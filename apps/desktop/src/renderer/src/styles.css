@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    font-family:
+      Inter,
+      system-ui,
+      -apple-system,
+      sans-serif;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: theme('colors.surface.700');
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: theme('colors.surface.600');
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition;
+  }
+  .btn-primary {
+    @apply bg-accent-500 text-white hover:bg-accent-600 active:bg-accent-600 disabled:opacity-50;
+  }
+  .btn-ghost {
+    @apply text-surface-300 hover:bg-surface-800 hover:text-surface-100 disabled:opacity-50;
+  }
+  .input {
+    @apply w-full rounded border border-surface-700 bg-surface-900 px-2 py-1.5 text-xs text-surface-100 placeholder:text-surface-500 focus:border-accent-500 focus:outline-none focus:ring-1 focus:ring-accent-500;
+  }
+  .tab {
+    @apply cursor-pointer border-b-2 border-transparent px-3 py-2 text-xs font-medium text-surface-400 transition hover:text-surface-100;
+  }
+  .tab-active {
+    @apply border-accent-500 text-surface-50;
+  }
+}

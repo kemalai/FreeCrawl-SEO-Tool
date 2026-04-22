@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node", "electron-vite/node"],
+    "outDir": "./out-types/node",
+    "rootDir": "./src"
+  },
+  "include": ["src/main/**/*", "src/preload/**/*"],
+  "references": [
+    { "path": "../../packages/shared-types" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/core" }
+  ]
+}
