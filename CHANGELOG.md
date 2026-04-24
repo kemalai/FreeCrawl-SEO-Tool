@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.3] — 2026-04-24
+
+### Fixed
+- **Release workflow** — Windows build failed on GitHub Actions with "Cannot compute electron version from installed node modules" because npm workspaces hoist `electron` to the repo root, outside where `electron-builder` looks. Pinned `electronVersion: 41.2.2` in `electron-builder.yml` to bypass the auto-detection.
+- Added `--publish never` to `build:{win,mac,linux}` scripts so `electron-builder` doesn't race against the `softprops/action-gh-release` step (also silences the implicit-publishing deprecation warning).
+
 ## [0.1.2] — 2026-04-24
 
 ### Added
