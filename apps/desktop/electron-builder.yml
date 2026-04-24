@@ -1,6 +1,11 @@
 appId: com.kemalai.freecrawl
 productName: FreeCrawl SEO Tool
 electronVersion: 41.2.2
+publish:
+  provider: github
+  owner: kemalai
+  repo: FreeCrawl-SEO-Tool
+  releaseType: release
 directories:
   buildResources: resources
   output: release
