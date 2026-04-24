@@ -1,3 +1,48 @@
+export type CrawlScope = 'subdomain' | 'subfolder' | 'all-subdomains' | 'exact-url';
+
+export type UrlCategory =
+  | 'all'
+  | 'internal:all'
+  | 'internal:html'
+  | 'internal:js'
+  | 'internal:css'
+  | 'internal:image'
+  | 'internal:pdf'
+  | 'internal:font'
+  | 'internal:other'
+  | 'external:all'
+  | 'external:html'
+  | 'external:other'
+  | 'status:blocked-robots'
+  | 'status:no-response'
+  | 'status:2xx'
+  | 'status:3xx'
+  | 'status:4xx'
+  | 'status:5xx'
+  | 'security:https'
+  | 'security:http'
+  | 'indexability:indexable'
+  | 'indexability:non-indexable'
+  | 'indexability:noindex'
+  | 'indexability:canonicalised'
+  | 'indexability:blocked-robots'
+  | 'issues:title-missing'
+  | 'issues:title-too-long'
+  | 'issues:title-too-short'
+  | 'issues:title-duplicate'
+  | 'issues:meta-missing'
+  | 'issues:meta-too-long'
+  | 'issues:meta-too-short'
+  | 'issues:meta-duplicate'
+  | 'issues:h1-missing'
+  | 'issues:h1-duplicate'
+  | 'issues:content-thin'
+  | 'issues:response-slow'
+  | 'issues:image-missing-alt'
+  | 'issues:broken-links-all'
+  | 'issues:broken-links-internal'
+  | 'issues:broken-links-external';
+
 export type Indexability =
   | 'indexable'
   | 'non-indexable:noindex'
@@ -22,6 +67,8 @@ export interface CrawlUrlRow {
   metaDescription: string | null;
   metaDescriptionLength: number | null;
   h1: string | null;
+  h1Length: number | null;
+  h1Count: number;
   h2Count: number;
   wordCount: number | null;
   canonical: string | null;
@@ -33,12 +80,15 @@ export interface CrawlUrlRow {
   depth: number;
   inlinks: number;
   outlinks: number;
+  imagesCount: number;
+  imagesMissingAlt: number;
   redirectTarget: string | null;
   crawledAt: string;
 }
 
 export interface CrawlConfig {
   startUrl: string;
+  scope: CrawlScope;
   maxDepth: number;
   maxUrls: number;
   maxConcurrency: number;
@@ -48,8 +98,52 @@ export interface CrawlConfig {
   followRedirects: boolean;
   respectRobotsTxt: boolean;
   crawlExternal: boolean;
-  includeSubdomains: boolean;
   acceptLanguage: string;
+}
+
+export interface OverviewCounts {
+  summary: {
+    totalInternalUrls: number;
+    totalIndexable: number;
+    totalNonIndexable: number;
+    totalExternalUrls: number;
+  };
+  internal: Record<string, number>;
+  external: Record<string, number>;
+  responseCodes: {
+    all: number;
+    blockedRobots: number;
+    noResponse: number;
+    success2xx: number;
+    redirect3xx: number;
+    clientError4xx: number;
+    serverError5xx: number;
+  };
+  security: { https: number; http: number };
+  indexability: {
+    indexable: number;
+    nonIndexable: number;
+    noindex: number;
+    canonicalised: number;
+    blockedRobots: number;
+  };
+  issues: {
+    titleMissing: number;
+    titleTooLong: number;
+    titleTooShort: number;
+    titleDuplicate: number;
+    metaMissing: number;
+    metaTooLong: number;
+    metaTooShort: number;
+    metaDuplicate: number;
+    h1Missing: number;
+    h1Duplicate: number;
+    contentThin: number;
+    responseSlow: number;
+    imageMissingAlt: number;
+    brokenLinksInternal: number;
+    brokenLinksExternal: number;
+  };
 }
 
 export interface CrawlProgress {
@@ -74,25 +168,174 @@ export interface CrawlSummary {
   totalBytes: number;
 }
 
+export type LinkType = 'hyperlink' | 'image' | 'script' | 'stylesheet' | 'other';
+export type LinkPathType =
+  | 'absolute'
+  | 'root-relative'
+  | 'path-relative'
+  | 'protocol-relative';
+export type LinkPosition =
+  | 'navigation'
+  | 'header'
+  | 'content'
+  | 'sidebar'
+  | 'footer'
+  | 'aside';
+export type LinkOrigin = 'html' | 'javascript' | 'css' | 'redirect' | 'canonical';
+
 export interface DiscoveredLink {
   fromUrl: string;
   toUrl: string;
+  type: LinkType;
+  anchor: string | null;
+  altText: string | null;
+  rel: string | null;
+  target: string | null;
+  pathType: LinkPathType;
+  linkPath: string | null;
+  linkPosition: LinkPosition;
+  linkOrigin: LinkOrigin;
+  isInternal: boolean;
+}
+
+export interface DiscoveredImage {
+  src: string;
+  alt: string | null;
+  width: number | null;
+  height: number | null;
+  isInternal: boolean;
+}
+
+export interface ImageRow {
+  id: number;
+  src: string;
+  alt: string | null;
+  width: number | null;
+  height: number | null;
+  isInternal: boolean;
+  occurrences: number;
+}
+
+/** Columns that the Advanced Filter dialog exposes for querying. */
+export type FilterField =
+  | 'url'
+  | 'content_kind'
+  | 'status_code'
+  | 'indexability'
+  | 'title'
+  | 'title_length'
+  | 'meta_description'
+  | 'meta_description_length'
+  | 'h1'
+  | 'h1_length'
+  | 'h1_count'
+  | 'h2_count'
+  | 'word_count'
+  | 'content_type'
+  | 'content_length'
+  | 'response_time_ms'
+  | 'depth'
+  | 'inlinks'
+  | 'outlinks'
+  | 'canonical'
+  | 'meta_robots'
+  | 'x_robots_tag'
+  | 'redirect_target'
+  | 'images_count'
+  | 'images_missing_alt';
+
+export type FilterOperator =
+  | 'contains'
+  | 'not_contains'
+  | 'equals'
+  | 'not_equals'
+  | 'starts_with'
+  | 'ends_with'
+  | 'is_empty'
+  | 'is_not_empty'
+  | 'gt'
+  | 'lt'
+  | 'gte'
+  | 'lte';
+
+export interface FilterClause {
+  field: FilterField;
+  operator: FilterOperator;
+  value: string;
+}
+
+/** Clauses inside a group are AND'd together. */
+export interface FilterGroup {
+  clauses: FilterClause[];
+}
+
+/** Groups are OR'd together. Empty groups / clauses are ignored. */
+export interface AdvancedFilter {
+  groups: FilterGroup[];
+}
+
+export interface BrokenLinkRow {
+  fromUrl: string;
+  fromStatusCode: number | null;
+  toUrl: string;
+  toStatusCode: number | null;
   anchor: string | null;
   rel: string | null;
   isInternal: boolean;
 }
 
+export interface InlinkRow {
+  fromUrl: string;
+  fromStatusCode: number | null;
+  /** Status code of the page the inlink points *to* (the detail panel URL). */
+  toStatusCode: number | null;
+  toSize: number | null;
+  type: LinkType;
+  anchor: string | null;
+  altText: string | null;
+  rel: string | null;
+  target: string | null;
+  pathType: LinkPathType | null;
+  linkPath: string | null;
+  linkPosition: LinkPosition | null;
+  linkOrigin: LinkOrigin;
+}
+
+export interface OutlinkRow {
+  toUrl: string;
+  toStatusCode: number | null;
+  toSize: number | null;
+  type: LinkType;
+  anchor: string | null;
+  altText: string | null;
+  rel: string | null;
+  target: string | null;
+  pathType: LinkPathType | null;
+  linkPath: string | null;
+  linkPosition: LinkPosition | null;
+  linkOrigin: LinkOrigin;
+  isInternal: boolean;
+}
+
+export interface UrlDetail {
+  row: CrawlUrlRow;
+  inlinks: InlinkRow[];
+  inlinksTotal: number;
+  outlinks: OutlinkRow[];
+  outlinksTotal: number;
+}
+
 export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   startUrl: '',
+  scope: 'subdomain',
   maxDepth: 10,
   maxUrls: 100_000,
-  maxConcurrency: 5,
-  maxRps: 5,
+  maxConcurrency: 20,
+  maxRps: 20,
   requestTimeoutMs: 20_000,
   userAgent: 'FreeCrawlSEO/0.1 (+https://github.com/kemalai/FreeCrawl-SEO-Tool)',
   followRedirects: true,
   respectRobotsTxt: true,
   crawlExternal: false,
-  includeSubdomains: false,
   acceptLanguage: 'tr,en;q=0.8',
 };

@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -19,6 +19,7 @@
   "dependencies": {
     "@freecrawl/db": "*",
     "@freecrawl/shared-types": "*",
+    "cacheable-lookup": "^7.0.0",
     "cheerio": "^1.0.0",
     "p-queue": "^8.0.1",
     "robots-parser": "^3.0.1",

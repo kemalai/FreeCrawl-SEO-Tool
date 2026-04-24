@@ -42,13 +42,19 @@ function escapeCsv(value: unknown): string {
 export async function exportUrlsToCsv(
   db: ProjectDb,
   filePath: string,
+  options: { selectedIds?: number[] } = {},
 ): Promise<{ rowsWritten: number }> {
   let rowsWritten = 0;
   const header = CSV_COLUMNS.join(',') + '\n';
 
+  const source: Iterable<CrawlUrlRow> =
+    options.selectedIds && options.selectedIds.length > 0
+      ? db.iterateUrlsByIds(options.selectedIds)
+      : db.iterateAllUrls();
+
   const generator = async function* (): AsyncGenerator<string> {
     yield '﻿' + header;
-    for (const row of db.iterateAllUrls()) {
+    for (const row of source) {
       const line = CSV_COLUMNS.map((col) => escapeCsv(row[col])).join(',') + '\n';
       rowsWritten++;
       yield line;

@@ -18,7 +18,7 @@ export function StatsBar() {
   const elapsedStr = formatElapsed(elapsed);
 
   return (
-    <div className="flex items-center gap-5 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+    <div className="flex shrink-0 items-center gap-5 border-t border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
       <Stat label="Discovered" value={progress?.discovered ?? 0} />
       <Stat label="Crawled" value={progress?.crawled ?? 0} />
       <Stat label="Pending" value={progress?.pending ?? 0} />
