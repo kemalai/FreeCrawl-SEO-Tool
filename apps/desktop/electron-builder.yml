@@ -1,5 +1,5 @@
 appId: com.kemalai.freecrawl
-productName: FreeCrawl SEO
+productName: FreeCrawl SEO Tool
 directories:
   buildResources: resources
   output: release
