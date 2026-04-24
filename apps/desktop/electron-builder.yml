@@ -1,5 +1,6 @@
 appId: com.kemalai.freecrawl
 productName: FreeCrawl SEO Tool
+electronVersion: 41.2.2
 directories:
   buildResources: resources
   output: release

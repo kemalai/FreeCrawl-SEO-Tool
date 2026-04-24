@@ -119,7 +119,7 @@ shared-types  →  db  →  core  →  desktop, cli
 
 ## Versioning
 
-See [CHANGELOG.md](CHANGELOG.md) for per-version release notes. The current version is shown in the window title bar: `FreeCrawl SEO Tool v0.1.2`.
+See [CHANGELOG.md](CHANGELOG.md) for per-version release notes. The current version is shown in the window title bar: `FreeCrawl SEO Tool v0.1.3`.
 
 ---
 
