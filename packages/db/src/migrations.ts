@@ -217,6 +217,21 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 9,
+    name: 'add_lang_viewport_og',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('lang')) db.exec('ALTER TABLE urls ADD COLUMN lang TEXT');
+      if (!has('viewport')) db.exec('ALTER TABLE urls ADD COLUMN viewport TEXT');
+      if (!has('og_title')) db.exec('ALTER TABLE urls ADD COLUMN og_title TEXT');
+      if (!has('og_description')) db.exec('ALTER TABLE urls ADD COLUMN og_description TEXT');
+      if (!has('og_image')) db.exec('ALTER TABLE urls ADD COLUMN og_image TEXT');
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

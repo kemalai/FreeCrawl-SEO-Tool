@@ -20,7 +20,7 @@ import {
 } from './url-utils.js';
 import { parseHtml } from './html-parser.js';
 import { loadRobots, type RobotsChecker } from './robots.js';
-import { defaultRequestHeaders, initHttpClient } from './http-client.js';
+import { defaultRequestHeaders, formatFetchError, initHttpClient } from './http-client.js';
 
 export interface CrawlerEvents {
   progress: (p: CrawlProgress) => void;
@@ -66,6 +66,7 @@ export class Crawler extends EventEmitter {
   private startedAt = 0;
   private stopped = false;
   private running = false;
+  private paused = false;
   private robots: RobotsChecker | null = null;
   private progressTimer: NodeJS.Timeout | null = null;
 
@@ -223,10 +224,9 @@ export class Crawler extends EventEmitter {
         responseTimeMs: Date.now() - t0,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
       this.db.updateExternalProbe(url, {
         statusCode: null,
-        statusText: message,
+        statusText: formatFetchError(err),
         responseTimeMs: Date.now() - t0,
       });
     } finally {
@@ -237,12 +237,37 @@ export class Crawler extends EventEmitter {
   stop(): void {
     this.stopped = true;
     this.running = false;
+    this.paused = false;
+    // Drop any queued work. If paused, unblock onIdle() so start() can resolve.
     this.queue.clear();
     this.externalQueue.clear();
+    this.queue.start();
+    this.externalQueue.start();
+  }
+
+  pause(): void {
+    if (this.stopped || this.paused) return;
+    this.paused = true;
+    // PQueue.pause() halts dispatch but lets in-flight tasks finish naturally.
+    this.queue.pause();
+    this.externalQueue.pause();
+    this.emitProgress();
+  }
+
+  resume(): void {
+    if (this.stopped || !this.paused) return;
+    this.paused = false;
+    this.queue.start();
+    this.externalQueue.start();
+    this.emitProgress();
   }
 
   get isRunning(): boolean {
     return !this.stopped;
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   /** Re-queue a specific URL (e.g. user-triggered Re-Spider). */
@@ -286,12 +311,7 @@ export class Crawler extends EventEmitter {
       // Response Codes > 3xx view and `redirect_target` column are
       // populated correctly. When followRedirects is on we enqueue the
       // target, producing a full chain across multiple crawl passes.
-      const res = await undiciFetch(item.url, {
-        method: 'GET',
-        headers: defaultRequestHeaders(this.config.userAgent, this.config.acceptLanguage),
-        redirect: 'manual',
-        signal: controller.signal,
-      });
+      const res = await this.fetchWithRetry(item.url, controller.signal);
 
       const responseTimeMs = Date.now() - t0;
       this.totalResponseTimeMs += responseTimeMs;
@@ -392,7 +412,14 @@ export class Crawler extends EventEmitter {
         reason = `canonical points to ${parsed.canonical}`;
       }
 
-      const internalLinks = parsed.links.filter((l) => l.isInternal);
+      // Respect-Nofollow default (Screaming-Frog style): `rel="nofollow"`
+      // links are treated as hints that exist only for search engines, so
+      // we drop them from persistence and from the crawl graph entirely.
+      // Opt-in via `storeNofollowLinks` if the user wants them recorded.
+      const storableLinks = this.config.storeNofollowLinks
+        ? parsed.links
+        : parsed.links.filter((l) => !l.rel?.includes('nofollow'));
+
       const imagesMissingAlt = parsed.images.filter((img) => img.alt === null).length;
       const urlId = this.db.upsertUrl({
         url: item.url,
@@ -414,13 +441,18 @@ export class Crawler extends EventEmitter {
         contentLength: bodyLength,
         responseTimeMs,
         depth: item.depth,
-        outlinks: parsed.links.length,
+        outlinks: storableLinks.length,
         imagesCount: parsed.images.length,
         imagesMissingAlt,
+        lang: parsed.lang,
+        viewport: parsed.viewport,
+        ogTitle: parsed.ogTitle,
+        ogDescription: parsed.ogDescription,
+        ogImage: parsed.ogImage,
       });
-      this.db.insertLinks(urlId, parsed.links, item.depth);
+      this.db.insertLinks(urlId, storableLinks, item.depth);
       this.db.insertImages(urlId, parsed.images);
-      for (const link of parsed.links) {
+      for (const link of storableLinks) {
         if (!link.isInternal) this.enqueueExternal(link.toUrl);
       }
       this.crawled++;
@@ -433,29 +465,82 @@ export class Crawler extends EventEmitter {
         // exact-url mode: do not follow any links
       } else {
         const nextDepth = item.depth + 1;
-        for (const link of parsed.links) {
+        for (const link of storableLinks) {
           const inScope = isInScope(this.config.startUrl, link.toUrl, this.config.scope);
           if (!inScope && !this.config.crawlExternal) continue;
+          // Belt-and-braces: when storeNofollowLinks=true we still respect
+          // nofollow for the *follow* decision — store the hint, don't
+          // recurse into it.
           if (link.rel?.includes('nofollow')) continue;
           this.enqueue({ url: link.toUrl, depth: nextDepth });
         }
       }
     } catch (err) {
       this.failed++;
-      const message = err instanceof Error ? err.message : String(err);
+      const detail = formatFetchError(err);
       this.db.upsertUrl({
         url: item.url,
         contentKind: 'html',
         statusCode: null,
-        statusText: message,
+        statusText: detail,
         indexability: 'non-indexable:client-error',
-        indexabilityReason: `Network error: ${message}`,
+        indexabilityReason: `Network error: ${detail}`,
         responseTimeMs: Date.now() - t0,
         depth: item.depth,
       });
     } finally {
       clearTimeout(timeout);
+      // Politeness delay — applied per worker *after* each request so a
+      // higher concurrency still honours a "one request every N ms per slot"
+      // contract on top of the global RPS cap.
+      if (this.config.crawlDelayMs > 0 && !this.stopped) {
+        await sleep(this.config.crawlDelayMs);
+      }
     }
+  }
+
+  /**
+   * Fetch wrapper with exponential backoff on transient failures.
+   * Retries are triggered by network errors, HTTP 429, and 5xx responses —
+   * 3xx/4xx (except 429) are treated as final.
+   */
+  private async fetchWithRetry(url: string, signal: AbortSignal) {
+    const maxAttempts = Math.max(0, this.config.retryAttempts) + 1;
+    const baseDelay = Math.max(0, this.config.retryInitialDelayMs);
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (this.stopped) throw lastError ?? new Error('crawler stopped');
+      try {
+        const res = await undiciFetch(url, {
+          method: 'GET',
+          headers: defaultRequestHeaders(this.config.userAgent, this.config.acceptLanguage),
+          redirect: 'manual',
+          signal,
+        });
+        // Final attempt or non-retryable status — return as-is.
+        if (attempt === maxAttempts - 1 || !isRetryableStatus(res.status)) {
+          return res;
+        }
+        // Drain body so the connection can be reused, then back off.
+        try {
+          await res.body?.cancel();
+        } catch {
+          /* ignore */
+        }
+        lastError = new Error(`HTTP ${res.status}`);
+      } catch (err) {
+        lastError = err;
+        // Don't keep retrying after stop() / timeout abort — the controller
+        // has already fired, so further attempts will fail immediately.
+        if (signal.aborted) throw err;
+        if (attempt === maxAttempts - 1) throw err;
+      }
+      const delay = baseDelay * 2 ** attempt;
+      await sleep(delay);
+    }
+    // Unreachable — the loop above always returns or throws — but TS wants it.
+    throw lastError ?? new Error('retry loop exhausted');
   }
 
   private emitProgress(): void {
@@ -473,10 +558,19 @@ export class Crawler extends EventEmitter {
       elapsedMs,
       avgResponseTimeMs,
       running: this.running,
+      paused: this.paused,
       startUrl: this.config.startUrl,
     };
     this.emit('progress', progress);
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
 function parseIntSafe(v: string | null | undefined): number | null {

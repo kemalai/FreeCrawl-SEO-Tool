@@ -76,3 +76,4 @@ crawls/
 .claude/ide/
 .claude/history.jsonl
 CLAUDE.md
+.playwright-mcp

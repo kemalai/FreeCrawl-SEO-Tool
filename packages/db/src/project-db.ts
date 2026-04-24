@@ -50,6 +50,11 @@ interface UrlRowDb {
   is_external: number;
   images_count: number;
   images_missing_alt: number;
+  lang: string | null;
+  viewport: string | null;
+  og_title: string | null;
+  og_description: string | null;
+  og_image: string | null;
 }
 
 interface ImageRowDb {
@@ -86,6 +91,11 @@ export interface UpsertUrlInput {
   redirectTarget?: string | null;
   imagesCount?: number;
   imagesMissingAlt?: number;
+  lang?: string | null;
+  viewport?: string | null;
+  ogTitle?: string | null;
+  ogDescription?: string | null;
+  ogImage?: string | null;
 }
 
 const UPSERT_URL_SQL = `
@@ -94,13 +104,15 @@ const UPSERT_URL_SQL = `
     title, title_length, meta_description, meta_description_length,
     h1, h1_length, h1_count, h2_count, word_count, canonical, meta_robots, x_robots_tag,
     content_type, content_length, response_time_ms, depth, outlinks, redirect_target,
-    images_count, images_missing_alt
+    images_count, images_missing_alt,
+    lang, viewport, og_title, og_description, og_image
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
     :h1, :h1_length, :h1_count, :h2_count, :word_count, :canonical, :meta_robots, :x_robots_tag,
     :content_type, :content_length, :response_time_ms, :depth, :outlinks, :redirect_target,
-    :images_count, :images_missing_alt
+    :images_count, :images_missing_alt,
+    :lang, :viewport, :og_title, :og_description, :og_image
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -128,6 +140,11 @@ const UPSERT_URL_SQL = `
     redirect_target = excluded.redirect_target,
     images_count = excluded.images_count,
     images_missing_alt = excluded.images_missing_alt,
+    lang = excluded.lang,
+    viewport = excluded.viewport,
+    og_title = excluded.og_title,
+    og_description = excluded.og_description,
+    og_image = excluded.og_image,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -372,6 +389,11 @@ export class ProjectDb {
       redirect_target: input.redirectTarget ?? null,
       images_count: input.imagesCount ?? 0,
       images_missing_alt: input.imagesMissingAlt ?? 0,
+      lang: input.lang ?? null,
+      viewport: input.viewport ?? null,
+      og_title: input.ogTitle ?? null,
+      og_description: input.ogDescription ?? null,
+      og_image: input.ogImage ?? null,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -758,8 +780,20 @@ export class ProjectDb {
       metaDuplicate: dup('meta_description'),
       h1Missing: countWhere(`${html} AND (h1 IS NULL OR h1 = '')`),
       h1Duplicate: dup('h1'),
+      h1Multiple: countWhere(`${html} AND h1_count > 1`),
       contentThin: countWhere(`${html} AND word_count IS NOT NULL AND word_count < 300`),
       responseSlow: countWhere('is_external = 0 AND response_time_ms > 1000'),
+      responseVerySlow: countWhere('is_external = 0 AND response_time_ms > 3000'),
+      pageLarge: countWhere(`${html} AND content_length > 1048576`),
+      urlTooLong: countWhere('is_external = 0 AND LENGTH(url) > 2048'),
+      langMissing: countWhere(`${html} AND (lang IS NULL OR lang = '')`),
+      viewportMissing: countWhere(`${html} AND (viewport IS NULL OR viewport = '')`),
+      ogMissing: countWhere(
+        `${html}
+         AND (og_title IS NULL OR og_title = '')
+         AND (og_description IS NULL OR og_description = '')
+         AND (og_image IS NULL OR og_image = '')`,
+      ),
       imageMissingAlt: (
         this.db.prepare('SELECT COUNT(*) AS c FROM images WHERE alt IS NULL').get() as {
           c: number;
@@ -1029,6 +1063,11 @@ export class ProjectDb {
     imagesCount: r.images_count,
     imagesMissingAlt: r.images_missing_alt,
     redirectTarget: r.redirect_target,
+    lang: r.lang,
+    viewport: r.viewport,
+    ogTitle: r.og_title,
+    ogDescription: r.og_description,
+    ogImage: r.og_image,
     crawledAt: r.crawled_at,
   });
 
@@ -1277,10 +1316,27 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                   AND h1 IS NOT NULL AND h1 != ''
                 GROUP BY h1 HAVING COUNT(*) > 1
               )`;
+    case 'issues:h1-multiple':
+      return "is_external = 0 AND content_kind = 'html' AND h1_count > 1";
     case 'issues:content-thin':
       return "is_external = 0 AND content_kind = 'html' AND word_count IS NOT NULL AND word_count < 300";
     case 'issues:response-slow':
       return 'is_external = 0 AND response_time_ms > 1000';
+    case 'issues:response-very-slow':
+      return 'is_external = 0 AND response_time_ms > 3000';
+    case 'issues:page-large':
+      return "is_external = 0 AND content_kind = 'html' AND content_length > 1048576";
+    case 'issues:url-too-long':
+      return 'is_external = 0 AND LENGTH(url) > 2048';
+    case 'issues:lang-missing':
+      return "is_external = 0 AND content_kind = 'html' AND (lang IS NULL OR lang = '')";
+    case 'issues:viewport-missing':
+      return "is_external = 0 AND content_kind = 'html' AND (viewport IS NULL OR viewport = '')";
+    case 'issues:og-missing':
+      return `is_external = 0 AND content_kind = 'html'
+              AND (og_title IS NULL OR og_title = '')
+              AND (og_description IS NULL OR og_description = '')
+              AND (og_image IS NULL OR og_image = '')`;
     case 'issues:image-missing-alt':
       return "is_external = 0 AND content_kind = 'html' AND images_missing_alt > 0";
     // Broken-link categories drive the BrokenLinksTab view; they never

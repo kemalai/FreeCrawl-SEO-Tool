@@ -6,7 +6,11 @@ function send(event: MenuEvent): void {
   win?.webContents.send(IPC.menuEvent, event);
 }
 
-export function buildAppMenu(): Menu {
+export interface AppMenuHandlers {
+  onOpenLogs: () => void;
+}
+
+export function buildAppMenu(handlers: AppMenuHandlers): Menu {
   const isMac = process.platform === 'darwin';
 
   const template: MenuItemConstructorOptions[] = [
@@ -78,6 +82,13 @@ export function buildAppMenu(): Menu {
           label: 'Documentation',
           click: () => void shell.openExternal('https://github.com/kemalai/FreeCrawl-SEO-Tool'),
         },
+        { type: 'separator' },
+        {
+          label: 'Show Logs…',
+          accelerator: 'CmdOrCtrl+L',
+          click: () => handlers.onOpenLogs(),
+        },
+        { type: 'separator' },
         { label: 'About FreeCrawl SEO', click: () => send('about') },
       ],
     },

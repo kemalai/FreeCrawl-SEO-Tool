@@ -12,6 +12,7 @@ import {
   type BrokenLinksQueryResult,
   type ImagesQueryInput,
   type ImagesQueryResult,
+  type LogEntry,
   type MenuEvent,
   type OverviewCounts,
   type SitemapGenerateInput,
@@ -41,6 +42,8 @@ const prefsCache: Record<string, unknown> =
 const api: FreeCrawlApi = {
   crawlStart: (config: CrawlConfig) => ipcRenderer.invoke(IPC.crawlStart, config),
   crawlStop: () => ipcRenderer.invoke(IPC.crawlStop),
+  crawlPause: () => ipcRenderer.invoke(IPC.crawlPause),
+  crawlResume: () => ipcRenderer.invoke(IPC.crawlResume),
   crawlClear: () => ipcRenderer.invoke(IPC.crawlClear),
   urlsQuery: (input: UrlsQueryInput): Promise<UrlsQueryResult> =>
     ipcRenderer.invoke(IPC.urlsQuery, input),
@@ -72,6 +75,10 @@ const api: FreeCrawlApi = {
     void ipcRenderer.invoke(IPC.prefsDelete, key);
   },
   confirmClear: (): Promise<ConfirmClearResult> => ipcRenderer.invoke(IPC.confirmClear),
+  logsGetAll: (): Promise<LogEntry[]> => ipcRenderer.invoke(IPC.logsGetAll),
+  logsClear: (): Promise<void> => ipcRenderer.invoke(IPC.logsClear),
+  logsOpenWindow: (): Promise<void> => ipcRenderer.invoke(IPC.logsOpenWindow),
+  onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onProgress: (cb) => subscribe<CrawlProgress>(IPC.crawlProgress, cb),
   onDone: (cb) => subscribe<CrawlSummary>(IPC.crawlDone, cb),
   onError: (cb) => subscribe<string>(IPC.crawlError, cb),

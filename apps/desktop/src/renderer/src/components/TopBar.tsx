@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Play, Square, Eraser, ChevronDown } from 'lucide-react';
+import { Play, Square, Pause, Eraser, ChevronDown } from 'lucide-react';
 import clsx from 'clsx';
 import type { CrawlScope } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
@@ -22,6 +22,7 @@ export function TopBar() {
   const [scopeOpen, setScopeOpen] = useState(false);
 
   const running = progress?.running === true;
+  const paused = progress?.paused === true;
   // Clear only makes sense when there's something to wipe — disable it
   // when the crawl table is empty so it can't be clicked accidentally.
   const hasData = (progress?.discovered ?? 0) > 0 || (progress?.crawled ?? 0) > 0;
@@ -46,6 +47,7 @@ export function TopBar() {
       elapsedMs: 0,
       avgResponseTimeMs: 0,
       running: true,
+      paused: false,
       startUrl: config.startUrl,
     });
     try {
@@ -57,6 +59,14 @@ export function TopBar() {
 
   async function stop() {
     await window.freecrawl.crawlStop();
+  }
+
+  async function pauseCrawl() {
+    await window.freecrawl.crawlPause();
+  }
+
+  async function resumeCrawl() {
+    await window.freecrawl.crawlResume();
   }
 
   async function clearCrawl() {
@@ -117,9 +127,28 @@ export function TopBar() {
       </div>
 
       {running ? (
-        <button className="btn btn-ghost border border-red-700/50 text-red-300" onClick={stop}>
-          <Square className="h-3.5 w-3.5" /> Stop
-        </button>
+        <>
+          {paused ? (
+            <button
+              className="btn btn-ghost border border-amber-700/60 text-amber-300"
+              onClick={resumeCrawl}
+              title="Resume crawl"
+            >
+              <Play className="h-3.5 w-3.5" /> Resume
+            </button>
+          ) : (
+            <button
+              className="btn btn-ghost border border-surface-700"
+              onClick={pauseCrawl}
+              title="Pause crawl (in-flight requests will finish)"
+            >
+              <Pause className="h-3.5 w-3.5" /> Pause
+            </button>
+          )}
+          <button className="btn btn-ghost border border-red-700/50 text-red-300" onClick={stop}>
+            <Square className="h-3.5 w-3.5" /> Stop
+          </button>
+        </>
       ) : (
         <button className="btn btn-primary" onClick={start}>
           <Play className="h-3.5 w-3.5" /> Start

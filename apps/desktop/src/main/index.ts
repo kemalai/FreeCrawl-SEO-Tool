@@ -36,10 +36,12 @@ import {
 import { Crawler, exportUrlsToCsv, exportSitemap } from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
+import * as logger from './logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
+let logsWindow: BrowserWindow | null = null;
 let db: ProjectDb | null = null;
 let activeCrawler: Crawler | null = null;
 
@@ -155,8 +157,67 @@ function createWindow(): void {
   }
 }
 
+/**
+ * Open (or focus) the Logs popup window. Loads the same renderer bundle
+ * with `?logs=1` so the renderer entry branches to the LogsView component.
+ * Single-instance — re-invocations focus the existing window.
+ */
+function openLogsWindow(): void {
+  if (logsWindow && !logsWindow.isDestroyed()) {
+    logsWindow.show();
+    logsWindow.focus();
+    return;
+  }
+  const win = new BrowserWindow({
+    width: 1000,
+    height: 640,
+    minWidth: 560,
+    minHeight: 320,
+    show: false,
+    backgroundColor: '#0a0a0a',
+    title: 'FreeCrawl — Logs',
+    parent: mainWindow ?? undefined,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  win.setMenu(null);
+  win.on('ready-to-show', () => win.show());
+  win.on('page-title-updated', (e) => e.preventDefault());
+  win.on('closed', () => {
+    if (logsWindow === win) logsWindow = null;
+  });
+
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    void win.loadURL(process.env['ELECTRON_RENDERER_URL'] + '?logs=1');
+  } else {
+    void win.loadFile(join(__dirname, '../renderer/index.html'), { search: 'logs=1' });
+  }
+  logsWindow = win;
+  logger.log('info', 'main', 'Logs window opened');
+}
+
 function registerIpc(): void {
   ipcMain.handle(IPC.appVersion, () => app.getVersion());
+
+  ipcMain.handle(IPC.logsGetAll, () => logger.getAll());
+  ipcMain.handle(IPC.logsClear, () => {
+    logger.clearAll();
+    logger.log('info', 'main', 'Log buffer cleared');
+  });
+  ipcMain.handle(IPC.logsOpenWindow, () => openLogsWindow());
+
+  // Stream every new entry to the logs window if it's open. Subscriber
+  // is registered for the process lifetime — the log window can come
+  // and go, we just check before sending.
+  logger.subscribe((entry) => {
+    if (logsWindow && !logsWindow.isDestroyed()) {
+      logsWindow.webContents.send(IPC.logsEntry, entry);
+    }
+  });
 
   // Prefs — synchronous bulk read so preload can hydrate before the
   // renderer renders (avoids column-width / panel-size flash on startup).
@@ -178,7 +239,13 @@ function registerIpc(): void {
   ipcMain.handle(IPC.crawlStart, (_e, config: CrawlConfig) => {
     if (activeCrawler) {
       activeCrawler.stop();
+      logger.log('info', 'crawler', 'Stopped previous crawl before starting a new one');
     }
+    logger.log(
+      'info',
+      'crawler',
+      `Crawl starting: ${config.startUrl} (scope=${config.scope}, maxDepth=${config.maxDepth}, maxUrls=${config.maxUrls}, concurrency=${config.maxConcurrency}, rps=${config.maxRps})`,
+    );
     const database = getDb();
     const crawler = new Crawler(config, database);
     activeCrawler = crawler;
@@ -187,10 +254,16 @@ function registerIpc(): void {
       mainWindow?.webContents.send(IPC.crawlProgress, p);
     });
     crawler.on('done', (summary: CrawlSummary) => {
+      logger.log(
+        'info',
+        'crawler',
+        `Crawl done: total=${summary.total} avgResp=${summary.avgResponseTimeMs}ms totalBytes=${summary.totalBytes}`,
+      );
       mainWindow?.webContents.send(IPC.crawlDone, summary);
       if (activeCrawler === crawler) activeCrawler = null;
     });
     crawler.on('error', (msg: string) => {
+      logger.log('error', 'crawler', msg);
       mainWindow?.webContents.send(IPC.crawlError, msg);
     });
 
@@ -199,6 +272,14 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.crawlStop, () => {
     activeCrawler?.stop();
+  });
+
+  ipcMain.handle(IPC.crawlPause, () => {
+    activeCrawler?.pause();
+  });
+
+  ipcMain.handle(IPC.crawlResume, () => {
+    activeCrawler?.resume();
   });
 
   ipcMain.handle(IPC.crawlClear, () => {
@@ -466,11 +547,18 @@ function registerIpc(): void {
   );
 }
 
+// Install console / crash hooks before anything else runs, so even the
+// earliest startup noise (migration warnings, undici deprecations) is
+// captured in the in-app log window.
+logger.installGlobalHooks();
+logger.log('info', 'main', `App bootstrap — Node ${process.version} on ${process.platform}`);
+
 void app.whenReady().then(() => {
   loadPrefs();
-  Menu.setApplicationMenu(buildAppMenu());
+  Menu.setApplicationMenu(buildAppMenu({ onOpenLogs: openLogsWindow }));
   registerIpc();
   createWindow();
+  logger.log('info', 'main', `App ready — version ${app.getVersion()}`);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

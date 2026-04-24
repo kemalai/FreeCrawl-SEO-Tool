@@ -14,6 +14,8 @@ import type {
 export const IPC = {
   crawlStart: 'crawl:start',
   crawlStop: 'crawl:stop',
+  crawlPause: 'crawl:pause',
+  crawlResume: 'crawl:resume',
   crawlClear: 'crawl:clear',
   crawlProgress: 'crawl:progress',
   crawlDone: 'crawl:done',
@@ -35,6 +37,10 @@ export const IPC = {
   prefsSet: 'prefs:set',
   prefsDelete: 'prefs:delete',
   confirmClear: 'confirm:clear',
+  logsGetAll: 'logs:get-all',
+  logsClear: 'logs:clear',
+  logsEntry: 'logs:entry',
+  logsOpenWindow: 'logs:open-window',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -129,9 +135,24 @@ export interface ConfirmClearResult {
   skipNext: boolean;
 }
 
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface LogEntry {
+  /** Monotonic sequence id, increments on every log call this session. */
+  id: number;
+  /** ISO 8601 timestamp. */
+  ts: string;
+  level: LogLevel;
+  /** Originating subsystem: 'main', 'crawler', 'ipc', 'console', 'uncaught', 'renderer', 'fetch'. */
+  source: string;
+  message: string;
+}
+
 export interface FreeCrawlApi {
   crawlStart(config: CrawlConfig): Promise<void>;
   crawlStop(): Promise<void>;
+  crawlPause(): Promise<void>;
+  crawlResume(): Promise<void>;
   crawlClear(): Promise<void>;
   urlsQuery(input: UrlsQueryInput): Promise<UrlsQueryResult>;
   urlDetailGet(input: UrlDetailInput): Promise<UrlDetail | null>;
@@ -149,6 +170,10 @@ export interface FreeCrawlApi {
   prefsSet(key: string, value: unknown): void;
   prefsDelete(key: string): void;
   confirmClear(): Promise<ConfirmClearResult>;
+  logsGetAll(): Promise<LogEntry[]>;
+  logsClear(): Promise<void>;
+  logsOpenWindow(): Promise<void>;
+  onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onProgress(cb: (p: CrawlProgress) => void): () => void;
   onDone(cb: (summary: CrawlSummary) => void): () => void;
   onError(cb: (message: string) => void): () => void;

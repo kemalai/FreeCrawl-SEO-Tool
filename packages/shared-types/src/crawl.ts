@@ -36,8 +36,15 @@ export type UrlCategory =
   | 'issues:meta-duplicate'
   | 'issues:h1-missing'
   | 'issues:h1-duplicate'
+  | 'issues:h1-multiple'
   | 'issues:content-thin'
   | 'issues:response-slow'
+  | 'issues:response-very-slow'
+  | 'issues:page-large'
+  | 'issues:url-too-long'
+  | 'issues:lang-missing'
+  | 'issues:viewport-missing'
+  | 'issues:og-missing'
   | 'issues:image-missing-alt'
   | 'issues:broken-links-all'
   | 'issues:broken-links-internal'
@@ -83,6 +90,11 @@ export interface CrawlUrlRow {
   imagesCount: number;
   imagesMissingAlt: number;
   redirectTarget: string | null;
+  lang: string | null;
+  viewport: string | null;
+  ogTitle: string | null;
+  ogDescription: string | null;
+  ogImage: string | null;
   crawledAt: string;
 }
 
@@ -99,6 +111,20 @@ export interface CrawlConfig {
   respectRobotsTxt: boolean;
   crawlExternal: boolean;
   acceptLanguage: string;
+  /** Per-worker delay inserted *after* each request (ms). 0 = disabled. */
+  crawlDelayMs: number;
+  /** Max retry attempts on network errors / 5xx / 429 (0 = no retry). */
+  retryAttempts: number;
+  /** Initial backoff (ms) — doubles on each attempt. */
+  retryInitialDelayMs: number;
+  /**
+   * Persist `rel="nofollow"` links in the `links` table.
+   * Default `false` — nofollow links are never stored, never probed as
+   * externals, and don't count toward `urls.outlinks`. Screaming-Frog
+   * style "Respect Nofollow" behaviour: nofollow links exist only as
+   * hints to search engines, not as part of the crawl graph.
+   */
+  storeNofollowLinks: boolean;
 }
 
 export interface OverviewCounts {
@@ -138,8 +164,15 @@ export interface OverviewCounts {
     metaDuplicate: number;
     h1Missing: number;
     h1Duplicate: number;
+    h1Multiple: number;
     contentThin: number;
     responseSlow: number;
+    responseVerySlow: number;
+    pageLarge: number;
+    urlTooLong: number;
+    langMissing: number;
+    viewportMissing: number;
+    ogMissing: number;
     imageMissingAlt: number;
     brokenLinksInternal: number;
     brokenLinksExternal: number;
@@ -156,6 +189,7 @@ export interface CrawlProgress {
   elapsedMs: number;
   avgResponseTimeMs: number;
   running: boolean;
+  paused: boolean;
   startUrl: string;
 }
 
@@ -338,4 +372,8 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   respectRobotsTxt: true,
   crawlExternal: false,
   acceptLanguage: 'tr,en;q=0.8',
+  crawlDelayMs: 0,
+  retryAttempts: 2,
+  retryInitialDelayMs: 500,
+  storeNofollowLinks: false,
 };

@@ -385,6 +385,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.h1Duplicate,
               category: 'issues:h1-duplicate',
             },
+            {
+              key: 'issues-h1-multiple',
+              label: 'Multiple',
+              count: o.issues.h1Multiple,
+              category: 'issues:h1-multiple',
+            },
           ],
         },
         {
@@ -408,6 +414,72 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Slow (>1s)',
               count: o.issues.responseSlow,
               category: 'issues:response-slow',
+            },
+            {
+              key: 'issues-response-very-slow',
+              label: 'Very Slow (>3s)',
+              count: o.issues.responseVerySlow,
+              category: 'issues:response-very-slow',
+            },
+          ],
+        },
+        {
+          key: 'issues-page',
+          label: 'Page',
+          children: [
+            {
+              key: 'issues-page-large',
+              label: 'Large (>1MB)',
+              count: o.issues.pageLarge,
+              category: 'issues:page-large',
+            },
+          ],
+        },
+        {
+          key: 'issues-url',
+          label: 'URL',
+          children: [
+            {
+              key: 'issues-url-too-long',
+              label: 'Too Long (>2048 chars)',
+              count: o.issues.urlTooLong,
+              category: 'issues:url-too-long',
+            },
+          ],
+        },
+        {
+          key: 'issues-accessibility',
+          label: 'Accessibility',
+          children: [
+            {
+              key: 'issues-lang-missing',
+              label: 'Lang Attribute Missing',
+              count: o.issues.langMissing,
+              category: 'issues:lang-missing',
+            },
+          ],
+        },
+        {
+          key: 'issues-mobile',
+          label: 'Mobile',
+          children: [
+            {
+              key: 'issues-viewport-missing',
+              label: 'Viewport Meta Missing',
+              count: o.issues.viewportMissing,
+              category: 'issues:viewport-missing',
+            },
+          ],
+        },
+        {
+          key: 'issues-social',
+          label: 'Social',
+          children: [
+            {
+              key: 'issues-og-missing',
+              label: 'OpenGraph Tags Missing',
+              count: o.issues.ogMissing,
+              category: 'issues:og-missing',
             },
           ],
         },

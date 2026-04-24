@@ -28,10 +28,17 @@ export function StatsBar() {
       <Stat label="Elapsed" value={elapsedStr} />
       <div className="ml-auto flex items-center gap-2">
         {progress?.running ? (
-          <span className="inline-flex items-center gap-1.5">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
-            <span className="text-emerald-400">Running</span>
-          </span>
+          progress.paused ? (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-amber-500" />
+              <span className="text-amber-400">Paused</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+              <span className="text-emerald-400">Running</span>
+            </span>
+          )
         ) : (
           <span className="inline-flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-surface-600" />

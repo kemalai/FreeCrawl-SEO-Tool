@@ -17,6 +17,10 @@ export interface ParsedPage {
   canonical: string | null;
   metaRobots: string | null;
   lang: string | null;
+  viewport: string | null;
+  ogTitle: string | null;
+  ogDescription: string | null;
+  ogImage: string | null;
   links: DiscoveredLink[];
   images: DiscoveredImage[];
   hasNoindex: boolean;
@@ -52,6 +56,14 @@ export function parseHtml(
   const canonical = ($('link[rel="canonical"]').attr('href') ?? '').trim() || null;
   const metaRobots = ($('meta[name="robots"]').attr('content') ?? '').trim().toLowerCase() || null;
   const lang = ($('html').attr('lang') ?? '').trim() || null;
+  const viewport = ($('meta[name="viewport"]').attr('content') ?? '').trim() || null;
+  const ogTitle =
+    decodeEntities(($('meta[property="og:title"]').attr('content') ?? '').trim()) || null;
+  const ogDescription =
+    decodeEntities(
+      ($('meta[property="og:description"]').attr('content') ?? '').trim(),
+    ) || null;
+  const ogImage = ($('meta[property="og:image"]').attr('content') ?? '').trim() || null;
 
   const text = $('body').text().replace(/\s+/g, ' ').trim();
   const wordCount = text.length > 0 ? text.split(' ').filter(Boolean).length : 0;
@@ -144,6 +156,10 @@ export function parseHtml(
     canonical,
     metaRobots,
     lang,
+    viewport,
+    ogTitle,
+    ogDescription,
+    ogImage,
     links: [...linkMap.values()],
     images: [...imageMap.values()],
     hasNoindex,
