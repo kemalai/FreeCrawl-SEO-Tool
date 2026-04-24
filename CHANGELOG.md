@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.1.4] — 2026-04-24
+
+### Added
+- **Pause / Resume** crawl controls in the top bar — in-flight requests finish naturally; queued work halts until Resume. Status bar shows an amber "Paused" indicator.
+- **Retry with exponential backoff** — transient failures (network errors, 408, 425, 429, 5xx) are retried up to `retryAttempts` times with doubling delay. Defaults: 2 retries, 500 ms initial backoff.
+- **Crawl delay** (`crawlDelayMs`) — optional per-worker politeness delay applied *after* each request, on top of the global RPS cap.
+- **In-app Logs window** — `Help → Show Logs…` (Ctrl+L) opens a live popup that streams every console message, warning, uncaught exception, and crawler event from app startup onward. 5 000-entry ring buffer, filter by level, search, Copy, Clear.
+- **Fetch error diagnostics** — the generic `"fetch failed"` message now walks `err.cause` and surfaces the real underlying reason (e.g. `ENOTFOUND`, `UND_ERR_CONNECT_TIMEOUT`, `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, `ECONNREFUSED`) with a contextual hint about corporate proxy / antivirus / DNS.
+- **HTTPS_PROXY / HTTP_PROXY** environment variable support via undici `ProxyAgent` — users behind corporate proxies no longer get silent `ECONNREFUSED`.
+- **Happy Eyeballs (RFC 8305)** — `autoSelectFamily` races IPv4/IPv6 so dual-stack hosts with a broken AAAA record don't stall the crawl.
+- **SEO metadata extraction** — every crawled HTML page now stores `lang` (html[lang]), `viewport` (meta[name=viewport]), and OpenGraph `og:title` / `og:description` / `og:image`. Shown in the URL Details panel.
+- **7 new SEO issue filters** under the Overview sidebar's Issues group:
+  - H1 > Multiple (`h1_count > 1`)
+  - Response > Very Slow (>3 s)
+  - Page > Large (>1 MB)
+  - URL > Too Long (>2048 chars)
+  - Accessibility > Lang Attribute Missing
+  - Mobile > Viewport Meta Missing
+  - Social > OpenGraph Tags Missing (all of og:title / og:description / og:image absent)
+
+### Changed
+- **Nofollow links no longer stored by default** (Screaming-Frog style "Respect Nofollow"). Links with `rel="nofollow"` are treated as hints for search engines only — they don't appear in the `links` table, don't count toward `urls.outlinks`, and external nofollow targets aren't HEAD-probed. Opt back in via `storeNofollowLinks: true`.
+- `urls.outlinks` now reflects the *stored* (followed) link count so the detail panel's Outlinks list stays consistent with the header count.
+
+### Fixed
+- `node:sqlite` `ExperimentalWarning` no longer appears as ERROR in the Logs window — classified as benign and suppressed (CLAUDE.md already acknowledged it as expected for this stack). The `'warning'` event listener also disables Node's default stderr printer for us, so any future warnings flow through a proper severity classifier instead of being dumped to stderr.
+
 ## [0.1.3] — 2026-04-24
 
 ### Fixed
