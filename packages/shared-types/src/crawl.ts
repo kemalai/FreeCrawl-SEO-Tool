@@ -47,6 +47,8 @@ export type UrlCategory =
   | 'issues:h1-duplicate'
   | 'issues:h1-multiple'
   | 'issues:heading-skipped-level'
+  | 'issues:multiple-canonicals'
+  | 'issues:canonical-to-non-200'
   | 'issues:content-thin'
   | 'issues:response-slow'
   | 'issues:response-very-slow'
@@ -115,6 +117,7 @@ export interface CrawlUrlRow {
   h6Count: number;
   wordCount: number | null;
   canonical: string | null;
+  canonicalCount: number;
   metaRobots: string | null;
   xRobotsTag: string | null;
   contentType: string | null;
@@ -287,6 +290,8 @@ export interface OverviewCounts {
     h1Duplicate: number;
     h1Multiple: number;
     headingSkippedLevel: number;
+    multipleCanonicals: number;
+    canonicalToNon200: number;
     contentThin: number;
     responseSlow: number;
     responseVerySlow: number;

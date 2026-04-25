@@ -39,6 +39,7 @@ interface UrlRowDb {
   h4_count: number;
   h5_count: number;
   h6_count: number;
+  canonical_count: number;
   word_count: number | null;
   canonical: string | null;
   meta_robots: string | null;
@@ -118,6 +119,7 @@ export interface UpsertUrlInput {
   h4Count?: number;
   h5Count?: number;
   h6Count?: number;
+  canonicalCount?: number;
   wordCount?: number | null;
   canonical?: string | null;
   metaRobots?: string | null;
@@ -170,7 +172,7 @@ const UPSERT_URL_SQL = `
     url, content_kind, status_code, status_text, indexability, indexability_reason,
     title, title_length, meta_description, meta_description_length,
     h1, h1_length, h1_count, h2_count, h3_count, h4_count, h5_count, h6_count,
-    word_count, canonical, meta_robots, x_robots_tag,
+    word_count, canonical, canonical_count, meta_robots, x_robots_tag,
     content_type, content_length, response_time_ms, depth, outlinks, redirect_target,
     images_count, images_missing_alt,
     lang, viewport, og_title, og_description, og_image,
@@ -187,7 +189,7 @@ const UPSERT_URL_SQL = `
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
     :h1, :h1_length, :h1_count, :h2_count, :h3_count, :h4_count, :h5_count, :h6_count,
-    :word_count, :canonical, :meta_robots, :x_robots_tag,
+    :word_count, :canonical, :canonical_count, :meta_robots, :x_robots_tag,
     :content_type, :content_length, :response_time_ms, :depth, :outlinks, :redirect_target,
     :images_count, :images_missing_alt,
     :lang, :viewport, :og_title, :og_description, :og_image,
@@ -221,6 +223,7 @@ const UPSERT_URL_SQL = `
     h6_count = excluded.h6_count,
     word_count = excluded.word_count,
     canonical = excluded.canonical,
+    canonical_count = excluded.canonical_count,
     meta_robots = excluded.meta_robots,
     x_robots_tag = excluded.x_robots_tag,
     content_type = excluded.content_type,
@@ -503,6 +506,7 @@ export class ProjectDb {
       h6_count: input.h6Count ?? 0,
       word_count: input.wordCount ?? null,
       canonical: input.canonical ?? null,
+      canonical_count: input.canonicalCount ?? 0,
       meta_robots: input.metaRobots ?? null,
       x_robots_tag: input.xRobotsTag ?? null,
       content_type: input.contentType ?? null,
@@ -1172,6 +1176,15 @@ export class ProjectDb {
            OR (h5_count = 0 AND h6_count > 0)
          )`,
       ),
+      multipleCanonicals: countWhere(`${html} AND canonical_count > 1`),
+      canonicalToNon200: countWhere(
+        `${html} AND canonical IS NOT NULL AND canonical != ''
+         AND EXISTS (
+           SELECT 1 FROM urls t WHERE t.url = urls.canonical
+             AND t.status_code IS NOT NULL
+             AND (t.status_code < 200 OR t.status_code >= 300)
+         )`,
+      ),
       contentThin: countWhere(`${html} AND word_count IS NOT NULL AND word_count < 300`),
       responseSlow: countWhere('is_external = 0 AND response_time_ms > 1000'),
       responseVerySlow: countWhere('is_external = 0 AND response_time_ms > 3000'),
@@ -1559,6 +1572,7 @@ export class ProjectDb {
     h6Count: r.h6_count,
     wordCount: r.word_count,
     canonical: r.canonical,
+    canonicalCount: r.canonical_count,
     metaRobots: r.meta_robots,
     xRobotsTag: r.x_robots_tag,
     contentType: r.content_type,
@@ -1865,6 +1879,21 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                 OR (h3_count = 0 AND h4_count > 0)
                 OR (h4_count = 0 AND h5_count > 0)
                 OR (h5_count = 0 AND h6_count > 0)
+              )`;
+    case 'issues:multiple-canonicals':
+      // More than one `<link rel="canonical">` on a page is a confusion
+      // signal — Google may pick any of them, defeating the canonical's
+      // purpose.
+      return "is_external = 0 AND content_kind = 'html' AND canonical_count > 1";
+    case 'issues:canonical-to-non-200':
+      // Canonical points to a URL we crawled and it returned 4xx/5xx —
+      // major SEO bug, the canonical is broken.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical != ''
+              AND EXISTS (
+                SELECT 1 FROM urls t WHERE t.url = urls.canonical
+                  AND t.status_code IS NOT NULL
+                  AND (t.status_code < 200 OR t.status_code >= 300)
               )`;
     case 'issues:content-thin':
       return "is_external = 0 AND content_kind = 'html' AND word_count IS NOT NULL AND word_count < 300";

@@ -434,6 +434,20 @@ const MIGRATIONS: Migration[] = [
         db.exec('ALTER TABLE urls ADD COLUMN h6_count INTEGER NOT NULL DEFAULT 0');
     },
   },
+  {
+    version: 22,
+    name: 'add_canonical_count',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'canonical_count')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN canonical_count INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

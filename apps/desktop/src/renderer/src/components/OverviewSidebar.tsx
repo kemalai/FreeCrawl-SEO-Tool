@@ -400,6 +400,24 @@ function buildTree(o: OverviewCounts | null): Node[] {
           ],
         },
         {
+          key: 'issues-canonicals',
+          label: 'Canonicals',
+          children: [
+            {
+              key: 'issues-canonicals-multiple',
+              label: 'Multiple Canonicals',
+              count: o.issues.multipleCanonicals,
+              category: 'issues:multiple-canonicals',
+            },
+            {
+              key: 'issues-canonicals-non-200',
+              label: 'Canonical → Non-200',
+              count: o.issues.canonicalToNon200,
+              category: 'issues:canonical-to-non-200',
+            },
+          ],
+        },
+        {
           key: 'issues-content',
           label: 'Content',
           children: [

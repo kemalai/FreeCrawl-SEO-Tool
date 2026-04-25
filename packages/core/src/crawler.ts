@@ -640,6 +640,7 @@ export class Crawler extends EventEmitter {
         h6Count: parsed.h6Count,
         wordCount: parsed.wordCount,
         canonical: parsed.canonical,
+        canonicalCount: parsed.canonicalCount,
         metaRobots: parsed.metaRobots,
         xRobotsTag,
         contentType,

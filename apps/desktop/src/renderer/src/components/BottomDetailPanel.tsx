@@ -211,6 +211,7 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['H6 Count', row.h6Count > 0 ? row.h6Count : null],
     ['Word Count', row.wordCount],
     ['Canonical Link Element 1', row.canonical],
+    ['Canonical Count', row.canonicalCount > 1 ? row.canonicalCount : null],
     ['Meta Robots 1', row.metaRobots],
     ['X-Robots-Tag 1', row.xRobotsTag],
     ['HTML Lang', row.lang],

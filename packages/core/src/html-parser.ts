@@ -26,6 +26,8 @@ export interface ParsedPage {
   h6Count: number;
   wordCount: number;
   canonical: string | null;
+  /** Number of `<link rel="canonical">` elements declared. >1 is a confusion signal. */
+  canonicalCount: number;
   metaRobots: string | null;
   lang: string | null;
   viewport: string | null;
@@ -108,7 +110,9 @@ export function parseHtml(
   const h4Count = $('h4').length;
   const h5Count = $('h5').length;
   const h6Count = $('h6').length;
-  const canonical = ($('link[rel="canonical"]').attr('href') ?? '').trim() || null;
+  const canonicalEls = $('link[rel="canonical"]');
+  const canonical = (canonicalEls.first().attr('href') ?? '').trim() || null;
+  const canonicalCount = canonicalEls.length;
   const metaRobots = ($('meta[name="robots"]').attr('content') ?? '').trim().toLowerCase() || null;
   const lang = ($('html').attr('lang') ?? '').trim() || null;
   const viewport = ($('meta[name="viewport"]').attr('content') ?? '').trim() || null;
@@ -332,6 +336,7 @@ export function parseHtml(
     h6Count,
     wordCount,
     canonical,
+    canonicalCount,
     metaRobots,
     lang,
     viewport,
