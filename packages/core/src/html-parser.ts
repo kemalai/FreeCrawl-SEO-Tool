@@ -7,6 +7,13 @@ import type {
 } from '@freecrawl/shared-types';
 import { normalizeUrl, isSameHost } from './url-utils.js';
 
+export interface HreflangEntry {
+  /** Language tag from `hreflang` attribute (e.g. "tr", "en-US", "x-default"). */
+  lang: string;
+  /** Resolved absolute URL of the alternate page. */
+  href: string;
+}
+
 export interface ParsedPage {
   title: string | null;
   metaDescription: string | null;
@@ -21,6 +28,36 @@ export interface ParsedPage {
   ogTitle: string | null;
   ogDescription: string | null;
   ogImage: string | null;
+  twitterCard: string | null;
+  twitterTitle: string | null;
+  twitterDescription: string | null;
+  twitterImage: string | null;
+  metaKeywords: string | null;
+  metaAuthor: string | null;
+  metaGenerator: string | null;
+  themeColor: string | null;
+  /** Sorted unique `@type` values collected from all JSON-LD blocks. */
+  schemaTypes: string[];
+  /** Total number of valid JSON-LD `<script>` blocks on the page. */
+  schemaBlockCount: number;
+  /** Number of JSON-LD blocks that failed to parse. */
+  schemaInvalidCount: number;
+  /** `<link rel="next">` href, normalized to absolute URL. */
+  paginationNext: string | null;
+  /** `<link rel="prev">` href, normalized to absolute URL. */
+  paginationPrev: string | null;
+  /** All `<link rel="alternate" hreflang>` entries on the page. */
+  hreflangs: HreflangEntry[];
+  /** `<link rel="amphtml" href>` if present, else null. */
+  amphtml: string | null;
+  /** Resolved favicon URL from `<link rel="icon">` / `shortcut icon`, else null. */
+  favicon: string | null;
+  /**
+   * Number of `http://` subresources (img, script, stylesheet, iframe, …)
+   * referenced from a HTTPS page — i.e. mixed-content findings. Always 0
+   * when the page itself is served over plain HTTP.
+   */
+  mixedContentCount: number;
   links: DiscoveredLink[];
   images: DiscoveredImage[];
   hasNoindex: boolean;
@@ -64,6 +101,104 @@ export function parseHtml(
       ($('meta[property="og:description"]').attr('content') ?? '').trim(),
     ) || null;
   const ogImage = ($('meta[property="og:image"]').attr('content') ?? '').trim() || null;
+
+  // Twitter Cards use `name=` (not `property=`) per Twitter's spec. Many
+  // sites leave one set missing and rely on the other — we capture both.
+  const twitterCard =
+    ($('meta[name="twitter:card"]').attr('content') ?? '').trim().toLowerCase() || null;
+  const twitterTitle =
+    decodeEntities(($('meta[name="twitter:title"]').attr('content') ?? '').trim()) || null;
+  const twitterDescription =
+    decodeEntities(
+      ($('meta[name="twitter:description"]').attr('content') ?? '').trim(),
+    ) || null;
+  const twitterImage =
+    ($('meta[name="twitter:image"]').attr('content') ?? '').trim() || null;
+
+  const metaKeywords =
+    decodeEntities(($('meta[name="keywords"]').attr('content') ?? '').trim()) || null;
+  const metaAuthor =
+    decodeEntities(($('meta[name="author"]').attr('content') ?? '').trim()) || null;
+  const metaGenerator =
+    decodeEntities(($('meta[name="generator"]').attr('content') ?? '').trim()) || null;
+  const themeColor =
+    ($('meta[name="theme-color"]').attr('content') ?? '').trim() || null;
+
+  // JSON-LD structured data — Google's preferred structured-data format.
+  // Each page can have multiple <script type="application/ld+json"> blocks,
+  // each block can be a single object, an array, or a graph via `@graph`.
+  // We walk the parsed JSON recursively to collect every `@type` so the UI
+  // can show the type set a page declares (Product, Article, BreadcrumbList…)
+  // without having to inspect the raw payload.
+  const schemaTypeSet = new Set<string>();
+  let schemaBlockCount = 0;
+  let schemaInvalidCount = 0;
+  $('script[type="application/ld+json"]').each((_, el) => {
+    const raw = $(el).text().trim();
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      collectSchemaTypes(parsed, schemaTypeSet);
+      schemaBlockCount++;
+    } catch {
+      // Malformed JSON-LD — still count presence so Structured Data
+      // Missing filter doesn't mistakenly claim "no structured data" when
+      // the author just broke the syntax; surface via schemaInvalidCount.
+      schemaInvalidCount++;
+    }
+  });
+  const schemaTypes = [...schemaTypeSet].sort();
+
+  // Pagination — `<link rel="next">` / `<link rel="prev">`. Resolved to
+  // absolute via normalizeUrl so the values are comparable to the URLs
+  // we crawl and store.
+  const paginationNextRaw = ($('link[rel="next"]').attr('href') ?? '').trim();
+  const paginationPrevRaw = ($('link[rel="prev"]').attr('href') ?? '').trim();
+  const paginationNext = paginationNextRaw ? normalizeUrl(paginationNextRaw, pageUrl) : null;
+  const paginationPrev = paginationPrevRaw ? normalizeUrl(paginationPrevRaw, pageUrl) : null;
+
+  // Hreflang — `<link rel="alternate" hreflang="…" href="…">`. We dedupe
+  // by lang+href because some sites repeat tags accidentally.
+  const hreflangSet = new Set<string>();
+  const hreflangs: HreflangEntry[] = [];
+  $('link[rel="alternate"][hreflang]').each((_, el) => {
+    const lang = ($(el).attr('hreflang') ?? '').trim();
+    const rawHref = ($(el).attr('href') ?? '').trim();
+    if (!lang || !rawHref) return;
+    const href = normalizeUrl(rawHref, pageUrl);
+    if (!href) return;
+    const key = `${lang}|${href}`;
+    if (hreflangSet.has(key)) return;
+    hreflangSet.add(key);
+    hreflangs.push({ lang, href });
+  });
+
+  // AMP variant — `<link rel="amphtml">` points to the AMP version of
+  // the current page, when one exists.
+  const amphtmlRaw = ($('link[rel="amphtml"]').attr('href') ?? '').trim();
+  const amphtml = amphtmlRaw ? normalizeUrl(amphtmlRaw, pageUrl) : null;
+
+  // Favicon — prefer modern `rel="icon"`, fall back to legacy
+  // `rel="shortcut icon"`. We don't fabricate a default `/favicon.ico`;
+  // only what the page actually declares.
+  const faviconRaw =
+    ($('link[rel="icon"]').first().attr('href') ?? '').trim() ||
+    ($('link[rel="shortcut icon"]').first().attr('href') ?? '').trim();
+  const favicon = faviconRaw ? normalizeUrl(faviconRaw, pageUrl) : null;
+
+  // Mixed content — only relevant on HTTPS pages. We scan the standard
+  // subresource elements (Google's mixed-content audit list); plain
+  // `<a href>` doesn't count because anchor links aren't subresources.
+  let mixedContentCount = 0;
+  if (pageUrl.startsWith('https://')) {
+    $(
+      'img[src], script[src], iframe[src], video[src], audio[src], source[src], embed[src], link[rel="stylesheet"][href]',
+    ).each((_, el) => {
+      const $el = $(el);
+      const ref = ($el.attr('src') ?? $el.attr('href') ?? '').trim();
+      if (ref.startsWith('http://')) mixedContentCount++;
+    });
+  }
 
   const text = $('body').text().replace(/\s+/g, ' ').trim();
   const wordCount = text.length > 0 ? text.split(' ').filter(Boolean).length : 0;
@@ -160,6 +295,23 @@ export function parseHtml(
     ogTitle,
     ogDescription,
     ogImage,
+    twitterCard,
+    twitterTitle,
+    twitterDescription,
+    twitterImage,
+    metaKeywords,
+    metaAuthor,
+    metaGenerator,
+    themeColor,
+    schemaTypes,
+    schemaBlockCount,
+    schemaInvalidCount,
+    paginationNext,
+    paginationPrev,
+    hreflangs,
+    amphtml,
+    favicon,
+    mixedContentCount,
     links: [...linkMap.values()],
     images: [...imageMap.values()],
     hasNoindex,
@@ -171,6 +323,39 @@ function parseIntAttr(v: string | undefined): number | null {
   if (!v) return null;
   const n = parseInt(v, 10);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Walk a parsed JSON-LD payload and add every `@type` value it finds to
+ * the provided set. Handles the three common shapes Google documents:
+ *
+ *   - top-level object:    { "@type": "Product", ... }
+ *   - top-level array:     [ { "@type": "Article" }, { "@type": "Person" } ]
+ *   - @graph container:    { "@graph": [ { "@type": "WebPage" }, ... ] }
+ *
+ * `@type` itself may be a string or an array of strings (the latter is
+ * valid per the JSON-LD spec, e.g. `"@type": ["Product", "Offer"]`).
+ * Nested objects/arrays are walked recursively so deeply-nested types
+ * like breadcrumb list items are also captured.
+ */
+function collectSchemaTypes(node: unknown, out: Set<string>): void {
+  if (!node) return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectSchemaTypes(item, out);
+    return;
+  }
+  if (typeof node !== 'object') return;
+  const obj = node as Record<string, unknown>;
+  const type = obj['@type'];
+  if (typeof type === 'string' && type) out.add(type);
+  else if (Array.isArray(type)) {
+    for (const t of type) if (typeof t === 'string' && t) out.add(t);
+  }
+  for (const value of Object.values(obj)) {
+    if (value && (typeof value === 'object' || Array.isArray(value))) {
+      collectSchemaTypes(value, out);
+    }
+  }
 }
 
 function detectPathType(rawHref: string): LinkPathType {

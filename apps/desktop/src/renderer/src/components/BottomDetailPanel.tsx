@@ -23,7 +23,7 @@ const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'inlinks', label: 'Inlinks' },
   { key: 'outlinks', label: 'Outlinks' },
   { key: 'serp-snippet', label: 'SERP Snippet' },
-  { key: 'http-headers', label: 'HTTP Headers', disabled: true },
+  { key: 'http-headers', label: 'HTTP Headers' },
   { key: 'view-source', label: 'View Source', disabled: true },
 ];
 
@@ -143,7 +143,40 @@ export function BottomDetailPanel() {
           />
         )}
         {detail && subTab === 'serp-snippet' && <SerpSnippet row={detail.row} />}
+        {detail && subTab === 'http-headers' && <HttpHeadersView headers={detail.headers} />}
       </div>
+    </div>
+  );
+}
+
+function HttpHeadersView({ headers }: { headers: { name: string; value: string }[] }) {
+  if (headers.length === 0) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        No response headers captured for this URL.
+      </div>
+    );
+  }
+  return (
+    <div className="p-3">
+      <table className="w-full text-[11px]">
+        <thead className="sticky top-0 bg-surface-900">
+          <tr className="text-surface-400">
+            <th className="w-64 py-1 pr-3 text-left font-medium">Header</th>
+            <th className="py-1 text-left font-medium">Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {headers.map((h) => (
+            <tr key={h.name} className="border-b border-surface-900 last:border-0">
+              <td className="py-1.5 pr-3 align-top font-mono text-surface-400">{h.name}</td>
+              <td className="break-all py-1.5 align-top font-mono text-surface-100">
+                {h.value}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -181,6 +214,36 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['OG Title', row.ogTitle],
     ['OG Description', row.ogDescription],
     ['OG Image', row.ogImage],
+    ['Twitter Card', row.twitterCard],
+    ['Twitter Title', row.twitterTitle],
+    ['Twitter Description', row.twitterDescription],
+    ['Twitter Image', row.twitterImage],
+    ['Meta Keywords', row.metaKeywords],
+    ['Meta Author', row.metaAuthor],
+    ['Meta Generator', row.metaGenerator],
+    ['Theme Color', row.themeColor],
+    ['Strict-Transport-Security', row.hsts],
+    ['X-Frame-Options', row.xFrameOptions],
+    ['X-Content-Type-Options', row.xContentTypeOptions],
+    ['Content-Encoding', row.contentEncoding],
+    ['Schema Types', row.schemaTypes],
+    ['JSON-LD Blocks', row.schemaBlockCount],
+    ['Invalid JSON-LD Blocks', row.schemaInvalidCount > 0 ? row.schemaInvalidCount : null],
+    ['Pagination Next', row.paginationNext],
+    ['Pagination Prev', row.paginationPrev],
+    ['Hreflang Count', row.hreflangCount > 0 ? row.hreflangCount : null],
+    ['Hreflangs', summarizeHreflangs(row.hreflangs)],
+    ['AMP HTML', row.amphtml],
+    ['Favicon', row.favicon],
+    ['Mixed Content (subresources)', row.mixedContentCount > 0 ? row.mixedContentCount : null],
+    [
+      'Redirect Chain Length',
+      row.redirectChainLength > 0 ? row.redirectChainLength : null,
+    ],
+    ['Redirect Final URL', row.redirectFinalUrl],
+    ['Redirect Loop', row.redirectLoop ? 'YES' : null],
+    ['Folder Depth', row.folderDepth],
+    ['Query Param Count', row.queryParamCount > 0 ? row.queryParamCount : null],
     ['Crawl Depth', row.depth],
     ['Inlinks', row.inlinks],
     ['Outlinks', row.outlinks],
@@ -725,4 +788,20 @@ function httpStatusText(code: number): string {
   if (code >= 400 && code < 500) return 'Client Error';
   if (code >= 500) return 'Server Error';
   return '';
+}
+
+/**
+ * Render the JSON-stringified hreflang array as a single line of
+ * `lang -> href` pairs, separated by ` · `. Returns null on empty/parse
+ * failure so the row falls back to the "—" placeholder.
+ */
+function summarizeHreflangs(json: string | null): string | null {
+  if (!json) return null;
+  try {
+    const arr = JSON.parse(json) as { lang: string; href: string }[];
+    if (!Array.isArray(arr) || arr.length === 0) return null;
+    return arr.map((h) => `${h.lang} → ${h.href}`).join(' · ');
+  } catch {
+    return null;
+  }
 }

@@ -232,6 +232,148 @@ const MIGRATIONS: Migration[] = [
       if (!has('og_image')) db.exec('ALTER TABLE urls ADD COLUMN og_image TEXT');
     },
   },
+  {
+    version: 10,
+    name: 'add_twitter_card',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('twitter_card')) db.exec('ALTER TABLE urls ADD COLUMN twitter_card TEXT');
+      if (!has('twitter_title')) db.exec('ALTER TABLE urls ADD COLUMN twitter_title TEXT');
+      if (!has('twitter_description'))
+        db.exec('ALTER TABLE urls ADD COLUMN twitter_description TEXT');
+      if (!has('twitter_image')) db.exec('ALTER TABLE urls ADD COLUMN twitter_image TEXT');
+    },
+  },
+  {
+    version: 11,
+    name: 'add_meta_extras',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('meta_keywords')) db.exec('ALTER TABLE urls ADD COLUMN meta_keywords TEXT');
+      if (!has('meta_author')) db.exec('ALTER TABLE urls ADD COLUMN meta_author TEXT');
+      if (!has('meta_generator')) db.exec('ALTER TABLE urls ADD COLUMN meta_generator TEXT');
+      if (!has('theme_color')) db.exec('ALTER TABLE urls ADD COLUMN theme_color TEXT');
+    },
+  },
+  {
+    version: 12,
+    name: 'add_security_headers',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('hsts')) db.exec('ALTER TABLE urls ADD COLUMN hsts TEXT');
+      if (!has('x_frame_options')) db.exec('ALTER TABLE urls ADD COLUMN x_frame_options TEXT');
+      if (!has('x_content_type_options'))
+        db.exec('ALTER TABLE urls ADD COLUMN x_content_type_options TEXT');
+      if (!has('content_encoding')) db.exec('ALTER TABLE urls ADD COLUMN content_encoding TEXT');
+    },
+  },
+  {
+    version: 13,
+    name: 'add_structured_data',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      // Comma-joined sorted unique @type values; readable filter target.
+      if (!has('schema_types')) db.exec('ALTER TABLE urls ADD COLUMN schema_types TEXT');
+      if (!has('schema_block_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN schema_block_count INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('schema_invalid_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN schema_invalid_count INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 14,
+    name: 'add_pagination_hreflang',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('pagination_next')) db.exec('ALTER TABLE urls ADD COLUMN pagination_next TEXT');
+      if (!has('pagination_prev')) db.exec('ALTER TABLE urls ADD COLUMN pagination_prev TEXT');
+      // hreflangs stored as JSON array text — variable-length list, easier
+      // than a child table for V1; we surface counts via a sibling column.
+      if (!has('hreflangs')) db.exec('ALTER TABLE urls ADD COLUMN hreflangs TEXT');
+      if (!has('hreflang_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN hreflang_count INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 15,
+    name: 'add_amp_favicon_mixed_content',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('amphtml')) db.exec('ALTER TABLE urls ADD COLUMN amphtml TEXT');
+      if (!has('favicon')) db.exec('ALTER TABLE urls ADD COLUMN favicon TEXT');
+      if (!has('mixed_content_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN mixed_content_count INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 16,
+    name: 'add_redirect_chain',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      // Number of redirects in this URL's chain (0 = not a redirect; n = n hops to final).
+      if (!has('redirect_chain_length'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN redirect_chain_length INTEGER NOT NULL DEFAULT 0',
+        );
+      // Terminal URL after walking all redirects, or null if loop / unknown.
+      if (!has('redirect_final_url'))
+        db.exec('ALTER TABLE urls ADD COLUMN redirect_final_url TEXT');
+      // Boolean flag (0/1) — 1 if a cycle was detected while walking.
+      if (!has('redirect_loop'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN redirect_loop INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 17,
+    name: 'add_url_structure_stats',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      // Number of `/` segments in the URL path (e.g. `/a/b/c` → 3).
+      if (!has('folder_depth'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN folder_depth INTEGER NOT NULL DEFAULT 0',
+        );
+      // Number of `?key=…&key=…` parameters in the query string.
+      if (!has('query_param_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN query_param_count INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

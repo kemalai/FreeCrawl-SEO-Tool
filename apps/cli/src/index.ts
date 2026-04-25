@@ -19,6 +19,9 @@ Options:
   --user-agent <str>  Custom User-Agent string
   --no-robots         Ignore robots.txt
   --external          Follow external links
+  --header <K: V>     Extra request header; repeatable (e.g. --header "Authorization: Bearer X")
+  --include <regex>   Only crawl URLs matching this regex; repeatable
+  --exclude <regex>   Skip URLs matching this regex; repeatable
   --db <file>         SQLite project file (default: ./crawl.seoproject)
   --out <file.csv>    Export CSV after crawl
   -h, --help          Show this help
@@ -36,6 +39,9 @@ async function main(): Promise<void> {
       'user-agent': { type: 'string' },
       'no-robots': { type: 'boolean' },
       external: { type: 'boolean' },
+      header: { type: 'string', multiple: true },
+      include: { type: 'string', multiple: true },
+      exclude: { type: 'string', multiple: true },
       db: { type: 'string' },
       out: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
@@ -61,6 +67,9 @@ async function main(): Promise<void> {
     userAgent: values['user-agent'] ?? DEFAULT_CRAWL_CONFIG.userAgent,
     respectRobotsTxt: !values['no-robots'],
     crawlExternal: Boolean(values.external),
+    customHeaders: parseHeaders(values.header),
+    includePatterns: values.include ?? [],
+    excludePatterns: values.exclude ?? [],
   };
 
   const crawler = new Crawler(config, db);
@@ -99,6 +108,23 @@ function parseNumeric(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const n = Number.parseInt(value, 10);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Parse `--header "Key: Value"` repeated flags into a map. Values beyond
+ * the first `:` are kept as-is (so `X: bearer token with: colon` works).
+ */
+function parseHeaders(values: string[] | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!values) return out;
+  for (const raw of values) {
+    const idx = raw.indexOf(':');
+    if (idx <= 0) continue;
+    const key = raw.slice(0, idx).trim();
+    const value = raw.slice(idx + 1).trim();
+    if (key) out[key] = value;
+  }
+  return out;
 }
 
 main().catch((err: unknown) => {

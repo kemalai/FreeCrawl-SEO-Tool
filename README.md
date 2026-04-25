@@ -57,6 +57,56 @@ FreeCrawl SEO Tool is a high-performance website crawler for SEO analysis, targe
 
 ---
 
+## Prerequisites
+
+Before running FreeCrawl SEO Tool from source, your machine needs the following. **End users who download the prebuilt Windows installer (`.exe`) from the [Releases](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases) page do NOT need any of this** — the installer ships everything bundled.
+
+### Required (for developers / source builds)
+
+| Component | Minimum version | Why | Where |
+|---|---|---|---|
+| **Node.js** | **22 LTS** (24 also OK) | Crawler runtime + bundled `node:sqlite` (Node 22.5+) — no native compile needed | [nodejs.org](https://nodejs.org/) |
+| **npm** | 10+ (ships with Node) | Workspace install + scripts | (bundled with Node) |
+| **Git** | any recent | Clone the repo | [git-scm.com](https://git-scm.com/) |
+
+> **Why no Python / MSBuild / node-gyp?** FreeCrawl uses Node 22's built-in `node:sqlite` instead of `better-sqlite3`. There are zero native dependencies — `npm install` never invokes a C++ compiler. This is a deliberate design choice (see [CLAUDE.md](CLAUDE.md) §6).
+
+### Required at runtime (any platform, both prebuilt and source)
+
+- **Outbound HTTPS access** to the sites you crawl. Behind a corporate proxy? Set `HTTPS_PROXY=http://your-proxy:port` before launch — the crawler routes through `undici`'s `ProxyAgent` automatically.
+- **TLS root certificates**. Node ships with the Mozilla CA bundle. If your antivirus or company proxy performs HTTPS inspection (Kaspersky, ESET, Zscaler, BlueCoat, etc.), set `NODE_EXTRA_CA_CERTS=C:\path\to\corp-ca-bundle.crt` — otherwise crawls fail with `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
+
+### Optional
+
+| Component | Why |
+|---|---|
+| **PowerShell 7+** (Windows) | Better experience for some package scripts (default `cmd.exe` works fine too) |
+| **Bash / Git Bash** (Windows) | Required only if you run the CLI examples below verbatim |
+| **VS Code** | Recommended editor — workspace TypeScript settings are pre-configured |
+
+### Platform-specific notes
+
+- **Windows 10/11** — runs without any extra setup once Node.js is installed. The included **`FreeCrawl-SEO-Tool-Start.bat`** launcher handles dependency install + first-time `tsc -b` build automatically.
+- **macOS 12+** — works out of the box on Apple Silicon and Intel. For production DMG signing/notarization you'll additionally need an Apple Developer ID certificate (only matters if you're distributing builds, not running locally).
+- **Linux** — any modern distro with Node 22 works. AppImage / `.deb` outputs are produced by `electron-builder`.
+
+### Disk + memory budget
+
+- ~600 MB for `node_modules` after `npm install`
+- ~150 MB for the production Electron build
+- ~100 MB peak RAM for a 100K-URL crawl (most data streams to SQLite via WAL)
+
+### Verifying your setup
+
+```bash
+node --version    # should print v22.x.x or v24.x.x
+npm --version     # 10+
+```
+
+If `node --version` prints `v18.x` or older, upgrade — `node:sqlite` requires Node 22.5+ and won't load on older runtimes.
+
+---
+
 ## Quick Start
 
 ### Windows (easiest)

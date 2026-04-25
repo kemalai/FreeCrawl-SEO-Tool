@@ -445,6 +445,36 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.urlTooLong,
               category: 'issues:url-too-long',
             },
+            {
+              key: 'issues-url-uppercase',
+              label: 'Contains Uppercase',
+              count: o.issues.urlUppercase,
+              category: 'issues:url-uppercase',
+            },
+            {
+              key: 'issues-url-underscore',
+              label: 'Contains Underscore',
+              count: o.issues.urlUnderscore,
+              category: 'issues:url-underscore',
+            },
+            {
+              key: 'issues-url-multiple-slashes',
+              label: 'Multiple Slashes',
+              count: o.issues.urlMultipleSlashes,
+              category: 'issues:url-multiple-slashes',
+            },
+            {
+              key: 'issues-url-non-ascii',
+              label: 'Non-ASCII Characters',
+              count: o.issues.urlNonAscii,
+              category: 'issues:url-non-ascii',
+            },
+            {
+              key: 'issues-url-many-params',
+              label: 'Many Query Params (>5)',
+              count: o.issues.urlManyParams,
+              category: 'issues:url-many-params',
+            },
           ],
         },
         {
@@ -480,6 +510,132 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'OpenGraph Tags Missing',
               count: o.issues.ogMissing,
               category: 'issues:og-missing',
+            },
+            {
+              key: 'issues-twitter-missing',
+              label: 'Twitter Card Missing',
+              count: o.issues.twitterMissing,
+              category: 'issues:twitter-missing',
+            },
+          ],
+        },
+        {
+          key: 'issues-security-headers',
+          label: 'Security Headers',
+          children: [
+            {
+              key: 'issues-hsts-missing',
+              label: 'HSTS Missing',
+              count: o.issues.hstsMissing,
+              category: 'issues:hsts-missing',
+            },
+            {
+              key: 'issues-xframe-missing',
+              label: 'X-Frame-Options Missing',
+              count: o.issues.xFrameOptionsMissing,
+              category: 'issues:x-frame-options-missing',
+            },
+            {
+              key: 'issues-xcto-missing',
+              label: 'X-Content-Type-Options Missing',
+              count: o.issues.xContentTypeOptionsMissing,
+              category: 'issues:x-content-type-options-missing',
+            },
+            {
+              key: 'issues-mixed-content',
+              label: 'Mixed Content',
+              count: o.issues.mixedContent,
+              category: 'issues:mixed-content',
+            },
+          ],
+        },
+        {
+          key: 'issues-technical',
+          label: 'Technical',
+          children: [
+            {
+              key: 'issues-favicon-missing',
+              label: 'Favicon Missing',
+              count: o.issues.faviconMissing,
+              category: 'issues:favicon-missing',
+            },
+          ],
+        },
+        {
+          key: 'issues-redirects',
+          label: 'Redirects',
+          children: [
+            {
+              key: 'issues-redirect-loop',
+              label: 'Redirect Loop',
+              count: o.issues.redirectLoop,
+              category: 'issues:redirect-loop',
+            },
+            {
+              key: 'issues-redirect-chain-long',
+              label: 'Long Chain (>3 hops)',
+              count: o.issues.redirectChainLong,
+              category: 'issues:redirect-chain-long',
+            },
+            {
+              key: 'issues-redirect-self',
+              label: 'Self-Redirect',
+              count: o.issues.redirectSelf,
+              category: 'issues:redirect-self',
+            },
+          ],
+        },
+        {
+          key: 'issues-perf',
+          label: 'Performance',
+          children: [
+            {
+              key: 'issues-compression-missing',
+              label: 'Compression Missing',
+              count: o.issues.compressionMissing,
+              category: 'issues:compression-missing',
+            },
+          ],
+        },
+        {
+          key: 'issues-structured-data',
+          label: 'Structured Data',
+          children: [
+            {
+              key: 'issues-schema-missing',
+              label: 'JSON-LD Missing',
+              count: o.issues.structuredDataMissing,
+              category: 'issues:structured-data-missing',
+            },
+            {
+              key: 'issues-schema-invalid',
+              label: 'Invalid JSON-LD',
+              count: o.issues.structuredDataInvalid,
+              category: 'issues:structured-data-invalid',
+            },
+          ],
+        },
+        {
+          key: 'issues-pagination',
+          label: 'Pagination',
+          children: [
+            {
+              key: 'issues-pagination-broken',
+              label: 'Broken Next/Prev Target',
+              count: o.issues.paginationBroken,
+              category: 'issues:pagination-broken',
+            },
+          ],
+        },
+        {
+          key: 'issues-hreflang',
+          label: 'Hreflang',
+          children: [
+            {
+              key: 'issues-hreflang-x-default',
+              label: 'x-default Missing',
+              count: o.issues.hreflangXDefaultMissing,
+              category: 'issues:hreflang-x-default-missing',
             },
           ],
         },

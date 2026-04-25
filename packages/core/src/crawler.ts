@@ -69,6 +69,8 @@ export class Crawler extends EventEmitter {
   private paused = false;
   private robots: RobotsChecker | null = null;
   private progressTimer: NodeJS.Timeout | null = null;
+  private readonly includeRegexes: RegExp[];
+  private readonly excludeRegexes: RegExp[];
 
   constructor(config: CrawlConfig, db: ProjectDb) {
     super();
@@ -85,6 +87,29 @@ export class Crawler extends EventEmitter {
       interval: 1000,
       intervalCap: Math.max(2, intervalCap),
     });
+    // Compile include/exclude patterns once — an invalid pattern should
+    // surface to the user as a crawler error, not a silent miss.
+    this.includeRegexes = compilePatterns(config.includePatterns, (p, err) => {
+      this.emit('error', `Invalid include pattern "${p}": ${err}`);
+    });
+    this.excludeRegexes = compilePatterns(config.excludePatterns, (p, err) => {
+      this.emit('error', `Invalid exclude pattern "${p}": ${err}`);
+    });
+  }
+
+  /**
+   * URL passes the include/exclude filter when:
+   *   - excludes: no pattern matches
+   *   - includes: either the list is empty, or at least one matches
+   *   - the crawl's start URL is always permitted (user explicitly asked for it)
+   */
+  private passesUrlFilter(url: string): boolean {
+    if (url === this.config.startUrl) return true;
+    for (const re of this.excludeRegexes) {
+      if (re.test(url)) return false;
+    }
+    if (this.includeRegexes.length === 0) return true;
+    return this.includeRegexes.some((re) => re.test(url));
   }
 
   async start(): Promise<void> {
@@ -137,6 +162,7 @@ export class Crawler extends EventEmitter {
     }
 
     this.db.recomputeInlinks();
+    this.db.recomputeRedirectChains();
     this.running = false;
     this.emitProgress();
     this.emit('done', this.db.getSummary());
@@ -172,6 +198,7 @@ export class Crawler extends EventEmitter {
   private enqueueExternal(url: string): void {
     if (this.stopped) return;
     if (this.externalSeen.has(url)) return;
+    if (!this.passesUrlFilter(url)) return;
     this.externalSeen.add(url);
     this.externalQueue
       .add(() => this.probeExternal(url))
@@ -191,7 +218,11 @@ export class Crawler extends EventEmitter {
     const doFetch = async (method: 'HEAD' | 'GET') =>
       undiciFetch(url, {
         method,
-        headers: defaultRequestHeaders(this.config.userAgent, this.config.acceptLanguage),
+        headers: defaultRequestHeaders(
+          this.config.userAgent,
+          this.config.acceptLanguage,
+          this.config.customHeaders,
+        ),
         redirect: this.config.followRedirects ? 'follow' : 'manual',
         signal: controller.signal,
       });
@@ -283,6 +314,7 @@ export class Crawler extends EventEmitter {
     if (this.seen.size >= this.config.maxUrls) return;
     if (item.depth > this.config.maxDepth) return;
     if (this.robots && !this.robots.isAllowed(item.url)) return;
+    if (!this.passesUrlFilter(item.url)) return;
 
     this.seen.add(item.url);
     this.pending++;
@@ -321,8 +353,20 @@ export class Crawler extends EventEmitter {
       const contentType = res.headers.get('content-type');
       const contentLengthHeader = res.headers.get('content-length');
       const xRobotsTag = res.headers.get('x-robots-tag');
+      // Security / performance headers — captured per URL for the Security
+      // issue filters and the URL Details panel.
+      const hsts = res.headers.get('strict-transport-security');
+      const xFrameOptions = res.headers.get('x-frame-options');
+      const xContentTypeOptions = res.headers.get('x-content-type-options');
+      const contentEncoding = res.headers.get('content-encoding');
 
       const kind = detectContentKind(item.url, contentType);
+
+      // Materialize all response headers once — used for the HTTP Headers
+      // tab in the URL Details panel. Built before each upsertUrl so we
+      // can also call setUrlHeaders right after we have a urlId.
+      const allHeaders: [string, string][] = [];
+      res.headers.forEach((v, k) => allHeaders.push([k, v]));
 
       // 3xx redirect — record hop, optionally enqueue target, stop.
       if (statusCode >= 300 && statusCode < 400) {
@@ -333,7 +377,7 @@ export class Crawler extends EventEmitter {
         }
         const locationHeader = res.headers.get('location');
         const target = locationHeader ? normalizeUrl(locationHeader, item.url) : null;
-        this.db.upsertUrl({
+        const redirectUrlId = this.db.upsertUrl({
           url: item.url,
           contentKind: kind,
           statusCode,
@@ -346,7 +390,12 @@ export class Crawler extends EventEmitter {
           responseTimeMs,
           depth: item.depth,
           redirectTarget: target,
+          hsts,
+          xFrameOptions,
+          xContentTypeOptions,
+          contentEncoding,
         });
+        if (redirectUrlId) this.db.setUrlHeaders(redirectUrlId, allHeaders);
         this.crawled++;
         if (this.config.followRedirects && target) {
           const inScope = isInScope(this.config.startUrl, target, this.config.scope);
@@ -373,7 +422,7 @@ export class Crawler extends EventEmitter {
             : statusCode >= 400
               ? 'non-indexable:client-error'
               : 'indexable';
-        this.db.upsertUrl({
+        const nonHtmlUrlId = this.db.upsertUrl({
           url: item.url,
           contentKind: kind,
           statusCode,
@@ -385,7 +434,12 @@ export class Crawler extends EventEmitter {
           xRobotsTag,
           responseTimeMs,
           depth: item.depth,
+          hsts,
+          xFrameOptions,
+          xContentTypeOptions,
+          contentEncoding,
         });
+        if (nonHtmlUrlId) this.db.setUrlHeaders(nonHtmlUrlId, allHeaders);
         this.crawled++;
         return;
       }
@@ -449,7 +503,30 @@ export class Crawler extends EventEmitter {
         ogTitle: parsed.ogTitle,
         ogDescription: parsed.ogDescription,
         ogImage: parsed.ogImage,
+        twitterCard: parsed.twitterCard,
+        twitterTitle: parsed.twitterTitle,
+        twitterDescription: parsed.twitterDescription,
+        twitterImage: parsed.twitterImage,
+        metaKeywords: parsed.metaKeywords,
+        metaAuthor: parsed.metaAuthor,
+        metaGenerator: parsed.metaGenerator,
+        themeColor: parsed.themeColor,
+        hsts,
+        xFrameOptions,
+        xContentTypeOptions,
+        contentEncoding,
+        schemaTypes: parsed.schemaTypes.length > 0 ? parsed.schemaTypes.join(', ') : null,
+        schemaBlockCount: parsed.schemaBlockCount,
+        schemaInvalidCount: parsed.schemaInvalidCount,
+        paginationNext: parsed.paginationNext,
+        paginationPrev: parsed.paginationPrev,
+        hreflangs: parsed.hreflangs.length > 0 ? JSON.stringify(parsed.hreflangs) : null,
+        hreflangCount: parsed.hreflangs.length,
+        amphtml: parsed.amphtml,
+        favicon: parsed.favicon,
+        mixedContentCount: parsed.mixedContentCount,
       });
+      if (urlId) this.db.setUrlHeaders(urlId, allHeaders);
       this.db.insertLinks(urlId, storableLinks, item.depth);
       this.db.insertImages(urlId, parsed.images);
       for (const link of storableLinks) {
@@ -514,7 +591,11 @@ export class Crawler extends EventEmitter {
       try {
         const res = await undiciFetch(url, {
           method: 'GET',
-          headers: defaultRequestHeaders(this.config.userAgent, this.config.acceptLanguage),
+          headers: defaultRequestHeaders(
+            this.config.userAgent,
+            this.config.acceptLanguage,
+            this.config.customHeaders,
+          ),
           redirect: 'manual',
           signal,
         });
@@ -571,6 +652,23 @@ function sleep(ms: number): Promise<void> {
 
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function compilePatterns(
+  patterns: string[],
+  onInvalid: (pattern: string, error: string) => void,
+): RegExp[] {
+  const out: RegExp[] = [];
+  for (const raw of patterns) {
+    const pattern = raw.trim();
+    if (!pattern) continue;
+    try {
+      out.push(new RegExp(pattern));
+    } catch (err) {
+      onInvalid(pattern, err instanceof Error ? err.message : String(err));
+    }
+  }
+  return out;
 }
 
 function parseIntSafe(v: string | null | undefined): number | null {

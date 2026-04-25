@@ -42,9 +42,28 @@ export type UrlCategory =
   | 'issues:response-very-slow'
   | 'issues:page-large'
   | 'issues:url-too-long'
+  | 'issues:url-uppercase'
+  | 'issues:url-underscore'
+  | 'issues:url-multiple-slashes'
+  | 'issues:url-non-ascii'
   | 'issues:lang-missing'
   | 'issues:viewport-missing'
   | 'issues:og-missing'
+  | 'issues:twitter-missing'
+  | 'issues:hsts-missing'
+  | 'issues:x-frame-options-missing'
+  | 'issues:x-content-type-options-missing'
+  | 'issues:structured-data-missing'
+  | 'issues:structured-data-invalid'
+  | 'issues:pagination-broken'
+  | 'issues:hreflang-x-default-missing'
+  | 'issues:mixed-content'
+  | 'issues:favicon-missing'
+  | 'issues:redirect-loop'
+  | 'issues:redirect-chain-long'
+  | 'issues:redirect-self'
+  | 'issues:url-many-params'
+  | 'issues:compression-missing'
   | 'issues:image-missing-alt'
   | 'issues:broken-links-all'
   | 'issues:broken-links-internal'
@@ -95,6 +114,34 @@ export interface CrawlUrlRow {
   ogTitle: string | null;
   ogDescription: string | null;
   ogImage: string | null;
+  twitterCard: string | null;
+  twitterTitle: string | null;
+  twitterDescription: string | null;
+  twitterImage: string | null;
+  metaKeywords: string | null;
+  metaAuthor: string | null;
+  metaGenerator: string | null;
+  themeColor: string | null;
+  hsts: string | null;
+  xFrameOptions: string | null;
+  xContentTypeOptions: string | null;
+  contentEncoding: string | null;
+  schemaTypes: string | null;
+  schemaBlockCount: number;
+  schemaInvalidCount: number;
+  paginationNext: string | null;
+  paginationPrev: string | null;
+  /** JSON-stringified array of `{ lang, href }` objects, or null. */
+  hreflangs: string | null;
+  hreflangCount: number;
+  amphtml: string | null;
+  favicon: string | null;
+  mixedContentCount: number;
+  redirectChainLength: number;
+  redirectFinalUrl: string | null;
+  redirectLoop: boolean;
+  folderDepth: number;
+  queryParamCount: number;
   crawledAt: string;
 }
 
@@ -125,6 +172,21 @@ export interface CrawlConfig {
    * hints to search engines, not as part of the crawl graph.
    */
   storeNofollowLinks: boolean;
+  /**
+   * Extra headers sent on every request — key/value pairs added on top of
+   * the defaults (User-Agent, Accept-Language, Accept-Encoding). User
+   * values override defaults when keys collide (case-insensitive).
+   * Typical uses: auth tokens, custom routing hints, X-Forwarded-For.
+   */
+  customHeaders: Record<string, string>;
+  /**
+   * If non-empty, only URLs matching at least one of these regexes are
+   * enqueued. The start URL is always crawled regardless. Patterns are
+   * tested against the full URL string.
+   */
+  includePatterns: string[];
+  /** URLs matching any of these regexes are skipped during enqueue. */
+  excludePatterns: string[];
 }
 
 export interface OverviewCounts {
@@ -170,9 +232,28 @@ export interface OverviewCounts {
     responseVerySlow: number;
     pageLarge: number;
     urlTooLong: number;
+    urlUppercase: number;
+    urlUnderscore: number;
+    urlMultipleSlashes: number;
+    urlNonAscii: number;
     langMissing: number;
     viewportMissing: number;
     ogMissing: number;
+    twitterMissing: number;
+    hstsMissing: number;
+    xFrameOptionsMissing: number;
+    xContentTypeOptionsMissing: number;
+    structuredDataMissing: number;
+    structuredDataInvalid: number;
+    paginationBroken: number;
+    hreflangXDefaultMissing: number;
+    mixedContent: number;
+    faviconMissing: number;
+    redirectLoop: number;
+    redirectChainLong: number;
+    redirectSelf: number;
+    urlManyParams: number;
+    compressionMissing: number;
     imageMissingAlt: number;
     brokenLinksInternal: number;
     brokenLinksExternal: number;
@@ -351,12 +432,19 @@ export interface OutlinkRow {
   isInternal: boolean;
 }
 
+export interface HttpHeader {
+  name: string;
+  value: string;
+}
+
 export interface UrlDetail {
   row: CrawlUrlRow;
   inlinks: InlinkRow[];
   inlinksTotal: number;
   outlinks: OutlinkRow[];
   outlinksTotal: number;
+  /** Captured response headers (all values), in original order. */
+  headers: HttpHeader[];
 }
 
 export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
@@ -376,4 +464,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   retryAttempts: 2,
   retryInitialDelayMs: 500,
   storeNofollowLinks: false,
+  customHeaders: {},
+  includePatterns: [],
+  excludePatterns: [],
 };

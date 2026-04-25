@@ -55,6 +55,33 @@ interface UrlRowDb {
   og_title: string | null;
   og_description: string | null;
   og_image: string | null;
+  twitter_card: string | null;
+  twitter_title: string | null;
+  twitter_description: string | null;
+  twitter_image: string | null;
+  meta_keywords: string | null;
+  meta_author: string | null;
+  meta_generator: string | null;
+  theme_color: string | null;
+  hsts: string | null;
+  x_frame_options: string | null;
+  x_content_type_options: string | null;
+  content_encoding: string | null;
+  schema_types: string | null;
+  schema_block_count: number;
+  schema_invalid_count: number;
+  pagination_next: string | null;
+  pagination_prev: string | null;
+  hreflangs: string | null;
+  hreflang_count: number;
+  amphtml: string | null;
+  favicon: string | null;
+  mixed_content_count: number;
+  redirect_chain_length: number;
+  redirect_final_url: string | null;
+  redirect_loop: number;
+  folder_depth: number;
+  query_param_count: number;
 }
 
 interface ImageRowDb {
@@ -96,6 +123,29 @@ export interface UpsertUrlInput {
   ogTitle?: string | null;
   ogDescription?: string | null;
   ogImage?: string | null;
+  twitterCard?: string | null;
+  twitterTitle?: string | null;
+  twitterDescription?: string | null;
+  twitterImage?: string | null;
+  metaKeywords?: string | null;
+  metaAuthor?: string | null;
+  metaGenerator?: string | null;
+  themeColor?: string | null;
+  hsts?: string | null;
+  xFrameOptions?: string | null;
+  xContentTypeOptions?: string | null;
+  contentEncoding?: string | null;
+  schemaTypes?: string | null;
+  schemaBlockCount?: number;
+  schemaInvalidCount?: number;
+  paginationNext?: string | null;
+  paginationPrev?: string | null;
+  /** JSON-stringified array of `HreflangEntry` objects, or null. */
+  hreflangs?: string | null;
+  hreflangCount?: number;
+  amphtml?: string | null;
+  favicon?: string | null;
+  mixedContentCount?: number;
 }
 
 const UPSERT_URL_SQL = `
@@ -105,14 +155,28 @@ const UPSERT_URL_SQL = `
     h1, h1_length, h1_count, h2_count, word_count, canonical, meta_robots, x_robots_tag,
     content_type, content_length, response_time_ms, depth, outlinks, redirect_target,
     images_count, images_missing_alt,
-    lang, viewport, og_title, og_description, og_image
+    lang, viewport, og_title, og_description, og_image,
+    twitter_card, twitter_title, twitter_description, twitter_image,
+    meta_keywords, meta_author, meta_generator, theme_color,
+    hsts, x_frame_options, x_content_type_options, content_encoding,
+    schema_types, schema_block_count, schema_invalid_count,
+    pagination_next, pagination_prev, hreflangs, hreflang_count,
+    amphtml, favicon, mixed_content_count,
+    folder_depth, query_param_count
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
     :h1, :h1_length, :h1_count, :h2_count, :word_count, :canonical, :meta_robots, :x_robots_tag,
     :content_type, :content_length, :response_time_ms, :depth, :outlinks, :redirect_target,
     :images_count, :images_missing_alt,
-    :lang, :viewport, :og_title, :og_description, :og_image
+    :lang, :viewport, :og_title, :og_description, :og_image,
+    :twitter_card, :twitter_title, :twitter_description, :twitter_image,
+    :meta_keywords, :meta_author, :meta_generator, :theme_color,
+    :hsts, :x_frame_options, :x_content_type_options, :content_encoding,
+    :schema_types, :schema_block_count, :schema_invalid_count,
+    :pagination_next, :pagination_prev, :hreflangs, :hreflang_count,
+    :amphtml, :favicon, :mixed_content_count,
+    :folder_depth, :query_param_count
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -145,6 +209,30 @@ const UPSERT_URL_SQL = `
     og_title = excluded.og_title,
     og_description = excluded.og_description,
     og_image = excluded.og_image,
+    twitter_card = excluded.twitter_card,
+    twitter_title = excluded.twitter_title,
+    twitter_description = excluded.twitter_description,
+    twitter_image = excluded.twitter_image,
+    meta_keywords = excluded.meta_keywords,
+    meta_author = excluded.meta_author,
+    meta_generator = excluded.meta_generator,
+    theme_color = excluded.theme_color,
+    hsts = excluded.hsts,
+    x_frame_options = excluded.x_frame_options,
+    x_content_type_options = excluded.x_content_type_options,
+    content_encoding = excluded.content_encoding,
+    schema_types = excluded.schema_types,
+    schema_block_count = excluded.schema_block_count,
+    schema_invalid_count = excluded.schema_invalid_count,
+    pagination_next = excluded.pagination_next,
+    pagination_prev = excluded.pagination_prev,
+    hreflangs = excluded.hreflangs,
+    hreflang_count = excluded.hreflang_count,
+    amphtml = excluded.amphtml,
+    favicon = excluded.favicon,
+    mixed_content_count = excluded.mixed_content_count,
+    folder_depth = excluded.folder_depth,
+    query_param_count = excluded.query_param_count,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -394,6 +482,30 @@ export class ProjectDb {
       og_title: input.ogTitle ?? null,
       og_description: input.ogDescription ?? null,
       og_image: input.ogImage ?? null,
+      twitter_card: input.twitterCard ?? null,
+      twitter_title: input.twitterTitle ?? null,
+      twitter_description: input.twitterDescription ?? null,
+      twitter_image: input.twitterImage ?? null,
+      meta_keywords: input.metaKeywords ?? null,
+      meta_author: input.metaAuthor ?? null,
+      meta_generator: input.metaGenerator ?? null,
+      theme_color: input.themeColor ?? null,
+      hsts: input.hsts ?? null,
+      x_frame_options: input.xFrameOptions ?? null,
+      x_content_type_options: input.xContentTypeOptions ?? null,
+      content_encoding: input.contentEncoding ?? null,
+      schema_types: input.schemaTypes ?? null,
+      schema_block_count: input.schemaBlockCount ?? 0,
+      schema_invalid_count: input.schemaInvalidCount ?? 0,
+      pagination_next: input.paginationNext ?? null,
+      pagination_prev: input.paginationPrev ?? null,
+      hreflangs: input.hreflangs ?? null,
+      hreflang_count: input.hreflangCount ?? 0,
+      amphtml: input.amphtml ?? null,
+      favicon: input.favicon ?? null,
+      mixed_content_count: input.mixedContentCount ?? 0,
+      folder_depth: computeFolderDepth(input.url),
+      query_param_count: computeQueryParamCount(input.url),
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -479,6 +591,75 @@ export class ProjectDb {
         WHERE l.to_url = urls.url AND l.is_internal = 1
       )
     `);
+  }
+
+  /**
+   * Walk every redirect's `redirect_target` chain to its terminal URL,
+   * detect cycles, and write `redirect_chain_length` / `redirect_final_url`
+   * / `redirect_loop` for each redirect row.
+   *
+   * Algorithm:
+   *   1. Snapshot `(url -> redirect_target)` into a Map (one DB scan).
+   *   2. For every redirect row (status_code 3xx), walk the map; track a
+   *      `visited` set so cycles produce `redirect_loop = 1` instead of
+   *      looping forever.
+   *
+   * O(N) memory, O(N · avg_chain_depth) time. Chains tend to be 1–3 hops
+   * in practice so the walk is cheap.
+   */
+  recomputeRedirectChains(): void {
+    const allRows = this.db
+      .prepare('SELECT url, redirect_target FROM urls')
+      .all() as { url: string; redirect_target: string | null }[];
+    const targetByUrl = new Map<string, string | null>();
+    for (const r of allRows) targetByUrl.set(r.url, r.redirect_target);
+
+    const redirects = this.db
+      .prepare(
+        'SELECT id, url FROM urls WHERE status_code >= 300 AND status_code < 400',
+      )
+      .all() as { id: number; url: string }[];
+
+    const upd = this.db.prepare(
+      `UPDATE urls SET
+         redirect_chain_length = ?,
+         redirect_final_url = ?,
+         redirect_loop = ?
+       WHERE id = ?`,
+    );
+
+    this.db.exec('BEGIN');
+    try {
+      for (const row of redirects) {
+        const visited = new Set<string>();
+        let current: string | null = row.url;
+        let chain = 0;
+        let loop = 0;
+        let finalUrl: string | null = null;
+        // Hard cap so a pathological dataset can't run away even if the
+        // visited-set guard somehow fails (e.g. URL canonicalisation slip).
+        const HARD_LIMIT = 50;
+        while (current && chain < HARD_LIMIT) {
+          if (visited.has(current)) {
+            loop = 1;
+            break;
+          }
+          visited.add(current);
+          const nextHop: string | null = targetByUrl.get(current) ?? null;
+          if (!nextHop) {
+            finalUrl = current;
+            break;
+          }
+          chain++;
+          current = nextHop;
+        }
+        upd.run(chain, finalUrl, loop, row.id);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   /**
@@ -786,6 +967,12 @@ export class ProjectDb {
       responseVerySlow: countWhere('is_external = 0 AND response_time_ms > 3000'),
       pageLarge: countWhere(`${html} AND content_length > 1048576`),
       urlTooLong: countWhere('is_external = 0 AND LENGTH(url) > 2048'),
+      urlUppercase: countWhere("is_external = 0 AND url GLOB '*[A-Z]*'"),
+      urlUnderscore: countWhere("is_external = 0 AND INSTR(url, '_') > 0"),
+      urlMultipleSlashes: countWhere(
+        "is_external = 0 AND INSTR(SUBSTR(url, INSTR(url, '://') + 3), '//') > 0",
+      ),
+      urlNonAscii: countWhere('is_external = 0 AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)'),
       langMissing: countWhere(`${html} AND (lang IS NULL OR lang = '')`),
       viewportMissing: countWhere(`${html} AND (viewport IS NULL OR viewport = '')`),
       ogMissing: countWhere(
@@ -793,6 +980,53 @@ export class ProjectDb {
          AND (og_title IS NULL OR og_title = '')
          AND (og_description IS NULL OR og_description = '')
          AND (og_image IS NULL OR og_image = '')`,
+      ),
+      twitterMissing: countWhere(
+        `${html}
+         AND (twitter_card IS NULL OR twitter_card = '')
+         AND (twitter_image IS NULL OR twitter_image = '')`,
+      ),
+      hstsMissing: countWhere(
+        "is_external = 0 AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')",
+      ),
+      xFrameOptionsMissing: countWhere(
+        `${html} AND (x_frame_options IS NULL OR x_frame_options = '')`,
+      ),
+      xContentTypeOptionsMissing: countWhere(
+        `${html} AND (x_content_type_options IS NULL OR x_content_type_options = '')`,
+      ),
+      structuredDataMissing: countWhere(
+        `${html} AND schema_block_count = 0 AND schema_invalid_count = 0`,
+      ),
+      structuredDataInvalid: countWhere(`${html} AND schema_invalid_count > 0`),
+      paginationBroken: countWhere(
+        `${html}
+         AND (
+           (pagination_next IS NOT NULL AND EXISTS (
+             SELECT 1 FROM urls t WHERE t.url = urls.pagination_next
+               AND t.status_code >= 400 AND t.status_code < 600))
+           OR (pagination_prev IS NOT NULL AND EXISTS (
+             SELECT 1 FROM urls t WHERE t.url = urls.pagination_prev
+               AND t.status_code >= 400 AND t.status_code < 600))
+         )`,
+      ),
+      hreflangXDefaultMissing: countWhere(
+        `${html} AND hreflang_count > 0
+         AND (hreflangs IS NULL OR INSTR(hreflangs, '"x-default"') = 0)`,
+      ),
+      mixedContent: countWhere(
+        `${html} AND url LIKE 'https://%' AND mixed_content_count > 0`,
+      ),
+      faviconMissing: countWhere(`${html} AND (favicon IS NULL OR favicon = '')`),
+      redirectLoop: countWhere('is_external = 0 AND redirect_loop = 1'),
+      redirectChainLong: countWhere('is_external = 0 AND redirect_chain_length > 3'),
+      redirectSelf: countWhere(
+        'is_external = 0 AND redirect_target IS NOT NULL AND redirect_target = url',
+      ),
+      urlManyParams: countWhere('is_external = 0 AND query_param_count > 5'),
+      compressionMissing: countWhere(
+        `${html} AND status_code >= 200 AND status_code < 300
+         AND (content_encoding IS NULL OR content_encoding = '')`,
       ),
       imageMissingAlt: (
         this.db.prepare('SELECT COUNT(*) AS c FROM images WHERE alt IS NULL').get() as {
@@ -986,13 +1220,61 @@ export class ProjectDb {
     if (!row) return null;
     const inl = this.getInlinks(row.url, linkLimit);
     const outl = this.getOutlinks(id, linkLimit);
+    const headers = this.getUrlHeaders(id);
     return {
       row,
       inlinks: inl.rows,
       inlinksTotal: inl.total,
       outlinks: outl.rows,
       outlinksTotal: outl.total,
+      headers,
     };
+  }
+
+  /**
+   * Replace any previously-stored response headers for this URL with the
+   * given set. Old rows are deleted first so a re-crawl doesn't accumulate
+   * stale entries when servers change their header set.
+   *
+   * Header names are stored lowercased (HTTP header names are
+   * case-insensitive), values are kept as the server sent them. Values
+   * over 4 KB are truncated with a marker so the row size stays bounded
+   * on adversarial servers.
+   */
+  setUrlHeaders(urlId: number, entries: Iterable<readonly [string, string]>): void {
+    const list: { name: string; value: string }[] = [];
+    const seen = new Set<string>();
+    for (const [rawName, rawValue] of entries) {
+      const name = rawName.trim().toLowerCase();
+      if (!name) continue;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      let value = rawValue ?? '';
+      if (value.length > 4096) value = value.slice(0, 4093) + '...';
+      list.push({ name, value });
+    }
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM headers WHERE url_id = ?').run(urlId);
+      if (list.length > 0) {
+        const placeholders = list.map(() => '(?, ?, ?)').join(',');
+        const args: (number | string)[] = [];
+        for (const h of list) args.push(urlId, h.name, h.value);
+        this.db
+          .prepare(`INSERT INTO headers (url_id, name, value) VALUES ${placeholders}`)
+          .run(...args);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  getUrlHeaders(urlId: number): { name: string; value: string }[] {
+    return this.db
+      .prepare('SELECT name, value FROM headers WHERE url_id = ? ORDER BY name')
+      .all(urlId) as { name: string; value: string }[];
   }
 
   *iterateAllUrls(): IterableIterator<CrawlUrlRow> {
@@ -1068,6 +1350,33 @@ export class ProjectDb {
     ogTitle: r.og_title,
     ogDescription: r.og_description,
     ogImage: r.og_image,
+    twitterCard: r.twitter_card,
+    twitterTitle: r.twitter_title,
+    twitterDescription: r.twitter_description,
+    twitterImage: r.twitter_image,
+    metaKeywords: r.meta_keywords,
+    metaAuthor: r.meta_author,
+    metaGenerator: r.meta_generator,
+    themeColor: r.theme_color,
+    hsts: r.hsts,
+    xFrameOptions: r.x_frame_options,
+    xContentTypeOptions: r.x_content_type_options,
+    contentEncoding: r.content_encoding,
+    schemaTypes: r.schema_types,
+    schemaBlockCount: r.schema_block_count,
+    schemaInvalidCount: r.schema_invalid_count,
+    paginationNext: r.pagination_next,
+    paginationPrev: r.pagination_prev,
+    hreflangs: r.hreflangs,
+    hreflangCount: r.hreflang_count,
+    amphtml: r.amphtml,
+    favicon: r.favicon,
+    mixedContentCount: r.mixed_content_count,
+    redirectChainLength: r.redirect_chain_length,
+    redirectFinalUrl: r.redirect_final_url,
+    redirectLoop: r.redirect_loop === 1,
+    folderDepth: r.folder_depth,
+    queryParamCount: r.query_param_count,
     crawledAt: r.crawled_at,
   });
 
@@ -1328,6 +1637,19 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return "is_external = 0 AND content_kind = 'html' AND content_length > 1048576";
     case 'issues:url-too-long':
       return 'is_external = 0 AND LENGTH(url) > 2048';
+    case 'issues:url-uppercase':
+      // GLOB with [A-Z] is case-sensitive — unlike LIKE which isn't.
+      return "is_external = 0 AND url GLOB '*[A-Z]*'";
+    case 'issues:url-underscore':
+      return "is_external = 0 AND INSTR(url, '_') > 0";
+    case 'issues:url-multiple-slashes':
+      // Strip the `scheme://` prefix, then check for any `//` that remains
+      // (path / query doubled slashes aren't usually intentional).
+      return "is_external = 0 AND INSTR(SUBSTR(url, INSTR(url, '://') + 3), '//') > 0";
+    case 'issues:url-non-ascii':
+      // Byte-length (BLOB cast) > character length only when the string
+      // contains multi-byte UTF-8, i.e. any non-ASCII code point.
+      return 'is_external = 0 AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)';
     case 'issues:lang-missing':
       return "is_external = 0 AND content_kind = 'html' AND (lang IS NULL OR lang = '')";
     case 'issues:viewport-missing':
@@ -1337,6 +1659,77 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               AND (og_title IS NULL OR og_title = '')
               AND (og_description IS NULL OR og_description = '')
               AND (og_image IS NULL OR og_image = '')`;
+    case 'issues:twitter-missing':
+      // Twitter card is “missing” if there’s no twitter:card tag AND no
+      // twitter:image — the minimum pair needed for a valid preview.
+      return `is_external = 0 AND content_kind = 'html'
+              AND (twitter_card IS NULL OR twitter_card = '')
+              AND (twitter_image IS NULL OR twitter_image = '')`;
+    // HSTS on HTTP is meaningless — only flag HTTPS pages. X-Frame-Options
+    // and X-Content-Type-Options matter on any HTML response regardless
+    // of scheme, so they're only scheme-gated on a per-page basis.
+    case 'issues:hsts-missing':
+      return "is_external = 0 AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')";
+    case 'issues:x-frame-options-missing':
+      return `is_external = 0 AND content_kind = 'html'
+              AND (x_frame_options IS NULL OR x_frame_options = '')`;
+    case 'issues:x-content-type-options-missing':
+      return `is_external = 0 AND content_kind = 'html'
+              AND (x_content_type_options IS NULL OR x_content_type_options = '')`;
+    case 'issues:structured-data-missing':
+      // "Missing" = no valid JSON-LD block AND no malformed block either;
+      // if parsing failed we surface it under the invalid filter instead
+      // so it's actionable, not confused with "nothing declared".
+      return `is_external = 0 AND content_kind = 'html'
+              AND schema_block_count = 0 AND schema_invalid_count = 0`;
+    case 'issues:structured-data-invalid':
+      return `is_external = 0 AND content_kind = 'html' AND schema_invalid_count > 0`;
+    case 'issues:pagination-broken':
+      // Page declares a rel=next/prev whose target was crawled and came
+      // back as 4xx/5xx — actionable: the pagination chain is broken.
+      return `is_external = 0 AND content_kind = 'html'
+              AND (
+                (pagination_next IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM urls t WHERE t.url = urls.pagination_next
+                    AND t.status_code >= 400 AND t.status_code < 600))
+                OR (pagination_prev IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM urls t WHERE t.url = urls.pagination_prev
+                    AND t.status_code >= 400 AND t.status_code < 600))
+              )`;
+    case 'issues:hreflang-x-default-missing':
+      // Page declares hreflang alternates but no `x-default` — Google's
+      // recommended fallback for unmatched languages.
+      return `is_external = 0 AND content_kind = 'html'
+              AND hreflang_count > 0
+              AND (hreflangs IS NULL OR INSTR(hreflangs, '"x-default"') = 0)`;
+    case 'issues:mixed-content':
+      // HTTPS pages that load at least one http:// subresource. The page
+      // itself must be HTTPS for this to be meaningful — mixed_content_count
+      // is always 0 on http:// pages by construction.
+      return `is_external = 0 AND content_kind = 'html'
+              AND url LIKE 'https://%' AND mixed_content_count > 0`;
+    case 'issues:favicon-missing':
+      return `is_external = 0 AND content_kind = 'html'
+              AND (favicon IS NULL OR favicon = '')`;
+    case 'issues:redirect-loop':
+      return 'is_external = 0 AND redirect_loop = 1';
+    case 'issues:redirect-chain-long':
+      // 3 hops is the conservative SF threshold — every extra redirect
+      // multiplies link-equity loss and crawl-budget waste.
+      return 'is_external = 0 AND redirect_chain_length > 3';
+    case 'issues:redirect-self':
+      // Redirect target equals the URL itself — a self-loop. Always
+      // broken regardless of `followRedirects`.
+      return 'is_external = 0 AND redirect_target IS NOT NULL AND redirect_target = url';
+    case 'issues:url-many-params':
+      // 5+ query params usually means session IDs / faceted-nav explosion.
+      return 'is_external = 0 AND query_param_count > 5';
+    case 'issues:compression-missing':
+      // No Content-Encoding on a successful HTML response = ~70% wasted
+      // bandwidth. Skip the scheme-less and non-200 noise.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (content_encoding IS NULL OR content_encoding = '')`;
     case 'issues:image-missing-alt':
       return "is_external = 0 AND content_kind = 'html' AND images_missing_alt > 0";
     // Broken-link categories drive the BrokenLinksTab view; they never
@@ -1347,5 +1740,33 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return null;
     default:
       return null;
+  }
+}
+
+/**
+ * Number of `/`-delimited path segments in the URL (e.g. `/a/b/c` → 3,
+ * `/` → 0). Falls back to 0 on parse errors so the column is always a
+ * plain integer for simple SQL filtering / aggregation.
+ */
+function computeFolderDepth(rawUrl: string): number {
+  try {
+    const u = new URL(rawUrl);
+    const path = u.pathname;
+    if (!path || path === '/') return 0;
+    return path.split('/').filter((s) => s.length > 0).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Number of `?key=…&key=…` parameters in the query string. */
+function computeQueryParamCount(rawUrl: string): number {
+  try {
+    const u = new URL(rawUrl);
+    let n = 0;
+    for (const _ of u.searchParams) n++;
+    return n;
+  } catch {
+    return 0;
   }
 }

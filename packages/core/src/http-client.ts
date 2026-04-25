@@ -112,12 +112,32 @@ export function formatFetchError(err: unknown): string {
 /**
  * Headers every crawler request should send. Compression is requested so
  * servers can save 60–80% bandwidth on HTML; undici's fetch auto-decodes.
+ *
+ * Any user-supplied `custom` entries are merged last and override defaults
+ * on case-insensitive key match — so `{ 'User-Agent': 'X' }` wins over the
+ * built-in `user-agent` header.
  */
-export function defaultRequestHeaders(userAgent: string, acceptLanguage: string): Record<string, string> {
-  return {
+export function defaultRequestHeaders(
+  userAgent: string,
+  acceptLanguage: string,
+  custom: Record<string, string> = {},
+): Record<string, string> {
+  const headers: Record<string, string> = {
     'user-agent': userAgent,
     'accept-language': acceptLanguage,
     'accept-encoding': 'gzip, deflate, br',
     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
   };
+  for (const [rawKey, value] of Object.entries(custom)) {
+    const key = rawKey.trim();
+    if (!key) continue;
+    // Case-insensitive override: delete any existing lower-cased variant
+    // so the user's exact-case key wins without producing duplicates.
+    const lower = key.toLowerCase();
+    for (const existing of Object.keys(headers)) {
+      if (existing.toLowerCase() === lower) delete headers[existing];
+    }
+    headers[key] = value;
+  }
+  return headers;
 }
