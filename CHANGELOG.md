@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.6] — 2026-04-25
+
+### Added
+- **Settings dialog** (gear icon in TopBar) — every plumbed-through `CrawlConfig` field is now editable from the UI: max depth/URLs/concurrency/RPS, request timeout, crawl delay, retry attempts/initial backoff, follow-redirects, respect-robots, crawl-external, store-nofollow, discover-sitemaps, User-Agent, Accept-Language, custom HTTP headers, include/exclude regex patterns, custom search terms, URL rewriting (strip-www / force-https / lowercase-path / trailing-slash policy), List mode + URL list. Persisted to `preferences.json`, restored on next launch.
+- **Sitemap auto-discovery + parser** — at crawl start, `robots.txt` `Sitemap:` directives + `/sitemap.xml` + `/sitemap_index.xml` fallbacks are fetched, nested `<sitemapindex>` walked BFS (cap 50K entries, depth 3), entries persisted to a new `sitemap_urls` table. Two new issue filters: **Non-Indexable in Sitemap**, **Non-200 in Sitemap**. Toggle: `discoverSitemaps` (default on).
+- **List mode** — `CrawlConfig.mode = 'list'` fetches every URL in `urlList` exactly once with no link follow / robots / sitemap discovery. CLI `--list <file>` (one URL per line, `#` comments). Settings dialog has a Mode dropdown + URL list textarea.
+- **Custom Search** — case-insensitive literal substring counts in body text, configured via Settings or `customSearchTerms` config. Per-page hits stored as JSON in `custom_search_hits`; one Detail-panel row per term.
+- **URL Rewriting** — 4 opt-in toggles applied at every `normalizeUrl` call site (so the seen-set, redirects, link extraction, sitemap entries all dedupe consistently): **Strip www**, **Force HTTPS**, **Lowercase path**, **Trailing slash policy** (leave / strip / add — `add` is file-extension aware).
+- **JSON export** — streaming exporter dumps every captured field (security headers, structured data, hreflang JSON, pagination, custom search hits, redirect chain, …) for ~65 columns vs. CSV's 23. CLI `--out *.json` auto-detects format. Menu: **File → Export Current View as JSON…** (`Ctrl+Shift+E`).
+- **Robots.txt Tester** dialog — **Help → Robots.txt Tester…** opens a popup; enter a URL + UA, see fetched robots.txt status, allow/disallow verdict, declared sitemaps, crawl-delay, and the raw body (8 KB cap).
+- **Reports dialog** — new top-level **Reports** menu (`Ctrl+R`) opens a dropdown-driven analytics dialog: **Pages per Directory** (depth selector 1–4), **Status Code Histogram** (2xx/3xx/4xx/5xx/NET badges), **Depth Histogram** (BFS click-depth distribution), **Response Time Histogram** (6 buckets `<100ms` → `>10s` + `No response` row, OK/WARN/SLOW/ERR badges).
+- **Heading hierarchy** — `h3_count` / `h4_count` / `h5_count` / `h6_count` columns + new **Skipped Heading Level** issue (flags pages where a tier is missing — e.g. H1 → H3 without H2). Detail panel shows non-zero counts.
+- **Full security header capture** — `Content-Security-Policy`, `Referrer-Policy`, `Permissions-Policy` rounded out the response-header set (joining HSTS, X-Frame-Options, X-Content-Type-Options, Content-Encoding). New **CSP Missing** issue filter.
+
+### Changed
+- `normalizeUrl` signature gained an optional `UrlRewriteOptions` parameter. Existing call sites are unaffected (defaults are no-op); the crawler snapshots config rewrites once in the constructor and threads them through `parseHtml` so every URL the page declares is normalized identically.
+
 ## [0.1.5] — 2026-04-25
 
 ### Added
