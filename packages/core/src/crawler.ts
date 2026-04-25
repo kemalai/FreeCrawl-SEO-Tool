@@ -21,6 +21,7 @@ import {
 import { parseHtml } from './html-parser.js';
 import { loadRobots, type RobotsChecker } from './robots.js';
 import { defaultRequestHeaders, formatFetchError, initHttpClient } from './http-client.js';
+import { discoverSitemapUrls, fetchSitemaps } from './sitemap.js';
 
 export interface CrawlerEvents {
   progress: (p: CrawlProgress) => void;
@@ -71,6 +72,17 @@ export class Crawler extends EventEmitter {
   private progressTimer: NodeJS.Timeout | null = null;
   private readonly includeRegexes: RegExp[];
   private readonly excludeRegexes: RegExp[];
+  /**
+   * Snapshotted once in the constructor so the URL-rewrite pass costs
+   * nothing per call (no `?:` chains, no per-link `if`s) and so changing
+   * config mid-crawl can't desync the seen-set's keying.
+   */
+  private readonly urlRewrites: {
+    stripWww?: boolean;
+    forceHttps?: boolean;
+    lowercasePath?: boolean;
+    trailingSlash?: 'leave' | 'strip' | 'add';
+  };
 
   constructor(config: CrawlConfig, db: ProjectDb) {
     super();
@@ -95,6 +107,12 @@ export class Crawler extends EventEmitter {
     this.excludeRegexes = compilePatterns(config.excludePatterns, (p, err) => {
       this.emit('error', `Invalid exclude pattern "${p}": ${err}`);
     });
+    this.urlRewrites = {
+      stripWww: config.stripWww,
+      forceHttps: config.forceHttps,
+      lowercasePath: config.lowercasePath,
+      trailingSlash: config.trailingSlash,
+    };
   }
 
   /**
@@ -122,6 +140,11 @@ export class Crawler extends EventEmitter {
     // probing HTTPS then HTTP on unreachable hosts).
     this.emitProgress();
 
+    if (this.config.mode === 'list') {
+      await this.startListMode();
+      return;
+    }
+
     const start = await resolveStartUrl(this.config.startUrl, this.config.userAgent);
     if (!start) {
       this.emit('error', `Invalid start URL: ${this.config.startUrl}`);
@@ -145,6 +168,46 @@ export class Crawler extends EventEmitter {
       this.robots = await loadRobots(origin, this.config.userAgent);
     }
 
+    if (this.config.discoverSitemaps) {
+      // Best-effort sitemap discovery — never block the crawl on it. Any
+      // network failure is logged via the 'error' event but the crawl
+      // proceeds with whatever (possibly empty) entry set we got.
+      try {
+        const controller = new AbortController();
+        // Sitemap discovery shouldn't take longer than half the per-URL
+        // timeout — it's preliminary work, not the main event.
+        const t = setTimeout(
+          () => controller.abort(),
+          Math.max(5000, this.config.requestTimeoutMs),
+        );
+        try {
+          const roots = await discoverSitemapUrls(
+            origin,
+            this.config.userAgent,
+            controller.signal,
+          );
+          const result = await fetchSitemaps(roots, {
+            userAgent: this.config.userAgent,
+            signal: controller.signal,
+            timeoutMs: this.config.requestTimeoutMs,
+            maxUrls: 50_000,
+            maxDepth: 3,
+          });
+          this.db.setSitemapUrls(result.entries);
+          if (result.entries.length > 0) {
+            this.emit(
+              'error',
+              `Sitemap: parsed ${result.sitemapsParsed.length}/${result.sitemapsTried.length}, ${result.entries.length} URLs${result.truncated ? ' (truncated at 50k)' : ''}`,
+            );
+          }
+        } finally {
+          clearTimeout(t);
+        }
+      } catch (err) {
+        this.emit('error', `Sitemap discovery skipped: ${formatFetchError(err)}`);
+      }
+    }
+
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
 
     // Hydrate in-memory state from the DB so resume starts from the right
@@ -154,6 +217,74 @@ export class Crawler extends EventEmitter {
     try {
       // Wait for internal crawl first, then drain any external probes still
       // in flight or queued (externals may have been enqueued during internal).
+      await this.queue.onIdle();
+      await this.externalQueue.onIdle();
+    } finally {
+      if (this.progressTimer) clearInterval(this.progressTimer);
+      this.progressTimer = null;
+    }
+
+    this.db.recomputeInlinks();
+    this.db.recomputeRedirectChains();
+    this.running = false;
+    this.emitProgress();
+    this.emit('done', this.db.getSummary());
+  }
+
+  /**
+   * List-mode entry point — fetch each URL in `urlList` exactly once, no
+   * link follow, no robots.txt, no sitemap discovery. The start URL field
+   * is repurposed to a list-fingerprint so the resume / reset decision
+   * still works (changing the list re-runs from scratch).
+   *
+   * The fetch / parse / persist pipeline (`fetchAndProcess`) is shared
+   * with spider mode — the only difference here is what we put on the
+   * queue and the disabled scope so links never get re-enqueued.
+   */
+  private async startListMode(): Promise<void> {
+    const urls: string[] = [];
+    const seenInList = new Set<string>();
+    for (const raw of this.config.urlList) {
+      const norm = normalizeUrl(raw, undefined, this.urlRewrites);
+      if (!norm) continue;
+      if (seenInList.has(norm)) continue;
+      seenInList.add(norm);
+      urls.push(norm);
+    }
+    if (urls.length === 0) {
+      this.emit('error', 'List mode: urlList is empty (or no entries normalised to valid URLs).');
+      this.running = false;
+      this.emitProgress();
+      this.emit('done', this.db.getSummary());
+      return;
+    }
+
+    // Fingerprint: list signature is "list:<count>:<first-url>". Two crawls
+    // with the same first URL + same count look identical — good enough
+    // heuristic; users who really want a fresh start can use Clear.
+    const fingerprint = `list:${urls.length}:${urls[0] ?? ''}`;
+    const previousStart = this.db.getMeta('startUrl');
+    if (previousStart !== fingerprint) {
+      this.db.reset();
+    }
+    this.db.setMeta('startUrl', fingerprint);
+
+    // Force exact-url scope so anything fetched in fetchAndProcess never
+    // re-enqueues its outlinks, and bake the first URL into startUrl so
+    // progress events have a sensible label.
+    this.config = {
+      ...this.config,
+      scope: 'exact-url',
+      startUrl: urls[0]!,
+    };
+
+    this.progressTimer = setInterval(() => this.emitProgress(), 500);
+
+    for (const u of urls) {
+      this.enqueue({ url: u, depth: 0 });
+    }
+
+    try {
       await this.queue.onIdle();
       await this.externalQueue.onIdle();
     } finally {
@@ -359,6 +490,9 @@ export class Crawler extends EventEmitter {
       const xFrameOptions = res.headers.get('x-frame-options');
       const xContentTypeOptions = res.headers.get('x-content-type-options');
       const contentEncoding = res.headers.get('content-encoding');
+      const csp = res.headers.get('content-security-policy');
+      const referrerPolicy = res.headers.get('referrer-policy');
+      const permissionsPolicy = res.headers.get('permissions-policy');
 
       const kind = detectContentKind(item.url, contentType);
 
@@ -376,7 +510,9 @@ export class Crawler extends EventEmitter {
           /* ignore */
         }
         const locationHeader = res.headers.get('location');
-        const target = locationHeader ? normalizeUrl(locationHeader, item.url) : null;
+        const target = locationHeader
+          ? normalizeUrl(locationHeader, item.url, this.urlRewrites)
+          : null;
         const redirectUrlId = this.db.upsertUrl({
           url: item.url,
           contentKind: kind,
@@ -394,6 +530,9 @@ export class Crawler extends EventEmitter {
           xFrameOptions,
           xContentTypeOptions,
           contentEncoding,
+          csp,
+          referrerPolicy,
+          permissionsPolicy,
         });
         if (redirectUrlId) this.db.setUrlHeaders(redirectUrlId, allHeaders);
         this.crawled++;
@@ -438,6 +577,9 @@ export class Crawler extends EventEmitter {
           xFrameOptions,
           xContentTypeOptions,
           contentEncoding,
+          csp,
+          referrerPolicy,
+          permissionsPolicy,
         });
         if (nonHtmlUrlId) this.db.setUrlHeaders(nonHtmlUrlId, allHeaders);
         this.crawled++;
@@ -448,6 +590,8 @@ export class Crawler extends EventEmitter {
       const bodyLength = parseIntSafe(contentLengthHeader) ?? Buffer.byteLength(body, 'utf8');
       const parsed = parseHtml(body, item.url, {
         includeSubdomains: this.config.scope === 'all-subdomains',
+        customSearchTerms: this.config.customSearchTerms,
+        urlRewrites: this.urlRewrites,
       });
 
       const xRobotsLower = xRobotsTag?.toLowerCase() ?? '';
@@ -461,7 +605,10 @@ export class Crawler extends EventEmitter {
       } else if (headerNoindex) {
         indexability = 'non-indexable:noindex';
         reason = 'X-Robots-Tag: noindex';
-      } else if (parsed.canonical && normalizeUrl(parsed.canonical, item.url) !== item.url) {
+      } else if (
+        parsed.canonical &&
+        normalizeUrl(parsed.canonical, item.url, this.urlRewrites) !== item.url
+      ) {
         indexability = 'non-indexable:canonical';
         reason = `canonical points to ${parsed.canonical}`;
       }
@@ -487,6 +634,10 @@ export class Crawler extends EventEmitter {
         h1: parsed.h1,
         h1Count: parsed.h1Count,
         h2Count: parsed.h2Count,
+        h3Count: parsed.h3Count,
+        h4Count: parsed.h4Count,
+        h5Count: parsed.h5Count,
+        h6Count: parsed.h6Count,
         wordCount: parsed.wordCount,
         canonical: parsed.canonical,
         metaRobots: parsed.metaRobots,
@@ -515,6 +666,13 @@ export class Crawler extends EventEmitter {
         xFrameOptions,
         xContentTypeOptions,
         contentEncoding,
+        csp,
+        referrerPolicy,
+        permissionsPolicy,
+        customSearchHits:
+          Object.keys(parsed.customSearchHits).length > 0
+            ? JSON.stringify(parsed.customSearchHits)
+            : null,
         schemaTypes: parsed.schemaTypes.length > 0 ? parsed.schemaTypes.join(', ') : null,
         schemaBlockCount: parsed.schemaBlockCount,
         schemaInvalidCount: parsed.schemaInvalidCount,

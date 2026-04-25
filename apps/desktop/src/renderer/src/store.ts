@@ -68,8 +68,20 @@ interface AppState {
   reset: () => void;
 }
 
+/**
+ * Hydrate the stored CrawlConfig once at module load. Anything saved by
+ * the Settings dialog merges over the defaults so new fields added in
+ * later versions still surface (the merge order is `defaults <- saved`).
+ */
+function loadInitialConfig(): CrawlConfig {
+  if (typeof window === 'undefined' || !window.freecrawl) return DEFAULT_CRAWL_CONFIG;
+  const saved = window.freecrawl.prefsGet('crawl-config');
+  if (!saved || typeof saved !== 'object') return DEFAULT_CRAWL_CONFIG;
+  return { ...DEFAULT_CRAWL_CONFIG, ...(saved as Partial<CrawlConfig>) };
+}
+
 export const useAppStore = create<AppState>((set) => ({
-  config: DEFAULT_CRAWL_CONFIG,
+  config: loadInitialConfig(),
   progress: null,
   summary: null,
   overview: null,
@@ -80,7 +92,19 @@ export const useAppStore = create<AppState>((set) => ({
   sidebarOpen: true,
   detailPanelOpen: true,
   dataVersion: 0,
-  setConfig: (patch) => set((state) => ({ config: { ...state.config, ...patch } })),
+  setConfig: (patch) =>
+    set((state) => {
+      const next = { ...state.config, ...patch };
+      // Persist every config edit so the next launch starts from the
+      // user's last settings — even fields the Settings dialog doesn't
+      // expose (e.g. live URL / scope edits in the top bar).
+      try {
+        window.freecrawl?.prefsSet('crawl-config', next);
+      } catch {
+        // best-effort persistence
+      }
+      return { config: next };
+    }),
   setProgress: (p) => set({ progress: p }),
   setSummary: (s) => set({ summary: s }),
   setOverview: (o) => set({ overview: o }),

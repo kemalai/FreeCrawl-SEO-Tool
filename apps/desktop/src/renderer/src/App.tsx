@@ -1,10 +1,12 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 import { TopBar } from './components/TopBar.js';
 import { StatsBar } from './components/StatsBar.js';
 import { TabsBar } from './components/TabsBar.js';
 import { OverviewSidebar } from './components/OverviewSidebar.js';
 import { BottomDetailPanel } from './components/BottomDetailPanel.js';
+import { RobotsTesterDialog } from './components/RobotsTesterDialog.js';
+import { ReportsDialog } from './components/ReportsDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
@@ -23,6 +25,8 @@ export function App() {
   const setError = useAppStore((s) => s.setError);
   const bumpDataVersion = useAppStore((s) => s.bumpDataVersion);
   const reset = useAppStore((s) => s.reset);
+  const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
+  const [reportsOpen, setReportsOpen] = useState(false);
 
   // Redirect react-resizable-panels' persistence away from localStorage and
   // into our JSON prefs file so layout survives Clear (which wipes crawl
@@ -61,6 +65,15 @@ export function App() {
           break;
         case 'export-csv':
           void window.freecrawl.exportCsv({ filePath: '' });
+          break;
+        case 'export-json':
+          void window.freecrawl.exportJson({ filePath: '', pretty: true });
+          break;
+        case 'open-robots-tester':
+          setRobotsTesterOpen(true);
+          break;
+        case 'open-reports':
+          setReportsOpen(true);
           break;
         case 'generate-sitemap':
           void window.freecrawl.sitemapGenerate({ filePath: '' });
@@ -128,6 +141,11 @@ export function App() {
         </PanelGroup>
       </main>
       <StatsBar />
+      <RobotsTesterDialog
+        open={robotsTesterOpen}
+        onClose={() => setRobotsTesterOpen(false)}
+      />
+      <ReportsDialog open={reportsOpen} onClose={() => setReportsOpen(false)} />
     </div>
   );
 }

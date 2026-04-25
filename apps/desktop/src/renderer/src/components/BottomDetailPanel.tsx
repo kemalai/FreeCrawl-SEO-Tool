@@ -205,6 +205,10 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['H1-1 Length', row.h1Length],
     ['H1 Count', row.h1Count],
     ['H2 Count', row.h2Count],
+    ['H3 Count', row.h3Count > 0 ? row.h3Count : null],
+    ['H4 Count', row.h4Count > 0 ? row.h4Count : null],
+    ['H5 Count', row.h5Count > 0 ? row.h5Count : null],
+    ['H6 Count', row.h6Count > 0 ? row.h6Count : null],
     ['Word Count', row.wordCount],
     ['Canonical Link Element 1', row.canonical],
     ['Meta Robots 1', row.metaRobots],
@@ -225,6 +229,9 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Strict-Transport-Security', row.hsts],
     ['X-Frame-Options', row.xFrameOptions],
     ['X-Content-Type-Options', row.xContentTypeOptions],
+    ['Content-Security-Policy', row.csp],
+    ['Referrer-Policy', row.referrerPolicy],
+    ['Permissions-Policy', row.permissionsPolicy],
     ['Content-Encoding', row.contentEncoding],
     ['Schema Types', row.schemaTypes],
     ['JSON-LD Blocks', row.schemaBlockCount],
@@ -244,6 +251,7 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Redirect Loop', row.redirectLoop ? 'YES' : null],
     ['Folder Depth', row.folderDepth],
     ['Query Param Count', row.queryParamCount > 0 ? row.queryParamCount : null],
+    ...customSearchRows(row.customSearchHits),
     ['Crawl Depth', row.depth],
     ['Inlinks', row.inlinks],
     ['Outlinks', row.outlinks],
@@ -795,6 +803,31 @@ function httpStatusText(code: number): string {
  * `lang -> href` pairs, separated by ` · `. Returns null on empty/parse
  * failure so the row falls back to the "—" placeholder.
  */
+/**
+ * Expand the `custom_search_hits` JSON into one detail-panel row per
+ * search term (`Custom: <term>` → `<count>`). Returns an empty array on
+ * absent or malformed JSON so the surrounding row list isn't disturbed.
+ */
+function customSearchRows(
+  json: string | null,
+): [string, number | null][] {
+  if (!json) return [];
+  try {
+    const obj = JSON.parse(json) as Record<string, unknown>;
+    if (!obj || typeof obj !== 'object') return [];
+    const out: [string, number | null][] = [];
+    for (const [term, raw] of Object.entries(obj)) {
+      const count = typeof raw === 'number' ? raw : null;
+      // null-render small zeros to keep the panel compact — users care
+      // about hits, not absences.
+      out.push([`Custom: "${term}"`, count && count > 0 ? count : null]);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function summarizeHreflangs(json: string | null): string | null {
   if (!json) return null;
   try {

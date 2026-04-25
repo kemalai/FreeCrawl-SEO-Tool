@@ -29,6 +29,7 @@ export const IPC = {
   overviewGet: 'overview:get',
   summaryGet: 'summary:get',
   exportCsv: 'export:csv',
+  exportJson: 'export:json',
   sitemapGenerate: 'sitemap:generate',
   menuEvent: 'menu:event',
   dataChanged: 'data:changed',
@@ -41,6 +42,11 @@ export const IPC = {
   logsClear: 'logs:clear',
   logsEntry: 'logs:entry',
   logsOpenWindow: 'logs:open-window',
+  robotsTest: 'robots:test',
+  reportsPagesPerDirectory: 'reports:pages-per-directory',
+  reportsStatusCodeHistogram: 'reports:status-code-histogram',
+  reportsDepthHistogram: 'reports:depth-histogram',
+  reportsResponseTimeHistogram: 'reports:response-time-histogram',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -98,10 +104,26 @@ export type MenuEvent =
   | 'toggle-sidebar'
   | 'toggle-detail-panel'
   | 'export-csv'
+  | 'export-json'
   | 'generate-sitemap'
+  | 'open-robots-tester'
+  | 'open-reports'
   | 'about';
 
 export interface ExportCsvResult {
+  filePath: string;
+  rowsWritten: number;
+}
+
+export interface ExportJsonInput {
+  filePath: string;
+  category?: UrlCategory;
+  selectedIds?: number[];
+  /** Pretty-printed (2-space indent) when true. Default false (compact). */
+  pretty?: boolean;
+}
+
+export interface ExportJsonResult {
   filePath: string;
   rowsWritten: number;
 }
@@ -135,6 +157,50 @@ export interface ConfirmClearResult {
   skipNext: boolean;
 }
 
+export interface RobotsTestInput {
+  url: string;
+  userAgent: string;
+}
+
+export interface PagesPerDirectoryInput {
+  /** Path-segment depth to group at (1 = top-level only). Default 1. */
+  depth?: number;
+  /** Max rows to return. Default 500. */
+  limit?: number;
+}
+
+export interface PagesPerDirectoryRow {
+  directory: string;
+  count: number;
+}
+
+export interface StatusCodeHistogramRow {
+  status: number | null;
+  count: number;
+}
+
+export interface DepthHistogramRow {
+  depth: number;
+  count: number;
+}
+
+export interface ResponseTimeHistogramRow {
+  /** Bucket label (e.g. `"< 100ms"`, `"1–3s"`, `"No response"`). */
+  label: string;
+  count: number;
+}
+
+export interface RobotsTestResult {
+  url: string;
+  robotsUrl: string;
+  status: number | null;
+  body: string | null;
+  allowed: boolean;
+  crawlDelay: number | null;
+  sitemaps: string[];
+  error: string | null;
+}
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface LogEntry {
@@ -163,6 +229,7 @@ export interface FreeCrawlApi {
   overviewGet(): Promise<OverviewCounts>;
   summaryGet(): Promise<CrawlSummary>;
   exportCsv(input: ExportCsvInput): Promise<ExportCsvResult>;
+  exportJson(input: ExportJsonInput): Promise<ExportJsonResult>;
   sitemapGenerate(input: SitemapGenerateInput): Promise<SitemapGenerateResult>;
   appVersion(): Promise<string>;
   prefsGetAll(): Record<string, unknown>;
@@ -173,6 +240,11 @@ export interface FreeCrawlApi {
   logsGetAll(): Promise<LogEntry[]>;
   logsClear(): Promise<void>;
   logsOpenWindow(): Promise<void>;
+  robotsTest(input: RobotsTestInput): Promise<RobotsTestResult>;
+  reportsPagesPerDirectory(input: PagesPerDirectoryInput): Promise<PagesPerDirectoryRow[]>;
+  reportsStatusCodeHistogram(): Promise<StatusCodeHistogramRow[]>;
+  reportsDepthHistogram(): Promise<DepthHistogramRow[]>;
+  reportsResponseTimeHistogram(): Promise<ResponseTimeHistogramRow[]>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onProgress(cb: (p: CrawlProgress) => void): () => void;
   onDone(cb: (summary: CrawlSummary) => void): () => void;

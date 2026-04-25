@@ -19,6 +19,10 @@ import {
   type CrawlSummary,
   type ExportCsvInput,
   type ExportCsvResult,
+  type ExportJsonInput,
+  type ExportJsonResult,
+  type RobotsTestInput,
+  type PagesPerDirectoryInput,
   type ImagesQueryInput,
   type ImagesQueryResult,
   type BrokenLinksQueryInput,
@@ -33,7 +37,13 @@ import {
   type UrlsQueryInput,
   type UrlsQueryResult,
 } from '@freecrawl/shared-types';
-import { Crawler, exportUrlsToCsv, exportSitemap } from '@freecrawl/core';
+import {
+  Crawler,
+  exportUrlsToCsv,
+  exportUrlsToJson,
+  exportSitemap,
+  testUrlAgainstRobots,
+} from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
 import * as logger from './logger.js';
@@ -209,6 +219,24 @@ function registerIpc(): void {
     logger.log('info', 'main', 'Log buffer cleared');
   });
   ipcMain.handle(IPC.logsOpenWindow, () => openLogsWindow());
+
+  ipcMain.handle(IPC.robotsTest, (_e, input: RobotsTestInput) =>
+    testUrlAgainstRobots(input.url, input.userAgent),
+  );
+
+  ipcMain.handle(
+    IPC.reportsPagesPerDirectory,
+    (_e, input: PagesPerDirectoryInput) =>
+      getDb().getPagesPerDirectory({ depth: input.depth, limit: input.limit }),
+  );
+
+  ipcMain.handle(IPC.reportsStatusCodeHistogram, () => getDb().getStatusCodeHistogram());
+
+  ipcMain.handle(IPC.reportsDepthHistogram, () => getDb().getDepthHistogram());
+
+  ipcMain.handle(IPC.reportsResponseTimeHistogram, () =>
+    getDb().getResponseTimeHistogram(),
+  );
 
   // Stream every new entry to the logs window if it's open. Subscriber
   // is registered for the process lifetime — the log window can come
@@ -510,6 +538,29 @@ function registerIpc(): void {
       }
       const { rowsWritten } = await exportUrlsToCsv(getDb(), filePath, {
         selectedIds: input.selectedIds,
+      });
+      return { filePath, rowsWritten };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.exportJson,
+    async (_e, input: ExportJsonInput): Promise<ExportJsonResult> => {
+      let filePath = input.filePath;
+      const isSelection = (input.selectedIds?.length ?? 0) > 0;
+      if (!filePath) {
+        const res = await dialog.showSaveDialog(mainWindow!, {
+          defaultPath: isSelection ? 'freecrawl-selected.json' : 'freecrawl-export.json',
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+        });
+        if (res.canceled || !res.filePath) {
+          return { filePath: '', rowsWritten: 0 };
+        }
+        filePath = res.filePath;
+      }
+      const { rowsWritten } = await exportUrlsToJson(getDb(), filePath, {
+        selectedIds: input.selectedIds,
+        pretty: input.pretty,
       });
       return { filePath, rowsWritten };
     },

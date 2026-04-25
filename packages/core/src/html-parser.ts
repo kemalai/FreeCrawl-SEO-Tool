@@ -5,7 +5,7 @@ import type {
   LinkPathType,
   LinkPosition,
 } from '@freecrawl/shared-types';
-import { normalizeUrl, isSameHost } from './url-utils.js';
+import { normalizeUrl, isSameHost, type UrlRewriteOptions } from './url-utils.js';
 
 export interface HreflangEntry {
   /** Language tag from `hreflang` attribute (e.g. "tr", "en-US", "x-default"). */
@@ -20,6 +20,10 @@ export interface ParsedPage {
   h1: string | null;
   h1Count: number;
   h2Count: number;
+  h3Count: number;
+  h4Count: number;
+  h5Count: number;
+  h6Count: number;
   wordCount: number;
   canonical: string | null;
   metaRobots: string | null;
@@ -58,6 +62,11 @@ export interface ParsedPage {
    * when the page itself is served over plain HTTP.
    */
   mixedContentCount: number;
+  /**
+   * `{ "term1": count, "term2": count, ... }` — case-insensitive literal
+   * substring match counts. Empty if no terms requested.
+   */
+  customSearchHits: Record<string, number>;
   links: DiscoveredLink[];
   images: DiscoveredImage[];
   hasNoindex: boolean;
@@ -67,7 +76,12 @@ export interface ParsedPage {
 export function parseHtml(
   html: string,
   pageUrl: string,
-  opts: { includeSubdomains?: boolean } = {},
+  opts: {
+    includeSubdomains?: boolean;
+    customSearchTerms?: readonly string[];
+    /** URL-rewrite policy applied to every link/image/canonical we resolve. */
+    urlRewrites?: UrlRewriteOptions;
+  } = {},
 ): ParsedPage {
   // Fast path: force the htmlparser2 backend and skip entity decoding.
   // ~2–3x faster than cheerio's default parse5 mode, which we don't need
@@ -90,6 +104,10 @@ export function parseHtml(
   const h1 = decodeEntities($('h1').first().text().trim()) || null;
   const h1Count = $('h1').length;
   const h2Count = $('h2').length;
+  const h3Count = $('h3').length;
+  const h4Count = $('h4').length;
+  const h5Count = $('h5').length;
+  const h6Count = $('h6').length;
   const canonical = ($('link[rel="canonical"]').attr('href') ?? '').trim() || null;
   const metaRobots = ($('meta[name="robots"]').attr('content') ?? '').trim().toLowerCase() || null;
   const lang = ($('html').attr('lang') ?? '').trim() || null;
@@ -154,8 +172,8 @@ export function parseHtml(
   // we crawl and store.
   const paginationNextRaw = ($('link[rel="next"]').attr('href') ?? '').trim();
   const paginationPrevRaw = ($('link[rel="prev"]').attr('href') ?? '').trim();
-  const paginationNext = paginationNextRaw ? normalizeUrl(paginationNextRaw, pageUrl) : null;
-  const paginationPrev = paginationPrevRaw ? normalizeUrl(paginationPrevRaw, pageUrl) : null;
+  const paginationNext = paginationNextRaw ? normalizeUrl(paginationNextRaw, pageUrl, opts.urlRewrites) : null;
+  const paginationPrev = paginationPrevRaw ? normalizeUrl(paginationPrevRaw, pageUrl, opts.urlRewrites) : null;
 
   // Hreflang — `<link rel="alternate" hreflang="…" href="…">`. We dedupe
   // by lang+href because some sites repeat tags accidentally.
@@ -165,7 +183,7 @@ export function parseHtml(
     const lang = ($(el).attr('hreflang') ?? '').trim();
     const rawHref = ($(el).attr('href') ?? '').trim();
     if (!lang || !rawHref) return;
-    const href = normalizeUrl(rawHref, pageUrl);
+    const href = normalizeUrl(rawHref, pageUrl, opts.urlRewrites);
     if (!href) return;
     const key = `${lang}|${href}`;
     if (hreflangSet.has(key)) return;
@@ -176,7 +194,7 @@ export function parseHtml(
   // AMP variant — `<link rel="amphtml">` points to the AMP version of
   // the current page, when one exists.
   const amphtmlRaw = ($('link[rel="amphtml"]').attr('href') ?? '').trim();
-  const amphtml = amphtmlRaw ? normalizeUrl(amphtmlRaw, pageUrl) : null;
+  const amphtml = amphtmlRaw ? normalizeUrl(amphtmlRaw, pageUrl, opts.urlRewrites) : null;
 
   // Favicon — prefer modern `rel="icon"`, fall back to legacy
   // `rel="shortcut icon"`. We don't fabricate a default `/favicon.ico`;
@@ -184,7 +202,7 @@ export function parseHtml(
   const faviconRaw =
     ($('link[rel="icon"]').first().attr('href') ?? '').trim() ||
     ($('link[rel="shortcut icon"]').first().attr('href') ?? '').trim();
-  const favicon = faviconRaw ? normalizeUrl(faviconRaw, pageUrl) : null;
+  const favicon = faviconRaw ? normalizeUrl(faviconRaw, pageUrl, opts.urlRewrites) : null;
 
   // Mixed content — only relevant on HTTPS pages. We scan the standard
   // subresource elements (Google's mixed-content audit list); plain
@@ -203,6 +221,27 @@ export function parseHtml(
   const text = $('body').text().replace(/\s+/g, ' ').trim();
   const wordCount = text.length > 0 ? text.split(' ').filter(Boolean).length : 0;
 
+  // Custom search — count case-insensitive literal substring occurrences
+  // in the visible body text (not raw HTML, to avoid attribute / inline-JS
+  // false positives). Lowercase haystack/needle once per page rather than
+  // per-term so cost stays linear in body size.
+  const customSearchHits: Record<string, number> = {};
+  if (opts.customSearchTerms && opts.customSearchTerms.length > 0 && text.length > 0) {
+    const haystack = text.toLowerCase();
+    for (const raw of opts.customSearchTerms) {
+      const term = raw.trim();
+      if (!term) continue;
+      const needle = term.toLowerCase();
+      let count = 0;
+      let pos = 0;
+      while ((pos = haystack.indexOf(needle, pos)) !== -1) {
+        count++;
+        pos += needle.length;
+      }
+      customSearchHits[term] = count;
+    }
+  }
+
   const hasNoindex = metaRobots !== null && metaRobots.includes('noindex');
   const hasNofollow = metaRobots !== null && metaRobots.includes('nofollow');
 
@@ -210,7 +249,7 @@ export function parseHtml(
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href');
     if (!href) return;
-    const normalized = normalizeUrl(href, pageUrl);
+    const normalized = normalizeUrl(href, pageUrl, opts.urlRewrites);
     if (!normalized) return;
     if (!/^https?:/.test(normalized)) return;
     if (linkMap.has(normalized)) return;
@@ -258,7 +297,7 @@ export function parseHtml(
     // Skip inline data URIs — they're not "web resources" in the crawler
     // sense and would bloat the images table fast on any CMS.
     if (rawSrc.startsWith('data:')) return;
-    const normalized = normalizeUrl(rawSrc, pageUrl);
+    const normalized = normalizeUrl(rawSrc, pageUrl, opts.urlRewrites);
     if (!normalized) return;
     if (!/^https?:/.test(normalized)) return;
     if (imageMap.has(normalized)) return;
@@ -287,6 +326,10 @@ export function parseHtml(
     h1,
     h1Count,
     h2Count,
+    h3Count,
+    h4Count,
+    h5Count,
+    h6Count,
     wordCount,
     canonical,
     metaRobots,
@@ -312,6 +355,7 @@ export function parseHtml(
     amphtml,
     favicon,
     mixedContentCount,
+    customSearchHits,
     links: [...linkMap.values()],
     images: [...imageMap.values()],
     hasNoindex,

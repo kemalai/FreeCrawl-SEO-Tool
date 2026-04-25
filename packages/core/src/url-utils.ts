@@ -1,4 +1,19 @@
-export function normalizeUrl(raw: string, base?: string): string | null {
+export interface UrlRewriteOptions {
+  /** Strip a leading `www.` from the host. */
+  stripWww?: boolean;
+  /** Upgrade `http://` to `https://` before resolving. */
+  forceHttps?: boolean;
+  /** Lowercase the URL path component (host is case-insensitive per spec). */
+  lowercasePath?: boolean;
+  /** Trailing-slash policy: leave / strip / add. */
+  trailingSlash?: 'leave' | 'strip' | 'add';
+}
+
+export function normalizeUrl(
+  raw: string,
+  base?: string,
+  rewrites: UrlRewriteOptions = {},
+): string | null {
   try {
     const u = new URL(raw, base);
     u.hash = '';
@@ -17,6 +32,31 @@ export function normalizeUrl(raw: string, base?: string): string | null {
     if (u.pathname === '') u.pathname = '/';
     if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {
       u.port = '';
+    }
+
+    // User-configured rewrites — applied after the canonical pass so each
+    // branch sees a clean URL. Combinations (forceHttps + stripWww) compose
+    // naturally because each branch only touches one URL component.
+    if (rewrites.forceHttps && u.protocol === 'http:') {
+      u.protocol = 'https:';
+    }
+    if (rewrites.stripWww && u.hostname.startsWith('www.') && u.hostname.length > 4) {
+      u.hostname = u.hostname.slice(4);
+    }
+    if (rewrites.lowercasePath && u.pathname) {
+      u.pathname = u.pathname.toLowerCase();
+    }
+    if (rewrites.trailingSlash === 'strip' && u.pathname.length > 1 && u.pathname.endsWith('/')) {
+      u.pathname = u.pathname.slice(0, -1);
+    } else if (
+      rewrites.trailingSlash === 'add' &&
+      u.pathname.length > 0 &&
+      !u.pathname.endsWith('/')
+    ) {
+      // Skip file-extension paths (`.css`, `.html`, …) — adding `/` to those
+      // creates broken URLs. Detect by the final segment containing a `.`.
+      const last = u.pathname.slice(u.pathname.lastIndexOf('/') + 1);
+      if (!last.includes('.')) u.pathname += '/';
     }
     return u.toString();
   } catch {

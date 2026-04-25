@@ -374,6 +374,66 @@ const MIGRATIONS: Migration[] = [
         );
     },
   },
+  {
+    version: 18,
+    name: 'add_sitemap_urls',
+    up: `
+      CREATE TABLE IF NOT EXISTS sitemap_urls (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        url             TEXT NOT NULL UNIQUE,
+        lastmod         TEXT,
+        priority        REAL,
+        changefreq      TEXT,
+        source_sitemap  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sitemap_urls_url ON sitemap_urls(url);
+    `,
+  },
+  {
+    version: 19,
+    name: 'add_csp_referrer_permissions',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('csp')) db.exec('ALTER TABLE urls ADD COLUMN csp TEXT');
+      if (!has('referrer_policy')) db.exec('ALTER TABLE urls ADD COLUMN referrer_policy TEXT');
+      if (!has('permissions_policy'))
+        db.exec('ALTER TABLE urls ADD COLUMN permissions_policy TEXT');
+    },
+  },
+  {
+    version: 20,
+    name: 'add_custom_search_hits',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      // JSON object `{ "term": count }` — variable-shape, single column.
+      if (!has('custom_search_hits'))
+        db.exec('ALTER TABLE urls ADD COLUMN custom_search_hits TEXT');
+    },
+  },
+  {
+    version: 21,
+    name: 'add_h3_h4_h5_h6_counts',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('h3_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN h3_count INTEGER NOT NULL DEFAULT 0');
+      if (!has('h4_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN h4_count INTEGER NOT NULL DEFAULT 0');
+      if (!has('h5_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN h5_count INTEGER NOT NULL DEFAULT 0');
+      if (!has('h6_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN h6_count INTEGER NOT NULL DEFAULT 0');
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

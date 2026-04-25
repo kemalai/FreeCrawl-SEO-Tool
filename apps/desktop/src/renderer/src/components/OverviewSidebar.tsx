@@ -391,6 +391,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.h1Multiple,
               category: 'issues:h1-multiple',
             },
+            {
+              key: 'issues-heading-skipped',
+              label: 'Skipped Heading Level',
+              count: o.issues.headingSkippedLevel,
+              category: 'issues:heading-skipped-level',
+            },
           ],
         },
         {
@@ -542,6 +548,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               category: 'issues:x-content-type-options-missing',
             },
             {
+              key: 'issues-csp-missing',
+              label: 'CSP Missing',
+              count: o.issues.cspMissing,
+              category: 'issues:csp-missing',
+            },
+            {
               key: 'issues-mixed-content',
               label: 'Mixed Content',
               count: o.issues.mixedContent,
@@ -594,6 +606,24 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Compression Missing',
               count: o.issues.compressionMissing,
               category: 'issues:compression-missing',
+            },
+          ],
+        },
+        {
+          key: 'issues-sitemap',
+          label: 'Sitemap',
+          children: [
+            {
+              key: 'issues-sitemap-non-indexable',
+              label: 'Non-Indexable in Sitemap',
+              count: o.issues.nonIndexableInSitemap,
+              category: 'issues:non-indexable-in-sitemap',
+            },
+            {
+              key: 'issues-sitemap-non-200',
+              label: 'Non-200 in Sitemap',
+              count: o.issues.non200InSitemap,
+              category: 'issues:non-200-in-sitemap',
             },
           ],
         },

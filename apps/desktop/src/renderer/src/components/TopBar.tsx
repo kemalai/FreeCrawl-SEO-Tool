@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { Play, Square, Pause, Eraser, ChevronDown } from 'lucide-react';
+import { Play, Square, Pause, Eraser, ChevronDown, Settings } from 'lucide-react';
 import clsx from 'clsx';
 import type { CrawlScope } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { clearCrawlWithConfirm } from '../utils/clearCrawl.js';
+import { SettingsDialog } from './SettingsDialog.js';
 
 const SCOPE_OPTIONS: { value: CrawlScope; label: string; hint: string }[] = [
   { value: 'subdomain', label: 'Subdomain', hint: 'Same subdomain only' },
@@ -20,6 +21,7 @@ export function TopBar() {
   const reset = useAppStore((s) => s.reset);
   const setError = useAppStore((s) => s.setError);
   const [scopeOpen, setScopeOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const running = progress?.running === true;
   const paused = progress?.paused === true;
@@ -162,6 +164,15 @@ export function TopBar() {
       >
         <Eraser className="h-3.5 w-3.5" /> Clear
       </button>
+      <button
+        className="btn btn-ghost border border-surface-700 px-2 py-1.5"
+        onClick={() => setSettingsOpen(true)}
+        title="Settings"
+        disabled={running}
+      >
+        <Settings className="h-3.5 w-3.5" />
+      </button>
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

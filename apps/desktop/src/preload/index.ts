@@ -7,6 +7,8 @@ import {
   type CrawlSummary,
   type ExportCsvInput,
   type ExportCsvResult,
+  type ExportJsonInput,
+  type ExportJsonResult,
   type FreeCrawlApi,
   type BrokenLinksQueryInput,
   type BrokenLinksQueryResult,
@@ -14,6 +16,13 @@ import {
   type ImagesQueryResult,
   type LogEntry,
   type MenuEvent,
+  type RobotsTestInput,
+  type RobotsTestResult,
+  type PagesPerDirectoryInput,
+  type PagesPerDirectoryRow,
+  type StatusCodeHistogramRow,
+  type DepthHistogramRow,
+  type ResponseTimeHistogramRow,
   type OverviewCounts,
   type SitemapGenerateInput,
   type SitemapGenerateResult,
@@ -61,6 +70,8 @@ const api: FreeCrawlApi = {
   summaryGet: (): Promise<CrawlSummary> => ipcRenderer.invoke(IPC.summaryGet),
   exportCsv: (input: ExportCsvInput): Promise<ExportCsvResult> =>
     ipcRenderer.invoke(IPC.exportCsv, input),
+  exportJson: (input: ExportJsonInput): Promise<ExportJsonResult> =>
+    ipcRenderer.invoke(IPC.exportJson, input),
   sitemapGenerate: (input: SitemapGenerateInput): Promise<SitemapGenerateResult> =>
     ipcRenderer.invoke(IPC.sitemapGenerate, input),
   appVersion: (): Promise<string> => ipcRenderer.invoke(IPC.appVersion),
@@ -78,6 +89,17 @@ const api: FreeCrawlApi = {
   logsGetAll: (): Promise<LogEntry[]> => ipcRenderer.invoke(IPC.logsGetAll),
   logsClear: (): Promise<void> => ipcRenderer.invoke(IPC.logsClear),
   logsOpenWindow: (): Promise<void> => ipcRenderer.invoke(IPC.logsOpenWindow),
+  robotsTest: (input: RobotsTestInput): Promise<RobotsTestResult> =>
+    ipcRenderer.invoke(IPC.robotsTest, input),
+  reportsPagesPerDirectory: (
+    input: PagesPerDirectoryInput,
+  ): Promise<PagesPerDirectoryRow[]> => ipcRenderer.invoke(IPC.reportsPagesPerDirectory, input),
+  reportsStatusCodeHistogram: (): Promise<StatusCodeHistogramRow[]> =>
+    ipcRenderer.invoke(IPC.reportsStatusCodeHistogram),
+  reportsDepthHistogram: (): Promise<DepthHistogramRow[]> =>
+    ipcRenderer.invoke(IPC.reportsDepthHistogram),
+  reportsResponseTimeHistogram: (): Promise<ResponseTimeHistogramRow[]> =>
+    ipcRenderer.invoke(IPC.reportsResponseTimeHistogram),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onProgress: (cb) => subscribe<CrawlProgress>(IPC.crawlProgress, cb),
   onDone: (cb) => subscribe<CrawlSummary>(IPC.crawlDone, cb),

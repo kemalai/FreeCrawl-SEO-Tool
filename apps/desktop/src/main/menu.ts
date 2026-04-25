@@ -44,6 +44,11 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => send('export-csv'),
         },
         {
+          label: 'Export Current View as JSON…',
+          accelerator: 'CmdOrCtrl+Shift+E',
+          click: () => send('export-json'),
+        },
+        {
           label: 'Generate XML Sitemap…',
           click: () => send('generate-sitemap'),
         },
@@ -76,6 +81,16 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
       ],
     },
     {
+      label: 'Reports',
+      submenu: [
+        {
+          label: 'Reports…',
+          accelerator: 'CmdOrCtrl+R',
+          click: () => send('open-reports'),
+        },
+      ],
+    },
+    {
       label: 'Help',
       submenu: [
         {
@@ -87,6 +102,10 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: 'Show Logs…',
           accelerator: 'CmdOrCtrl+L',
           click: () => handlers.onOpenLogs(),
+        },
+        {
+          label: 'Robots.txt Tester…',
+          click: () => send('open-robots-tester'),
         },
         { type: 'separator' },
         { label: 'About FreeCrawl SEO', click: () => send('about') },

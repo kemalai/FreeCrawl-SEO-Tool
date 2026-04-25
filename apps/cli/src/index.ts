@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { DEFAULT_CRAWL_CONFIG } from '@freecrawl/shared-types';
-import { Crawler, exportUrlsToCsv } from '@freecrawl/core';
+import { Crawler, exportUrlsToCsv, exportUrlsToJson } from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
 
 function help(): void {
@@ -22,8 +23,11 @@ Options:
   --header <K: V>     Extra request header; repeatable (e.g. --header "Authorization: Bearer X")
   --include <regex>   Only crawl URLs matching this regex; repeatable
   --exclude <regex>   Skip URLs matching this regex; repeatable
+  --list <file>       List-mode crawl: fetch every URL in <file> (one per line), no link follow
   --db <file>         SQLite project file (default: ./crawl.seoproject)
-  --out <file.csv>    Export CSV after crawl
+  --out <file>        Export results after crawl. Format auto-detected by extension:
+                        *.json → full JSON dump (every captured field)
+                        any other → CSV (subset of common columns)
   -h, --help          Show this help
 `);
 }
@@ -42,23 +46,47 @@ async function main(): Promise<void> {
       header: { type: 'string', multiple: true },
       include: { type: 'string', multiple: true },
       exclude: { type: 'string', multiple: true },
+      list: { type: 'string' },
       db: { type: 'string' },
       out: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
   });
 
-  if (values.help || positionals.length === 0) {
+  // List mode is selected by `--list`; otherwise we need a positional URL.
+  const listFile = values.list;
+  if (values.help || (!listFile && positionals.length === 0)) {
     help();
     process.exit(values.help ? 0 : 1);
   }
 
-  const startUrl = positionals[0]!;
+  let listUrls: string[] = [];
+  if (listFile) {
+    try {
+      listUrls = readFileSync(resolve(listFile), 'utf8')
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && !s.startsWith('#'));
+    } catch (err) {
+      console.error(`Cannot read --list file ${listFile}: ${(err as Error).message}`);
+      process.exit(2);
+    }
+    if (listUrls.length === 0) {
+      console.error(`--list file ${listFile} contains no URLs.`);
+      process.exit(2);
+    }
+  }
+
+  // In list mode the first listed URL doubles as `startUrl` for progress
+  // labels; in spider mode the positional argument is the start URL.
+  const startUrl = listFile ? (listUrls[0] ?? '') : positionals[0]!;
   const dbPath = resolve(values.db ?? 'crawl.seoproject');
   const db = new ProjectDb(dbPath);
 
   const config = {
     ...DEFAULT_CRAWL_CONFIG,
+    mode: listFile ? ('list' as const) : ('spider' as const),
+    urlList: listUrls,
     startUrl,
     maxDepth: parseNumeric(values.depth, DEFAULT_CRAWL_CONFIG.maxDepth),
     maxUrls: parseNumeric(values.max, DEFAULT_CRAWL_CONFIG.maxUrls),
@@ -91,7 +119,12 @@ async function main(): Promise<void> {
 
   if (values.out) {
     const outPath = resolve(values.out);
-    const { rowsWritten } = await exportUrlsToCsv(db, outPath);
+    // Auto-detect format from extension. `.json` → full JSON dump, anything
+    // else → CSV (existing behaviour).
+    const isJson = outPath.toLowerCase().endsWith('.json');
+    const { rowsWritten } = isJson
+      ? await exportUrlsToJson(db, outPath, { pretty: true })
+      : await exportUrlsToCsv(db, outPath);
     console.log(`Wrote ${rowsWritten} rows → ${outPath}`);
   }
 

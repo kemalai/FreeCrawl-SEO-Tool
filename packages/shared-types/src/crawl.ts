@@ -1,5 +1,14 @@
 export type CrawlScope = 'subdomain' | 'subfolder' | 'all-subdomains' | 'exact-url';
 
+/**
+ * Top-level crawl mode.
+ *  - `spider` — start from `startUrl`, follow links by `scope`. Default.
+ *  - `list`   — fetch every URL in `urlList` exactly once, no link follow.
+ *               Used to audit a curated set of URLs (sitemap export,
+ *               GSC URL inspection list, etc.).
+ */
+export type CrawlMode = 'spider' | 'list';
+
 export type UrlCategory =
   | 'all'
   | 'internal:all'
@@ -37,6 +46,7 @@ export type UrlCategory =
   | 'issues:h1-missing'
   | 'issues:h1-duplicate'
   | 'issues:h1-multiple'
+  | 'issues:heading-skipped-level'
   | 'issues:content-thin'
   | 'issues:response-slow'
   | 'issues:response-very-slow'
@@ -53,6 +63,7 @@ export type UrlCategory =
   | 'issues:hsts-missing'
   | 'issues:x-frame-options-missing'
   | 'issues:x-content-type-options-missing'
+  | 'issues:csp-missing'
   | 'issues:structured-data-missing'
   | 'issues:structured-data-invalid'
   | 'issues:pagination-broken'
@@ -64,6 +75,8 @@ export type UrlCategory =
   | 'issues:redirect-self'
   | 'issues:url-many-params'
   | 'issues:compression-missing'
+  | 'issues:non-indexable-in-sitemap'
+  | 'issues:non-200-in-sitemap'
   | 'issues:image-missing-alt'
   | 'issues:broken-links-all'
   | 'issues:broken-links-internal'
@@ -96,6 +109,10 @@ export interface CrawlUrlRow {
   h1Length: number | null;
   h1Count: number;
   h2Count: number;
+  h3Count: number;
+  h4Count: number;
+  h5Count: number;
+  h6Count: number;
   wordCount: number | null;
   canonical: string | null;
   metaRobots: string | null;
@@ -142,10 +159,18 @@ export interface CrawlUrlRow {
   redirectLoop: boolean;
   folderDepth: number;
   queryParamCount: number;
+  csp: string | null;
+  referrerPolicy: string | null;
+  permissionsPolicy: string | null;
+  /** JSON-stringified `{ term: count, ... }` or null. */
+  customSearchHits: string | null;
   crawledAt: string;
 }
 
 export interface CrawlConfig {
+  mode: CrawlMode;
+  /** When `mode === 'list'`, URLs to fetch (one per entry). Ignored in spider mode. */
+  urlList: string[];
   startUrl: string;
   scope: CrawlScope;
   maxDepth: number;
@@ -187,6 +212,40 @@ export interface CrawlConfig {
   includePatterns: string[];
   /** URLs matching any of these regexes are skipped during enqueue. */
   excludePatterns: string[];
+  /**
+   * On crawl start, discover sitemap.xml URLs from robots.txt + default
+   * paths and persist their entries into `sitemap_urls`. Used for the
+   * post-crawl Sitemap issue filters (non-indexable URLs declared in the
+   * sitemap, etc.). Default `true` — cheap I/O, high SEO value.
+   */
+  discoverSitemaps: boolean;
+  /**
+   * Free-form keyword/phrase list searched (case-insensitive, literal
+   * substring) inside every crawled page's body text. Each term's hit
+   * count is stored per URL — useful for content audits ("how many pages
+   * mention 'pricing'?", "where do we still say 'beta'?"). Empty array
+   * disables the scan entirely (cost: zero).
+   */
+  customSearchTerms: string[];
+  /**
+   * URL rewriting — applied at normalization time so the seen-set, link
+   * graph, and DB rows all use the canonical form. All flags default off
+   * (opt-in) because each one collapses what some sites treat as
+   * distinct URLs and can mask bugs if applied incorrectly.
+   */
+  /** Strip leading `www.` from the host (`www.x.com/y` → `x.com/y`). */
+  stripWww: boolean;
+  /** Upgrade `http://` to `https://` before fetching. Breaks HTTP-only sites. */
+  forceHttps: boolean;
+  /** Lowercase the URL path component. Host is already case-insensitive per the URL spec. */
+  lowercasePath: boolean;
+  /**
+   * Trailing-slash policy:
+   *  - `leave`  — never touch (default)
+   *  - `strip`  — `…/foo/` → `…/foo`  (root `/` stays as-is)
+   *  - `add`    — `…/foo` → `…/foo/`  (only when path has no trailing `.ext`)
+   */
+  trailingSlash: 'leave' | 'strip' | 'add';
 }
 
 export interface OverviewCounts {
@@ -227,6 +286,7 @@ export interface OverviewCounts {
     h1Missing: number;
     h1Duplicate: number;
     h1Multiple: number;
+    headingSkippedLevel: number;
     contentThin: number;
     responseSlow: number;
     responseVerySlow: number;
@@ -243,6 +303,7 @@ export interface OverviewCounts {
     hstsMissing: number;
     xFrameOptionsMissing: number;
     xContentTypeOptionsMissing: number;
+    cspMissing: number;
     structuredDataMissing: number;
     structuredDataInvalid: number;
     paginationBroken: number;
@@ -254,6 +315,8 @@ export interface OverviewCounts {
     redirectSelf: number;
     urlManyParams: number;
     compressionMissing: number;
+    nonIndexableInSitemap: number;
+    non200InSitemap: number;
     imageMissingAlt: number;
     brokenLinksInternal: number;
     brokenLinksExternal: number;
@@ -448,6 +511,8 @@ export interface UrlDetail {
 }
 
 export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
+  mode: 'spider',
+  urlList: [],
   startUrl: '',
   scope: 'subdomain',
   maxDepth: 10,
@@ -467,4 +532,10 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   customHeaders: {},
   includePatterns: [],
   excludePatterns: [],
+  discoverSitemaps: true,
+  customSearchTerms: [],
+  stripWww: false,
+  forceHttps: false,
+  lowercasePath: false,
+  trailingSlash: 'leave',
 };

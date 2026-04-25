@@ -35,6 +35,10 @@ interface UrlRowDb {
   h1_length: number | null;
   h1_count: number;
   h2_count: number;
+  h3_count: number;
+  h4_count: number;
+  h5_count: number;
+  h6_count: number;
   word_count: number | null;
   canonical: string | null;
   meta_robots: string | null;
@@ -82,6 +86,10 @@ interface UrlRowDb {
   redirect_loop: number;
   folder_depth: number;
   query_param_count: number;
+  csp: string | null;
+  referrer_policy: string | null;
+  permissions_policy: string | null;
+  custom_search_hits: string | null;
 }
 
 interface ImageRowDb {
@@ -106,6 +114,10 @@ export interface UpsertUrlInput {
   h1?: string | null;
   h1Count?: number;
   h2Count?: number;
+  h3Count?: number;
+  h4Count?: number;
+  h5Count?: number;
+  h6Count?: number;
   wordCount?: number | null;
   canonical?: string | null;
   metaRobots?: string | null;
@@ -135,6 +147,11 @@ export interface UpsertUrlInput {
   xFrameOptions?: string | null;
   xContentTypeOptions?: string | null;
   contentEncoding?: string | null;
+  csp?: string | null;
+  referrerPolicy?: string | null;
+  permissionsPolicy?: string | null;
+  /** JSON-stringified `{ term: count, ... }` or null. */
+  customSearchHits?: string | null;
   schemaTypes?: string | null;
   schemaBlockCount?: number;
   schemaInvalidCount?: number;
@@ -152,7 +169,8 @@ const UPSERT_URL_SQL = `
   INSERT INTO urls (
     url, content_kind, status_code, status_text, indexability, indexability_reason,
     title, title_length, meta_description, meta_description_length,
-    h1, h1_length, h1_count, h2_count, word_count, canonical, meta_robots, x_robots_tag,
+    h1, h1_length, h1_count, h2_count, h3_count, h4_count, h5_count, h6_count,
+    word_count, canonical, meta_robots, x_robots_tag,
     content_type, content_length, response_time_ms, depth, outlinks, redirect_target,
     images_count, images_missing_alt,
     lang, viewport, og_title, og_description, og_image,
@@ -162,11 +180,14 @@ const UPSERT_URL_SQL = `
     schema_types, schema_block_count, schema_invalid_count,
     pagination_next, pagination_prev, hreflangs, hreflang_count,
     amphtml, favicon, mixed_content_count,
-    folder_depth, query_param_count
+    folder_depth, query_param_count,
+    csp, referrer_policy, permissions_policy,
+    custom_search_hits
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
-    :h1, :h1_length, :h1_count, :h2_count, :word_count, :canonical, :meta_robots, :x_robots_tag,
+    :h1, :h1_length, :h1_count, :h2_count, :h3_count, :h4_count, :h5_count, :h6_count,
+    :word_count, :canonical, :meta_robots, :x_robots_tag,
     :content_type, :content_length, :response_time_ms, :depth, :outlinks, :redirect_target,
     :images_count, :images_missing_alt,
     :lang, :viewport, :og_title, :og_description, :og_image,
@@ -176,7 +197,9 @@ const UPSERT_URL_SQL = `
     :schema_types, :schema_block_count, :schema_invalid_count,
     :pagination_next, :pagination_prev, :hreflangs, :hreflang_count,
     :amphtml, :favicon, :mixed_content_count,
-    :folder_depth, :query_param_count
+    :folder_depth, :query_param_count,
+    :csp, :referrer_policy, :permissions_policy,
+    :custom_search_hits
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -192,6 +215,10 @@ const UPSERT_URL_SQL = `
     h1_length = excluded.h1_length,
     h1_count = excluded.h1_count,
     h2_count = excluded.h2_count,
+    h3_count = excluded.h3_count,
+    h4_count = excluded.h4_count,
+    h5_count = excluded.h5_count,
+    h6_count = excluded.h6_count,
     word_count = excluded.word_count,
     canonical = excluded.canonical,
     meta_robots = excluded.meta_robots,
@@ -233,6 +260,10 @@ const UPSERT_URL_SQL = `
     mixed_content_count = excluded.mixed_content_count,
     folder_depth = excluded.folder_depth,
     query_param_count = excluded.query_param_count,
+    csp = excluded.csp,
+    referrer_policy = excluded.referrer_policy,
+    permissions_policy = excluded.permissions_policy,
+    custom_search_hits = excluded.custom_search_hits,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -280,6 +311,7 @@ export class ProjectDb {
        DELETE FROM images;
        DELETE FROM links;
        DELETE FROM headers;
+       DELETE FROM sitemap_urls;
        DELETE FROM urls;
        DELETE FROM project_meta;`,
     );
@@ -465,6 +497,10 @@ export class ProjectDb {
       h1_length: input.h1?.length ?? null,
       h1_count: input.h1Count ?? 0,
       h2_count: input.h2Count ?? 0,
+      h3_count: input.h3Count ?? 0,
+      h4_count: input.h4Count ?? 0,
+      h5_count: input.h5Count ?? 0,
+      h6_count: input.h6Count ?? 0,
       word_count: input.wordCount ?? null,
       canonical: input.canonical ?? null,
       meta_robots: input.metaRobots ?? null,
@@ -506,6 +542,10 @@ export class ProjectDb {
       mixed_content_count: input.mixedContentCount ?? 0,
       folder_depth: computeFolderDepth(input.url),
       query_param_count: computeQueryParamCount(input.url),
+      csp: input.csp ?? null,
+      referrer_policy: input.referrerPolicy ?? null,
+      permissions_policy: input.permissionsPolicy ?? null,
+      custom_search_hits: input.customSearchHits ?? null,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -660,6 +700,168 @@ export class ProjectDb {
       this.db.exec('ROLLBACK');
       throw err;
     }
+  }
+
+  /**
+   * Replace any previously-discovered sitemap entries with `entries`.
+   * Bulk-inserted in chunks; on URL-level conflicts (same `<loc>` listed
+   * by multiple sitemaps) the first one wins.
+   */
+  setSitemapUrls(
+    entries: ReadonlyArray<{
+      url: string;
+      lastmod: string | null;
+      priority: number | null;
+      changefreq: string | null;
+      source: string;
+    }>,
+  ): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM sitemap_urls');
+      if (entries.length > 0) {
+        const CHUNK = 200;
+        for (let i = 0; i < entries.length; i += CHUNK) {
+          const slice = entries.slice(i, i + CHUNK);
+          const placeholders = slice.map(() => '(?, ?, ?, ?, ?)').join(',');
+          const args: (string | number | null)[] = [];
+          for (const e of slice) {
+            args.push(e.url, e.lastmod, e.priority, e.changefreq, e.source);
+          }
+          this.db
+            .prepare(
+              `INSERT INTO sitemap_urls (url, lastmod, priority, changefreq, source_sitemap)
+               VALUES ${placeholders}
+               ON CONFLICT(url) DO NOTHING`,
+            )
+            .run(...args);
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  countSitemapUrls(): number {
+    return (this.db.prepare('SELECT COUNT(*) AS c FROM sitemap_urls').get() as { c: number }).c;
+  }
+
+  /**
+   * Aggregate internal HTML URLs by their leading-N path segments.
+   *
+   * Examples (depth = 1):
+   *   `/blog/post-a`, `/blog/post-b` → `{ "/blog": 2 }`
+   *   `/`, `/about`                  → `{ "/": 1, "/about": 1 }`
+   *
+   * Examples (depth = 2):
+   *   `/blog/2024/foo`, `/blog/2024/bar`, `/blog/2025/x`
+   *     → `{ "/blog/2024": 2, "/blog/2025": 1 }`
+   *
+   * Aggregated client-side from the URL strings rather than via heavy SQL
+   * substring acrobatics — for 100K URLs this is well under 100 ms. Keeps
+   * the SQL legible and forward-compatible if we later want to mix in
+   * per-directory metrics (avg word count, avg response time).
+   */
+  getPagesPerDirectory(
+    opts: { depth?: number; limit?: number } = {},
+  ): { directory: string; count: number }[] {
+    const targetDepth = Math.max(1, Math.min(10, opts.depth ?? 1));
+    const limit = Math.max(1, Math.min(2000, opts.limit ?? 500));
+    const rows = this.db
+      .prepare(
+        "SELECT url FROM urls WHERE is_external = 0 AND content_kind = 'html'",
+      )
+      .all() as { url: string }[];
+    const counts = new Map<string, number>();
+    for (const r of rows) {
+      try {
+        const u = new URL(r.url);
+        const segments = u.pathname.split('/').filter((s) => s.length > 0);
+        const taken = segments.slice(0, targetDepth);
+        const dir = taken.length > 0 ? '/' + taken.join('/') : '/';
+        counts.set(dir, (counts.get(dir) ?? 0) + 1);
+      } catch {
+        // skip unparseable URL — already a separate issue category
+      }
+    }
+    return [...counts.entries()]
+      .map(([directory, count]) => ({ directory, count }))
+      .sort((a, b) => b.count - a.count || a.directory.localeCompare(b.directory))
+      .slice(0, limit);
+  }
+
+  /**
+   * Status-code histogram across internal URLs (every kind, not just HTML —
+   * users want to see image 4xx, JS 5xx, etc.). Null status (network error)
+   * is included as its own bucket so timeouts don't disappear.
+   */
+  getStatusCodeHistogram(): { status: number | null; count: number }[] {
+    return this.db
+      .prepare(
+        `SELECT status_code AS status, COUNT(*) AS count
+         FROM urls
+         WHERE is_external = 0
+         GROUP BY status_code
+         ORDER BY status_code IS NULL, status_code`,
+      )
+      .all() as { status: number | null; count: number }[];
+  }
+
+  /**
+   * Click-depth distribution for internal HTML pages — the canonical
+   * "site architecture flatness" metric. Shallow sites bias toward depths
+   * 0–2; sites with orphaned / deeply nested clusters show a long tail.
+   */
+  getDepthHistogram(): { depth: number; count: number }[] {
+    return this.db
+      .prepare(
+        `SELECT depth, COUNT(*) AS count
+         FROM urls
+         WHERE is_external = 0 AND content_kind = 'html'
+         GROUP BY depth
+         ORDER BY depth`,
+      )
+      .all() as { depth: number; count: number }[];
+  }
+
+  /**
+   * Response-time distribution across internal URLs. Six buckets matching
+   * Web Vitals-adjacent thresholds (<100ms excellent → >10s timeout-zone)
+   * plus a "No response" row for fetches that returned null status (DNS
+   * fail, connection refused, AbortController timeout). Buckets are
+   * always returned in order so the chart reads left-to-right.
+   */
+  getResponseTimeHistogram(): { label: string; count: number }[] {
+    const out: { label: string; count: number }[] = [];
+    const noResp = (
+      this.db
+        .prepare(
+          'SELECT COUNT(*) AS c FROM urls WHERE is_external = 0 AND response_time_ms IS NULL',
+        )
+        .get() as { c: number }
+    ).c;
+    if (noResp > 0) out.push({ label: 'No response', count: noResp });
+
+    const buckets: { label: string; min: number; max: number | null }[] = [
+      { label: '< 100ms', min: 0, max: 100 },
+      { label: '100–500ms', min: 100, max: 500 },
+      { label: '500ms–1s', min: 500, max: 1000 },
+      { label: '1–3s', min: 1000, max: 3000 },
+      { label: '3–10s', min: 3000, max: 10000 },
+      { label: '> 10s', min: 10000, max: null },
+    ];
+    for (const b of buckets) {
+      const sql =
+        b.max === null
+          ? 'SELECT COUNT(*) AS c FROM urls WHERE is_external = 0 AND response_time_ms >= ?'
+          : 'SELECT COUNT(*) AS c FROM urls WHERE is_external = 0 AND response_time_ms >= ? AND response_time_ms < ?';
+      const params = b.max === null ? [b.min] : [b.min, b.max];
+      const c = (this.db.prepare(sql).get(...params) as { c: number }).c;
+      out.push({ label: b.label, count: c });
+    }
+    return out;
   }
 
   /**
@@ -962,6 +1164,14 @@ export class ProjectDb {
       h1Missing: countWhere(`${html} AND (h1 IS NULL OR h1 = '')`),
       h1Duplicate: dup('h1'),
       h1Multiple: countWhere(`${html} AND h1_count > 1`),
+      headingSkippedLevel: countWhere(
+        `${html} AND (
+           (h2_count = 0 AND h3_count > 0)
+           OR (h3_count = 0 AND h4_count > 0)
+           OR (h4_count = 0 AND h5_count > 0)
+           OR (h5_count = 0 AND h6_count > 0)
+         )`,
+      ),
       contentThin: countWhere(`${html} AND word_count IS NOT NULL AND word_count < 300`),
       responseSlow: countWhere('is_external = 0 AND response_time_ms > 1000'),
       responseVerySlow: countWhere('is_external = 0 AND response_time_ms > 3000'),
@@ -995,6 +1205,7 @@ export class ProjectDb {
       xContentTypeOptionsMissing: countWhere(
         `${html} AND (x_content_type_options IS NULL OR x_content_type_options = '')`,
       ),
+      cspMissing: countWhere(`${html} AND (csp IS NULL OR csp = '')`),
       structuredDataMissing: countWhere(
         `${html} AND schema_block_count = 0 AND schema_invalid_count = 0`,
       ),
@@ -1027,6 +1238,16 @@ export class ProjectDb {
       compressionMissing: countWhere(
         `${html} AND status_code >= 200 AND status_code < 300
          AND (content_encoding IS NULL OR content_encoding = '')`,
+      ),
+      nonIndexableInSitemap: countWhere(
+        `is_external = 0 AND indexability LIKE 'non-indexable%'
+         AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`,
+      ),
+      non200InSitemap: countWhere(
+        `is_external = 0
+         AND status_code IS NOT NULL
+         AND (status_code < 200 OR status_code >= 300)
+         AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`,
       ),
       imageMissingAlt: (
         this.db.prepare('SELECT COUNT(*) AS c FROM images WHERE alt IS NULL').get() as {
@@ -1332,6 +1553,10 @@ export class ProjectDb {
     h1Length: r.h1_length,
     h1Count: r.h1_count,
     h2Count: r.h2_count,
+    h3Count: r.h3_count,
+    h4Count: r.h4_count,
+    h5Count: r.h5_count,
+    h6Count: r.h6_count,
     wordCount: r.word_count,
     canonical: r.canonical,
     metaRobots: r.meta_robots,
@@ -1377,6 +1602,10 @@ export class ProjectDb {
     redirectLoop: r.redirect_loop === 1,
     folderDepth: r.folder_depth,
     queryParamCount: r.query_param_count,
+    csp: r.csp,
+    referrerPolicy: r.referrer_policy,
+    permissionsPolicy: r.permissions_policy,
+    customSearchHits: r.custom_search_hits,
     crawledAt: r.crawled_at,
   });
 
@@ -1627,6 +1856,16 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               )`;
     case 'issues:h1-multiple':
       return "is_external = 0 AND content_kind = 'html' AND h1_count > 1";
+    case 'issues:heading-skipped-level':
+      // A "skipped" heading level is when level N+ exists but level N
+      // is missing — the page jumps over a tier (e.g. H1 → H3 with no
+      // H2). Each rung is checked independently.
+      return `is_external = 0 AND content_kind = 'html' AND (
+                (h2_count = 0 AND h3_count > 0)
+                OR (h3_count = 0 AND h4_count > 0)
+                OR (h4_count = 0 AND h5_count > 0)
+                OR (h5_count = 0 AND h6_count > 0)
+              )`;
     case 'issues:content-thin':
       return "is_external = 0 AND content_kind = 'html' AND word_count IS NOT NULL AND word_count < 300";
     case 'issues:response-slow':
@@ -1676,6 +1915,9 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     case 'issues:x-content-type-options-missing':
       return `is_external = 0 AND content_kind = 'html'
               AND (x_content_type_options IS NULL OR x_content_type_options = '')`;
+    case 'issues:csp-missing':
+      return `is_external = 0 AND content_kind = 'html'
+              AND (csp IS NULL OR csp = '')`;
     case 'issues:structured-data-missing':
       // "Missing" = no valid JSON-LD block AND no malformed block either;
       // if parsing failed we surface it under the invalid filter instead
@@ -1730,6 +1972,17 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND status_code >= 200 AND status_code < 300
               AND (content_encoding IS NULL OR content_encoding = '')`;
+    case 'issues:non-indexable-in-sitemap':
+      // URL declared in sitemap but our crawl found it non-indexable
+      // (noindex, canonical-to-other, blocked, redirect, …) — Google flags
+      // this as a serious sitemap-quality issue.
+      return `is_external = 0 AND indexability LIKE 'non-indexable%'
+              AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`;
+    case 'issues:non-200-in-sitemap':
+      return `is_external = 0
+              AND status_code IS NOT NULL
+              AND (status_code < 200 OR status_code >= 300)
+              AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`;
     case 'issues:image-missing-alt':
       return "is_external = 0 AND content_kind = 'html' AND images_missing_alt > 0";
     // Broken-link categories drive the BrokenLinksTab view; they never
