@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.7] — 2026-04-25
+
+### Added
+- **Multiple Canonicals detection** — `canonical_count` column tracks the number of `<link rel="canonical">` tags on the page (previously only the first was captured). New issue **Canonicals → Multiple Canonicals** flags pages with more than one canonical (Google may pick any of them, defeating the canonical's purpose).
+- **Canonical → Non-200 detection** — new issue **Canonicals → Canonical → Non-200** flags pages whose canonical URL was crawled and returned 4xx/5xx (uses an `EXISTS` join against the canonical's stored status code).
+
 ## [0.1.6] — 2026-04-25
 
 ### Added
