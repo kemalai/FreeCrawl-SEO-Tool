@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.5] — 2026-04-25
+
+### Added
+- **HTTP Headers tab** in URL Details — every response header (lowercased, dedup'd, 4 KB cap) is now persisted to the `headers` table and rendered as a sortable name/value table for the selected URL.
+- **JSON-LD structured data extraction** — every `<script type="application/ld+json">` block is parsed; `@type` values from arbitrary nesting (top-level, arrays, `@graph` containers, string-or-array `@type`) are collected into a sorted unique list. Block count + invalid-block count tracked separately. Two new issues: **JSON-LD Missing**, **Invalid JSON-LD**.
+- **Pagination + hreflang extraction** — `<link rel="next">` / `<link rel="prev">` and all `<link rel="alternate" hreflang>` entries are stored; hreflangs as JSON. Two new issues: **Broken Next/Prev Target** (joins to `urls` to find 4xx/5xx redirect targets), **x-default Missing**.
+- **Mixed Content + AMP + Favicon detection** — HTTPS pages are scanned for `http://` subresources (img / script / iframe / video / audio / source / embed / stylesheet — anchors deliberately ignored). `<link rel="amphtml">` and `<link rel="icon">` (with legacy `shortcut icon` fallback) captured per URL. New issues: **Mixed Content**, **Favicon Missing**.
+- **Security headers audit** — `Strict-Transport-Security`, `X-Frame-Options`, `X-Content-Type-Options`, `Content-Encoding` captured from response headers. Three new issues: **HSTS Missing** (HTTPS pages only), **X-Frame-Options Missing**, **X-Content-Type-Options Missing**. Plus **Compression Missing** issue under Performance.
+- **Twitter Card extraction** — `twitter:card` / `twitter:title` / `twitter:description` / `twitter:image` (Twitter spec uses `name=` not `property=`). New issue **Twitter Card Missing** when both card+image are absent.
+- **OpenGraph + viewport + lang extraction** — `og:title` / `og:description` / `og:image`, `meta[name=viewport]`, `html[lang]` per URL. Three new issues: **OpenGraph Tags Missing** (all three absent), **Viewport Meta Missing**, **Lang Attribute Missing**.
+- **Meta extras** — `meta[name=keywords]`, `meta[name=author]`, `meta[name=generator]`, `meta[name=theme-color]` captured + shown in URL Details.
+- **Redirect chain resolution** — post-crawl `recomputeRedirectChains()` walks every redirect with cycle detection (visited-set + 50-hop hard cap), filling `redirect_chain_length` / `redirect_final_url` / `redirect_loop`. Two new issues: **Redirect Loop**, **Long Chain (>3 hops)**.
+- **URL structure analytics** — 4 new URL-shape issues (**Contains Uppercase**, **Contains Underscore**, **Multiple Slashes**, **Non-ASCII Characters**) plus **Many Query Params (>5)**, **Self-Redirect**, and **Too Long (>2048 chars)**. `folder_depth` and `query_param_count` columns computed at upsert time.
+- **Configurable crawler** — `customHeaders`, `includePatterns`, `excludePatterns` (regex) added to `CrawlConfig`. Default headers merge case-insensitively with user overrides; include filter is opt-in (empty = all pass), exclude is always applied; start URL is exempt. CLI flags `--header "K: V"`, `--include <regex>`, `--exclude <regex>`.
+
+### Changed
+- **README.md** — added a **Prerequisites** section detailing Node.js 22+ requirement, optional tooling, corporate-proxy / antivirus TLS guidance (`HTTPS_PROXY`, `NODE_EXTRA_CA_CERTS`), and disk/memory budget. Prebuilt installer users explicitly exempted from these requirements.
+
 ## [0.1.4] — 2026-04-24
 
 ### Added
