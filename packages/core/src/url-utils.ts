@@ -122,137 +122,85 @@ export function extractExtension(url: string): string {
   }
 }
 
-async function probeUrl(url: string, userAgent: string, timeoutMs: number): Promise<boolean> {
-  const { fetch: undiciFetch } = await import('undici');
-  const { initHttpClient } = await import('./http-client.js');
-  initHttpClient();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    // Try HEAD first (cheap)
-    try {
-      await undiciFetch(url, {
-        method: 'HEAD',
-        headers: { 'user-agent': userAgent },
-        redirect: 'manual',
-        signal: controller.signal,
-      });
-      return true;
-    } catch {
-      // HEAD may be blocked by server or WAF — retry with GET
-      const controller2 = new AbortController();
-      const timeout2 = setTimeout(() => controller2.abort(), timeoutMs);
-      try {
-        const res = await undiciFetch(url, {
-          method: 'GET',
-          headers: { 'user-agent': userAgent },
-          redirect: 'manual',
-          signal: controller2.signal,
-        });
-        try {
-          await res.body?.cancel();
-        } catch {
-          /* ignore */
-        }
-        return true;
-      } finally {
-        clearTimeout(timeout2);
-      }
-    }
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-/**
- * Follow redirects starting from `url` until a non-3xx response is reached
- * or `maxHops` is exhausted. Returns the final URL (or the last URL seen
- * if we give up on a loop / error). Uses GET with redirect: 'manual' so
- * the chain is driven by `location` headers.
- */
-async function followRedirectChain(
-  url: string,
-  userAgent: string,
-  timeoutMs: number,
-  maxHops = 5,
-): Promise<string> {
-  const { fetch: undiciFetch } = await import('undici');
-  const { initHttpClient } = await import('./http-client.js');
-  initHttpClient();
-  let current = url;
-  const seen = new Set<string>([current]);
-  for (let i = 0; i < maxHops; i++) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await undiciFetch(current, {
-        method: 'GET',
-        headers: { 'user-agent': userAgent },
-        redirect: 'manual',
-        signal: controller.signal,
-      });
-      try {
-        await res.body?.cancel();
-      } catch {
-        /* ignore */
-      }
-      if (res.status < 300 || res.status >= 400) return current;
-      const location = res.headers.get('location');
-      if (!location) return current;
-      const next = normalizeUrl(location, current);
-      if (!next || seen.has(next)) return current;
-      seen.add(next);
-      current = next;
-    } catch {
-      return current;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  return current;
-}
-
 /**
  * Resolve a user-typed start URL to a full URL with protocol, following
  * any initial redirect chain so the crawler's scope calculation (e.g.
  * `subdomain` match) uses the site's canonical host.
  *
  * - If the input already begins with http:// or https://, protocol is kept.
- * - Otherwise, tries https:// first (5s probe); falls back to http://.
- * - Then follows up to 5 redirect hops so `example.com` → `www.example.com`
- *   resolves to the final URL before scope is fixed.
+ * - Otherwise, tries https:// first; falls back to http://.
+ * - Uses a single auto-follow fetch per scheme (~300–800 ms typical) so a
+ *   site like `gamesatis.com` → `www.gamesatis.com` resolves in one
+ *   round-trip instead of two HEAD/GET phases.
  */
 export async function resolveStartUrl(
   raw: string,
   userAgent = 'FreeCrawlSEO/0.1',
-  probeTimeoutMs = 5000,
+  probeTimeoutMs = 3000,
 ): Promise<string | null> {
   const trimmed = raw.trim();
   if (!trimmed) return null;
 
-  let candidate: string | null = null;
-  if (/^https?:\/\//i.test(trimmed)) {
-    candidate = normalizeUrl(trimmed);
-  } else {
-    const bare = trimmed.replace(/^\/\//, '').replace(/^\/+/, '');
-    const httpsUrl = `https://${bare}`;
-    if (await probeUrl(httpsUrl, userAgent, probeTimeoutMs)) {
-      candidate = normalizeUrl(httpsUrl);
-    } else {
-      const httpUrl = `http://${bare}`;
-      if (await probeUrl(httpUrl, userAgent, probeTimeoutMs)) {
-        candidate = normalizeUrl(httpUrl);
-      } else {
-        // Neither protocol responded — return the secure candidate anyway;
-        // the crawler will surface a network error with that URL.
-        candidate = normalizeUrl(httpsUrl);
+  // Single auto-follow request collapses what used to be two phases —
+  // HEAD probe + manual hop-driven redirect chain — into one network
+  // round-trip. For sites with `gamesatis.com` → 301 → `www.gamesatis.com`
+  // → 200, the old code did a HEAD then 1–2 GETs (2–3 s total). undici's
+  // `redirect: 'follow'` does the chain at the network layer in ~300–
+  // 800 ms, after which `res.url` is the canonical final URL.
+  async function resolveVia(url: string): Promise<string | null> {
+    const { fetch: undiciFetch } = await import('undici');
+    const { initHttpClient } = await import('./http-client.js');
+    initHttpClient();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), probeTimeoutMs);
+    try {
+      // HEAD first — cheap and avoids body transfer.
+      try {
+        const res = await undiciFetch(url, {
+          method: 'HEAD',
+          headers: { 'user-agent': userAgent },
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        return res.url || url;
+      } catch {
+        // HEAD may be blocked / WAF'd — retry with GET. Body is cancelled
+        // immediately so we don't actually transfer the page.
+        const res = await undiciFetch(url, {
+          method: 'GET',
+          headers: { 'user-agent': userAgent },
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+        try {
+          await res.body?.cancel();
+        } catch {
+          /* ignore */
+        }
+        return res.url || url;
       }
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
-  if (!candidate) return null;
-  const final = await followRedirectChain(candidate, userAgent, probeTimeoutMs);
-  return normalizeUrl(final) ?? candidate;
+  if (/^https?:\/\//i.test(trimmed)) {
+    const resolved = (await resolveVia(trimmed)) ?? trimmed;
+    return normalizeUrl(resolved);
+  }
+
+  const bare = trimmed.replace(/^\/\//, '').replace(/^\/+/, '');
+  const httpsUrl = `https://${bare}`;
+  const viaHttps = await resolveVia(httpsUrl);
+  if (viaHttps) return normalizeUrl(viaHttps);
+
+  const httpUrl = `http://${bare}`;
+  const viaHttp = await resolveVia(httpUrl);
+  if (viaHttp) return normalizeUrl(viaHttp);
+
+  // Neither protocol responded — return the secure candidate anyway;
+  // the crawler will surface a network error with that URL.
+  return normalizeUrl(httpsUrl);
 }

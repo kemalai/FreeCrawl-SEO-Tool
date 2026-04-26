@@ -13,6 +13,7 @@ import {
 import clsx from 'clsx';
 import type { CrawlConfig, CrawlMode } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
+import { InfoTip, type FieldInfo } from './InfoTip.js';
 
 interface Props {
   open: boolean;
@@ -396,7 +397,11 @@ function ModePanel({ form, update }: PanelProps) {
         Choose how the crawler discovers URLs. Spider follows links from a start URL; List fetches a fixed set.
       </p>
       <label className="mb-2 flex flex-col gap-1">
-        <span className="text-[10px] text-surface-400">Crawl Mode</span>
+        <FieldLabel
+          label="Crawl Mode"
+          info="Spider follows links from the start URL across the chosen scope. List fetches a fixed set of URLs once with no link-following."
+          example="Spider for full site audits; List for re-checking a known set of pages."
+        />
         <select
           className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
           value={form.mode}
@@ -413,6 +418,8 @@ function ModePanel({ form, update }: PanelProps) {
           onChange={(v) => update('urlListText', v)}
           rows={10}
           placeholder={'https://example.com/\nhttps://example.com/about\nhttps://example.com/contact'}
+          info="One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored."
+          example={'https://example.com/about\nhttps://example.com/pricing\n# old urls\nhttps://example.com/legacy'}
         />
       )}
     </>
@@ -426,33 +433,61 @@ function CrawlerPanel({ form, update }: PanelProps) {
         Throughput, concurrency, and traversal limits.
       </p>
       <div className="grid grid-cols-2 gap-3">
-        <Num label="Max Depth" value={form.maxDepth} onChange={(v) => update('maxDepth', v)} />
-        <Num label="Max URLs" value={form.maxUrls} onChange={(v) => update('maxUrls', v)} />
+        <Num
+          label="Max Depth"
+          value={form.maxDepth}
+          onChange={(v) => update('maxDepth', v)}
+          info="Hop count from the start URL. Start URL is depth 0; its outlinks are depth 1, theirs depth 2, and so on."
+          example="10 covers most sites; 3 limits crawls to top-of-funnel pages only."
+        />
+        <Num
+          label="Max URLs"
+          value={form.maxUrls}
+          onChange={(v) => update('maxUrls', v)}
+          info="Hard cap on total URLs crawled. The crawl stops as soon as this is reached."
+          example="1000000 (1M) for a full site audit; 5000 for spot checks."
+        />
         <Num
           label="Max Concurrency"
           value={form.maxConcurrency}
           onChange={(v) => update('maxConcurrency', v)}
+          info="Number of parallel HTTP workers. Higher = faster crawl but more load on the target server."
+          example="20 is a safe default; bump to 50 on fast servers, drop to 5 if the site rate-limits."
         />
-        <Num label="Max RPS" value={form.maxRps} onChange={(v) => update('maxRps', v)} />
+        <Num
+          label="Max RPS"
+          value={form.maxRps}
+          onChange={(v) => update('maxRps', v)}
+          info="Requests per second cap across all workers combined. Hard rate limit independent of concurrency."
+          example="20 for typical sites; 5 to be polite on shared hosting."
+        />
         <Num
           label="Request Timeout (ms)"
           value={form.requestTimeoutMs}
           onChange={(v) => update('requestTimeoutMs', v)}
+          info="Per-request abort threshold. Pages that take longer than this are recorded as network errors."
+          example="20000 (20 s) for typical use; 5000 for fast spot checks; 60000 for slow APIs."
         />
         <Num
           label="Crawl Delay (ms, per worker)"
           value={form.crawlDelayMs}
           onChange={(v) => update('crawlDelayMs', v)}
+          info="Sleep inserted after each request, applied per worker. Stacks with robots.txt's own crawl-delay if larger."
+          example="0 disables; 250 for very polite crawling; 1000 to throttle aggressively."
         />
         <Num
           label="Retry Attempts"
           value={form.retryAttempts}
           onChange={(v) => update('retryAttempts', v)}
+          info="How many times to retry on network errors / 5xx / 429. The original request is not counted."
+          example="2 (default) means original + 2 retries (3 total). 0 disables retry."
         />
         <Num
           label="Retry Initial Delay (ms)"
           value={form.retryInitialDelayMs}
           onChange={(v) => update('retryInitialDelayMs', v)}
+          info="Backoff before the first retry. Doubles each subsequent attempt (exponential backoff)."
+          example="500 → next attempts wait 500 ms, then 1000 ms, then 2000 ms…"
         />
       </div>
       <div className="mt-4 grid grid-cols-2 gap-2">
@@ -460,28 +495,38 @@ function CrawlerPanel({ form, update }: PanelProps) {
           label="Follow redirects"
           checked={form.followRedirects}
           onChange={(v) => update('followRedirects', v)}
+          info="Crawl 3xx redirect targets. Each hop is its own row; the chain is reconstructed in the Response Codes view."
+          example="On for normal audits; off when you only want to inspect raw 3xx behaviour."
         />
         <Bool
           label="Respect robots.txt"
           checked={form.respectRobotsTxt}
           onChange={(v) => update('respectRobotsTxt', v)}
+          info="Honor Disallow rules + crawl-delay declared in /robots.txt for the configured User-Agent."
+          example="On (default). Off only when crawling sites you own and need to bypass."
         />
         <Bool
           label="Crawl external links"
           checked={form.crawlExternal}
           onChange={(v) => update('crawlExternal', v)}
+          info="Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals."
+          example="On for outbound link audits; off for fast internal-only crawls."
         />
         <Bool
           label="Store nofollow links"
           checked={form.storeNofollowLinks}
           onChange={(v) => update('storeNofollowLinks', v)}
           hint="Default off (Screaming-Frog style 'Respect Nofollow')"
+          info='Persist rel="nofollow" links in the link graph. When off, nofollow links are dropped entirely (not counted in outlinks, not probed as externals).'
+          example="On if you need nofollow attribute audits; off keeps the link graph cleaner."
         />
         <Bool
           label="Discover sitemaps"
           checked={form.discoverSitemaps}
           onChange={(v) => update('discoverSitemaps', v)}
           hint="Read sitemap.xml from robots.txt + default paths at crawl start"
+          info="Fetches /robots.txt sitemap directives + /sitemap.xml fallbacks. Powers the 'Non-Indexable in Sitemap' issue filter."
+          example="On (default) — cheap I/O, high SEO value."
         />
       </div>
     </>
@@ -498,11 +543,15 @@ function RequestsPanel({ form, update }: PanelProps) {
         label="User-Agent"
         value={form.userAgent}
         onChange={(v) => update('userAgent', v)}
+        info="Sent on every request as the User-Agent header. Identifies the crawler to servers; some sites serve different content based on UA."
+        example="Mozilla/5.0 (compatible; FreeCrawlSEO/1.0; +https://yourdomain.com/bot)"
       />
       <Text
         label="Accept-Language"
         value={form.acceptLanguage}
         onChange={(v) => update('acceptLanguage', v)}
+        info="Sent on every request. Affects which locale a multi-lingual site serves you."
+        example="tr,en;q=0.8 — Turkish first, English fallback."
       />
       <Area
         label='Custom Headers (one per line, "Key: Value")'
@@ -510,6 +559,8 @@ function RequestsPanel({ form, update }: PanelProps) {
         onChange={(v) => update('customHeadersText', v)}
         rows={6}
         placeholder={'Authorization: Bearer ...\nX-Custom: foo'}
+        info="One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."
+        example={'Authorization: Bearer abc123xyz\nX-Forwarded-For: 1.2.3.4\nCookie: session=...'}
       />
     </>
   );
@@ -527,6 +578,8 @@ function FiltersPanel({ form, update }: PanelProps) {
         onChange={(v) => update('includePatternsText', v)}
         rows={5}
         placeholder={'^https?://example\\.com/blog/\n/api/v2/'}
+        info="JavaScript regex tested against the full URL. Empty = all URLs allowed. URL must match at least one to be enqueued. The start URL is always permitted regardless."
+        example={'^https?://example\\.com/blog/\n/api/v2/'}
       />
       <Area
         label="Exclude Patterns (regex, one per line)"
@@ -534,6 +587,8 @@ function FiltersPanel({ form, update }: PanelProps) {
         onChange={(v) => update('excludePatternsText', v)}
         rows={5}
         placeholder={'/admin\n\\.pdf$'}
+        info="JavaScript regex. Any match → URL is skipped, even if it would otherwise pass the include list. Common uses: skip admin areas, large file types, session-id query params."
+        example={'/admin\n\\.pdf$\n\\?session='}
       />
     </>
   );
@@ -551,6 +606,8 @@ function CustomSearchPanel({ form, update }: PanelProps) {
         onChange={(v) => update('customSearchTermsText', v)}
         rows={8}
         placeholder={'pricing\nfree shipping\nlimited time'}
+        info="Case-insensitive literal substring (NOT regex). Each term's per-page hit count is shown in the URL Details panel. Empty list disables the scan entirely."
+        example={'free shipping\npricing\nbeta\ncoming soon'}
       />
     </>
   );
@@ -568,21 +625,31 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
           checked={form.stripWww}
           onChange={(v) => update('stripWww', v)}
           hint="Treat www.x.com and x.com as the same URL"
+          info="Removes the leading 'www.' from the host at normalisation time. The seen-set, redirect graph, and link extraction all use the rewritten form, so duplicates collapse correctly."
+          example="On if your site canonicalises to non-www but emits www links somewhere."
         />
         <Bool
           label="Force HTTPS"
           checked={form.forceHttps}
           onChange={(v) => update('forceHttps', v)}
           hint="Upgrade http:// → https:// before fetching"
+          info="Rewrites http:// to https:// before fetching. Breaks HTTP-only sites."
+          example="On for modern sites that 301 http→https anyway; off for legacy intranet."
         />
         <Bool
           label="Lowercase path"
           checked={form.lowercasePath}
           onChange={(v) => update('lowercasePath', v)}
           hint="Treat /Foo and /foo as the same URL"
+          info="Lowercases the URL path component. Host is already case-insensitive per the URL spec, so this only affects the path."
+          example="On if your CMS serves the same page at mixed casing (/Foo and /foo)."
         />
         <label className="flex flex-col gap-1">
-          <span className="text-[10px] text-surface-400">Trailing slash policy</span>
+          <FieldLabel
+            label="Trailing slash policy"
+            info="How to canonicalise paths with/without a trailing slash. 'Add' is file-extension aware — won't add a slash to /file.pdf or /image.png."
+            example="Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/."
+          />
           <select
             className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
             value={form.trailingSlash}
@@ -616,6 +683,8 @@ function HardwarePanel({ form, update }: PanelProps) {
           label="Memory soft limit (MB) — 0 = unlimited"
           value={form.memoryLimitMb}
           onChange={(v) => update('memoryLimitMb', v)}
+          info="Crawler RSS auto-pauses the queue when this is exceeded; resumes once memory drops to 80% of the cap. Soft cap — does not enforce a hard heap limit."
+          example="2048 (≈2 GB) on a 4 GB laptop; 8192 on a 16 GB workstation; 0 to disable."
         />
         <p className="mt-1 text-[10px] text-surface-500">
           When the crawler's RSS exceeds this, the queue auto-pauses and
@@ -632,6 +701,8 @@ function HardwarePanel({ form, update }: PanelProps) {
           label="Max in-memory queue size — 0 = unlimited"
           value={form.maxQueueSize}
           onChange={(v) => update('maxQueueSize', v)}
+          info="Hard cap on pending URLs held in memory. Excess discoveries are dropped silently — bounds peak heap during fan-out bursts (big sitemaps, dense link graphs)."
+          example="50000 keeps RAM bounded during big sitemap fan-outs; 0 for typical crawls."
         />
         <p className="mt-1 text-[10px] text-surface-500">
           Hard cap on pending URLs held in memory. Excess discoveries are
@@ -646,7 +717,11 @@ function HardwarePanel({ form, update }: PanelProps) {
           CPU
         </div>
         <label className="mb-2 flex flex-col gap-1">
-          <span className="text-[10px] text-surface-400">Process priority</span>
+          <FieldLabel
+            label="Process priority"
+            info="OS scheduler hint applied at crawl start. Lowering priority lets the rest of the machine stay responsive during heavy crawls. May require elevated privileges on some platforms."
+            example="Below Normal while you keep working in other apps; Idle for overnight unattended runs."
+          />
           <select
             className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
             value={form.processPriority}
@@ -674,18 +749,39 @@ function HardwarePanel({ form, update }: PanelProps) {
   );
 }
 
+function FieldLabel({
+  label,
+  info,
+  example,
+  className,
+}: {
+  label: string;
+  info?: string;
+  example?: string;
+  className?: string;
+}) {
+  return (
+    <span className={clsx('flex items-center gap-1 text-[10px] text-surface-400', className)}>
+      <span>{label}</span>
+      <InfoTip info={info} example={example} />
+    </span>
+  );
+}
+
 function Num({
   label,
   value,
   onChange,
+  info,
+  example,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
-}) {
+} & FieldInfo) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[10px] text-surface-400">{label}</span>
+      <FieldLabel label={label} info={info} example={example} />
       <input
         type="number"
         className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
@@ -700,14 +796,16 @@ function Text({
   label,
   value,
   onChange,
+  info,
+  example,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
-}) {
+} & FieldInfo) {
   return (
     <label className="mb-3 flex flex-col gap-1">
-      <span className="text-[10px] text-surface-400">{label}</span>
+      <FieldLabel label={label} info={info} example={example} />
       <input
         type="text"
         className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
@@ -725,16 +823,18 @@ function Area({
   onChange,
   rows,
   placeholder,
+  info,
+  example,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   rows: number;
   placeholder?: string;
-}) {
+} & FieldInfo) {
   return (
     <label className="mb-3 flex flex-col gap-1">
-      <span className="text-[10px] text-surface-400">{label}</span>
+      <FieldLabel label={label} info={info} example={example} />
       <textarea
         className="rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
         value={value}
@@ -752,12 +852,14 @@ function Bool({
   checked,
   onChange,
   hint,
+  info,
+  example,
 }: {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   hint?: string;
-}) {
+} & FieldInfo) {
   return (
     <label className="flex items-start gap-2">
       <input
@@ -767,7 +869,10 @@ function Bool({
         className="mt-0.5"
       />
       <div className="flex flex-col gap-0.5">
-        <span className="text-[12px] text-surface-100">{label}</span>
+        <span className="flex items-center gap-1">
+          <span className="text-[12px] text-surface-100">{label}</span>
+          <InfoTip info={info} example={example} />
+        </span>
         {hint && <span className="text-[10px] text-surface-500">{hint}</span>}
       </div>
     </label>

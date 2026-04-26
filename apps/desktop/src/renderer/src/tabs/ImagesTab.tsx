@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import clsx from 'clsx';
 import type { ImageRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
+import { InfoTip } from '../components/InfoTip.js';
 
 const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
@@ -80,12 +81,52 @@ export function ImagesTab() {
     }
   };
 
-  const columns: { key: SortKey; label: string; width: number; align?: 'right' }[] = [
-    { key: 'src', label: 'Image URL', width: 520 },
-    { key: 'alt', label: 'Alt', width: 320 },
-    { key: 'width', label: 'Width', width: 80, align: 'right' },
-    { key: 'height', label: 'Height', width: 80, align: 'right' },
-    { key: 'occurrences', label: 'Occurrences', width: 100, align: 'right' },
+  const columns: {
+    key: SortKey;
+    label: string;
+    width: number;
+    align?: 'right';
+    info?: string;
+    example?: string;
+  }[] = [
+    {
+      key: 'src',
+      label: 'Image URL',
+      width: 520,
+      info: 'Resolved absolute URL of the <img src> attribute.',
+      example: 'https://example.com/img/hero.png',
+    },
+    {
+      key: 'alt',
+      label: 'Alt',
+      width: 320,
+      info: 'Value of the alt attribute. Empty cell = no alt declared (accessibility/SEO issue).',
+      example: 'Sunset over the mountain ridge',
+    },
+    {
+      key: 'width',
+      label: 'Width',
+      width: 80,
+      align: 'right',
+      info: 'Width attribute value (in pixels) declared on the <img> tag, when present.',
+      example: '1280',
+    },
+    {
+      key: 'height',
+      label: 'Height',
+      width: 80,
+      align: 'right',
+      info: 'Height attribute value (in pixels) declared on the <img> tag, when present.',
+      example: '720',
+    },
+    {
+      key: 'occurrences',
+      label: 'Occurrences',
+      width: 100,
+      align: 'right',
+      info: 'How many distinct pages reference this image. High values typically indicate site-wide assets (logos, icons).',
+      example: '47',
+    },
   ];
   const colsWidth = columns.reduce((n, c) => n + c.width, 0);
   const totalWidth = ROW_NUM_WIDTH + colsWidth;
@@ -137,6 +178,14 @@ export function ImagesTab() {
                 <span className={clsx('truncate', c.align === 'right' && 'ml-auto')}>
                   {c.label}
                 </span>
+                {(c.info || c.example) && (
+                  <span
+                    className="shrink-0"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <InfoTip info={c.info} example={c.example} />
+                  </span>
+                )}
                 {sortBy === c.key && (
                   <span className="text-surface-500">{sortDir === 'asc' ? '▲' : '▼'}</span>
                 )}

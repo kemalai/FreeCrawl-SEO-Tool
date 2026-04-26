@@ -7,6 +7,7 @@ import { useAppStore, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId, type ColumnSpec } from './columns.js';
 import { useLazyUrlRows } from '../hooks/useLazyUrlRows.js';
 import { AdvancedFilterDialog } from '../components/AdvancedFilterDialog.js';
+import { InfoTip } from '../components/InfoTip.js';
 
 const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
@@ -558,6 +559,15 @@ export function UrlsTab() {
                   title={c.header + ' (click to select column · drag to select multiple · click arrow to sort)'}
                 >
                   <span className="cursor-pointer truncate">{c.header}</span>
+                  {(c.info || c.example) && (
+                    <span
+                      className="shrink-0"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <InfoTip info={c.info} example={c.example} />
+                    </span>
+                  )}
                   <button
                     type="button"
                     className={clsx(

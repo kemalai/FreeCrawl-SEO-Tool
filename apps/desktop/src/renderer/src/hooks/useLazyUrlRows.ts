@@ -3,7 +3,11 @@ import type { AdvancedFilter, CrawlUrlRow, UrlCategory } from '@freecrawl/shared
 
 const CHUNK_SIZE = 500;
 const MAX_CACHED_CHUNKS = 8;
-const LIVE_REFRESH_MS = 1500;
+// Live-refresh cadence during an active crawl. 250 ms keeps perceived
+// row arrival close to "as they're crawled" without saturating the COUNT
+// query — at 20 RPS the user sees ~5 rows per tick instead of 30 in a
+// 1.5 s lump (which felt like the program had stalled).
+const LIVE_REFRESH_MS = 250;
 
 export interface LazyRowsOpts {
   category: UrlCategory;
@@ -101,30 +105,42 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
   // Live tick: re-query only the visible chunks and patch them in place.
   // Never calls .clear(), so rowAt never returns null for a
   // previously-loaded index. The table streams rather than flashes.
+  // A leading tick fires immediately so the first rows surface without
+  // the LIVE_REFRESH_MS dead window after Start.
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     const tick = async () => {
+      // Coalesce overlapping ticks — at 250 ms cadence a slow COUNT or
+      // chunk fetch can otherwise queue up multiple in-flight ticks.
+      if (inFlight) return;
+      inFlight = true;
       const token = resetToken.current;
       try {
-        const { total: t } = await queryMeta();
-        if (cancelled || token !== resetToken.current) return;
-        setTotal(t);
-      } catch {
-        /* ignore transient errors */
-      }
-      const { first, last } = activeRange.current;
-      for (let i = first; i <= last; i++) {
         try {
-          const { rows } = await queryChunk(i);
+          const { total: t } = await queryMeta();
           if (cancelled || token !== resetToken.current) return;
-          chunks.current.set(i, rows);
+          setTotal(t);
         } catch {
-          /* ignore */
+          /* ignore transient errors */
         }
+        const { first, last } = activeRange.current;
+        for (let i = first; i <= last; i++) {
+          try {
+            const { rows } = await queryChunk(i);
+            if (cancelled || token !== resetToken.current) return;
+            chunks.current.set(i, rows);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (cancelled || token !== resetToken.current) return;
+        setVersion((v) => v + 1);
+      } finally {
+        inFlight = false;
       }
-      if (cancelled || token !== resetToken.current) return;
-      setVersion((v) => v + 1);
     };
+    void tick();
     const id = setInterval(tick, LIVE_REFRESH_MS);
     return () => {
       cancelled = true;

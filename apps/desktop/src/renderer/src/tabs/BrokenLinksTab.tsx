@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import clsx from 'clsx';
 import type { BrokenLinkRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
+import { InfoTip } from '../components/InfoTip.js';
 
 const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
@@ -60,13 +61,58 @@ export function BrokenLinksTab() {
     },
   });
 
-  const columns: { key: string; label: string; width: number; align?: 'right' }[] = [
-    { key: 'fromUrl', label: 'Source URL', width: 400 },
-    { key: 'fromStatus', label: 'Source Status', width: 110, align: 'right' },
-    { key: 'toUrl', label: 'Target URL', width: 400 },
-    { key: 'toStatus', label: 'Target Status', width: 110, align: 'right' },
-    { key: 'anchor', label: 'Anchor', width: 240 },
-    { key: 'isInternal', label: 'Type', width: 80 },
+  const columns: {
+    key: string;
+    label: string;
+    width: number;
+    align?: 'right';
+    info?: string;
+    example?: string;
+  }[] = [
+    {
+      key: 'fromUrl',
+      label: 'Source URL',
+      width: 400,
+      info: 'Page that contains the broken link.',
+      example: 'https://example.com/blog/post-1',
+    },
+    {
+      key: 'fromStatus',
+      label: 'Source Status',
+      width: 110,
+      align: 'right',
+      info: 'HTTP status of the source page itself. Usually 200; if non-2xx the broken link may be inherited.',
+      example: '200',
+    },
+    {
+      key: 'toUrl',
+      label: 'Target URL',
+      width: 400,
+      info: 'The URL that fails to resolve (4xx/5xx/network error).',
+      example: 'https://other.com/missing-page',
+    },
+    {
+      key: 'toStatus',
+      label: 'Target Status',
+      width: 110,
+      align: 'right',
+      info: 'HTTP status returned by the target. 0 = network failure (DNS, TLS, timeout).',
+      example: '404',
+    },
+    {
+      key: 'anchor',
+      label: 'Anchor',
+      width: 240,
+      info: 'Anchor text of the broken link as rendered in the source page.',
+      example: 'Read the full article →',
+    },
+    {
+      key: 'isInternal',
+      label: 'Type',
+      width: 80,
+      info: 'Whether the broken target is on the same site (internal) or a different host (external).',
+      example: 'internal / external',
+    },
   ];
   const totalWidth = ROW_NUM_WIDTH + columns.reduce((n, c) => n + c.width, 0);
 
@@ -116,6 +162,11 @@ export function BrokenLinksTab() {
                 <span className={clsx('truncate', c.align === 'right' && 'ml-auto')}>
                   {c.label}
                 </span>
+                {(c.info || c.example) && (
+                  <span className="shrink-0">
+                    <InfoTip info={c.info} example={c.example} />
+                  </span>
+                )}
               </div>
             ))}
             <div className="flex-1 border-b border-surface-800" />

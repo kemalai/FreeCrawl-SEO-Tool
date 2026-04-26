@@ -278,23 +278,32 @@ function registerIpc(): void {
     const crawler = new Crawler(config, database);
     activeCrawler = crawler;
 
+    // Every event handler is gated by `activeCrawler === crawler`. A
+    // stopped crawler can still emit late events (e.g. an in-flight
+    // sitemap fetch resolving after Stop, or a queued done-event) — if
+    // we forwarded those to the UI they'd clobber the new crawl's state
+    // (the "pır pır" effect: rapid Running ↔ Done flicker).
     crawler.on('progress', (p: CrawlProgress) => {
+      if (activeCrawler !== crawler) return;
       mainWindow?.webContents.send(IPC.crawlProgress, p);
     });
     crawler.on('done', (summary: CrawlSummary) => {
+      if (activeCrawler !== crawler) return;
       logger.log(
         'info',
         'crawler',
         `Crawl done: total=${summary.total} avgResp=${summary.avgResponseTimeMs}ms totalBytes=${summary.totalBytes}`,
       );
       mainWindow?.webContents.send(IPC.crawlDone, summary);
-      if (activeCrawler === crawler) activeCrawler = null;
+      activeCrawler = null;
     });
     crawler.on('error', (msg: string) => {
+      if (activeCrawler !== crawler) return;
       logger.log('error', 'crawler', msg);
       mainWindow?.webContents.send(IPC.crawlError, msg);
     });
     crawler.on('info', (msg: string) => {
+      if (activeCrawler !== crawler) return;
       logger.log('info', 'crawler', msg);
     });
 

@@ -79,6 +79,12 @@ export class Crawler extends EventEmitter {
   private memoryMonitorTimer: NodeJS.Timeout | null = null;
   private robots: RobotsChecker | null = null;
   private progressTimer: NodeJS.Timeout | null = null;
+  /**
+   * Aborts any in-flight sitemap discovery on stop(). Without this, a
+   * 21k-URL sitemap continues parsing in the background after Stop and
+   * the resulting 'info' / 'done' events leak into the next crawl.
+   */
+  private sitemapAbort: AbortController | null = null;
   private readonly includeRegexes: RegExp[];
   private readonly excludeRegexes: RegExp[];
   /**
@@ -176,52 +182,21 @@ export class Crawler extends EventEmitter {
     this.db.setMeta('startUrl', start);
 
     const origin = new URL(start).origin;
-    if (this.config.respectRobotsTxt) {
-      this.robots = await loadRobots(origin, this.config.userAgent);
-    }
-
-    if (this.config.discoverSitemaps) {
-      // Best-effort sitemap discovery — never block the crawl on it. Any
-      // network failure is logged via the 'error' event but the crawl
-      // proceeds with whatever (possibly empty) entry set we got.
-      try {
-        const controller = new AbortController();
-        // Sitemap discovery shouldn't take longer than half the per-URL
-        // timeout — it's preliminary work, not the main event.
-        const t = setTimeout(
-          () => controller.abort(),
-          Math.max(5000, this.config.requestTimeoutMs),
-        );
-        try {
-          const roots = await discoverSitemapUrls(
-            origin,
-            this.config.userAgent,
-            controller.signal,
-          );
-          // Sitemap entry cap follows the crawl-level cap so 1M-URL crawls
-          // can ingest the full sitemap, with a sensible floor for tiny caps.
-          const sitemapMaxUrls = Math.max(50_000, this.config.maxUrls);
-          const result = await fetchSitemaps(roots, {
-            userAgent: this.config.userAgent,
-            signal: controller.signal,
-            timeoutMs: this.config.requestTimeoutMs,
-            maxUrls: sitemapMaxUrls,
-            maxDepth: 3,
-          });
-          this.db.setSitemapUrls(result.entries);
-          if (result.entries.length > 0) {
-            this.emit(
-              'info',
-              `Sitemap: parsed ${result.sitemapsParsed.length}/${result.sitemapsTried.length}, ${result.entries.length} URLs${result.truncated ? ` (truncated at ${sitemapMaxUrls.toLocaleString()})` : ''}`,
-            );
-          }
-        } finally {
-          clearTimeout(t);
-        }
-      } catch (err) {
-        this.emit('error', `Sitemap discovery skipped: ${formatFetchError(err)}`);
-      }
-    }
+    // robots.txt + sitemap discovery used to block the crawl start
+    // sequentially (~1–4 s before the first row appeared). Both are now
+    // fire-and-forget. The robots check in enqueue() short-circuits when
+    // `this.robots === null`; by the time the start URL has been fetched
+    // (~500 ms) and outlinks are enqueued, robots.txt has typically
+    // loaded. Both promises are awaited at end-of-crawl so post-crawl
+    // recompute and sitemap-derived issue counts use the full data set.
+    const robotsPromise = this.config.respectRobotsTxt
+      ? loadRobots(origin, this.config.userAgent).then((r) => {
+          if (!this.stopped) this.robots = r;
+        })
+      : Promise.resolve();
+    const sitemapPromise = this.config.discoverSitemaps
+      ? this.discoverAndIngestSitemaps(origin)
+      : Promise.resolve();
 
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
 
@@ -234,6 +209,11 @@ export class Crawler extends EventEmitter {
       // in flight or queued (externals may have been enqueued during internal).
       await this.queue.onIdle();
       await this.externalQueue.onIdle();
+      // robots.txt + sitemap discovery may still be running — wait for
+      // both before the post-crawl recompute so issue filters depending
+      // on `sitemap_urls` (Non-Indexable in Sitemap, Non-200 in Sitemap)
+      // see the full set, and so the robots checker is settled.
+      await Promise.all([robotsPromise, sitemapPromise]);
     } finally {
       if (this.progressTimer) clearInterval(this.progressTimer);
       this.progressTimer = null;
@@ -248,7 +228,9 @@ export class Crawler extends EventEmitter {
     this.seen.clear();
     this.externalSeen.clear();
     this.emitProgress();
-    this.emit('done', this.db.getSummary());
+    // Suppress 'done' if a stop() ran during teardown — otherwise the
+    // zombie crawler's done-event clobbers the new crawl's UI state.
+    if (!this.stopped) this.emit('done', this.db.getSummary());
   }
 
   /**
@@ -275,7 +257,7 @@ export class Crawler extends EventEmitter {
       this.emit('error', 'List mode: urlList is empty (or no entries normalised to valid URLs).');
       this.running = false;
       this.emitProgress();
-      this.emit('done', this.db.getSummary());
+      if (!this.stopped) this.emit('done', this.db.getSummary());
       return;
     }
 
@@ -322,7 +304,63 @@ export class Crawler extends EventEmitter {
     this.seen.clear();
     this.externalSeen.clear();
     this.emitProgress();
-    this.emit('done', this.db.getSummary());
+    if (!this.stopped) this.emit('done', this.db.getSummary());
+  }
+
+  /**
+   * Discover + ingest sitemaps off the critical path. Runs in parallel
+   * with the actual crawl so the user sees rows trickle in immediately
+   * instead of staring at an empty table for 3–4 s while a 20k-URL
+   * sitemap is fetched. Errors are surfaced via 'error' / 'info' events,
+   * never thrown — sitemap discovery is best-effort.
+   */
+  private async discoverAndIngestSitemaps(origin: string): Promise<void> {
+    try {
+      const controller = new AbortController();
+      this.sitemapAbort = controller;
+      // Sitemap discovery is preliminary work — keep its budget bounded
+      // so a slow sitemap server can't stall post-crawl recompute.
+      const t = setTimeout(
+        () => controller.abort(),
+        Math.max(5000, this.config.requestTimeoutMs),
+      );
+      try {
+        const roots = await discoverSitemapUrls(
+          origin,
+          this.config.userAgent,
+          controller.signal,
+        );
+        // If stop() ran while we were discovering, bail without ingesting
+        // — otherwise a zombie 'info' / 'sitemap_urls' write leaks into
+        // whatever crawl ran next.
+        if (this.stopped) return;
+        // Sitemap entry cap follows the crawl-level cap so 1M-URL crawls
+        // can ingest the full sitemap, with a sensible floor for tiny caps.
+        const sitemapMaxUrls = Math.max(50_000, this.config.maxUrls);
+        const result = await fetchSitemaps(roots, {
+          userAgent: this.config.userAgent,
+          signal: controller.signal,
+          timeoutMs: this.config.requestTimeoutMs,
+          maxUrls: sitemapMaxUrls,
+          maxDepth: 3,
+        });
+        if (this.stopped) return;
+        this.db.setSitemapUrls(result.entries);
+        if (result.entries.length > 0) {
+          this.emit(
+            'info',
+            `Sitemap: parsed ${result.sitemapsParsed.length}/${result.sitemapsTried.length}, ${result.entries.length} URLs${result.truncated ? ` (truncated at ${sitemapMaxUrls.toLocaleString()})` : ''}`,
+          );
+        }
+      } finally {
+        clearTimeout(t);
+        this.sitemapAbort = null;
+      }
+    } catch (err) {
+      // Aborts during stop() are expected and not user-visible noise.
+      if (this.stopped) return;
+      this.emit('error', `Sitemap discovery skipped: ${formatFetchError(err)}`);
+    }
   }
 
   private hydrateFromDb(): void {
@@ -427,6 +465,16 @@ export class Crawler extends EventEmitter {
     this.running = false;
     this.paused = false;
     this.stopMemoryMonitor();
+    // Cancel any in-flight sitemap discovery so its 'info' / 'done'
+    // events don't leak into the next crawl.
+    if (this.sitemapAbort) {
+      try {
+        this.sitemapAbort.abort();
+      } catch {
+        /* ignore */
+      }
+      this.sitemapAbort = null;
+    }
     // Drop any queued work. If paused, unblock onIdle() so start() can resolve.
     this.queue.clear();
     this.externalQueue.clear();
