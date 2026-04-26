@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.9] — 2026-04-26
+
+### Added
+- **`[i]` info tooltips on every Settings field** — every input/select/checkbox in the Settings dialog now has a hoverable info icon next to its label. Tooltip surfaces a one-line description plus a concrete "Example" value so the user understands what each setting does without leaving the dialog. Covers all 26 fields across Mode, Crawler, Requests, Include/Exclude, Custom Search, URL Rewriting, and Hardware sections.
+- **`[i]` info tooltips on every table column header** — every column on the Internal/External/Response Codes/URL/Page Titles/Meta Description/H1/H2/Content/Canonicals/Directives/Links views (35 columns total) shows an info icon on hover with a description + example value. Same treatment applied to the Images and Broken Links views. Uses a new shared `InfoTip` component so settings and tables share styling.
+
+### Changed
+- **First row appears in ~1 s instead of ~3-4 s after Start** — sitemap discovery (`fetchSitemaps`) is now fire-and-forget, no longer blocking the start URL from being enqueued. `loadRobots` (robots.txt fetch) is also fire-and-forget — the robots check is fail-open until the file loads (typically <500 ms, well before the first fetched page emits its outlinks). Both promises are awaited at end-of-crawl so post-crawl `recomputeInlinks` and sitemap-derived issue filters see the full data set.
+- **`resolveStartUrl` rewritten as a single auto-follow fetch** — `gamesatis.com` previously took ~2-3 s (HEAD probe + manual `redirect: 'manual'` hop-by-hop GET chain over 1-2 redirects). Replaced with a single `fetch(..., { redirect: 'follow' })` call that lets undici drive the redirect chain at the network layer; typical resolution drops to ~300-800 ms. Probe timeout lowered from 5 s to 3 s.
+- **Live URL-table refresh cadence dropped from 1500 ms to 250 ms** — at 20 RPS the user previously saw ~30 rows arrive in a single 1.5 s lump (felt like the program had stalled). Now ~5 rows arrive every 250 ms, giving a continuous "streaming" feel. Added a leading tick (fires immediately on mount, no 1.5 s dead-window after Start) and an `inFlight` guard that coalesces overlapping ticks at the new cadence.
+
+### Fixed
+- **Stop → Start "pır pır" / flicker eliminated** — when Stop was pressed during a crawl, the in-flight sitemap fetch (5+ s on a 20k-URL sitemap) and the queued `done` event from the just-stopped crawler kept firing into the next crawl's UI, producing rapid Running ↔ Done state flips. Fixed by (1) tracking the sitemap fetch's `AbortController` on the crawler instance and aborting it from `stop()`, (2) gating all `done` emits behind `if (!this.stopped)` in spider/list/early-exit paths, and (3) gating the main process IPC forwards by `activeCrawler === crawler` so a zombie crawler's late `progress` / `done` / `error` / `info` events never reach the renderer.
+
 ## [0.1.8] — 2026-04-26
 
 ### Added
