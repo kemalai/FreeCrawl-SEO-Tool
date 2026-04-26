@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.0] — 2026-04-26
+
+### Added
+- **Near-duplicate / exact duplicate content detection** — every crawled page's body text is fingerprinted with a 64-bit Charikar SimHash over 3-shingles. Post-crawl, a band-based LSH (4 × 16-bit) + Union-Find clustering pass groups pages within a configurable Hamming threshold (Settings → Duplicates; default 3 ≈ 95% similarity, "Only cluster indexable pages" toggle). Surfaces as the **Near-Duplicate Content** issue plus `Cluster ID` / `Cluster Size` columns on the Content tab. **Duplicate Content (exact)** issue layered on top via FNV-1a content-hash collisions.
+- **Hreflang full analysis** — `recomputeHreflangAnalysis` validates BCP-47 / `x-default` codes, computes self-reference, reciprocity (against the in-crawl hreflang graph), and target health. Four new Hreflang issues: **Invalid Code**, **Self-Ref Missing**, **Reciprocity Missing**, **Target Issues** (non-200 / noindex / canonical-away targets).
+- **Sitemap multi-file split + gzip + image / hreflang variants** — exporter auto-shards >50K-URL outputs into `<base>-N.xml` parts under a `<sitemapindex>` wrapper; `gzip: true` writes `.xml.gz`; `variant: 'image'` emits `<image:image>` blocks (Google Images, max 1000/page); `variant: 'hreflang'` emits `<xhtml:link rel="alternate" hreflang>` siblings inside each `<url>`. Built-in `validateSitemap` checks URL count / file size / RFC 3339 lastmod.
+- **Sitemap diff filters** — **Crawled-Not-In-Sitemap** (orphan candidate from sitemap perspective), **Redirect in Sitemap** (3xx specifically, distinct from non-200), plus a `sitemapNotCrawled` count for entries the crawl never reached.
+- **HTML standalone audit report** — File menu → "Export HTML Report…": single-file print-ready report with KPI cards (URLs / Indexable / Avg Response / Total Bytes), severity-ranked Issues table covering 56 issue types, and Top-25 Slowest / Deepest / Outlink-Heavy URL tables. No external assets — emailable / archivable as-is.
+- **Webhook on crawl completion** — Settings → Webhook: any URL receives a single `POST` with crawl summary JSON when the run finishes. 10 s timeout, fire-and-forget so a misconfigured Slack/Zapier endpoint can't break crawl teardown. Status + latency surface as info events.
+- **Custom Extraction (CSS + Regex)** — Settings → Custom Extraction: up to 10 user-defined rules per project. CSS rules (cheerio-driven, reuses the loaded DOM) support text / attribute / inner_html / outer_html / count outputs; regex rules (JS RegExp /g with infinite-loop guard) support whole-match / capture-group-1 / count. Multi-match modes: first / last / all (JSON array) / concat (` | ` joined) / count. Per-rule failures are isolated. Results stored in a single JSON column, surfaced in the URL Details panel as `Extract: <name>` rows and included in CSV / JSON exports.
+- **Compare with Project** (Compare/Diff Mode) — File menu → "Compare With Project…" opens a `.seoproject` and produces a 9-category diff: **Added** (URLs in B not A), **Removed** (URLs in A not B), and field-level changes for **Status / Title / Meta / H1 / Canonical / Indexability / Response Time** (Δ ≥500 ms threshold). Modal shows per-category counts in the sidebar + colour-coded before/after diff table; samples capped at 5K per category for memory.
+- **Site architecture visualization** (`Ctrl+G`) — View → Visualization opens an interactive Cytoscape graph of the internal link structure. Top-N nodes by inlinks (200 / 500 / 1K / 2K / 5K cap), edges between them. Four layouts: **Force-Directed** (cose), **Tree (BFS)**, **Circle**, **Concentric**. Three colour modes: **By Status** (2xx green / 3xx amber / 4xx orange / 5xx red), **By Depth** (bluescale), **By Indexability**. Log-scaled node sizing by inlinks. Hover tooltip surfaces full URL.
+- **Anchor-text word cloud** — sidebar of the Visualization dialog ranks the top 120 internal-link anchors by frequency with log-scaled font sizing across the cloud.
+- **HTTP Basic + Bearer authentication** — Settings → Authentication. Adds `Authorization: Basic <base64>` or `Authorization: Bearer <token>` to every request. User-supplied custom-header `Authorization` still wins for advanced overrides.
+- **Per-project proxy URL override** — Settings → Network. Takes precedence over `HTTPS_PROXY` / `HTTP_PROXY` env vars when non-empty; same syntax (`http://user:pass@host:port`).
+- **File-extension exclude filter** — Settings → Network → "Exclude extensions". Comma-separated list (`pdf, jpg, png, woff2, …`); URLs whose path ends in any of these are dropped at enqueue time. Start URL exempt; query strings ignored.
+- **Configurable max redirect hops** — Settings → Network → "Max redirect hops" (default 10). Each 3xx is still recorded as its own URL row, but the chain stops being followed beyond N hops.
+- **Manual URL injection during crawl** — TopBar **Add URL** button (only visible while running). Clears the seen-flag for re-crawl semantics; respects robots / include-exclude / queue cap.
+- **Save Project As…** (`Ctrl+Shift+S`) — File menu → atomic SQLite `VACUUM INTO` snapshot of the live crawl into a `.seoproject` file. WAL-consistent unlike a plain file copy.
+- **OS notifications** — Electron `Notification` toasts when a crawl completes while the main window isn't focused. Gracefully degrades on Linux distros without a notification daemon.
+
+### Changed
+- **Settings dialog grew to 12 sections** — added **Custom Extraction**, **Authentication**, **Network**, **Duplicates**, **Webhook** entries to the existing Mode / Crawler / Requests / Include-Exclude / Custom Search / URL Rewriting / Hardware. Sidebar search filter covers all of them.
+- **OverviewSidebar issue count rose from ~60 to ~70** — adds a new **Content** group (Thin Content / Near-Duplicate / Duplicate Content) plus the four new Hreflang and two new Sitemap issues.
+- **Sitemap exporter API expanded** — `exportSitemap(db, path, opts)` now accepts `variant` / `gzip` / `splitAtUrlCount` and returns `{ files: string[], urlsWritten, truncated, sharded }` so callers can surface every part file.
+
 ## [0.1.10] — 2026-04-26
 
 ### Changed
