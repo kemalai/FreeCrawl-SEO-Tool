@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.10] — 2026-04-26
+
+### Changed
+- **README rewritten to match current capability surface (v0.1.9)** — feature list synced with the post-0.1.4 reality: 1M-URL target, ~60 issue categories (was 12), full Settings dialog inventory, Hardware throttling section, recent-URLs dropdown, sitemap auto-discovery, list mode, custom search, URL rewriting, JSON export, robots.txt tester, reports dialog, in-app logs, `[i]` info tooltips on every settings field and table column header, live-streaming UX (~1 s first row, 250 ms refresh), pause/resume, retry/backoff, HTTPS_PROXY support, Happy Eyeballs, mixed-content scan, security-header audit, JSON-LD / OpenGraph / Twitter Card / hreflang / pagination extraction, redirect-chain resolution.
+- **Added [freecrawl.net](https://freecrawl.net/) website link** — surfaced in the README header and a new Links section.
+
 ## [0.1.9] — 2026-04-26
 
 ### Added
