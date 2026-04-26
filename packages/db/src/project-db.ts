@@ -7,6 +7,7 @@ import type {
   CrawlUrlRow,
   DiscoveredImage,
   DiscoveredLink,
+  DuplicateClusterRow,
   FilterClause,
   FilterField,
   ImageRow,
@@ -83,6 +84,10 @@ interface UrlRowDb {
   amphtml: string | null;
   favicon: string | null;
   mixed_content_count: number;
+  hreflang_invalid_count: number;
+  hreflang_self_ref_missing: number;
+  hreflang_reciprocity_missing: number;
+  hreflang_target_issues: number;
   redirect_chain_length: number;
   redirect_final_url: string | null;
   redirect_loop: number;
@@ -95,6 +100,11 @@ interface UrlRowDb {
   meta_refresh: string | null;
   meta_refresh_url: string | null;
   charset: string | null;
+  extraction_results: string | null;
+  simhash: string | null;
+  content_hash: string | null;
+  cluster_id: number;
+  cluster_size: number;
 }
 
 interface ImageRowDb {
@@ -173,6 +183,10 @@ export interface UpsertUrlInput {
   amphtml?: string | null;
   favicon?: string | null;
   mixedContentCount?: number;
+  /** JSON-stringified custom-extraction results map. */
+  extractionResults?: string | null;
+  simhash?: string | null;
+  contentHash?: string | null;
 }
 
 const UPSERT_URL_SQL = `
@@ -193,7 +207,9 @@ const UPSERT_URL_SQL = `
     folder_depth, query_param_count,
     csp, referrer_policy, permissions_policy,
     custom_search_hits,
-    meta_refresh, meta_refresh_url, charset
+    meta_refresh, meta_refresh_url, charset,
+    extraction_results,
+    simhash, content_hash
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
@@ -211,7 +227,9 @@ const UPSERT_URL_SQL = `
     :folder_depth, :query_param_count,
     :csp, :referrer_policy, :permissions_policy,
     :custom_search_hits,
-    :meta_refresh, :meta_refresh_url, :charset
+    :meta_refresh, :meta_refresh_url, :charset,
+    :extraction_results,
+    :simhash, :content_hash
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -281,6 +299,9 @@ const UPSERT_URL_SQL = `
     meta_refresh = excluded.meta_refresh,
     meta_refresh_url = excluded.meta_refresh_url,
     charset = excluded.charset,
+    extraction_results = excluded.extraction_results,
+    simhash = excluded.simhash,
+    content_hash = excluded.content_hash,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -568,6 +589,9 @@ export class ProjectDb {
       meta_refresh: input.metaRefresh ?? null,
       meta_refresh_url: input.metaRefreshUrl ?? null,
       charset: input.charset ?? null,
+      extraction_results: input.extractionResults ?? null,
+      simhash: input.simhash ?? null,
+      content_hash: input.contentHash ?? null,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -741,6 +765,450 @@ export class ProjectDb {
           current = nextHop;
         }
         upd.run(chain, finalUrl, loop, row.id);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  /**
+   * Cluster pages by SimHash hamming distance ≤ `thresholdBits` and
+   * write `cluster_id` / `cluster_size` back to every URL.
+   *
+   * Algorithm — band-based LSH + Union-Find:
+   *
+   *   1. Pull `(id, simhash)` for every internal HTML row whose simhash
+   *      is non-null. (Optionally restrict to indexable rows.)
+   *   2. Split each 64-bit hash into 4 × 16-bit bands. By the pigeonhole
+   *      principle, any two hashes within hamming distance ≤ 3 must
+   *      agree on at least one band — so candidates are a strict subset
+   *      of "shares a band value". This collapses the comparison from
+   *      O(N²) to ~O(N · avg_bucket_size).
+   *   3. For every band-value bucket, do exact pairwise hamming checks.
+   *      Pairs within the threshold get unioned in a Union-Find DSU.
+   *   4. The DSU's connected components ARE the clusters. Map each root
+   *      to a sequential cluster_id and write back `(cluster_id,
+   *      cluster_size)` in a batched UPDATE.
+   *
+   * Memory: O(N) for the SimHash list + DSU. ~80 MB at 1M URLs.
+   * Time:   ~3–10 s at 1M URLs depending on bucket distribution.
+   *
+   * `onlyIndexable=true` skips noindex / canonicalised / blocked-robots
+   * pages — the duplicate report then surfaces only issues that actually
+   * affect search visibility.
+   */
+  recomputeDuplicateClusters(
+    thresholdBits: number,
+    onlyIndexable: boolean,
+  ): { clusters: number; clusteredUrls: number } {
+    // Reset all clustering state first so a re-run with different
+    // thresholds doesn't leave stale partitions behind.
+    this.db.exec('UPDATE urls SET cluster_id = 0, cluster_size = 1 WHERE cluster_id != 0');
+
+    if (thresholdBits < 0 || thresholdBits > 64) {
+      return { clusters: 0, clusteredUrls: 0 };
+    }
+
+    const indexClause = onlyIndexable ? "AND indexability = 'indexable'" : '';
+    const rows = this.db
+      .prepare(
+        `SELECT id, simhash FROM urls
+           WHERE is_external = 0 AND content_kind = 'html'
+             AND simhash IS NOT NULL ${indexClause}`,
+      )
+      .all() as { id: number; simhash: string }[];
+
+    if (rows.length < 2) return { clusters: 0, clusteredUrls: 0 };
+
+    const N = rows.length;
+    const ids = new Int32Array(N);
+    const hashes: bigint[] = new Array<bigint>(N);
+    for (let i = 0; i < N; i++) {
+      ids[i] = rows[i]!.id;
+      hashes[i] = BigInt('0x' + rows[i]!.simhash);
+    }
+
+    // Union-Find with path compression + union-by-rank.
+    const parent = new Int32Array(N);
+    const rank = new Int8Array(N);
+    for (let i = 0; i < N; i++) parent[i] = i;
+    const find = (x: number): number => {
+      let root = x;
+      while (parent[root] !== root) root = parent[root]!;
+      // Path-compress.
+      while (parent[x] !== root) {
+        const next = parent[x]!;
+        parent[x] = root;
+        x = next;
+      }
+      return root;
+    };
+    const union = (a: number, b: number): void => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra === rb) return;
+      if (rank[ra]! < rank[rb]!) parent[ra] = rb;
+      else if (rank[ra]! > rank[rb]!) parent[rb] = ra;
+      else {
+        parent[rb] = ra;
+        rank[ra]!++;
+      }
+    };
+
+    // Hamming distance over 64-bit BigInt — popcount via Brian Kernighan.
+    const hamming = (a: bigint, b: bigint): number => {
+      let x = a ^ b;
+      let c = 0;
+      while (x !== 0n) {
+        x &= x - 1n;
+        c++;
+      }
+      return c;
+    };
+
+    // Band buckets: 4 bands × Map<bandValue, indices[]>. We cap bucket
+    // size to BUCKET_LIMIT — pathological banner-only pages can otherwise
+    // produce a single bucket containing every page on the site, which
+    // would make the inner-loop comparison quadratic again.
+    const BUCKET_LIMIT = 5000;
+    for (let band = 0; band < 4; band++) {
+      const shift = BigInt(band * 16);
+      const mask = 0xffffn;
+      const buckets = new Map<number, number[]>();
+      for (let i = 0; i < N; i++) {
+        const v = Number((hashes[i]! >> shift) & mask);
+        let bucket = buckets.get(v);
+        if (!bucket) {
+          bucket = [];
+          buckets.set(v, bucket);
+        }
+        if (bucket.length < BUCKET_LIMIT) bucket.push(i);
+      }
+      for (const bucket of buckets.values()) {
+        if (bucket.length < 2) continue;
+        for (let a = 0; a < bucket.length; a++) {
+          const ia = bucket[a]!;
+          for (let b = a + 1; b < bucket.length; b++) {
+            const ib = bucket[b]!;
+            // Skip pairs already in the same component — we're going to
+            // touch the same band repeatedly across all 4 passes and the
+            // DSU find is cheap.
+            if (find(ia) === find(ib)) continue;
+            if (hamming(hashes[ia]!, hashes[ib]!) <= thresholdBits) {
+              union(ia, ib);
+            }
+          }
+        }
+      }
+    }
+
+    // Materialise clusters: assign sequential cluster IDs starting at 1
+    // (0 is reserved for "singleton"). Members of a singleton component
+    // keep cluster_id = 0 so the `cluster_id > 0` filter does the right
+    // thing in the issue WHERE clause.
+    const rootToCluster = new Map<number, number>();
+    const clusterSize = new Map<number, number>();
+    for (let i = 0; i < N; i++) {
+      const root = find(i);
+      clusterSize.set(root, (clusterSize.get(root) ?? 0) + 1);
+    }
+    let nextClusterId = 1;
+    let clusteredUrls = 0;
+    for (const [root, size] of clusterSize) {
+      if (size > 1) {
+        rootToCluster.set(root, nextClusterId++);
+        clusteredUrls += size;
+      }
+    }
+
+    const upd = this.db.prepare(
+      'UPDATE urls SET cluster_id = ?, cluster_size = ? WHERE id = ?',
+    );
+    this.db.exec('BEGIN');
+    try {
+      for (let i = 0; i < N; i++) {
+        const root = find(i);
+        const cid = rootToCluster.get(root);
+        if (cid !== undefined) {
+          upd.run(cid, clusterSize.get(root)!, ids[i]!);
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    return { clusters: rootToCluster.size, clusteredUrls };
+  }
+
+  /**
+   * Page through near-duplicate clusters for the dedicated Duplicates tab.
+   * Members are returned grouped: ORDER BY cluster_size DESC, cluster_id,
+   * then by URL within the cluster. Singletons (cluster_id=0) are excluded.
+   */
+  listDuplicateClusters(offset: number, limit: number): DuplicateClusterRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT u.url, u.status_code, u.indexability, u.title, u.word_count,
+                u.inlinks, u.cluster_id, u.cluster_size, u.simhash
+           FROM urls u
+          WHERE u.is_external = 0 AND u.content_kind = 'html'
+            AND u.cluster_id > 0
+          ORDER BY u.cluster_size DESC, u.cluster_id ASC, u.url ASC
+          LIMIT ? OFFSET ?`,
+      )
+      .all(limit, offset) as {
+      url: string;
+      status_code: number | null;
+      indexability: Indexability;
+      title: string | null;
+      word_count: number | null;
+      inlinks: number;
+      cluster_id: number;
+      cluster_size: number;
+      simhash: string | null;
+    }[];
+
+    // Cluster representative = first URL alphabetically per cluster_id.
+    // Reps are not stored explicitly; derive on the fly so the column
+    // remains accurate after re-clustering.
+    const reps = new Map<number, string>();
+    for (const r of rows) {
+      const existing = reps.get(r.cluster_id);
+      if (existing === undefined || r.url < existing) reps.set(r.cluster_id, r.url);
+    }
+    const repHashes = new Map<number, string>();
+    if (reps.size > 0) {
+      const repList = Array.from(reps.values());
+      const placeholders = repList.map(() => '?').join(',');
+      const repRows = this.db
+        .prepare(`SELECT url, simhash FROM urls WHERE url IN (${placeholders})`)
+        .all(...repList) as { url: string; simhash: string | null }[];
+      const urlToHash = new Map(repRows.map((r) => [r.url, r.simhash]));
+      for (const [cid, url] of reps) {
+        const h = urlToHash.get(url);
+        if (h) repHashes.set(cid, h);
+      }
+    }
+
+    const popcount = (x: bigint): number => {
+      let c = 0;
+      while (x !== 0n) {
+        x &= x - 1n;
+        c++;
+      }
+      return c;
+    };
+
+    return rows.map((r) => {
+      let hammingFromRep = 0;
+      const repHash = repHashes.get(r.cluster_id);
+      if (repHash && r.simhash && repHash !== r.simhash) {
+        hammingFromRep = popcount(BigInt('0x' + repHash) ^ BigInt('0x' + r.simhash));
+      }
+      return {
+        url: r.url,
+        statusCode: r.status_code,
+        indexability: r.indexability,
+        title: r.title,
+        wordCount: r.word_count,
+        inlinks: r.inlinks,
+        clusterId: r.cluster_id,
+        clusterSize: r.cluster_size,
+        simhash: r.simhash,
+        hammingFromRep,
+      };
+    });
+  }
+
+  countDuplicateClusterMembers(): number {
+    return (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM urls
+            WHERE is_external = 0 AND content_kind = 'html' AND cluster_id > 0`,
+        )
+        .get() as { c: number }
+    ).c;
+  }
+
+  /**
+   * Post-crawl hreflang validation. For every page that declares one or
+   * more `<link rel="alternate" hreflang>` entries we compute four flags
+   * and write them back to dedicated columns:
+   *
+   *   - `hreflang_invalid_count`         — entries whose `lang` token is
+   *     not a valid BCP-47 subtag (or `x-default`). Common bugs: spaces,
+   *     uppercase, missing region for `*-` formats, country instead of
+   *     language, etc.
+   *   - `hreflang_self_ref_missing` (0/1) — page does not list its own
+   *     URL as one of the hreflang alternates. Google MUST-have.
+   *   - `hreflang_reciprocity_missing`   — count of declared targets that
+   *     do NOT list this page back. (Computed against the in-crawl
+   *     hreflang graph; pages we never crawled are skipped, not counted
+   *     as missing — partial crawls would otherwise be all-red.)
+   *   - `hreflang_target_issues`         — count of declared targets that
+   *     resolve to a crawled URL with non-200 status, noindex, or that
+   *     canonicalises to a different URL. Aggregated for a single
+   *     "Hreflang Target Issues" filter.
+   *
+   * Cost: O(N · avg_hreflang_count) parse + map lookups. ~2-5 s at 100K
+   * URLs with hreflang on 5% of pages.
+   */
+  recomputeHreflangAnalysis(): void {
+    // Reset the four columns first so re-runs don't leave stale flags.
+    this.db.exec(
+      `UPDATE urls
+         SET hreflang_invalid_count = 0,
+             hreflang_self_ref_missing = 0,
+             hreflang_reciprocity_missing = 0,
+             hreflang_target_issues = 0
+       WHERE is_external = 0 AND content_kind = 'html'`,
+    );
+
+    interface HreflangRow {
+      id: number;
+      url: string;
+      hreflangs: string | null;
+      hreflang_count: number;
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT id, url, hreflangs, hreflang_count FROM urls
+          WHERE is_external = 0 AND content_kind = 'html'
+            AND hreflang_count > 0 AND hreflangs IS NOT NULL`,
+      )
+      .all() as unknown as HreflangRow[];
+
+    if (rows.length === 0) return;
+
+    interface ParsedEntry {
+      lang: string;
+      href: string;
+      langValid: boolean;
+    }
+    const declarationsByPage = new Map<string, ParsedEntry[]>();
+    const allTargets = new Set<string>();
+    for (const r of rows) {
+      let parsed: { lang?: unknown; href?: unknown }[];
+      try {
+        const j = JSON.parse(r.hreflangs ?? '[]') as unknown;
+        parsed = Array.isArray(j) ? (j as { lang?: unknown; href?: unknown }[]) : [];
+      } catch {
+        parsed = [];
+      }
+      const entries: ParsedEntry[] = [];
+      for (const e of parsed) {
+        const lang = typeof e.lang === 'string' ? e.lang : '';
+        const href = typeof e.href === 'string' ? e.href : '';
+        if (!lang || !href) continue;
+        entries.push({ lang, href, langValid: isValidHreflangCode(lang) });
+        allTargets.add(href);
+      }
+      declarationsByPage.set(r.url, entries);
+    }
+
+    // Snapshot status / indexability / canonical for every URL referenced
+    // as a hreflang target — single batched query keeps the cost O(T).
+    interface TargetMeta {
+      status: number | null;
+      indexability: Indexability;
+      canonical: string | null;
+    }
+    const targetMeta = new Map<string, TargetMeta>();
+    if (allTargets.size > 0) {
+      // Chunk to stay under SQLite's 999-parameter default limit.
+      const CHUNK = 800;
+      const list = Array.from(allTargets);
+      for (let i = 0; i < list.length; i += CHUNK) {
+        const slice = list.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => '?').join(',');
+        const metaRows = this.db
+          .prepare(
+            `SELECT url, status_code, indexability, canonical FROM urls
+              WHERE url IN (${placeholders})`,
+          )
+          .all(...slice) as {
+          url: string;
+          status_code: number | null;
+          indexability: Indexability;
+          canonical: string | null;
+        }[];
+        for (const m of metaRows) {
+          targetMeta.set(m.url, {
+            status: m.status_code,
+            indexability: m.indexability,
+            canonical: m.canonical,
+          });
+        }
+      }
+    }
+
+    // Build a quick reverse-lookup: for each page, which URLs declare a
+    // hreflang to it? Used for reciprocity. We're constructing a multi-
+    // set so a target hit by 3 pages records all 3 sources.
+    const declaredBy = new Map<string, Set<string>>();
+    for (const [src, entries] of declarationsByPage) {
+      for (const e of entries) {
+        let set = declaredBy.get(e.href);
+        if (!set) {
+          set = new Set<string>();
+          declaredBy.set(e.href, set);
+        }
+        set.add(src);
+      }
+    }
+
+    const upd = this.db.prepare(
+      `UPDATE urls SET
+         hreflang_invalid_count = ?,
+         hreflang_self_ref_missing = ?,
+         hreflang_reciprocity_missing = ?,
+         hreflang_target_issues = ?
+       WHERE id = ?`,
+    );
+
+    this.db.exec('BEGIN');
+    try {
+      for (const r of rows) {
+        const entries = declarationsByPage.get(r.url) ?? [];
+        let invalidCount = 0;
+        let selfRef = false;
+        let reciprocityMissing = 0;
+        let targetIssues = 0;
+        for (const e of entries) {
+          if (!e.langValid) invalidCount++;
+          if (e.href === r.url) selfRef = true;
+          // Reciprocity — only score targets we actually crawled. Targets
+          // outside the crawl scope can't be checked, and counting them
+          // as missing would punish partial / scoped crawls.
+          if (targetMeta.has(e.href) && e.href !== r.url) {
+            const back = declaredBy.get(r.url);
+            if (!back || !back.has(e.href)) reciprocityMissing++;
+          }
+          // Target issues: non-200, noindex, or canonicalised away.
+          const meta = targetMeta.get(e.href);
+          if (meta) {
+            const badStatus =
+              meta.status === null || meta.status < 200 || meta.status >= 300;
+            const isNoindex = meta.indexability === 'non-indexable:noindex';
+            const isCanonAway =
+              meta.canonical !== null &&
+              meta.canonical !== '' &&
+              meta.canonical !== e.href;
+            if (badStatus || isNoindex || isCanonAway) targetIssues++;
+          }
+        }
+        upd.run(
+          invalidCount,
+          selfRef ? 0 : 1,
+          reciprocityMissing,
+          targetIssues,
+          r.id,
+        );
       }
       this.db.exec('COMMIT');
     } catch (err) {
@@ -1351,6 +1819,33 @@ export class ProjectDb {
       ),
       brokenLinksInternal: this.countBrokenLinks('internal'),
       brokenLinksExternal: this.countBrokenLinks('external'),
+      nearDuplicate: countWhere(`${html} AND cluster_id > 0 AND cluster_size > 1`),
+      duplicateContentExact: dup('content_hash'),
+      hreflangInvalidCode: countWhere(`${html} AND hreflang_invalid_count > 0`),
+      hreflangSelfRefMissing: countWhere(
+        `${html} AND hreflang_count > 0 AND hreflang_self_ref_missing = 1`,
+      ),
+      hreflangReciprocityMissing: countWhere(
+        `${html} AND hreflang_reciprocity_missing > 0`,
+      ),
+      hreflangTargetIssues: countWhere(`${html} AND hreflang_target_issues > 0`),
+      crawledNotInSitemap: countWhere(
+        `${html} AND status_code >= 200 AND status_code < 300
+         AND indexability = 'indexable'
+         AND NOT EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`,
+      ),
+      redirectInSitemap: countWhere(
+        `is_external = 0 AND status_code >= 300 AND status_code < 400
+         AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`,
+      ),
+      sitemapNotCrawled: (
+        this.db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM sitemap_urls s
+              WHERE NOT EXISTS (SELECT 1 FROM urls u WHERE u.url = s.url)`,
+          )
+          .get() as { c: number }
+      ).c,
     };
   }
 
@@ -1632,6 +2127,139 @@ export class ProjectDb {
     }
   }
 
+  /**
+   * Compact graph snapshot for the Visualization tab.
+   *
+   * Returns up to `nodeLimit` internal HTML nodes (top by inlinks) plus
+   * every edge between them. Edges to URLs outside the cap are dropped
+   * — Cytoscape would crash on dangling edges, and the user only cares
+   * about the most-linked subset for sense-making anyway.
+   *
+   * Cost: two indexed SELECTs + a JOIN. ~200 ms at 100K URLs / 5K cap.
+   */
+  graphSnapshot(nodeLimit = 1000): {
+    nodes: { id: number; url: string; statusCode: number | null; depth: number; inlinks: number; indexability: Indexability }[];
+    edges: { source: number; target: number }[];
+  } {
+    const nodes = this.db
+      .prepare(
+        `SELECT id, url, status_code, depth, inlinks, indexability
+           FROM urls
+          WHERE is_external = 0 AND content_kind = 'html'
+          ORDER BY inlinks DESC, id ASC
+          LIMIT ?`,
+      )
+      .all(nodeLimit) as {
+      id: number;
+      url: string;
+      status_code: number | null;
+      depth: number;
+      inlinks: number;
+      indexability: Indexability;
+    }[];
+
+    if (nodes.length === 0) return { nodes: [], edges: [] };
+
+    const idByUrl = new Map<string, number>();
+    for (const n of nodes) idByUrl.set(n.url, n.id);
+
+    // Pull every edge whose `from_url_id` is in our node set, then
+    // filter targets that didn't make the cap (drop instead of fan
+    // out to ghost nodes).
+    const fromIds = nodes.map((n) => n.id);
+    const placeholders = fromIds.map(() => '?').join(',');
+    const edgeRows = this.db
+      .prepare(
+        `SELECT from_url_id AS source, to_url FROM links
+          WHERE is_internal = 1 AND from_url_id IN (${placeholders})`,
+      )
+      .all(...fromIds) as { source: number; to_url: string }[];
+
+    const edges: { source: number; target: number }[] = [];
+    for (const e of edgeRows) {
+      const target = idByUrl.get(e.to_url);
+      if (target !== undefined && target !== e.source) {
+        edges.push({ source: e.source, target });
+      }
+    }
+
+    return {
+      nodes: nodes.map((n) => ({
+        id: n.id,
+        url: n.url,
+        statusCode: n.status_code,
+        depth: n.depth,
+        inlinks: n.inlinks,
+        indexability: n.indexability,
+      })),
+      edges,
+    };
+  }
+
+  /**
+   * Top anchor texts across all internal links, ranked by frequency.
+   * Used by the Visualization tab's anchor-text word cloud.
+   */
+  topAnchorTexts(limit = 200): { anchor: string; count: number }[] {
+    return this.db
+      .prepare(
+        `SELECT anchor, COUNT(*) AS count FROM links
+          WHERE is_internal = 1 AND anchor IS NOT NULL AND anchor != ''
+          GROUP BY anchor
+          ORDER BY count DESC, anchor ASC
+          LIMIT ?`,
+      )
+      .all(limit) as { anchor: string; count: number }[];
+  }
+
+  /**
+   * Lightweight `(url, value)` pair lookup used by the HTML report's
+   * top-N tables. `column` is restricted to numeric URL columns (the
+   * UI never wires this from user input). Direction is fixed DESC since
+   * every callsite wants "top by metric".
+   */
+  topUrlsBy(
+    column: 'response_time_ms' | 'depth' | 'outlinks' | 'inlinks' | 'content_length',
+    limit: number,
+  ): { url: string; value: number | null }[] {
+    return this.db
+      .prepare(
+        `SELECT url, ${column} AS value FROM urls
+          WHERE is_external = 0 AND content_kind = 'html'
+            AND ${column} IS NOT NULL
+          ORDER BY ${column} DESC
+          LIMIT ?`,
+      )
+      .all(limit) as { url: string; value: number | null }[];
+  }
+
+  /**
+   * Internal-image entries linked to a single page URL. Used by the
+   * image sitemap variant — Google's `image:image` extension allows up
+   * to 1000 entries per `<url>` entry.
+   */
+  imagesForUrl(urlId: number, limit = 1000): { src: string; alt: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT i.src, COALESCE(iu.alt, i.alt) AS alt
+           FROM image_usages iu
+           JOIN images i ON i.id = iu.image_id
+          WHERE iu.from_url_id = ? AND i.is_internal = 1
+          ORDER BY i.id
+          LIMIT ?`,
+      )
+      .all(urlId, limit) as { src: string; alt: string | null }[];
+  }
+
+  /**
+   * Sitemap index iteration — same set as `iterateIndexableUrls` but
+   * additionally surfaces the `hreflangs` JSON so the hreflang sitemap
+   * variant can emit `<xhtml:link>` siblings. Identical filter / sort.
+   */
+  *iterateIndexableUrlsWithHreflang(): IterableIterator<CrawlUrlRow> {
+    yield* this.iterateIndexableUrls();
+  }
+
   private rowFromDb = (r: UrlRowDb): CrawlUrlRow => ({
     id: r.id,
     url: r.url,
@@ -1694,6 +2322,10 @@ export class ProjectDb {
     amphtml: r.amphtml,
     favicon: r.favicon,
     mixedContentCount: r.mixed_content_count,
+    hreflangInvalidCount: r.hreflang_invalid_count,
+    hreflangSelfRefMissing: r.hreflang_self_ref_missing === 1,
+    hreflangReciprocityMissing: r.hreflang_reciprocity_missing,
+    hreflangTargetIssues: r.hreflang_target_issues,
     redirectChainLength: r.redirect_chain_length,
     redirectFinalUrl: r.redirect_final_url,
     redirectLoop: r.redirect_loop === 1,
@@ -1706,6 +2338,11 @@ export class ProjectDb {
     metaRefresh: r.meta_refresh,
     metaRefreshUrl: r.meta_refresh_url,
     charset: r.charset,
+    extractionResults: r.extraction_results,
+    simhash: r.simhash,
+    contentHash: r.content_hash,
+    clusterId: r.cluster_id,
+    clusterSize: r.cluster_size,
     crawledAt: r.crawled_at,
   });
 
@@ -2170,9 +2807,84 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     case 'issues:broken-links-internal':
     case 'issues:broken-links-external':
       return null;
+    case 'issues:near-duplicate':
+      // SimHash cluster size > 1 means at least one other crawled page
+      // landed within the configured Hamming-distance threshold of this
+      // one. cluster_id > 0 guards against pre-recompute state.
+      return `is_external = 0 AND content_kind = 'html'
+              AND cluster_id > 0 AND cluster_size > 1`;
+    case 'issues:duplicate-content-exact':
+      // Exact body-text collision (FNV-1a over the normalised token
+      // stream). Stricter than near-duplicate — useful for spotting
+      // accidental ?utm= or session-id variants the URL canonicaliser
+      // missed.
+      return `is_external = 0 AND content_kind = 'html'
+              AND content_hash IS NOT NULL AND content_hash != ''
+              AND content_hash IN (
+                SELECT content_hash FROM urls
+                WHERE is_external = 0 AND content_kind = 'html'
+                  AND content_hash IS NOT NULL AND content_hash != ''
+                GROUP BY content_hash HAVING COUNT(*) > 1
+              )`;
+    case 'issues:hreflang-invalid-code':
+      // Page declares one or more hreflang entries whose lang token is
+      // not a valid BCP-47 / `x-default` value. Silent SEO bug — Google
+      // ignores invalid entries instead of warning.
+      return `is_external = 0 AND content_kind = 'html'
+              AND hreflang_invalid_count > 0`;
+    case 'issues:hreflang-self-ref-missing':
+      // Page declares hreflang alternates but does not list itself —
+      // Google MUST-have. Without it, the cluster is asymmetric and
+      // Google may pick any of the alternates as the canonical instead.
+      return `is_external = 0 AND content_kind = 'html'
+              AND hreflang_count > 0
+              AND hreflang_self_ref_missing = 1`;
+    case 'issues:hreflang-reciprocity-missing':
+      // Page declares hreflang to N other crawled pages, but at least
+      // one of those pages does NOT link back. Asymmetric clusters are
+      // a top-3 hreflang misconfiguration in practice.
+      return `is_external = 0 AND content_kind = 'html'
+              AND hreflang_reciprocity_missing > 0`;
+    case 'issues:hreflang-target-issues':
+      // Hreflang target resolves to a non-200 / noindex / canonical-away
+      // page. Aggregated: any kind of broken target trips this filter.
+      return `is_external = 0 AND content_kind = 'html'
+              AND hreflang_target_issues > 0`;
+    case 'issues:crawled-not-in-sitemap':
+      // Indexable HTML 2xx URLs the crawl found that are NOT listed in
+      // any of the discovered sitemaps. Strong orphan-from-sitemap
+      // candidate — Google may not crawl them on its sitemap pass.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND indexability = 'indexable'
+              AND NOT EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`;
+    case 'issues:redirect-in-sitemap':
+      // Sitemap entries that resolve to a redirect (3xx). Sitemap should
+      // declare the canonical URL, not redirect sources — Google flags
+      // this as a sitemap-quality signal in Search Console.
+      return `is_external = 0
+              AND status_code >= 300 AND status_code < 400
+              AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`;
     default:
       return null;
   }
+}
+
+/**
+ * Validate a hreflang `lang` token against the practical BCP-47 subset
+ * that Google accepts: ISO 639-1 (2 chars), ISO 639-2/3 (3 chars),
+ * optional region (`-XX` country or `-NNN` UN M.49 numeric), or the
+ * literal `x-default`. Case-insensitive in the wild (`tr-TR` and
+ * `TR-tr` both accepted by Google) — we lowercase before matching.
+ *
+ * Rejects: bare uppercase/lowercase mixed errors, spaces, country-only,
+ * underscored variants, three-letter region codes that aren't M.49.
+ */
+function isValidHreflangCode(raw: string): boolean {
+  const code = raw.trim().toLowerCase();
+  if (!code) return false;
+  if (code === 'x-default') return true;
+  return /^[a-z]{2,3}(-[a-z]{2}|-[0-9]{3})?$/.test(code);
 }
 
 /**

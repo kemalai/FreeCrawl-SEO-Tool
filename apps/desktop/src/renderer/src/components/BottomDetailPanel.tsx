@@ -257,6 +257,7 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Folder Depth', row.folderDepth],
     ['Query Param Count', row.queryParamCount > 0 ? row.queryParamCount : null],
     ...customSearchRows(row.customSearchHits),
+    ...extractionRows(row.extractionResults),
     ['Crawl Depth', row.depth],
     ['Inlinks', row.inlinks],
     ['Outlinks', row.outlinks],
@@ -813,6 +814,35 @@ function httpStatusText(code: number): string {
  * search term (`Custom: <term>` → `<count>`). Returns an empty array on
  * absent or malformed JSON so the surrounding row list isn't disturbed.
  */
+/**
+ * Expand the `extraction_results` JSON into one detail-panel row per
+ * configured rule (`Extract: <name>` → `<value>`). Arrays are joined
+ * with " | " for compact display; objects are pretty-stringified.
+ * Empty array on absent / malformed JSON.
+ */
+function extractionRows(
+  json: string | null,
+): [string, string | number | null][] {
+  if (!json) return [];
+  try {
+    const obj = JSON.parse(json) as Record<string, unknown>;
+    if (!obj || typeof obj !== 'object') return [];
+    const out: [string, string | number | null][] = [];
+    for (const [name, raw] of Object.entries(obj)) {
+      let display: string | number | null = null;
+      if (raw === null || raw === undefined) display = null;
+      else if (typeof raw === 'string') display = raw;
+      else if (typeof raw === 'number') display = raw;
+      else if (Array.isArray(raw)) display = raw.map(String).join(' | ');
+      else display = JSON.stringify(raw);
+      out.push([`Extract: ${name}`, display]);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function customSearchRows(
   json: string | null,
 ): [string, number | null][] {

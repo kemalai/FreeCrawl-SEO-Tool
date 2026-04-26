@@ -8,6 +8,8 @@ import { BottomDetailPanel } from './components/BottomDetailPanel.js';
 import { RobotsTesterDialog } from './components/RobotsTesterDialog.js';
 import { ReportsDialog } from './components/ReportsDialog.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
+import { CompareDialog } from './components/CompareDialog.js';
+import { VisualizationDialog } from './components/VisualizationDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
@@ -30,6 +32,8 @@ export function App() {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [visualizationOpen, setVisualizationOpen] = useState(false);
 
   // Redirect react-resizable-panels' persistence away from localStorage and
   // into our JSON prefs file so layout survives Clear (which wipes crawl
@@ -83,6 +87,18 @@ export function App() {
           break;
         case 'generate-sitemap':
           void window.freecrawl.sitemapGenerate({ filePath: '' });
+          break;
+        case 'export-html-report':
+          void window.freecrawl.exportHtmlReport({ filePath: '' });
+          break;
+        case 'compare-with-project':
+          setCompareOpen(true);
+          break;
+        case 'save-project-as':
+          void window.freecrawl.projectSaveAs();
+          break;
+        case 'open-visualization':
+          setVisualizationOpen(true);
           break;
       }
     });
@@ -162,6 +178,11 @@ export function App() {
       />
       <ReportsDialog open={reportsOpen} onClose={() => setReportsOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <CompareDialog open={compareOpen} onClose={() => setCompareOpen(false)} />
+      <VisualizationDialog
+        open={visualizationOpen}
+        onClose={() => setVisualizationOpen(false)}
+      />
     </div>
   );
 }

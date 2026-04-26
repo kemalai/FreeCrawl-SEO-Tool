@@ -6,6 +6,7 @@ import type {
   CrawlSummary,
   CrawlUrlRow,
   ImageRow,
+  Indexability,
   OverviewCounts,
   UrlCategory,
   UrlDetail,
@@ -17,6 +18,8 @@ export const IPC = {
   crawlPause: 'crawl:pause',
   crawlResume: 'crawl:resume',
   crawlClear: 'crawl:clear',
+  crawlAddUrl: 'crawl:add-url',
+  projectSaveAs: 'project:save-as',
   crawlProgress: 'crawl:progress',
   crawlDone: 'crawl:done',
   crawlError: 'crawl:error',
@@ -30,6 +33,10 @@ export const IPC = {
   summaryGet: 'summary:get',
   exportCsv: 'export:csv',
   exportJson: 'export:json',
+  exportHtmlReport: 'export:html-report',
+  compareLoad: 'compare:load',
+  graphSnapshot: 'graph:snapshot',
+  topAnchorTexts: 'graph:anchor-texts',
   sitemapGenerate: 'sitemap:generate',
   menuEvent: 'menu:event',
   dataChanged: 'data:changed',
@@ -105,6 +112,10 @@ export type MenuEvent =
   | 'toggle-detail-panel'
   | 'export-csv'
   | 'export-json'
+  | 'export-html-report'
+  | 'compare-with-project'
+  | 'save-project-as'
+  | 'open-visualization'
   | 'generate-sitemap'
   | 'open-robots-tester'
   | 'open-reports'
@@ -129,14 +140,95 @@ export interface ExportJsonResult {
   rowsWritten: number;
 }
 
+export interface ExportHtmlReportInput {
+  filePath: string;
+}
+
+export interface ExportHtmlReportResult {
+  filePath: string;
+  bytesWritten: number;
+}
+
+export type CompareCategory =
+  | 'added'
+  | 'removed'
+  | 'status'
+  | 'title'
+  | 'meta'
+  | 'h1'
+  | 'canonical'
+  | 'indexability'
+  | 'response_time';
+
+export interface CompareDiffRow {
+  url: string;
+  category: CompareCategory;
+  before: string | null;
+  after: string | null;
+}
+
+export interface CompareLoadInput {
+  /** Optional path; empty triggers an Open File dialog. */
+  filePath?: string;
+}
+
+export interface CompareLoadResult {
+  /** Empty when the user cancelled the file dialog. */
+  filePath: string;
+  totalA: number;
+  totalB: number;
+  counts: Record<CompareCategory, number>;
+  samples: CompareDiffRow[];
+}
+
+export interface GraphNode {
+  id: number;
+  url: string;
+  statusCode: number | null;
+  depth: number;
+  inlinks: number;
+  indexability: Indexability;
+}
+
+export interface GraphEdge {
+  source: number;
+  target: number;
+}
+
+export interface GraphSnapshotInput {
+  nodeLimit?: number;
+}
+
+export interface GraphSnapshotResult {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface AnchorTextRow {
+  anchor: string;
+  count: number;
+}
+
 export interface SitemapGenerateInput {
   filePath: string;
+  /**
+   * Variant: `standard` (default), `image` (Google Images extension), or
+   * `hreflang` (international targeting via `<xhtml:link>`).
+   */
+  variant?: 'standard' | 'image' | 'hreflang';
+  /** Gzip the output (`.xml.gz`). Index file is gzipped too when sharded. */
+  gzip?: boolean;
+  /** Per-file URL cap (≤50,000). Sharding kicks in when exceeded. */
+  splitAtUrlCount?: number;
 }
 
 export interface SitemapGenerateResult {
   filePath: string;
+  /** All files written (index first when sharded). */
+  files?: string[];
   urlsWritten: number;
   truncated: boolean;
+  sharded?: boolean;
 }
 
 export interface UrlDetailInput {
@@ -221,6 +313,8 @@ export interface FreeCrawlApi {
   crawlPause(): Promise<void>;
   crawlResume(): Promise<void>;
   crawlClear(): Promise<void>;
+  crawlAddUrl(url: string): Promise<{ accepted: boolean }>;
+  projectSaveAs(): Promise<{ filePath: string; bytesWritten: number } | null>;
   urlsQuery(input: UrlsQueryInput): Promise<UrlsQueryResult>;
   urlDetailGet(input: UrlDetailInput): Promise<UrlDetail | null>;
   urlContextMenu(input: UrlContextMenuInput): Promise<void>;
@@ -231,6 +325,10 @@ export interface FreeCrawlApi {
   summaryGet(): Promise<CrawlSummary>;
   exportCsv(input: ExportCsvInput): Promise<ExportCsvResult>;
   exportJson(input: ExportJsonInput): Promise<ExportJsonResult>;
+  exportHtmlReport(input: ExportHtmlReportInput): Promise<ExportHtmlReportResult>;
+  compareLoad(input: CompareLoadInput): Promise<CompareLoadResult>;
+  graphSnapshot(input: GraphSnapshotInput): Promise<GraphSnapshotResult>;
+  topAnchorTexts(limit?: number): Promise<AnchorTextRow[]>;
   sitemapGenerate(input: SitemapGenerateInput): Promise<SitemapGenerateResult>;
   appVersion(): Promise<string>;
   prefsGetAll(): Record<string, unknown>;

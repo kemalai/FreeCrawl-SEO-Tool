@@ -13,20 +13,33 @@ FreeCrawl SEO Tool is a high-performance website crawler for SEO analysis, targe
 ### Crawler
 - **undici HTTP client** with keep-alive Agent (128 connections), cacheable DNS, HTTP/1.1 + HTTP/2.
 - **robots.txt** obedience, configurable user-agent, configurable Accept-Language and arbitrary custom HTTP headers.
+- **HTTP Basic + Bearer authentication** — Settings → Authentication. Username/password or token added to every request as `Authorization: Basic …` / `Bearer …`. Custom-header overrides still win.
+- **Proxy URL override** — Settings → Network. Per-project proxy that takes precedence over `HTTPS_PROXY`/`HTTP_PROXY` env vars.
 - **Manual redirect handling** — every 3xx hop is stored as its own row and the target is requeued. Post-crawl chain resolution with cycle detection (50-hop cap), `redirect_chain_length` / `redirect_final_url` / `redirect_loop` columns.
+- **Configurable redirect hop cap** — `maxRedirects` (default 10) stops following long chains while still recording every hop.
+- **File-extension exclude filter** — drop `.pdf`, `.jpg`, `.woff2`, etc. at enqueue time; start URL is exempt.
 - **Rate limiting** via `p-queue` (concurrency + RPS caps) plus optional per-worker crawl-delay.
 - **Retry with exponential backoff** for transient failures (408, 425, 429, 5xx, network errors).
 - **Pause / Resume** any crawl mid-flight; in-flight requests finish naturally.
+- **Manual URL injection** — TopBar "Add URL" button while running; bypasses the seen-set so re-crawl is possible. Respects robots / include-exclude / queue cap.
 - Per-URL **AbortController** + configurable timeout.
 - **HTTPS_PROXY / HTTP_PROXY** environment variable support via undici `ProxyAgent`.
 - **Happy Eyeballs (RFC 8305)** — `autoSelectFamily` races IPv4/IPv6 on dual-stack hosts.
-- **Sitemap auto-discovery + parser** — `robots.txt` `Sitemap:` directives + `/sitemap.xml` + `/sitemap_index.xml` fallbacks; nested `<sitemapindex>` walked BFS (cap follows `maxUrls`, depth 3); enables Non-Indexable / Non-200 in-Sitemap issue filters.
+- **Sitemap auto-discovery + parser** — `robots.txt` `Sitemap:` directives + `/sitemap.xml` + `/sitemap_index.xml` fallbacks; nested `<sitemapindex>` walked BFS (cap follows `maxUrls`, depth 3); powers Sitemap diff issue filters.
 - **List mode** — fetch every URL in a supplied list exactly once with no link follow / sitemap discovery.
 - **Custom Search** — case-insensitive literal substring counts in body text; per-page hits stored as JSON.
+- **Custom Extraction (CSS + Regex)** — up to 10 user-defined rules per project; outputs (text / attribute / inner_html / outer_html / count / regex_group) and multi-match modes (first / last / all / concat / count); per-page values stored as JSON, surfaced in the URL Details panel and CSV/JSON export.
 - **URL Rewriting** — strip-www, force-HTTPS, lowercase-path, trailing-slash policy; applied at every `normalizeUrl` call site so the seen-set, redirects, links, and sitemap entries dedupe consistently.
 - **Include / Exclude regex patterns** at URL level.
 - **Images** extracted with alt-text, dimensions, internal/external classification.
 - Full **Screaming Frog parity link metadata**: type, alt text, target, path type, link-path breadcrumb, link position (header/nav/content/footer/aside), link origin.
+
+### Post-crawl analytics
+- **Near-duplicate detection (SimHash + LSH)** — every page's body text is hashed with a 64-bit Charikar SimHash over 3-shingles. The post-crawl pass uses 4×16-bit band buckets + Union-Find to cluster pages within a configurable Hamming threshold (default 3 ≈ 95% similarity). Results surface as the "Near-Duplicate Content" issue plus `Cluster ID` / `Cluster Size` columns on the Content tab.
+- **Exact duplicate detection** — FNV-1a content hash collision on the normalised body token stream; "Duplicate Content (exact)" issue.
+- **Hreflang full analysis** — post-crawl pass validates BCP-47 / `x-default` codes, checks self-reference, computes reciprocity against the in-crawl hreflang graph, and joins targets to detect non-200 / noindex / canonical-away pages. Surfaces 4 new issues: Invalid Code, Self-Ref Missing, Reciprocity Missing, Target Issues.
+- **Sitemap diff filters** — Crawled-Not-In-Sitemap (orphan candidate from sitemap perspective), Redirect in Sitemap, plus `sitemapNotCrawled` count for entries the crawl never reached.
+- **Compare with Project** — File menu → "Compare With Project…" opens a `.seoproject` and produces a 9-category diff (Added / Removed / Status / Title / Meta / H1 / Canonical / Indexability / Response Time Δ ≥500 ms) with per-category counts and capped sample tables.
 
 ### Page-level extraction
 - Titles + length, meta descriptions + length, canonical (HTML and HTTP `Link` header — RFC 8288 angle-bracket-aware), `meta robots`, `X-Robots-Tag`, multi-canonical detection.
@@ -39,15 +52,18 @@ FreeCrawl SEO Tool is a high-performance website crawler for SEO analysis, targe
 - URL-shape analytics: folder depth, query param count, uppercase / underscore / multiple-slashes / non-ASCII / too-long detection.
 
 ### Issues panel
-**~60 SEO issue categories** across the Overview sidebar:
+**~70 SEO issue categories** across the Overview sidebar:
 
 - **Document** — Title missing / too long / too short / duplicate, Meta description missing / too long / too short / duplicate, H1 missing / too long / multiple, H2 missing, Canonical missing / multiple / canonicalised / HTTP-vs-HTML mismatch / non-200 target, Self-referencing canonical filter, Skipped heading level, Charset missing, Meta refresh used.
+- **Content** — Thin content (<300 words), Near-Duplicate Content, Duplicate Content (exact).
 - **Response** — 4xx, 5xx, redirects, redirect loops, long redirect chains (>3), self-redirect, very slow (>3 s), broken link inventory.
 - **Page** — Large (>1 MB), missing alt text on images, mixed content, favicon missing, AMP target broken.
-- **URL** — Too long (>2048), uppercase, underscore, multiple slashes, non-ASCII, many query params (>5), non-indexable in sitemap, non-200 in sitemap.
+- **URL** — Too long (>2048), uppercase, underscore, multiple slashes, non-ASCII, many query params (>5).
+- **Sitemap** — Non-indexable in Sitemap, Non-200 in Sitemap, Redirect in Sitemap, Crawled-Not-In-Sitemap.
+- **Hreflang** — x-default Missing, Invalid Code (BCP-47 validator), Self-Ref Missing, Reciprocity Missing, Target Issues (non-200 / noindex / canonical-away targets).
 - **Social** — OpenGraph missing, Twitter Card missing.
 - **Mobile / Accessibility** — Viewport missing, lang attribute missing.
-- **Structured data** — JSON-LD missing, invalid JSON-LD, broken next/prev target, x-default missing.
+- **Structured data** — JSON-LD missing, invalid JSON-LD, broken next/prev target.
 - **Security** — HSTS missing, X-Frame-Options missing, X-Content-Type-Options missing, CSP missing, compression missing.
 
 ### Desktop UI
@@ -64,9 +80,16 @@ FreeCrawl SEO Tool is a high-performance website crawler for SEO analysis, targe
 - **Bottom Detail Panel** — Details, Inlinks, Outlinks, Images, SERP Snippet, HTTP Headers, Link Metrics tabs for the selected URL.
 - **Recent URLs dropdown** — focusing the URL bar surfaces the last 5 crawled URLs (persisted across launches). The URL bar always starts empty on launch.
 - **Reports dialog** (`Ctrl+R`) — Pages per Directory (depth selector), Status Code Histogram, Depth Histogram, Response Time Histogram.
+- **Visualization dialog** (`Ctrl+G`) — interactive Cytoscape graph of the internal link structure (top-N nodes by inlinks, edges between them); 4 layouts (force-directed, BFS tree, circle, concentric); 3 colour modes (status / depth / indexability); log-scaled node sizing by inlinks; sidebar **anchor-text word cloud** (top 120, log-scaled font sizing).
+- **Compare dialog** — File → "Compare With Project…": diff the current crawl against a saved `.seoproject` snapshot across 9 categories; before/after table per category.
 - **Robots.txt Tester** dialog — verify allow/disallow verdict, declared sitemaps, crawl-delay against any URL + UA combo.
 - **Logs window** (`Ctrl+L`) — live stream of every console message, warning, exception, and crawler event; 5 000-entry ring buffer with filter + search + Copy.
-- **XML Sitemap generator**, **CSV export** from every tab, and **JSON export** (~65 columns vs CSV's 23) via `Ctrl+Shift+E`.
+- **OS notifications** — toast when a crawl completes while the window isn't focused.
+- **Sitemap generator** — variants: standard, image (`<image:image>`), hreflang (`<xhtml:link rel=alternate>`); auto-shards >50K URLs into multi-file output with a `<sitemapindex>` wrapper; optional gzip output (`.xml.gz`).
+- **HTML standalone audit report** — File → "Export HTML Report…": single-file print-ready report with KPI cards, severity-ranked Issues table, and Top-25 Slowest / Deepest / Outlink-Heavy URL tables.
+- **CSV / JSON export** from every tab (`Ctrl+Shift+E` for JSON, ~65 columns vs CSV's 23).
+- **Save Project As…** (`Ctrl+Shift+S`) — atomic SQLite `VACUUM INTO` snapshot of the live crawl into a `.seoproject` file (WAL-consistent).
+- **Webhook on completion** — Settings → Webhook: any URL receives a single `POST` with crawl summary JSON when the run finishes (Slack incoming webhooks, Zapier, custom HTTP endpoints).
 - **Multi-row bulk actions** (context menu).
 - User preferences (column widths, panel sizes, "don't ask again" flags) saved to `<userData>/preferences.json`.
 
@@ -78,8 +101,13 @@ Open from `Ctrl+,` or the gear button. Left-sidebar category nav with searchable
 - **Requests** — User-Agent, Accept-Language, custom HTTP headers.
 - **Include / Exclude** — regex patterns at URL level.
 - **Custom Search** — case-insensitive literal terms.
+- **Custom Extraction** — up to 10 CSS / Regex rules per project (output type, attribute, multi-match mode, per-rule info tooltips with concrete examples).
 - **URL Rewriting** — strip-www, force-HTTPS, lowercase-path, trailing-slash policy.
+- **Duplicates** — Hamming-distance threshold for near-duplicate clustering (0 disables, default 3); "Only cluster indexable pages" toggle.
+- **Authentication** — None / HTTP Basic (username + password) / Bearer (token).
+- **Network** — Proxy URL override, Exclude extensions list, Max redirect hops.
 - **Hardware** — memory soft limit (MB) auto-pauses the queue at the cap and resumes at 80%; max in-memory queue size drops new discoveries beyond the cap (back-pressure on fan-out bursts); process priority (Normal / Below Normal / Idle) sets the OS scheduler hint so the machine stays usable during heavy crawls.
+- **Webhook** — POST URL fired once when each crawl finishes (Slack / Zapier / custom HTTP endpoints).
 
 ### Performance
 - **Batch UPSERT** + multi-row INSERT into SQLite (WAL mode).
@@ -223,13 +251,13 @@ shared-types  →  db  →  core  →  desktop, cli
 
 ## Versioning
 
-See [CHANGELOG.md](CHANGELOG.md) for per-version release notes. The current version is shown in the window title bar: `FreeCrawl SEO Tool v0.1.10`.
+See [CHANGELOG.md](CHANGELOG.md) for per-version release notes. The current version is shown in the window title bar: `FreeCrawl SEO Tool v0.2.0`.
 
 ---
 
 ## Status
 
-Active development. Core crawler, 14 analysis tabs, advanced search, ~60 issue categories, sitemap export, JSON export, list mode, custom search, URL rewriting, hardware throttling, robots.txt tester, reports dialog, in-app logs, and multi-layer table selection are all working. Live-streaming UX with first row in ~1 s, ready for 1M-URL audits out of the box. Upcoming: plugin system, JavaScript rendering, log analyzer, PageSpeed API integration.
+Active development. Core crawler, 14 analysis tabs, advanced search, ~70 issue categories, sitemap export with image / hreflang / multi-file / gzip variants, JSON / CSV / standalone HTML report exports, list mode, custom search, custom extraction (CSS + Regex), near-duplicate detection (SimHash + LSH), full hreflang validation, sitemap diff filters, project-vs-project compare, site-architecture visualization (Cytoscape graph + anchor word cloud), HTTP Basic + Bearer auth, proxy override, webhook on completion, OS notifications, robots.txt tester, reports dialog, in-app logs, and multi-layer table selection are all working. Live-streaming UX with first row in ~1 s, ready for 1M-URL audits out of the box. Upcoming: plugin system, JavaScript rendering, log analyzer, PageSpeed API integration.
 
 ---
 

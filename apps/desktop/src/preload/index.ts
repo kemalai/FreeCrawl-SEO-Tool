@@ -9,6 +9,13 @@ import {
   type ExportCsvResult,
   type ExportJsonInput,
   type ExportJsonResult,
+  type ExportHtmlReportInput,
+  type ExportHtmlReportResult,
+  type CompareLoadInput,
+  type CompareLoadResult,
+  type GraphSnapshotInput,
+  type GraphSnapshotResult,
+  type AnchorTextRow,
   type FreeCrawlApi,
   type BrokenLinksQueryInput,
   type BrokenLinksQueryResult,
@@ -54,6 +61,10 @@ const api: FreeCrawlApi = {
   crawlPause: () => ipcRenderer.invoke(IPC.crawlPause),
   crawlResume: () => ipcRenderer.invoke(IPC.crawlResume),
   crawlClear: () => ipcRenderer.invoke(IPC.crawlClear),
+  crawlAddUrl: (url: string): Promise<{ accepted: boolean }> =>
+    ipcRenderer.invoke(IPC.crawlAddUrl, url),
+  projectSaveAs: (): Promise<{ filePath: string; bytesWritten: number } | null> =>
+    ipcRenderer.invoke(IPC.projectSaveAs),
   urlsQuery: (input: UrlsQueryInput): Promise<UrlsQueryResult> =>
     ipcRenderer.invoke(IPC.urlsQuery, input),
   urlDetailGet: (input: UrlDetailInput): Promise<UrlDetail | null> =>
@@ -72,6 +83,14 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.exportCsv, input),
   exportJson: (input: ExportJsonInput): Promise<ExportJsonResult> =>
     ipcRenderer.invoke(IPC.exportJson, input),
+  exportHtmlReport: (input: ExportHtmlReportInput): Promise<ExportHtmlReportResult> =>
+    ipcRenderer.invoke(IPC.exportHtmlReport, input),
+  compareLoad: (input: CompareLoadInput): Promise<CompareLoadResult> =>
+    ipcRenderer.invoke(IPC.compareLoad, input),
+  graphSnapshot: (input: GraphSnapshotInput): Promise<GraphSnapshotResult> =>
+    ipcRenderer.invoke(IPC.graphSnapshot, input),
+  topAnchorTexts: (limit?: number): Promise<AnchorTextRow[]> =>
+    ipcRenderer.invoke(IPC.topAnchorTexts, limit),
   sitemapGenerate: (input: SitemapGenerateInput): Promise<SitemapGenerateResult> =>
     ipcRenderer.invoke(IPC.sitemapGenerate, input),
   appVersion: (): Promise<string> => ipcRenderer.invoke(IPC.appVersion),

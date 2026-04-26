@@ -234,6 +234,24 @@ const COL = {
     info: 'Location header value when status is 3xx. The URL the server points to next; chain length is in the URL Details panel.',
     example: 'https://example.com/new-path',
   } as ColumnSpec,
+  clusterId: {
+    key: 'clusterId',
+    header: 'Cluster',
+    size: 72,
+    kind: 'number',
+    align: 'right',
+    info: 'Near-duplicate cluster ID assigned by the post-crawl SimHash pass. 0 = singleton (no near-duplicates within the configured Hamming threshold). Pages sharing a non-zero cluster ID are mutually similar.',
+    example: '0 (no duplicates), 7 (member of cluster #7)',
+  } as ColumnSpec,
+  clusterSize: {
+    key: 'clusterSize',
+    header: 'Cluster Size',
+    size: 88,
+    kind: 'number',
+    align: 'right',
+    info: 'Number of pages in this URL\'s near-duplicate cluster (1 = no duplicates, ≥2 = part of a duplicate group). Tunable via Settings → Duplicates.',
+    example: '1 = unique, 5 = part of a 5-page near-duplicate group',
+  } as ColumnSpec,
 };
 
 export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
@@ -306,6 +324,8 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
     COL.url,
     COL.wordCount,
     COL.contentLength,
+    COL.clusterId,
+    COL.clusterSize,
     COL.status,
     COL.indexability,
     COL.inlinks,

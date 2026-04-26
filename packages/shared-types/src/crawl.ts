@@ -90,7 +90,15 @@ export type UrlCategory =
   | 'issues:charset-missing'
   | 'issues:broken-links-all'
   | 'issues:broken-links-internal'
-  | 'issues:broken-links-external';
+  | 'issues:broken-links-external'
+  | 'issues:near-duplicate'
+  | 'issues:duplicate-content-exact'
+  | 'issues:hreflang-invalid-code'
+  | 'issues:hreflang-self-ref-missing'
+  | 'issues:hreflang-reciprocity-missing'
+  | 'issues:hreflang-target-issues'
+  | 'issues:crawled-not-in-sitemap'
+  | 'issues:redirect-in-sitemap';
 
 export type Indexability =
   | 'indexable'
@@ -167,6 +175,14 @@ export interface CrawlUrlRow {
   amphtml: string | null;
   favicon: string | null;
   mixedContentCount: number;
+  /** Hreflang entries on this page whose `lang` is not a valid BCP-47 / `x-default` token. */
+  hreflangInvalidCount: number;
+  /** True if this page declares hreflang alternates but no self-referencing entry. */
+  hreflangSelfRefMissing: boolean;
+  /** Hreflang declarations on this page where the target does NOT declare a reciprocal link back. */
+  hreflangReciprocityMissing: number;
+  /** Hreflang targets that are non-200, noindex, or canonicalised away. */
+  hreflangTargetIssues: number;
   redirectChainLength: number;
   redirectFinalUrl: string | null;
   redirectLoop: boolean;
@@ -187,7 +203,56 @@ export interface CrawlUrlRow {
    * `charset=` parameter as fallback. Null when the page declares neither.
    */
   charset: string | null;
+  /**
+   * JSON-stringified `{ ruleName: value, ... }` of custom-extraction
+   * results, or null when no rules are configured / nothing matched.
+   * Surfaced in the URL Details panel and exported in CSV/JSON.
+   */
+  extractionResults: string | null;
+  /**
+   * 64-bit Charikar SimHash of the body text shingles, hex-encoded (16
+   * chars). Null when the page has too little usable content to fingerprint.
+   * Drives the post-crawl near-duplicate clustering pass.
+   */
+  simhash: string | null;
+  /**
+   * 64-bit FNV-1a hash of the full normalised body token stream, hex-
+   * encoded (16 chars). Two pages with the same `contentHash` have byte-
+   * identical body text post-tokenisation — the basis for "Exact Duplicate
+   * Content" detection.
+   */
+  contentHash: string | null;
+  /**
+   * Cluster ID assigned by `recomputeDuplicateClusters` (post-crawl pass).
+   * 0 = singleton (no near-duplicates within the configured Hamming
+   * threshold). >0 = member of a near-duplicate cluster of `clusterSize`
+   * pages. Within a cluster, all members share the same `clusterId`.
+   */
+  clusterId: number;
+  /** Number of pages in this URL's near-duplicate cluster (1 = singleton). */
+  clusterSize: number;
   crawledAt: string;
+}
+
+/**
+ * One row in the post-crawl near-duplicate clustering view. A cluster is a
+ * connected component of pages whose pairwise SimHash hamming distance is
+ * ≤ `nearDuplicateHammingThreshold`. We surface each member page with
+ * the cluster size for the dedicated "Duplicates" tab.
+ */
+export interface DuplicateClusterRow {
+  url: string;
+  statusCode: number | null;
+  indexability: Indexability;
+  title: string | null;
+  wordCount: number | null;
+  inlinks: number;
+  clusterId: number;
+  clusterSize: number;
+  /** SimHash hex of this URL — useful for spot-checking cluster cohesion. */
+  simhash: string | null;
+  /** Hamming distance to the cluster representative (0 for the rep itself). */
+  hammingFromRep: number;
 }
 
 export interface CrawlConfig {
@@ -285,6 +350,101 @@ export interface CrawlConfig {
   memoryLimitMb: number;
   maxQueueSize: number;
   processPriority: 'normal' | 'below-normal' | 'idle';
+  /**
+   * Maximum SimHash hamming distance (0–64) at which two pages are still
+   * considered near-duplicates. 3 (~95% similarity over the body text
+   * shingles) is the default and matches Screaming Frog's tightest near-
+   * duplicate filter. 0 disables near-duplicate clustering entirely.
+   */
+  nearDuplicateHammingThreshold: number;
+  /**
+   * If true, only pages flagged `indexability = 'indexable'` participate
+   * in near-duplicate clustering. Indexability-blocked pages (noindex,
+   * canonicalised, robots-blocked) are excluded so the duplicate report
+   * surfaces issues that actually affect search visibility.
+   */
+  duplicatesOnlyIndexable: boolean;
+  /**
+   * Optional webhook URL that receives a single `POST` with a JSON
+   * summary when a crawl finishes. Empty string disables it. Failures
+   * are best-effort — surfaced as an `info` event but never break the
+   * crawl. Used to integrate with Slack incoming webhooks, Zapier,
+   * dashboards, etc.
+   */
+  webhookUrl: string;
+  /**
+   * Custom extraction rules — each rule is run against every crawled
+   * HTML page; results are stored on the URL row as a JSON object
+   * `{ ruleName: value, ... }`. Up to 10 rules supported (matches
+   * Screaming Frog's free-tier cap; cost grows linearly).
+   */
+  customExtractionRules: CustomExtractionRule[];
+  /**
+   * HTTP authentication applied on every fetch. `none` is the default.
+   * `basic` sends `Authorization: Basic <base64(user:pass)>`; `bearer`
+   * sends `Authorization: Bearer <token>`. Digest auth is not supported
+   * yet (challenge/response state-machine).
+   */
+  auth: HttpAuth;
+  /**
+   * Proxy URL — overrides `HTTPS_PROXY` / `HTTP_PROXY` env vars when
+   * non-empty. Same syntax: `http://user:pass@host:port`.
+   */
+  proxyUrl: string;
+  /**
+   * URL path extensions to skip during enqueue (lowercase, without dot).
+   * Useful for trimming PDFs / large media when only HTML matters.
+   */
+  excludeExtensions: string[];
+  /**
+   * Hard cap on redirect hops. Each 3xx is enqueued as its own URL so
+   * exceeding this means we stop following the chain — the URL row
+   * for the last hop is kept with its 3xx status. 0 disables.
+   */
+  maxRedirects: number;
+}
+
+export interface HttpAuth {
+  type: 'none' | 'basic' | 'bearer';
+  username?: string;
+  password?: string;
+  token?: string;
+}
+
+/**
+ * One row of the Custom Extraction table. Either CSS-selector or regex
+ * driven; output shape and multi-match handling are independently
+ * configurable so the same rule schema covers "first occurrence",
+ * "concatenated list", "count", etc.
+ */
+export interface CustomExtractionRule {
+  /** User-visible name. Stored verbatim — also used as the JSON key. */
+  name: string;
+  /** Extraction strategy. `css` uses cheerio; `regex` runs against raw HTML. */
+  type: 'css' | 'regex';
+  /** CSS selector when `type = 'css'`; regex pattern (no flags) when `type = 'regex'`. */
+  selector: string;
+  /** Attribute to read when `output = 'attribute'`. Ignored otherwise. */
+  attribute?: string;
+  /**
+   * What to read off each match.
+   *  - `text`        — visible text content (CSS only).
+   *  - `attribute`   — value of `attribute` (CSS only).
+   *  - `inner_html`  — innerHTML (CSS only).
+   *  - `outer_html`  — outerHTML (CSS only).
+   *  - `count`       — match count, ignores `multi`.
+   *  - `regex_group` — regex capture group 1 (regex only).
+   */
+  output: 'text' | 'attribute' | 'inner_html' | 'outer_html' | 'count' | 'regex_group';
+  /**
+   * What to do when multiple matches exist:
+   *  - `first`  — return the first match (default).
+   *  - `last`   — return the last match.
+   *  - `all`    — return JSON array of all matches.
+   *  - `concat` — join with " | " separator.
+   *  - `count`  — return integer count.
+   */
+  multi: 'first' | 'last' | 'all' | 'concat' | 'count';
 }
 
 export interface OverviewCounts {
@@ -369,6 +529,16 @@ export interface OverviewCounts {
     charsetMissing: number;
     brokenLinksInternal: number;
     brokenLinksExternal: number;
+    nearDuplicate: number;
+    duplicateContentExact: number;
+    hreflangInvalidCode: number;
+    hreflangSelfRefMissing: number;
+    hreflangReciprocityMissing: number;
+    hreflangTargetIssues: number;
+    crawledNotInSitemap: number;
+    redirectInSitemap: number;
+    /** Sitemap URL count that the crawl never reached (in sitemap_urls but not in urls). */
+    sitemapNotCrawled: number;
   };
 }
 
@@ -590,4 +760,12 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   memoryLimitMb: 0,
   maxQueueSize: 0,
   processPriority: 'normal',
+  nearDuplicateHammingThreshold: 3,
+  duplicatesOnlyIndexable: true,
+  webhookUrl: '',
+  customExtractionRules: [],
+  auth: { type: 'none' },
+  proxyUrl: '',
+  excludeExtensions: [],
+  maxRedirects: 10,
 };

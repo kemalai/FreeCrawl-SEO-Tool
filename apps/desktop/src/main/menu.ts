@@ -52,6 +52,20 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: 'Generate XML Sitemap…',
           click: () => send('generate-sitemap'),
         },
+        {
+          label: 'Export HTML Report…',
+          click: () => send('export-html-report'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Compare With Project…',
+          click: () => send('compare-with-project'),
+        },
+        {
+          label: 'Save Project As…',
+          accelerator: 'CmdOrCtrl+Shift+S',
+          click: () => send('save-project-as'),
+        },
         { type: 'separator' },
         {
           label: 'Settings…',
@@ -74,6 +88,12 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: 'Detail Panel',
           accelerator: 'CmdOrCtrl+D',
           click: () => send('toggle-detail-panel'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Visualization…',
+          accelerator: 'CmdOrCtrl+G',
+          click: () => send('open-visualization'),
         },
         { type: 'separator' },
         { role: 'reload' },

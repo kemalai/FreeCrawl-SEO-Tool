@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/desktop",
-  "version": "0.1.10",
+  "version": "0.2.0",
   "private": true,
   "description": "FreeCrawl SEO — desktop application",
   "main": "./out/main/index.js",
@@ -21,7 +21,9 @@
     "@freecrawl/shared-types": "*",
     "@tanstack/react-table": "^8.20.5",
     "@tanstack/react-virtual": "^3.10.0",
+    "@types/cytoscape": "^3.21.9",
     "clsx": "^2.1.1",
+    "cytoscape": "^3.33.2",
     "lucide-react": "^0.544.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

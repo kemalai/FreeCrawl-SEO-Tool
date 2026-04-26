@@ -1,11 +1,14 @@
 import * as cheerio from 'cheerio';
 import type {
+  CustomExtractionRule,
   DiscoveredImage,
   DiscoveredLink,
   LinkPathType,
   LinkPosition,
 } from '@freecrawl/shared-types';
 import { normalizeUrl, isSameHost, type UrlRewriteOptions } from './url-utils.js';
+import { computeContentFingerprint } from './simhash.js';
+import { runExtractionRules } from './extraction.js';
 
 export interface HreflangEntry {
   /** Language tag from `hreflang` attribute (e.g. "tr", "en-US", "x-default"). */
@@ -84,6 +87,23 @@ export interface ParsedPage {
    * Content-Type header is checked separately by the crawler).
    */
   charset: string | null;
+  /**
+   * Custom-extraction results map — JSON-serialisable values keyed by
+   * rule name, or null when no rules configured / nothing matched.
+   */
+  extractionResults: Record<string, unknown> | null;
+  /**
+   * 64-bit Charikar SimHash of body text shingles (hex, 16 chars). Used by
+   * the post-crawl near-duplicate clustering pass. Null when the page has
+   * too little usable content to fingerprint (<50 chars / <3 tokens).
+   */
+  simhash: string | null;
+  /**
+   * 64-bit FNV-1a hash of the full normalised body token stream (hex, 16
+   * chars). Two pages whose `contentHash` collides have byte-identical
+   * tokenised body — the basis for the "Exact Duplicate Content" issue.
+   */
+  contentHash: string | null;
   links: DiscoveredLink[];
   images: DiscoveredImage[];
   hasNoindex: boolean;
@@ -98,6 +118,8 @@ export function parseHtml(
     customSearchTerms?: readonly string[];
     /** URL-rewrite policy applied to every link/image/canonical we resolve. */
     urlRewrites?: UrlRewriteOptions;
+    /** Custom Extraction rules to run against this page. */
+    customExtractionRules?: ReadonlyArray<CustomExtractionRule>;
   } = {},
 ): ParsedPage {
   // Fast path: force the htmlparser2 backend and skip entity decoding.
@@ -275,6 +297,18 @@ export function parseHtml(
   const text = $('body').text().replace(/\s+/g, ' ').trim();
   const wordCount = text.length > 0 ? text.split(' ').filter(Boolean).length : 0;
 
+  // Content fingerprint for the post-crawl duplicate clustering pass.
+  // Uses the same trimmed body text as wordCount so the work is reused.
+  const { simhash, contentHash } = computeContentFingerprint(text);
+
+  // Custom Extraction — runs after all standard fields so the cheerio
+  // tree is fully populated. Per-rule failures are isolated; the worst
+  // case is `null` for that rule's column.
+  const extractionResults =
+    opts.customExtractionRules && opts.customExtractionRules.length > 0
+      ? runExtractionRules(html, $, opts.customExtractionRules)
+      : null;
+
   // Custom search — count case-insensitive literal substring occurrences
   // in the visible body text (not raw HTML, to avoid attribute / inline-JS
   // false positives). Lowercase haystack/needle once per page rather than
@@ -414,6 +448,9 @@ export function parseHtml(
     metaRefresh,
     metaRefreshUrl,
     charset,
+    extractionResults,
+    simhash,
+    contentHash,
     links: [...linkMap.values()],
     images: [...imageMap.values()],
     hasNoindex,

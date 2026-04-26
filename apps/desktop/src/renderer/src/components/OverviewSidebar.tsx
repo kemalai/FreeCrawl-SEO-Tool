@@ -463,6 +463,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.contentThin,
               category: 'issues:content-thin',
             },
+            {
+              key: 'issues-near-duplicate',
+              label: 'Near-Duplicate Content',
+              count: o.issues.nearDuplicate,
+              category: 'issues:near-duplicate',
+            },
+            {
+              key: 'issues-duplicate-content-exact',
+              label: 'Duplicate Content (exact)',
+              count: o.issues.duplicateContentExact,
+              category: 'issues:duplicate-content-exact',
+            },
           ],
         },
         {
@@ -697,6 +709,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.non200InSitemap,
               category: 'issues:non-200-in-sitemap',
             },
+            {
+              key: 'issues-sitemap-redirect',
+              label: 'Redirect in Sitemap',
+              count: o.issues.redirectInSitemap,
+              category: 'issues:redirect-in-sitemap',
+            },
+            {
+              key: 'issues-crawled-not-in-sitemap',
+              label: 'Crawled, Not in Sitemap',
+              count: o.issues.crawledNotInSitemap,
+              category: 'issues:crawled-not-in-sitemap',
+            },
           ],
         },
         {
@@ -738,6 +762,30 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'x-default Missing',
               count: o.issues.hreflangXDefaultMissing,
               category: 'issues:hreflang-x-default-missing',
+            },
+            {
+              key: 'issues-hreflang-invalid-code',
+              label: 'Invalid Code',
+              count: o.issues.hreflangInvalidCode,
+              category: 'issues:hreflang-invalid-code',
+            },
+            {
+              key: 'issues-hreflang-self-ref-missing',
+              label: 'Self-Ref Missing',
+              count: o.issues.hreflangSelfRefMissing,
+              category: 'issues:hreflang-self-ref-missing',
+            },
+            {
+              key: 'issues-hreflang-reciprocity-missing',
+              label: 'Reciprocity Missing',
+              count: o.issues.hreflangReciprocityMissing,
+              category: 'issues:hreflang-reciprocity-missing',
+            },
+            {
+              key: 'issues-hreflang-target-issues',
+              label: 'Target Issues',
+              count: o.issues.hreflangTargetIssues,
+              category: 'issues:hreflang-target-issues',
             },
           ],
         },

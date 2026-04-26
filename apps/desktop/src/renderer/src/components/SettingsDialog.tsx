@@ -8,10 +8,22 @@ import {
   Search,
   Replace,
   Cpu,
+  Copy,
+  Code2,
+  Webhook,
+  Plus,
+  Trash2,
+  Shield,
+  Network,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
-import type { CrawlConfig, CrawlMode } from '@freecrawl/shared-types';
+import type {
+  CrawlConfig,
+  CrawlMode,
+  CustomExtractionRule,
+  HttpAuth,
+} from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip, type FieldInfo } from './InfoTip.js';
 
@@ -61,6 +73,18 @@ interface FormState {
   memoryLimitMb: string;
   maxQueueSize: string;
   processPriority: 'normal' | 'below-normal' | 'idle';
+  // duplicates
+  nearDuplicateHammingThreshold: string;
+  duplicatesOnlyIndexable: boolean;
+  // custom extraction
+  customExtractionRules: CustomExtractionRule[];
+  // webhook
+  webhookUrl: string;
+  // auth + network
+  auth: HttpAuth;
+  proxyUrl: string;
+  excludeExtensionsText: string;
+  maxRedirects: string;
 }
 
 type SectionKey =
@@ -69,8 +93,13 @@ type SectionKey =
   | 'requests'
   | 'filters'
   | 'custom-search'
+  | 'custom-extraction'
   | 'url-rewriting'
-  | 'hardware';
+  | 'duplicates'
+  | 'auth'
+  | 'network'
+  | 'hardware'
+  | 'webhook';
 
 interface SectionDef {
   key: SectionKey;
@@ -113,16 +142,47 @@ const SECTIONS: SectionDef[] = [
     keywords: 'custom search term keyword substring text',
   },
   {
+    key: 'custom-extraction',
+    label: 'Custom Extraction',
+    icon: Code2,
+    keywords: 'custom extraction css selector xpath regex attribute scrape rule',
+  },
+  {
     key: 'url-rewriting',
     label: 'URL Rewriting',
     icon: Replace,
     keywords: 'url rewrite normalize www https lowercase trailing slash',
   },
   {
+    key: 'auth',
+    label: 'Authentication',
+    icon: Shield,
+    keywords: 'auth authentication basic bearer token password http header',
+  },
+  {
+    key: 'network',
+    label: 'Network',
+    icon: Network,
+    keywords: 'network proxy https extension filter exclude redirect hop limit',
+  },
+  {
+    key: 'duplicates',
+    label: 'Duplicates',
+    icon: Copy,
+    keywords:
+      'duplicate near similar content simhash hamming threshold cluster fingerprint',
+  },
+  {
     key: 'hardware',
     label: 'Hardware',
     icon: Cpu,
     keywords: 'hardware cpu ram memory queue limit priority resource usage',
+  },
+  {
+    key: 'webhook',
+    label: 'Webhook',
+    icon: Webhook,
+    keywords: 'webhook notify slack discord zapier post crawl complete',
   },
 ];
 
@@ -158,6 +218,14 @@ function configToForm(c: CrawlConfig): FormState {
     memoryLimitMb: String(c.memoryLimitMb),
     maxQueueSize: String(c.maxQueueSize),
     processPriority: c.processPriority,
+    nearDuplicateHammingThreshold: String(c.nearDuplicateHammingThreshold),
+    duplicatesOnlyIndexable: c.duplicatesOnlyIndexable,
+    customExtractionRules: (c.customExtractionRules ?? []).map((r) => ({ ...r })),
+    webhookUrl: c.webhookUrl ?? '',
+    auth: { ...(c.auth ?? { type: 'none' }) },
+    proxyUrl: c.proxyUrl ?? '',
+    excludeExtensionsText: (c.excludeExtensions ?? []).join(', '),
+    maxRedirects: String(c.maxRedirects ?? 10),
   };
 }
 
@@ -267,6 +335,25 @@ export function SettingsDialog({ open, onClose }: Props) {
       memoryLimitMb: Math.max(0, num(form.memoryLimitMb, config.memoryLimitMb)),
       maxQueueSize: Math.max(0, num(form.maxQueueSize, config.maxQueueSize)),
       processPriority: form.processPriority,
+      nearDuplicateHammingThreshold: Math.max(
+        0,
+        Math.min(
+          12,
+          num(form.nearDuplicateHammingThreshold, config.nearDuplicateHammingThreshold),
+        ),
+      ),
+      duplicatesOnlyIndexable: form.duplicatesOnlyIndexable,
+      customExtractionRules: form.customExtractionRules
+        .filter((r) => r.name.trim() && r.selector.trim())
+        .slice(0, 10),
+      webhookUrl: form.webhookUrl.trim(),
+      auth: form.auth,
+      proxyUrl: form.proxyUrl.trim(),
+      excludeExtensions: form.excludeExtensionsText
+        .split(/[\s,]+/)
+        .map((s) => s.trim().toLowerCase().replace(/^\./, ''))
+        .filter(Boolean),
+      maxRedirects: Math.max(0, num(form.maxRedirects, config.maxRedirects)),
     });
     onClose();
   }
@@ -356,11 +443,26 @@ export function SettingsDialog({ open, onClose }: Props) {
               {active === 'custom-search' && (
                 <CustomSearchPanel form={form} update={update} />
               )}
+              {active === 'custom-extraction' && (
+                <CustomExtractionPanel form={form} update={update} />
+              )}
               {active === 'url-rewriting' && (
                 <UrlRewritingPanel form={form} update={update} />
               )}
+              {active === 'duplicates' && (
+                <DuplicatesPanel form={form} update={update} />
+              )}
+              {active === 'auth' && (
+                <AuthPanel form={form} update={update} />
+              )}
+              {active === 'network' && (
+                <NetworkPanel form={form} update={update} />
+              )}
               {active === 'hardware' && (
                 <HardwarePanel form={form} update={update} />
+              )}
+              {active === 'webhook' && (
+                <WebhookPanel form={form} update={update} />
               )}
             </div>
           </div>
@@ -662,6 +764,382 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
             <option value="add">Add (/foo → /foo/)</option>
           </select>
         </label>
+      </div>
+    </>
+  );
+}
+
+const DEFAULT_RULE: CustomExtractionRule = {
+  name: '',
+  type: 'css',
+  selector: '',
+  attribute: '',
+  output: 'text',
+  multi: 'first',
+};
+
+function CustomExtractionPanel({ form, update }: PanelProps) {
+  const rules = form.customExtractionRules;
+  const setRules = (next: CustomExtractionRule[]) => update('customExtractionRules', next);
+  const updateRule = (i: number, patch: Partial<CustomExtractionRule>) => {
+    const next = rules.slice();
+    next[i] = { ...next[i]!, ...patch };
+    setRules(next);
+  };
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Up to 10 custom extraction rules. Each runs against every crawled
+        HTML page; results are stored on the URL row and visible in the
+        URL Details panel under <strong>Extraction</strong>.
+      </p>
+
+      {rules.length === 0 && (
+        <p className="mb-3 text-[11px] italic text-surface-500">No rules — click "Add Rule" to start.</p>
+      )}
+
+      {rules.map((r, i) => (
+        <div
+          key={i}
+          className="mb-3 rounded border border-surface-800 bg-surface-950/40 p-3"
+        >
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+              Rule #{i + 1}
+            </div>
+            <button
+              className="rounded p-1 text-surface-500 hover:bg-surface-800 hover:text-red-400"
+              onClick={() => setRules(rules.filter((_, j) => j !== i))}
+              title="Remove rule"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            <label className="flex flex-col gap-1">
+              <FieldLabel
+                label="Name"
+                info="The column / JSON-key name for this rule's output. Free-form."
+                example="product_price, sku, breadcrumb_last"
+              />
+              <input
+                className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                value={r.name}
+                onChange={(e) => updateRule(i, { name: e.target.value })}
+                placeholder="e.g. product_price"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <FieldLabel
+                label="Type"
+                info="`css` runs against the parsed DOM; `regex` runs against raw HTML."
+                example="css for selectors, regex for free-form patterns"
+              />
+              <select
+                className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                value={r.type}
+                onChange={(e) =>
+                  updateRule(i, { type: e.target.value as 'css' | 'regex' })
+                }
+              >
+                <option value="css">CSS Selector</option>
+                <option value="regex">Regex</option>
+              </select>
+            </label>
+          </div>
+
+          <label className="mb-2 flex flex-col gap-1">
+            <FieldLabel
+              label={r.type === 'css' ? 'CSS Selector' : 'Regex Pattern'}
+              info={
+                r.type === 'css'
+                  ? 'Standard CSS selector — same syntax as `document.querySelectorAll`.'
+                  : 'JavaScript regex (no flags — /g is implicit). Use a capture group with `output=regex_group` to extract just part of the match.'
+              }
+              example={
+                r.type === 'css'
+                  ? '.price > .amount,  meta[property="og:image"],  .breadcrumb li:last-child'
+                  : 'sku-([A-Z0-9]+),  "price"\\s*:\\s*"([^"]+)"'
+              }
+            />
+            <input
+              className="rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+              value={r.selector}
+              onChange={(e) => updateRule(i, { selector: e.target.value })}
+              spellCheck={false}
+            />
+          </label>
+
+          <div className="mb-2 grid grid-cols-3 gap-2">
+            <label className="flex flex-col gap-1">
+              <FieldLabel
+                label="Output"
+                info={
+                  r.type === 'css'
+                    ? 'What to read off each matched element.'
+                    : 'For regex: `regex_group` extracts capture group 1; otherwise the whole match is used.'
+                }
+                example="text for visible content, attribute for href/src, count for occurrence count"
+              />
+              <select
+                className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                value={r.output}
+                onChange={(e) =>
+                  updateRule(i, { output: e.target.value as CustomExtractionRule['output'] })
+                }
+              >
+                {r.type === 'css' ? (
+                  <>
+                    <option value="text">Text</option>
+                    <option value="attribute">Attribute</option>
+                    <option value="inner_html">Inner HTML</option>
+                    <option value="outer_html">Outer HTML</option>
+                    <option value="count">Count</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="regex_group">Capture group 1</option>
+                    <option value="text">Whole match</option>
+                    <option value="count">Count</option>
+                  </>
+                )}
+              </select>
+            </label>
+            {r.type === 'css' && r.output === 'attribute' ? (
+              <label className="flex flex-col gap-1">
+                <FieldLabel
+                  label="Attribute"
+                  info="HTML attribute name to read."
+                  example="href, src, content, data-id"
+                />
+                <input
+                  className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  value={r.attribute ?? ''}
+                  onChange={(e) => updateRule(i, { attribute: e.target.value })}
+                  placeholder="href"
+                />
+              </label>
+            ) : (
+              <div />
+            )}
+            <label className="flex flex-col gap-1">
+              <FieldLabel
+                label="Multi-Match"
+                info="What to do when multiple matches exist."
+                example="first/last for single value, all for JSON array, concat for ' | ' joined string"
+              />
+              <select
+                className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                value={r.multi}
+                onChange={(e) =>
+                  updateRule(i, { multi: e.target.value as CustomExtractionRule['multi'] })
+                }
+              >
+                <option value="first">First</option>
+                <option value="last">Last</option>
+                <option value="all">All (array)</option>
+                <option value="concat">Concat (` | `)</option>
+                <option value="count">Count</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      ))}
+
+      {rules.length < 10 && (
+        <button
+          className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
+          onClick={() => setRules([...rules, { ...DEFAULT_RULE }])}
+        >
+          <Plus className="h-3 w-3" /> Add Rule
+        </button>
+      )}
+      {rules.length >= 10 && (
+        <p className="text-[10px] text-surface-500">Limit reached (10 rules).</p>
+      )}
+    </>
+  );
+}
+
+function WebhookPanel({ form, update }: PanelProps) {
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Webhook fired once when each crawl finishes. Single <code>POST</code>{' '}
+        with a JSON summary (start URL, duration, total URLs, status mix,
+        every non-zero issue count). Empty disables.
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <Text
+          label="Webhook URL"
+          value={form.webhookUrl}
+          onChange={(v) => update('webhookUrl', v)}
+          info="`POST <url>` is fired when the `done` event emits. 10 s timeout. Failures are logged as info events but never break the crawl."
+          example="https://hooks.slack.com/services/T0/B0/abc, https://your-server.example/freecrawl-hook"
+        />
+        <p className="mt-1 text-[10px] text-surface-500">
+          Compatible with Slack incoming webhooks (the JSON shape is rich
+          enough for Slack to render plain text), Zapier "Catch Hook"
+          triggers, Discord webhooks, and custom HTTP endpoints.
+        </p>
+      </div>
+    </>
+  );
+}
+
+function AuthPanel({ form, update }: PanelProps) {
+  const auth = form.auth;
+  const setAuth = (patch: Partial<HttpAuth>) =>
+    update('auth', { ...auth, ...patch });
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        HTTP authentication applied on every request. Useful for staging
+        environments behind Basic auth, or APIs that require a Bearer
+        token. Digest is not supported (challenge-response state machine).
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <label className="mb-2 flex flex-col gap-1">
+          <FieldLabel
+            label="Auth scheme"
+            info="`none` disables auth; `basic` adds `Authorization: Basic <base64>`; `bearer` adds `Authorization: Bearer <token>`."
+            example="basic for /staging behind nginx; bearer for protected APIs"
+          />
+          <select
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+            value={auth.type}
+            onChange={(e) =>
+              setAuth({ type: e.target.value as HttpAuth['type'] })
+            }
+          >
+            <option value="none">None</option>
+            <option value="basic">Basic (username + password)</option>
+            <option value="bearer">Bearer (token)</option>
+          </select>
+        </label>
+
+        {auth.type === 'basic' && (
+          <>
+            <Text
+              label="Username"
+              value={auth.username ?? ''}
+              onChange={(v) => setAuth({ username: v })}
+              info="Sent base64-encoded as the first half of the credential pair."
+              example="staging-user"
+            />
+            <Text
+              label="Password"
+              value={auth.password ?? ''}
+              onChange={(v) => setAuth({ password: v })}
+              info="Stored in your local prefs file as plain text. Treat the file accordingly."
+              example="hunter2"
+            />
+          </>
+        )}
+
+        {auth.type === 'bearer' && (
+          <Text
+            label="Token"
+            value={auth.token ?? ''}
+            onChange={(v) => setAuth({ token: v })}
+            info="Sent verbatim as `Bearer <token>`. Don't include the `Bearer ` prefix yourself."
+            example="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+function NetworkPanel({ form, update }: PanelProps) {
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Network-level controls: proxy override, file-extension exclusion,
+        redirect hop cap.
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <Text
+          label="Proxy URL (overrides HTTPS_PROXY)"
+          value={form.proxyUrl}
+          onChange={(v) => update('proxyUrl', v)}
+          info="Same syntax as HTTPS_PROXY/HTTP_PROXY env vars. Leave empty to inherit env. Routes via undici's ProxyAgent."
+          example="http://user:pass@proxy.corp:8080, http://10.0.0.5:3128"
+        />
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <Text
+          label="Exclude extensions (comma-separated)"
+          value={form.excludeExtensionsText}
+          onChange={(v) => update('excludeExtensionsText', v)}
+          info="URL paths ending in any of these extensions are not enqueued. Case-insensitive. Start URL is always crawled regardless."
+          example="pdf, jpg, png, woff2, mp4"
+        />
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <Num
+          label="Max redirect hops"
+          value={form.maxRedirects}
+          onChange={(v) => update('maxRedirects', v)}
+          info="Hard cap on the number of 3xx hops we follow for a single chain. Each hop is recorded as its own URL row regardless. 0 disables the cap (chain still ends at `redirect_loop`)."
+          example="10 (default), 3 for very tight chains, 0 to remove the cap"
+        />
+      </div>
+    </>
+  );
+}
+
+function DuplicatesPanel({ form, update }: PanelProps) {
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Near-duplicate detection. After every crawl, body text is hashed
+        with a 64-bit SimHash, and pages whose hashes lie within the
+        configured Hamming distance of each other are clustered as
+        near-duplicates. Surfaced under <strong>Issues → Content → Near-Duplicate</strong>.
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          Threshold
+        </div>
+        <Num
+          label="Max Hamming distance (0 = exact only, 12 = very loose, 0 disables)"
+          value={form.nearDuplicateHammingThreshold}
+          onChange={(v) => update('nearDuplicateHammingThreshold', v)}
+          info="Two pages are flagged as near-duplicates if their 64-bit SimHash differs by at most this many bits. 3 ≈ 95% similarity over body-text shingles (Screaming Frog's tightest filter). Set to 0 to skip clustering entirely."
+          example="3 = recommended; 5 catches looser duplicates (templated content with light variation); 0 turns the post-crawl pass off."
+        />
+        <p className="mt-1 text-[10px] text-surface-500">
+          Lower = stricter. 3 is the SF-equivalent default. Pages with too
+          little body content (&lt;50 characters) are excluded from
+          clustering regardless of threshold.
+        </p>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          Scope
+        </div>
+        <Bool
+          label="Only cluster indexable pages"
+          checked={form.duplicatesOnlyIndexable}
+          onChange={(v) => update('duplicatesOnlyIndexable', v)}
+          info="When on, pages with noindex / canonicalised / robots-blocked indexability are excluded from clustering — the Near-Duplicate report then surfaces only issues that affect search visibility."
+          example="ON for SEO audits (the typical case). Turn OFF to also cluster paginated / canonical-blocked variants for completeness."
+        />
+      </div>
+
+      <div className="rounded border border-surface-800 bg-surface-950/40 p-3 text-[10px] text-surface-500">
+        <strong className="text-surface-300">Cost:</strong> SimHash adds
+        ~5-10 ms per page during crawl; clustering itself runs after the
+        last URL completes (~3-10 s at 1M URLs, &lt;500 ms at 100K).
       </div>
     </>
   );

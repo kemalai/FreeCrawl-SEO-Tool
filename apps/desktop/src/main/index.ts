@@ -5,6 +5,7 @@ import {
   ipcMain,
   dialog,
   Menu,
+  Notification,
   shell,
   type MenuItemConstructorOptions,
 } from 'electron';
@@ -21,6 +22,13 @@ import {
   type ExportCsvResult,
   type ExportJsonInput,
   type ExportJsonResult,
+  type ExportHtmlReportInput,
+  type ExportHtmlReportResult,
+  type CompareLoadInput,
+  type CompareLoadResult,
+  type GraphSnapshotInput,
+  type GraphSnapshotResult,
+  type AnchorTextRow,
   type RobotsTestInput,
   type PagesPerDirectoryInput,
   type ImagesQueryInput,
@@ -42,6 +50,8 @@ import {
   exportUrlsToCsv,
   exportUrlsToJson,
   exportSitemap,
+  exportHtmlReport,
+  compareCrawls,
   testUrlAgainstRobots,
 } from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
@@ -275,6 +285,7 @@ function registerIpc(): void {
       `Crawl starting: ${config.startUrl} (scope=${config.scope}, maxDepth=${config.maxDepth}, maxUrls=${config.maxUrls}, concurrency=${config.maxConcurrency}, rps=${config.maxRps})`,
     );
     const database = getDb();
+    database.setMeta('lastStartUrl', config.startUrl);
     const crawler = new Crawler(config, database);
     activeCrawler = crawler;
 
@@ -296,6 +307,23 @@ function registerIpc(): void {
       );
       mainWindow?.webContents.send(IPC.crawlDone, summary);
       activeCrawler = null;
+      // OS-level toast — only when the window isn't focused, so the
+      // user actually benefits (Electron suppresses the notification
+      // sound on focused windows on most platforms anyway, but we
+      // gate explicitly to avoid distracting users who're watching).
+      if (Notification.isSupported() && !mainWindow?.isFocused()) {
+        try {
+          new Notification({
+            title: 'FreeCrawl SEO Tool',
+            body: `Crawl finished: ${summary.total.toLocaleString()} URLs · avg ${Math.round(summary.avgResponseTimeMs)} ms`,
+            silent: false,
+          }).show();
+        } catch {
+          // Notification can throw on some Linux distros without a
+          // notification daemon. Swallow — the in-app done banner
+          // already surfaces completion.
+        }
+      }
     });
     crawler.on('error', (msg: string) => {
       if (activeCrawler !== crawler) return;
@@ -327,6 +355,52 @@ function registerIpc(): void {
     activeCrawler = null;
     getDb().reset();
   });
+
+  ipcMain.handle(IPC.crawlAddUrl, (_e, url: string): { accepted: boolean } => {
+    if (!activeCrawler) return { accepted: false };
+    const accepted = activeCrawler.enqueueManual(url);
+    if (accepted) {
+      logger.log('info', 'crawler', `Manual URL added: ${url}`);
+    }
+    return { accepted };
+  });
+
+  ipcMain.handle(
+    IPC.projectSaveAs,
+    async (): Promise<{ filePath: string; bytesWritten: number } | null> => {
+      const win = mainWindow;
+      if (!win) return null;
+      const res = await dialog.showSaveDialog(win, {
+        title: 'Save Project As…',
+        defaultPath: 'crawl.seoproject',
+        filters: [
+          { name: 'FreeCrawl Project', extensions: ['seoproject'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      if (res.canceled || !res.filePath) return null;
+      // Snapshot the live SQLite DB. WAL mode means a plain file copy
+      // can miss in-flight writes — use the SQLite VACUUM INTO command,
+      // which produces a self-contained, consistent snapshot atomically.
+      const target = res.filePath;
+      const database = getDb();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawDb = (database as any).db as { exec: (sql: string) => void };
+      const escaped = target.replace(/'/g, "''");
+      rawDb.exec(`VACUUM INTO '${escaped}'`);
+      const { statSync } = await import('node:fs');
+      const bytes = statSync(target).size;
+      await dialog.showMessageBox(win, {
+        type: 'info',
+        title: 'Project Saved',
+        message: `Snapshot written: ${(bytes / (1024 * 1024)).toFixed(1)} MB.`,
+        detail: target,
+        buttons: ['OK'],
+        noLink: true,
+      });
+      return { filePath: target, bytesWritten: bytes };
+    },
+  );
 
   ipcMain.handle(IPC.confirmClear, async (): Promise<ConfirmClearResult> => {
     const win = mainWindow;
@@ -579,33 +653,164 @@ function registerIpc(): void {
   );
 
   ipcMain.handle(
-    IPC.sitemapGenerate,
-    async (_e, input: SitemapGenerateInput): Promise<SitemapGenerateResult> => {
+    IPC.exportHtmlReport,
+    async (
+      _e,
+      input: ExportHtmlReportInput,
+    ): Promise<ExportHtmlReportResult> => {
       let filePath = input.filePath;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: 'sitemap.xml',
-          filters: [{ name: 'XML Sitemap', extensions: ['xml'] }],
+          defaultPath: 'freecrawl-report.html',
+          filters: [{ name: 'HTML Report', extensions: ['html'] }],
+        });
+        if (res.canceled || !res.filePath) {
+          return { filePath: '', bytesWritten: 0 };
+        }
+        filePath = res.filePath;
+      }
+      const result = await exportHtmlReport(getDb(), filePath, {
+        startUrl: getDb().getMeta('lastStartUrl') ?? '',
+      });
+      if (mainWindow) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'info',
+          title: 'HTML Report Saved',
+          message: `Report written: ${(result.bytesWritten / 1024).toFixed(1)} KB.`,
+          detail: result.filePath,
+          buttons: ['OK'],
+          noLink: true,
+        });
+      }
+      return result;
+    },
+  );
+
+  ipcMain.handle(
+    IPC.sitemapGenerate,
+    async (_e, input: SitemapGenerateInput): Promise<SitemapGenerateResult> => {
+      let filePath = input.filePath;
+      const variant = input.variant ?? 'standard';
+      const gzip = input.gzip ?? false;
+      if (!filePath) {
+        const baseName =
+          variant === 'image'
+            ? 'sitemap-images.xml'
+            : variant === 'hreflang'
+              ? 'sitemap-hreflang.xml'
+              : 'sitemap.xml';
+        const defaultPath = gzip ? `${baseName}.gz` : baseName;
+        const res = await dialog.showSaveDialog(mainWindow!, {
+          defaultPath,
+          filters: [
+            gzip
+              ? { name: 'Gzipped XML Sitemap', extensions: ['xml.gz', 'gz'] }
+              : { name: 'XML Sitemap', extensions: ['xml'] },
+          ],
         });
         if (res.canceled || !res.filePath) {
           return { filePath: '', urlsWritten: 0, truncated: false };
         }
         filePath = res.filePath;
       }
-      const { urlsWritten, truncated } = await exportSitemap(getDb(), filePath);
+      const result = await exportSitemap(getDb(), filePath, {
+        variant,
+        gzip,
+        splitAtUrlCount: input.splitAtUrlCount,
+      });
       if (mainWindow) {
+        const detail = result.sharded
+          ? `${result.files.length - 1} part files + index\n${result.files.join('\n')}`
+          : result.files[0] ?? filePath;
         await dialog.showMessageBox(mainWindow, {
-          type: truncated ? 'warning' : 'info',
+          type: result.truncated ? 'warning' : 'info',
           title: 'Sitemap Generated',
-          message: truncated
-            ? `Sitemap written with ${urlsWritten.toLocaleString()} URLs (truncated at the 50,000 limit).`
-            : `Sitemap written with ${urlsWritten.toLocaleString()} URLs.`,
-          detail: filePath,
+          message: result.sharded
+            ? `Sharded sitemap written: ${result.urlsWritten.toLocaleString()} URLs across ${
+                result.files.length - 1
+              } parts + index.`
+            : `Sitemap written with ${result.urlsWritten.toLocaleString()} URLs${
+                result.truncated ? ' (truncated at the 50,000 limit).' : '.'
+              }`,
+          detail,
           buttons: ['OK'],
           noLink: true,
         });
       }
-      return { filePath, urlsWritten, truncated };
+      return {
+        filePath,
+        files: result.files,
+        urlsWritten: result.urlsWritten,
+        truncated: result.truncated,
+        sharded: result.sharded,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.compareLoad,
+    async (_e, input: CompareLoadInput): Promise<CompareLoadResult> => {
+      let filePath = input.filePath;
+      if (!filePath) {
+        const res = await dialog.showOpenDialog(mainWindow!, {
+          title: 'Compare With Project…',
+          properties: ['openFile'],
+          filters: [
+            { name: 'FreeCrawl Project', extensions: ['seoproject', 'sqlite', 'db'] },
+            { name: 'All Files', extensions: ['*'] },
+          ],
+        });
+        if (res.canceled || res.filePaths.length === 0) {
+          return {
+            filePath: '',
+            totalA: 0,
+            totalB: 0,
+            counts: {
+              added: 0,
+              removed: 0,
+              status: 0,
+              title: 0,
+              meta: 0,
+              h1: 0,
+              canonical: 0,
+              indexability: 0,
+              response_time: 0,
+            },
+            samples: [],
+          };
+        }
+        filePath = res.filePaths[0]!;
+      }
+      // Open the *other* project read-only — never mutate. The
+      // ProjectDb constructor opens the file in default mode; that's
+      // fine because we never call write methods on it during the diff.
+      const otherDb = new ProjectDb(filePath);
+      try {
+        const summary = compareCrawls(getDb(), otherDb);
+        return {
+          filePath,
+          totalA: summary.totalA,
+          totalB: summary.totalB,
+          counts: summary.counts,
+          samples: summary.samples,
+        };
+      } finally {
+        otherDb.close();
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.graphSnapshot,
+    (_e, input: GraphSnapshotInput): GraphSnapshotResult => {
+      return getDb().graphSnapshot(input.nodeLimit ?? 1000);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.topAnchorTexts,
+    (_e, limit: number | undefined): AnchorTextRow[] => {
+      return getDb().topAnchorTexts(limit ?? 200);
     },
   );
 }

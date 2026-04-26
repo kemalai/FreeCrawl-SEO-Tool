@@ -34,6 +34,8 @@ export interface CrawlerEvents {
 interface QueueItem {
   url: string;
   depth: number;
+  /** How many redirect hops led here (0 for items from link extraction). */
+  redirectHopCount?: number;
 }
 
 const EXT_TO_KIND: Record<string, ContentKind> = {
@@ -101,7 +103,7 @@ export class Crawler extends EventEmitter {
 
   constructor(config: CrawlConfig, db: ProjectDb) {
     super();
-    initHttpClient();
+    initHttpClient({ proxyOverride: config.proxyUrl });
     this.config = config;
     this.db = db;
     const concurrency = Math.max(1, Math.min(200, config.maxConcurrency));
@@ -143,6 +145,29 @@ export class Crawler extends EventEmitter {
     }
     if (this.includeRegexes.length === 0) return true;
     return this.includeRegexes.some((re) => re.test(url));
+  }
+
+  /**
+   * Drop URLs whose path extension matches any user-configured exclude
+   * (e.g. `pdf`, `jpg`). The start URL is exempt — even if it ends in
+   * `.pdf` we always crawl what the user explicitly asked for.
+   * Extensions are case-folded; URLs without an extension always pass.
+   */
+  private passesExtensionFilter(url: string): boolean {
+    if (url === this.config.startUrl) return true;
+    const list = this.config.excludeExtensions;
+    if (!list || list.length === 0) return true;
+    let pathOnly: string;
+    try {
+      pathOnly = new URL(url).pathname;
+    } catch {
+      return true;
+    }
+    const dot = pathOnly.lastIndexOf('.');
+    if (dot < 0 || dot < pathOnly.lastIndexOf('/')) return true;
+    const ext = pathOnly.slice(dot + 1).toLowerCase();
+    if (!ext) return true;
+    return !list.some((e) => e.trim().replace(/^\./, '').toLowerCase() === ext);
   }
 
   async start(): Promise<void> {
@@ -221,6 +246,8 @@ export class Crawler extends EventEmitter {
 
     this.db.recomputeInlinks();
     this.db.recomputeRedirectChains();
+    this.db.recomputeHreflangAnalysis();
+    this.runDuplicateClustering();
     this.running = false;
     this.stopMemoryMonitor();
     // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
@@ -230,7 +257,73 @@ export class Crawler extends EventEmitter {
     this.emitProgress();
     // Suppress 'done' if a stop() ran during teardown — otherwise the
     // zombie crawler's done-event clobbers the new crawl's UI state.
-    if (!this.stopped) this.emit('done', this.db.getSummary());
+    if (!this.stopped) {
+      this.emit('done', this.db.getSummary());
+      this.fireWebhook();
+    }
+  }
+
+  /**
+   * Fire-and-forget webhook poster. Configured via `webhookUrl`; empty
+   * string disables. Failures are surfaced via `info` event — never
+   * thrown — so a 500 from a misconfigured Slack hook can't break the
+   * crawl teardown.
+   */
+  private fireWebhook(): void {
+    const url = this.config.webhookUrl?.trim();
+    if (!url) return;
+    const summary = this.db.getSummary();
+    const issues = this.db.getOverviewCounts().issues;
+    const payload = {
+      finishedAt: new Date().toISOString(),
+      startUrl: this.config.startUrl,
+      durationMs: Date.now() - this.startedAt,
+      summary,
+      issues,
+    };
+    // Lazy import to avoid pulling fetch-via-undici at module load on
+    // CLI-only paths that never enable the webhook.
+    void import('./webhook.js').then(({ postCrawlCompleteWebhook }) =>
+      postCrawlCompleteWebhook(url, payload).then((res) => {
+        if (res.ok) {
+          this.emit('info', `Webhook posted to ${url} (${res.status} in ${res.durationMs} ms)`);
+        } else {
+          this.emit(
+            'info',
+            `Webhook failed: ${res.status ?? 'no response'} — ${res.detail.slice(0, 120)}`,
+          );
+        }
+      }),
+    );
+  }
+
+  /**
+   * Wrapper around `db.recomputeDuplicateClusters` that surfaces the
+   * cluster count as an `info` event so the user can see the post-crawl
+   * pass actually fired. Threshold = 0 disables clustering.
+   */
+  private runDuplicateClustering(): void {
+    const threshold = this.config.nearDuplicateHammingThreshold;
+    if (!threshold || threshold <= 0) return;
+    try {
+      const { clusters, clusteredUrls } = this.db.recomputeDuplicateClusters(
+        threshold,
+        this.config.duplicatesOnlyIndexable,
+      );
+      if (clusters > 0) {
+        this.emit(
+          'info',
+          `Duplicates: ${clusters} near-duplicate clusters across ${clusteredUrls} URLs (hamming ≤ ${threshold})`,
+        );
+      }
+    } catch (err) {
+      this.emit(
+        'error',
+        new Error(
+          `recomputeDuplicateClusters failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
   }
 
   /**
@@ -299,6 +392,8 @@ export class Crawler extends EventEmitter {
 
     this.db.recomputeInlinks();
     this.db.recomputeRedirectChains();
+    this.db.recomputeHreflangAnalysis();
+    this.runDuplicateClustering();
     this.running = false;
     this.stopMemoryMonitor();
     this.seen.clear();
@@ -417,6 +512,7 @@ export class Crawler extends EventEmitter {
           this.config.userAgent,
           this.config.acceptLanguage,
           this.config.customHeaders,
+          this.config.auth,
         ),
         redirect: this.config.followRedirects ? 'follow' : 'manual',
         signal: controller.signal,
@@ -586,6 +682,32 @@ export class Crawler extends EventEmitter {
     this.enqueue({ url, depth });
   }
 
+  /**
+   * Manual URL injection for the running crawl — used by the TopBar
+   * "Add URL…" affordance so the user can prod the queue with a URL
+   * the spider didn't discover on its own. Bypasses the seen-set check
+   * if the URL was already crawled (so re-crawl is possible) but still
+   * respects robots/include-exclude/maxQueueSize.
+   *
+   * Returns whether the URL was actually accepted into the queue.
+   */
+  enqueueManual(rawUrl: string): boolean {
+    if (this.stopped || !this.running) return false;
+    let url: string;
+    try {
+      url = new URL(rawUrl).toString();
+    } catch {
+      return false;
+    }
+    // For manual injection we want re-crawl semantics, so clear the
+    // seen flag if present. The DB upsert handles duplicate urls
+    // idempotently.
+    this.seen.delete(url);
+    const before = this.seen.size;
+    this.enqueue({ url, depth: 0 });
+    return this.seen.size > before;
+  }
+
   private enqueue(item: QueueItem): void {
     if (this.stopped) return;
     if (this.seen.has(item.url)) return;
@@ -593,6 +715,7 @@ export class Crawler extends EventEmitter {
     if (item.depth > this.config.maxDepth) return;
     if (this.robots && !this.robots.isAllowed(item.url)) return;
     if (!this.passesUrlFilter(item.url)) return;
+    if (!this.passesExtensionFilter(item.url)) return;
     // Hard cap on the in-memory pending queue. Beyond this we drop new
     // discoveries — the alternative is unbounded heap growth on big
     // sitemaps / dense link graphs. `seen` still grows, but each entry
@@ -703,9 +826,21 @@ export class Crawler extends EventEmitter {
         if (redirectUrlId) this.db.setUrlHeaders(redirectUrlId, allHeaders);
         this.crawled++;
         if (this.config.followRedirects && target) {
+          // Hard cap on hop count — if the queued item already exceeds
+          // `maxRedirects` we stop following the chain. Each enqueued
+          // hop carries an integer that we increment here. Items
+          // discovered via link extraction always start at 0.
+          const hopCount = (item.redirectHopCount ?? 0) + 1;
+          if (this.config.maxRedirects > 0 && hopCount > this.config.maxRedirects) {
+            this.emit(
+              'info',
+              `Redirect chain capped at ${this.config.maxRedirects} hops: ${item.url} → … → (stopped)`,
+            );
+            return;
+          }
           const inScope = isInScope(this.config.startUrl, target, this.config.scope);
           if (inScope || this.config.crawlExternal) {
-            this.enqueue({ url: target, depth: item.depth });
+            this.enqueue({ url: target, depth: item.depth, redirectHopCount: hopCount });
           } else if (!inScope) {
             // Record the target as an external stub so the hop chain is
             // visible in Outlinks even when we won't follow it.
@@ -759,6 +894,7 @@ export class Crawler extends EventEmitter {
         includeSubdomains: this.config.scope === 'all-subdomains',
         customSearchTerms: this.config.customSearchTerms,
         urlRewrites: this.urlRewrites,
+        customExtractionRules: this.config.customExtractionRules,
       });
 
       // Charset resolution — prefer the document's own declaration (HTML5
@@ -870,6 +1006,11 @@ export class Crawler extends EventEmitter {
         metaRefresh: parsed.metaRefresh,
         metaRefreshUrl: parsed.metaRefreshUrl,
         charset,
+        extractionResults: parsed.extractionResults
+          ? JSON.stringify(parsed.extractionResults)
+          : null,
+        simhash: parsed.simhash,
+        contentHash: parsed.contentHash,
       });
       if (urlId) this.db.setUrlHeaders(urlId, allHeaders);
       this.db.insertLinks(urlId, storableLinks, item.depth);
@@ -940,6 +1081,7 @@ export class Crawler extends EventEmitter {
             this.config.userAgent,
             this.config.acceptLanguage,
             this.config.customHeaders,
+            this.config.auth,
           ),
           redirect: 'manual',
           signal,

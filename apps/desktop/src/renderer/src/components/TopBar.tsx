@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Play, Square, Pause, Eraser, ChevronDown, Settings, History } from 'lucide-react';
+import { Play, Square, Pause, Eraser, ChevronDown, Settings, History, Plus } from 'lucide-react';
 import clsx from 'clsx';
 import type { CrawlScope } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
@@ -79,6 +79,17 @@ export function TopBar() {
   async function clearCrawl() {
     const didClear = await clearCrawlWithConfirm();
     if (didClear) reset();
+  }
+
+  async function addManualUrl() {
+    const raw = window.prompt('Add URL to queue:', '');
+    if (!raw) return;
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    const r = await window.freecrawl.crawlAddUrl(trimmed);
+    if (!r.accepted) {
+      setError('URL not accepted (invalid format, already crawled at full depth, or queue full).');
+    }
   }
 
   return (
@@ -189,6 +200,13 @@ export function TopBar() {
           )}
           <button className="btn btn-ghost border border-red-700/50 text-red-300" onClick={stop}>
             <Square className="h-3.5 w-3.5" /> Stop
+          </button>
+          <button
+            className="btn btn-ghost border border-surface-700"
+            onClick={addManualUrl}
+            title="Inject a URL into the running queue"
+          >
+            <Plus className="h-3.5 w-3.5" /> Add URL
           </button>
         </>
       ) : (

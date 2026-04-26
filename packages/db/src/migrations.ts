@@ -480,6 +480,82 @@ const MIGRATIONS: Migration[] = [
       if (!has('charset')) db.exec('ALTER TABLE urls ADD COLUMN charset TEXT');
     },
   },
+  {
+    version: 25,
+    name: 'add_duplicate_clustering',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      // 64-bit hex SimHash + content-hash for the post-crawl duplicate pass.
+      if (!has('simhash')) db.exec('ALTER TABLE urls ADD COLUMN simhash TEXT');
+      if (!has('content_hash')) db.exec('ALTER TABLE urls ADD COLUMN content_hash TEXT');
+      // Cluster IDs are filled by recomputeDuplicateClusters() — 0 means
+      // "not yet computed" or "singleton (no near-duplicates found)".
+      if (!has('cluster_id'))
+        db.exec('ALTER TABLE urls ADD COLUMN cluster_id INTEGER NOT NULL DEFAULT 0');
+      if (!has('cluster_size'))
+        db.exec('ALTER TABLE urls ADD COLUMN cluster_size INTEGER NOT NULL DEFAULT 1');
+
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_urls_simhash ON urls(simhash) WHERE simhash IS NOT NULL',
+      );
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_urls_content_hash ON urls(content_hash) WHERE content_hash IS NOT NULL',
+      );
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_urls_cluster_id ON urls(cluster_id) WHERE cluster_id > 0',
+      );
+    },
+  },
+  {
+    version: 26,
+    name: 'add_hreflang_analysis',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      // Number of hreflang entries on this page whose `lang` does not
+      // match BCP-47 / ISO 639-1 + ISO 3166-1 (incl. `x-default`).
+      if (!has('hreflang_invalid_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN hreflang_invalid_count INTEGER NOT NULL DEFAULT 0',
+        );
+      // 1 if the page declares hreflang alternates but does NOT include a
+      // self-referencing entry (Google MUST-have).
+      if (!has('hreflang_self_ref_missing'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN hreflang_self_ref_missing INTEGER NOT NULL DEFAULT 0',
+        );
+      // Number of hreflang declarations on this page where the target
+      // page does NOT declare a reciprocal hreflang back to this URL.
+      if (!has('hreflang_reciprocity_missing'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN hreflang_reciprocity_missing INTEGER NOT NULL DEFAULT 0',
+        );
+      // Number of hreflang targets that are non-200, noindex, or
+      // canonicalised away. Aggregated count for surfacing as a single
+      // "Hreflang Target Issues" filter.
+      if (!has('hreflang_target_issues'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN hreflang_target_issues INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 27,
+    name: 'add_extraction_results',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'extraction_results')) {
+        db.exec('ALTER TABLE urls ADD COLUMN extraction_results TEXT');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

@@ -20,7 +20,7 @@ let initialized = false;
  *   connections per origin, long keep-alive, tight headers timeout so a
  *   stuck origin can't freeze the pool.
  */
-export function initHttpClient(): void {
+export function initHttpClient(opts: { proxyOverride?: string } = {}): void {
   if (initialized) return;
   initialized = true;
 
@@ -32,8 +32,11 @@ export function initHttpClient(): void {
   });
 
   // Corporate proxy detection — env vars are the universal contract,
-  // matching curl / git / npm / pip behaviour.
+  // matching curl / git / npm / pip behaviour. A non-empty config
+  // override (Settings → Auth → Proxy URL) takes precedence so the
+  // user can route a single project through a different proxy.
   const proxyUrl =
+    (opts.proxyOverride && opts.proxyOverride.trim()) ||
     process.env['HTTPS_PROXY'] ??
     process.env['https_proxy'] ??
     process.env['HTTP_PROXY'] ??
@@ -121,6 +124,7 @@ export function defaultRequestHeaders(
   userAgent: string,
   acceptLanguage: string,
   custom: Record<string, string> = {},
+  auth?: { type: 'none' | 'basic' | 'bearer'; username?: string; password?: string; token?: string },
 ): Record<string, string> {
   const headers: Record<string, string> = {
     'user-agent': userAgent,
@@ -128,6 +132,16 @@ export function defaultRequestHeaders(
     'accept-encoding': 'gzip, deflate, br',
     accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
   };
+  // Auth header is materialised first so a user-supplied custom
+  // `Authorization` header still wins (custom comes later in the loop).
+  if (auth && auth.type === 'basic' && auth.username) {
+    const creds = Buffer.from(`${auth.username}:${auth.password ?? ''}`, 'utf8').toString(
+      'base64',
+    );
+    headers['authorization'] = `Basic ${creds}`;
+  } else if (auth && auth.type === 'bearer' && auth.token) {
+    headers['authorization'] = `Bearer ${auth.token}`;
+  }
   for (const [rawKey, value] of Object.entries(custom)) {
     const key = rawKey.trim();
     if (!key) continue;
