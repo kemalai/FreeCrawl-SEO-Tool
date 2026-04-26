@@ -2,7 +2,9 @@
 
 Open-source desktop SEO crawler — a free, cross-platform alternative to Screaming Frog.
 
-FreeCrawl SEO Tool is a high-performance website crawler for SEO analysis, targeting 100K+ URLs on a single machine without lag. Built on Electron + React + `node:sqlite`, with an undici-based crawler tuned for concurrent fetching.
+**Website:** [freecrawl.net](https://freecrawl.net/) · **Releases:** [github.com/kemalai/FreeCrawl-SEO-Tool/releases](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases)
+
+FreeCrawl SEO Tool is a high-performance website crawler for SEO analysis, targeting **1M+ URLs** on a single machine without lag. Built on Electron + React + `node:sqlite`, with an undici-based crawler tuned for concurrent fetching.
 
 ---
 
@@ -10,30 +12,81 @@ FreeCrawl SEO Tool is a high-performance website crawler for SEO analysis, targe
 
 ### Crawler
 - **undici HTTP client** with keep-alive Agent (128 connections), cacheable DNS, HTTP/1.1 + HTTP/2.
-- **robots.txt** obedience and configurable user-agent.
-- **Manual redirect handling** — every 3xx hop is stored as its own row and the target is requeued.
-- **Rate limiting** via `p-queue` (concurrency + RPS caps).
+- **robots.txt** obedience, configurable user-agent, configurable Accept-Language and arbitrary custom HTTP headers.
+- **Manual redirect handling** — every 3xx hop is stored as its own row and the target is requeued. Post-crawl chain resolution with cycle detection (50-hop cap), `redirect_chain_length` / `redirect_final_url` / `redirect_loop` columns.
+- **Rate limiting** via `p-queue` (concurrency + RPS caps) plus optional per-worker crawl-delay.
+- **Retry with exponential backoff** for transient failures (408, 425, 429, 5xx, network errors).
+- **Pause / Resume** any crawl mid-flight; in-flight requests finish naturally.
 - Per-URL **AbortController** + configurable timeout.
+- **HTTPS_PROXY / HTTP_PROXY** environment variable support via undici `ProxyAgent`.
+- **Happy Eyeballs (RFC 8305)** — `autoSelectFamily` races IPv4/IPv6 on dual-stack hosts.
+- **Sitemap auto-discovery + parser** — `robots.txt` `Sitemap:` directives + `/sitemap.xml` + `/sitemap_index.xml` fallbacks; nested `<sitemapindex>` walked BFS (cap follows `maxUrls`, depth 3); enables Non-Indexable / Non-200 in-Sitemap issue filters.
+- **List mode** — fetch every URL in a supplied list exactly once with no link follow / sitemap discovery.
+- **Custom Search** — case-insensitive literal substring counts in body text; per-page hits stored as JSON.
+- **URL Rewriting** — strip-www, force-HTTPS, lowercase-path, trailing-slash policy; applied at every `normalizeUrl` call site so the seen-set, redirects, links, and sitemap entries dedupe consistently.
+- **Include / Exclude regex patterns** at URL level.
 - **Images** extracted with alt-text, dimensions, internal/external classification.
 - Full **Screaming Frog parity link metadata**: type, alt text, target, path type, link-path breadcrumb, link position (header/nav/content/footer/aside), link origin.
 
+### Page-level extraction
+- Titles + length, meta descriptions + length, canonical (HTML and HTTP `Link` header — RFC 8288 angle-bracket-aware), `meta robots`, `X-Robots-Tag`, multi-canonical detection.
+- H1–H6 counts, word count, content-type, response time, payload size, crawl depth.
+- Meta refresh, charset, lang attribute, viewport.
+- OpenGraph (`og:title` / `og:description` / `og:image`), Twitter Card (`twitter:card` / `…title` / `…description` / `…image`), JSON-LD (with `@type` collected from arbitrary nesting incl. `@graph`), pagination (`rel=next` / `rel=prev`), hreflang (incl. `x-default`).
+- AMP (`rel=amphtml`), favicon (`rel=icon` + legacy `shortcut icon`), keywords / author / generator / theme-color.
+- Security headers: HSTS, X-Frame-Options, X-Content-Type-Options, Content-Security-Policy, Referrer-Policy, Permissions-Policy, Content-Encoding.
+- Mixed-content scan — HTTPS pages are scanned for `http://` subresources (img / script / iframe / video / audio / source / embed / stylesheet).
+- URL-shape analytics: folder depth, query param count, uppercase / underscore / multiple-slashes / non-ASCII / too-long detection.
+
+### Issues panel
+**~60 SEO issue categories** across the Overview sidebar:
+
+- **Document** — Title missing / too long / too short / duplicate, Meta description missing / too long / too short / duplicate, H1 missing / too long / multiple, H2 missing, Canonical missing / multiple / canonicalised / HTTP-vs-HTML mismatch / non-200 target, Self-referencing canonical filter, Skipped heading level, Charset missing, Meta refresh used.
+- **Response** — 4xx, 5xx, redirects, redirect loops, long redirect chains (>3), self-redirect, very slow (>3 s), broken link inventory.
+- **Page** — Large (>1 MB), missing alt text on images, mixed content, favicon missing, AMP target broken.
+- **URL** — Too long (>2048), uppercase, underscore, multiple slashes, non-ASCII, many query params (>5), non-indexable in sitemap, non-200 in sitemap.
+- **Social** — OpenGraph missing, Twitter Card missing.
+- **Mobile / Accessibility** — Viewport missing, lang attribute missing.
+- **Structured data** — JSON-LD missing, invalid JSON-LD, broken next/prev target, x-default missing.
+- **Security** — HSTS missing, X-Frame-Options missing, X-Content-Type-Options missing, CSP missing, compression missing.
+
 ### Desktop UI
 - **Dense dark theme**, Screaming Frog-style table layout.
-- Tabs: Internal, External, Response Codes, URL, Page Titles, Meta Description, H1, H2, Content, Images, Broken Links, Canonicals, Directives, Links.
-- **Virtualized tables** (`@tanstack/react-virtual`) — smooth scrolling with 100K+ rows.
+- 14 analysis tabs: Internal, External, Response Codes, URL, Page Titles, Meta Description, H1, H2, Content, Images, Broken Links, Canonicals, Directives, Links.
+- **Virtualized tables** (`@tanstack/react-virtual`) — smooth scrolling with 1M+ rows.
+- **Live streaming UX** — rows materialise continuously every 250 ms during a crawl, no batch lump.
+- **First row in ~1 s** — sitemap discovery and `robots.txt` are fire-and-forget; `resolveStartUrl` uses a single auto-follow fetch instead of per-hop probing.
 - **Column resize**, sortable headers, configurable widths persisted per tab.
+- **`[i]` info tooltips on every column header** — hover reveals a one-line description plus a concrete example value (35 columns covered).
 - **Three-layer selection** (row / cell / column) with mouse **drag-select**.
-- **Seamless live sort** — sorting works during an active crawl; rows shift smoothly as new data comes in (stable `getItemKey`).
+- **Seamless live sort** — sorting works during an active crawl; rows shift smoothly as new data arrives (stable `getItemKey`).
 - **Advanced Table Search** — Screaming Frog-style AND/OR groups, 24 fields, 12 operators (numeric/text aware).
-- **Issues panel** — 12 categories (missing title/meta/H1, length extremes, duplicate titles, multiple H1s, slow response, large payload, 4xx, 5xx, redirect, missing alt).
 - **Bottom Detail Panel** — Details, Inlinks, Outlinks, Images, SERP Snippet, HTTP Headers, Link Metrics tabs for the selected URL.
-- **XML Sitemap generator**, **CSV export** from every tab.
+- **Recent URLs dropdown** — focusing the URL bar surfaces the last 5 crawled URLs (persisted across launches). The URL bar always starts empty on launch.
+- **Reports dialog** (`Ctrl+R`) — Pages per Directory (depth selector), Status Code Histogram, Depth Histogram, Response Time Histogram.
+- **Robots.txt Tester** dialog — verify allow/disallow verdict, declared sitemaps, crawl-delay against any URL + UA combo.
+- **Logs window** (`Ctrl+L`) — live stream of every console message, warning, exception, and crawler event; 5 000-entry ring buffer with filter + search + Copy.
+- **XML Sitemap generator**, **CSV export** from every tab, and **JSON export** (~65 columns vs CSV's 23) via `Ctrl+Shift+E`.
 - **Multi-row bulk actions** (context menu).
 - User preferences (column widths, panel sizes, "don't ask again" flags) saved to `<userData>/preferences.json`.
+
+### Settings dialog
+Open from `Ctrl+,` or the gear button. Left-sidebar category nav with searchable filter; **`[i]` info tooltip on every field** (description + example).
+
+- **Mode** — Spider vs List, URL list textarea.
+- **Crawler** — max depth / URLs / concurrency / RPS, request timeout, crawl delay, retry attempts, follow-redirects, respect-robots, crawl-external, store-nofollow, discover-sitemaps.
+- **Requests** — User-Agent, Accept-Language, custom HTTP headers.
+- **Include / Exclude** — regex patterns at URL level.
+- **Custom Search** — case-insensitive literal terms.
+- **URL Rewriting** — strip-www, force-HTTPS, lowercase-path, trailing-slash policy.
+- **Hardware** — memory soft limit (MB) auto-pauses the queue at the cap and resumes at 80%; max in-memory queue size drops new discoveries beyond the cap (back-pressure on fan-out bursts); process priority (Normal / Below Normal / Idle) sets the OS scheduler hint so the machine stays usable during heavy crawls.
 
 ### Performance
 - **Batch UPSERT** + multi-row INSERT into SQLite (WAL mode).
 - `node:sqlite` (Node 22+ built-in) — **no native compile**, no node-gyp, no Python, no MSBuild headaches.
+- `recomputeInlinks` is a one-pass aggregate (temp-table `GROUP BY` + indexed JOIN) — finishes in seconds at 1M URLs.
+- `recomputeRedirectChains` snapshots only redirect rows, not the full URL table.
+- Crawler dedup sets (`seen` / `externalSeen`) released after the queue drains, freeing ~80–120 MB on big crawls.
 - Observed throughput: ~80–150 URL/s on typical sites (vs. 5 URL/s with naive fetch).
 
 ---
@@ -69,7 +122,7 @@ Before running FreeCrawl SEO Tool from source, your machine needs the following.
 | **npm** | 10+ (ships with Node) | Workspace install + scripts | (bundled with Node) |
 | **Git** | any recent | Clone the repo | [git-scm.com](https://git-scm.com/) |
 
-> **Why no Python / MSBuild / node-gyp?** FreeCrawl uses Node 22's built-in `node:sqlite` instead of `better-sqlite3`. There are zero native dependencies — `npm install` never invokes a C++ compiler. This is a deliberate design choice (see [CLAUDE.md](CLAUDE.md) §6).
+> **Why no Python / MSBuild / node-gyp?** FreeCrawl uses Node 22's built-in `node:sqlite` instead of `better-sqlite3`. There are zero native dependencies — `npm install` never invokes a C++ compiler. This is a deliberate design choice.
 
 ### Required at runtime (any platform, both prebuilt and source)
 
@@ -94,7 +147,7 @@ Before running FreeCrawl SEO Tool from source, your machine needs the following.
 
 - ~600 MB for `node_modules` after `npm install`
 - ~150 MB for the production Electron build
-- ~100 MB peak RAM for a 100K-URL crawl (most data streams to SQLite via WAL)
+- ~100 MB peak RAM for a 100K-URL crawl (most data streams to SQLite via WAL); 1M-URL crawls fit comfortably under the 1 GB process budget with the default Hardware settings.
 
 ### Verifying your setup
 
@@ -131,6 +184,7 @@ npm run dev        # launches the Electron desktop app
 ```bash
 npm run build:cli
 node apps/cli/dist/index.js https://example.com --depth 2 --max 500 --out out.csv
+node apps/cli/dist/index.js --list urls.txt --out out.json   # list mode + JSON export
 ```
 
 ### Production build
@@ -169,13 +223,21 @@ shared-types  →  db  →  core  →  desktop, cli
 
 ## Versioning
 
-See [CHANGELOG.md](CHANGELOG.md) for per-version release notes. The current version is shown in the window title bar: `FreeCrawl SEO Tool v0.1.3`.
+See [CHANGELOG.md](CHANGELOG.md) for per-version release notes. The current version is shown in the window title bar: `FreeCrawl SEO Tool v0.1.10`.
 
 ---
 
 ## Status
 
-Active development. Core crawler, 14 analysis tabs, advanced search, issues detection, sitemap export, and multi-layer table selection are working. Upcoming: plugin system, JavaScript rendering, log analyzer, PageSpeed API integration.
+Active development. Core crawler, 14 analysis tabs, advanced search, ~60 issue categories, sitemap export, JSON export, list mode, custom search, URL rewriting, hardware throttling, robots.txt tester, reports dialog, in-app logs, and multi-layer table selection are all working. Live-streaming UX with first row in ~1 s, ready for 1M-URL audits out of the box. Upcoming: plugin system, JavaScript rendering, log analyzer, PageSpeed API integration.
+
+---
+
+## Links
+
+- **Website:** [freecrawl.net](https://freecrawl.net/)
+- **Releases:** [github.com/kemalai/FreeCrawl-SEO-Tool/releases](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases)
+- **Issues / Bug reports:** [github.com/kemalai/FreeCrawl-SEO-Tool/issues](https://github.com/kemalai/FreeCrawl-SEO-Tool/issues)
 
 ---
 
