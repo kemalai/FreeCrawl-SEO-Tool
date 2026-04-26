@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.8] — 2026-04-26
+
+### Added
+- **Canonical completeness — 4 new issues**: **Canonical Missing** (HTML 2xx with no canonical declared anywhere), **Self-Referencing Canonical** filter, **Canonicalised** (canonical points elsewhere), **HTTP vs HTML Mismatch** (the document's `<link rel="canonical">` and the response's `Link: …; rel="canonical"` header disagree). New `canonical_http` column captures the HTTP-header canonical (RFC 8288 angle-bracket-aware parsing).
+- **Meta Refresh detection** — `meta_refresh` + `meta_refresh_url` columns extract `<meta http-equiv="refresh" content="…">`. New issue **Document → Meta Refresh Used** flags any HTML page using meta-refresh (Google recommends 301 instead).
+- **Charset detection** — `charset` column populated from `<meta charset>`, then legacy `<meta http-equiv="Content-Type">`, then HTTP `Content-Type` header `charset=` parameter. New issue **Document → Charset Missing** for HTML 2xx with no declared charset anywhere.
+- **Settings dialog redesign** — left-sidebar category nav (Mode, Crawler, Requests, Include/Exclude, Custom Search, URL Rewriting, Hardware) with searchable filter; breadcrumb header; per-category right-pane content. Wider modal (920×80vh).
+- **Settings entry in File menu** (`Ctrl+,`) — opens the Settings dialog from the menu bar in addition to the gear button.
+- **Recent URLs dropdown** — focusing the URL input shows the last 5 crawled URLs as a dropdown (persisted across launches). The URL bar always starts empty on launch.
+- **Hardware section in Settings** — **Memory soft limit (MB)** auto-pauses the queue when the crawler's RSS exceeds the cap and resumes at 80% of it; **Max in-memory queue size** drops new discoveries beyond the cap (back-pressure on fan-out bursts); **Process priority** (Normal / Below Normal / Idle) sets the OS scheduler hint so the machine stays usable during heavy crawls.
+- **Crawler `info` event channel** — non-error status messages (e.g. successful sitemap parse summaries, memory monitor pause/resume, priority-set acks) are now emitted as `info` events and logged at info level, no longer polluting the error log.
+
+### Changed
+- **Default `maxUrls` raised from 100k to 1,000,000** — supports large-site audits out of the box. Existing users keep their saved value (defaults merge under saved preferences).
+- **`recomputeInlinks` rewritten as one-pass aggregate** — switched from a correlated `(SELECT COUNT…)` subquery (N×M lookups, minutes at 1M URLs) to a temp-table `GROUP BY links.to_url` followed by an indexed JOIN; finishes in seconds at the same scale.
+- **`recomputeRedirectChains` memory fix** — now snapshots only rows where `redirect_target IS NOT NULL` instead of the full `urls` table (~100 MB saved at 1M URLs).
+- **Sitemap entry cap follows `maxUrls`** — the sitemap fetcher's hard 50k limit is now `Math.max(50_000, config.maxUrls)`, so 1M-URL crawls can ingest the full sitemap.
+- **Crawler dedup sets released after crawl ends** — `seen` and `externalSeen` are cleared once the queue is drained, releasing ~80–120 MB of string heap on big crawls.
+- **URL bar starts empty on launch** — previous start URL is no longer auto-restored; the recent-URLs dropdown surfaces history instead.
+
 ## [0.1.7] — 2026-04-25
 
 ### Added
