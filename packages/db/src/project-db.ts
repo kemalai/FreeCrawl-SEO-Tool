@@ -42,6 +42,7 @@ interface UrlRowDb {
   canonical_count: number;
   word_count: number | null;
   canonical: string | null;
+  canonical_http: string | null;
   meta_robots: string | null;
   x_robots_tag: string | null;
   content_type: string | null;
@@ -91,6 +92,9 @@ interface UrlRowDb {
   referrer_policy: string | null;
   permissions_policy: string | null;
   custom_search_hits: string | null;
+  meta_refresh: string | null;
+  meta_refresh_url: string | null;
+  charset: string | null;
 }
 
 interface ImageRowDb {
@@ -122,6 +126,7 @@ export interface UpsertUrlInput {
   canonicalCount?: number;
   wordCount?: number | null;
   canonical?: string | null;
+  canonicalHttp?: string | null;
   metaRobots?: string | null;
   xRobotsTag?: string | null;
   contentType?: string | null;
@@ -154,6 +159,9 @@ export interface UpsertUrlInput {
   permissionsPolicy?: string | null;
   /** JSON-stringified `{ term: count, ... }` or null. */
   customSearchHits?: string | null;
+  metaRefresh?: string | null;
+  metaRefreshUrl?: string | null;
+  charset?: string | null;
   schemaTypes?: string | null;
   schemaBlockCount?: number;
   schemaInvalidCount?: number;
@@ -172,7 +180,7 @@ const UPSERT_URL_SQL = `
     url, content_kind, status_code, status_text, indexability, indexability_reason,
     title, title_length, meta_description, meta_description_length,
     h1, h1_length, h1_count, h2_count, h3_count, h4_count, h5_count, h6_count,
-    word_count, canonical, canonical_count, meta_robots, x_robots_tag,
+    word_count, canonical, canonical_count, canonical_http, meta_robots, x_robots_tag,
     content_type, content_length, response_time_ms, depth, outlinks, redirect_target,
     images_count, images_missing_alt,
     lang, viewport, og_title, og_description, og_image,
@@ -184,12 +192,13 @@ const UPSERT_URL_SQL = `
     amphtml, favicon, mixed_content_count,
     folder_depth, query_param_count,
     csp, referrer_policy, permissions_policy,
-    custom_search_hits
+    custom_search_hits,
+    meta_refresh, meta_refresh_url, charset
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
     :h1, :h1_length, :h1_count, :h2_count, :h3_count, :h4_count, :h5_count, :h6_count,
-    :word_count, :canonical, :canonical_count, :meta_robots, :x_robots_tag,
+    :word_count, :canonical, :canonical_count, :canonical_http, :meta_robots, :x_robots_tag,
     :content_type, :content_length, :response_time_ms, :depth, :outlinks, :redirect_target,
     :images_count, :images_missing_alt,
     :lang, :viewport, :og_title, :og_description, :og_image,
@@ -201,7 +210,8 @@ const UPSERT_URL_SQL = `
     :amphtml, :favicon, :mixed_content_count,
     :folder_depth, :query_param_count,
     :csp, :referrer_policy, :permissions_policy,
-    :custom_search_hits
+    :custom_search_hits,
+    :meta_refresh, :meta_refresh_url, :charset
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -224,6 +234,7 @@ const UPSERT_URL_SQL = `
     word_count = excluded.word_count,
     canonical = excluded.canonical,
     canonical_count = excluded.canonical_count,
+    canonical_http = excluded.canonical_http,
     meta_robots = excluded.meta_robots,
     x_robots_tag = excluded.x_robots_tag,
     content_type = excluded.content_type,
@@ -267,6 +278,9 @@ const UPSERT_URL_SQL = `
     referrer_policy = excluded.referrer_policy,
     permissions_policy = excluded.permissions_policy,
     custom_search_hits = excluded.custom_search_hits,
+    meta_refresh = excluded.meta_refresh,
+    meta_refresh_url = excluded.meta_refresh_url,
+    charset = excluded.charset,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -507,6 +521,7 @@ export class ProjectDb {
       word_count: input.wordCount ?? null,
       canonical: input.canonical ?? null,
       canonical_count: input.canonicalCount ?? 0,
+      canonical_http: input.canonicalHttp ?? null,
       meta_robots: input.metaRobots ?? null,
       x_robots_tag: input.xRobotsTag ?? null,
       content_type: input.contentType ?? null,
@@ -550,6 +565,9 @@ export class ProjectDb {
       referrer_policy: input.referrerPolicy ?? null,
       permissions_policy: input.permissionsPolicy ?? null,
       custom_search_hits: input.customSearchHits ?? null,
+      meta_refresh: input.metaRefresh ?? null,
+      meta_refresh_url: input.metaRefreshUrl ?? null,
+      charset: input.charset ?? null,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -629,12 +647,32 @@ export class ProjectDb {
   }
 
   recomputeInlinks(): void {
-    this.db.exec(`
-      UPDATE urls SET inlinks = (
-        SELECT COUNT(*) FROM links l
-        WHERE l.to_url = urls.url AND l.is_internal = 1
-      )
-    `);
+    // One-pass aggregate via temp table: GROUP BY links.to_url once, then
+    // join. The naive correlated-subquery form (UPDATE … = (SELECT COUNT…))
+    // does N×M work and is ~minutes at 1M URLs.
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DROP TABLE IF EXISTS _inlink_counts');
+      this.db.exec(`
+        CREATE TEMP TABLE _inlink_counts AS
+          SELECT to_url AS url, COUNT(*) AS c
+          FROM links
+          WHERE is_internal = 1
+          GROUP BY to_url
+      `);
+      this.db.exec('CREATE INDEX _inlink_counts_url ON _inlink_counts(url)');
+      this.db.exec(`
+        UPDATE urls SET inlinks = COALESCE(
+          (SELECT c FROM _inlink_counts WHERE _inlink_counts.url = urls.url),
+          0
+        )
+      `);
+      this.db.exec('DROP TABLE _inlink_counts');
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
   }
 
   /**
@@ -652,8 +690,13 @@ export class ProjectDb {
    * in practice so the walk is cheap.
    */
   recomputeRedirectChains(): void {
+    // Only chain hops are needed in memory — snapshotting the entire `urls`
+    // table costs ~100 MB at 1M rows for no benefit. Pull just rows whose
+    // `redirect_target` is non-null (i.e. actual hops in some chain).
     const allRows = this.db
-      .prepare('SELECT url, redirect_target FROM urls')
+      .prepare(
+        'SELECT url, redirect_target FROM urls WHERE redirect_target IS NOT NULL',
+      )
       .all() as { url: string; redirect_target: string | null }[];
     const targetByUrl = new Map<string, string | null>();
     for (const r of allRows) targetByUrl.set(r.url, r.redirect_target);
@@ -1177,12 +1220,44 @@ export class ProjectDb {
          )`,
       ),
       multipleCanonicals: countWhere(`${html} AND canonical_count > 1`),
+      canonicalMissing: countWhere(
+        `${html} AND status_code >= 200 AND status_code < 300
+         AND (canonical IS NULL OR canonical = '')
+         AND (canonical_http IS NULL OR canonical_http = '')`,
+      ),
+      canonicalSelfReferencing: countWhere(
+        `${html} AND canonical IS NOT NULL AND canonical = url`,
+      ),
+      canonicalNonSelf: countWhere(
+        `${html} AND canonical IS NOT NULL AND canonical != ''
+         AND canonical != url`,
+      ),
+      canonicalMismatch: countWhere(
+        `${html}
+         AND canonical IS NOT NULL AND canonical != ''
+         AND canonical_http IS NOT NULL AND canonical_http != ''
+         AND canonical != canonical_http`,
+      ),
       canonicalToNon200: countWhere(
         `${html} AND canonical IS NOT NULL AND canonical != ''
          AND EXISTS (
            SELECT 1 FROM urls t WHERE t.url = urls.canonical
              AND t.status_code IS NOT NULL
-             AND (t.status_code < 200 OR t.status_code >= 300)
+             AND (t.status_code < 200 OR t.status_code >= 400)
+         )`,
+      ),
+      canonicalToRedirect: countWhere(
+        `${html} AND canonical IS NOT NULL AND canonical != ''
+         AND EXISTS (
+           SELECT 1 FROM urls t WHERE t.url = urls.canonical
+             AND t.status_code >= 300 AND t.status_code < 400
+         )`,
+      ),
+      canonicalToNoindex: countWhere(
+        `${html} AND canonical IS NOT NULL AND canonical != ''
+         AND EXISTS (
+           SELECT 1 FROM urls t WHERE t.url = urls.canonical
+             AND t.indexability = 'non-indexable:noindex'
          )`,
       ),
       contentThin: countWhere(`${html} AND word_count IS NOT NULL AND word_count < 300`),
@@ -1267,6 +1342,13 @@ export class ProjectDb {
           c: number;
         }
       ).c,
+      metaRefreshUsed: countWhere(
+        `${html} AND meta_refresh IS NOT NULL AND meta_refresh != ''`,
+      ),
+      charsetMissing: countWhere(
+        `${html} AND status_code >= 200 AND status_code < 300
+         AND (charset IS NULL OR charset = '')`,
+      ),
       brokenLinksInternal: this.countBrokenLinks('internal'),
       brokenLinksExternal: this.countBrokenLinks('external'),
     };
@@ -1573,6 +1655,7 @@ export class ProjectDb {
     wordCount: r.word_count,
     canonical: r.canonical,
     canonicalCount: r.canonical_count,
+    canonicalHttp: r.canonical_http,
     metaRobots: r.meta_robots,
     xRobotsTag: r.x_robots_tag,
     contentType: r.content_type,
@@ -1620,6 +1703,9 @@ export class ProjectDb {
     referrerPolicy: r.referrer_policy,
     permissionsPolicy: r.permissions_policy,
     customSearchHits: r.custom_search_hits,
+    metaRefresh: r.meta_refresh,
+    metaRefreshUrl: r.meta_refresh_url,
+    charset: r.charset,
     crawledAt: r.crawled_at,
   });
 
@@ -1885,15 +1971,65 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // signal — Google may pick any of them, defeating the canonical's
       // purpose.
       return "is_external = 0 AND content_kind = 'html' AND canonical_count > 1";
+    case 'issues:canonical-missing':
+      // HTML 2xx pages that declare neither a `<link rel="canonical">`
+      // nor a `Link: rel="canonical"` HTTP header. Without a canonical
+      // hint, search engines pick one themselves — possibly the wrong
+      // variant on duplicate-prone sites.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (canonical IS NULL OR canonical = '')
+              AND (canonical_http IS NULL OR canonical_http = '')`;
+    case 'issues:canonical-self-referencing':
+      // Informational filter: this page's canonical points back to
+      // itself — the typical "good" state for a primary URL.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical = url`;
+    case 'issues:canonical-non-self':
+      // Page canonical points to a different URL — this page is
+      // canonicalised to another. Often intentional (paginated /
+      // duplicates) but always worth surfacing.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical != ''
+              AND canonical != url`;
+    case 'issues:canonical-mismatch':
+      // HTML and HTTP-header canonicals both exist but disagree —
+      // Google picks one unpredictably. Always a misconfiguration.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical != ''
+              AND canonical_http IS NOT NULL AND canonical_http != ''
+              AND canonical != canonical_http`;
     case 'issues:canonical-to-non-200':
       // Canonical points to a URL we crawled and it returned 4xx/5xx —
-      // major SEO bug, the canonical is broken.
+      // major SEO bug, the canonical is broken. 3xx is excluded here
+      // because redirects are surfaced separately under
+      // `issues:canonical-to-redirect` to keep the two filters disjoint.
       return `is_external = 0 AND content_kind = 'html'
               AND canonical IS NOT NULL AND canonical != ''
               AND EXISTS (
                 SELECT 1 FROM urls t WHERE t.url = urls.canonical
                   AND t.status_code IS NOT NULL
-                  AND (t.status_code < 200 OR t.status_code >= 300)
+                  AND (t.status_code < 200 OR t.status_code >= 400)
+              )`;
+    case 'issues:canonical-to-redirect':
+      // Canonical points to a 3xx URL — the canonical chain has an extra
+      // hop that defeats its purpose. Google may consolidate to the
+      // final URL but it's a wasted signal.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical != ''
+              AND EXISTS (
+                SELECT 1 FROM urls t WHERE t.url = urls.canonical
+                  AND t.status_code >= 300 AND t.status_code < 400
+              )`;
+    case 'issues:canonical-to-noindex':
+      // Canonical implies "use this as authoritative"; noindex says
+      // "don't index". Contradictory — page sends mixed signals to
+      // search engines.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical != ''
+              AND EXISTS (
+                SELECT 1 FROM urls t WHERE t.url = urls.canonical
+                  AND t.indexability = 'non-indexable:noindex'
               )`;
     case 'issues:content-thin':
       return "is_external = 0 AND content_kind = 'html' AND word_count IS NOT NULL AND word_count < 300";
@@ -2014,6 +2150,20 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`;
     case 'issues:image-missing-alt':
       return "is_external = 0 AND content_kind = 'html' AND images_missing_alt > 0";
+    case 'issues:meta-refresh-used':
+      // Any HTML page that declares a `<meta http-equiv="refresh">` —
+      // Google explicitly recommends 301 over meta refresh, so every
+      // occurrence is worth surfacing.
+      return `is_external = 0 AND content_kind = 'html'
+              AND meta_refresh IS NOT NULL AND meta_refresh != ''`;
+    case 'issues:charset-missing':
+      // HTML 2xx page declares no charset anywhere — neither
+      // `<meta charset>` / `<meta http-equiv="Content-Type">` nor the
+      // HTTP Content-Type header. Browsers fall back to a guess, which
+      // can mojibake non-ASCII content.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (charset IS NULL OR charset = '')`;
     // Broken-link categories drive the BrokenLinksTab view; they never
     // filter the URL table itself.
     case 'issues:broken-links-all':

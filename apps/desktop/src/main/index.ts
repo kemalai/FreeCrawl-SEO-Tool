@@ -294,6 +294,9 @@ function registerIpc(): void {
       logger.log('error', 'crawler', msg);
       mainWindow?.webContents.send(IPC.crawlError, msg);
     });
+    crawler.on('info', (msg: string) => {
+      logger.log('info', 'crawler', msg);
+    });
 
     void crawler.start();
   });

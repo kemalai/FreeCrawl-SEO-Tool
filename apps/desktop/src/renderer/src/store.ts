@@ -52,6 +52,8 @@ interface AppState {
   selectedUrlId: number | null;
   sidebarOpen: boolean;
   detailPanelOpen: boolean;
+  settingsOpen: boolean;
+  recentUrls: string[];
   dataVersion: number;
   setConfig: (patch: Partial<CrawlConfig>) => void;
   setProgress: (p: CrawlProgress) => void;
@@ -64,20 +66,37 @@ interface AppState {
   setSelectedUrlId: (id: number | null) => void;
   toggleSidebar: () => void;
   toggleDetailPanel: () => void;
+  setSettingsOpen: (open: boolean) => void;
+  addRecentUrl: (url: string) => void;
   bumpDataVersion: () => void;
   reset: () => void;
+}
+
+const RECENT_URLS_MAX = 5;
+const RECENT_URLS_KEY = 'recent-urls';
+
+function loadRecentUrls(): string[] {
+  if (typeof window === 'undefined' || !window.freecrawl) return [];
+  const saved = window.freecrawl.prefsGet(RECENT_URLS_KEY);
+  if (!Array.isArray(saved)) return [];
+  return saved
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+    .slice(0, RECENT_URLS_MAX);
 }
 
 /**
  * Hydrate the stored CrawlConfig once at module load. Anything saved by
  * the Settings dialog merges over the defaults so new fields added in
  * later versions still surface (the merge order is `defaults <- saved`).
+ *
+ * `startUrl` is intentionally NOT restored — every launch starts with an
+ * empty URL bar; recent URLs are surfaced via a dropdown instead.
  */
 function loadInitialConfig(): CrawlConfig {
   if (typeof window === 'undefined' || !window.freecrawl) return DEFAULT_CRAWL_CONFIG;
   const saved = window.freecrawl.prefsGet('crawl-config');
-  if (!saved || typeof saved !== 'object') return DEFAULT_CRAWL_CONFIG;
-  return { ...DEFAULT_CRAWL_CONFIG, ...(saved as Partial<CrawlConfig>) };
+  if (!saved || typeof saved !== 'object') return { ...DEFAULT_CRAWL_CONFIG, startUrl: '' };
+  return { ...DEFAULT_CRAWL_CONFIG, ...(saved as Partial<CrawlConfig>), startUrl: '' };
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -91,6 +110,8 @@ export const useAppStore = create<AppState>((set) => ({
   selectedUrlId: null,
   sidebarOpen: true,
   detailPanelOpen: true,
+  settingsOpen: false,
+  recentUrls: loadRecentUrls(),
   dataVersion: 0,
   setConfig: (patch) =>
     set((state) => {
@@ -120,6 +141,22 @@ export const useAppStore = create<AppState>((set) => ({
   setSelectedUrlId: (id) => set({ selectedUrlId: id }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleDetailPanel: () => set((s) => ({ detailPanelOpen: !s.detailPanelOpen })),
+  setSettingsOpen: (open) => set({ settingsOpen: open }),
+  addRecentUrl: (url) =>
+    set((state) => {
+      const trimmed = url.trim();
+      if (!trimmed) return state;
+      const next = [trimmed, ...state.recentUrls.filter((u) => u !== trimmed)].slice(
+        0,
+        RECENT_URLS_MAX,
+      );
+      try {
+        window.freecrawl?.prefsSet(RECENT_URLS_KEY, next);
+      } catch {
+        // best-effort persistence
+      }
+      return { recentUrls: next };
+    }),
   bumpDataVersion: () => set((s) => ({ dataVersion: s.dataVersion + 1 })),
   reset: () =>
     set({

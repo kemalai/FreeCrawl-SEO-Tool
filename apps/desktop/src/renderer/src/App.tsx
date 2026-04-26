@@ -7,6 +7,7 @@ import { OverviewSidebar } from './components/OverviewSidebar.js';
 import { BottomDetailPanel } from './components/BottomDetailPanel.js';
 import { RobotsTesterDialog } from './components/RobotsTesterDialog.js';
 import { ReportsDialog } from './components/ReportsDialog.js';
+import { SettingsDialog } from './components/SettingsDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
@@ -25,6 +26,8 @@ export function App() {
   const setError = useAppStore((s) => s.setError);
   const bumpDataVersion = useAppStore((s) => s.bumpDataVersion);
   const reset = useAppStore((s) => s.reset);
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
 
@@ -75,6 +78,9 @@ export function App() {
         case 'open-reports':
           setReportsOpen(true);
           break;
+        case 'open-settings':
+          setSettingsOpen(true);
+          break;
         case 'generate-sitemap':
           void window.freecrawl.sitemapGenerate({ filePath: '' });
           break;
@@ -87,7 +93,16 @@ export function App() {
       off4();
       offData();
     };
-  }, [setProgress, setSummary, setError, toggleSidebar, toggleDetailPanel, reset, bumpDataVersion]);
+  }, [
+    setProgress,
+    setSummary,
+    setError,
+    toggleSidebar,
+    toggleDetailPanel,
+    reset,
+    bumpDataVersion,
+    setSettingsOpen,
+  ]);
 
   return (
     <div className="flex h-full flex-col bg-surface-950 text-surface-100">
@@ -146,6 +161,7 @@ export function App() {
         onClose={() => setRobotsTesterOpen(false)}
       />
       <ReportsDialog open={reportsOpen} onClose={() => setReportsOpen(false)} />
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

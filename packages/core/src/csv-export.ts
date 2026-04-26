@@ -18,6 +18,7 @@ const CSV_COLUMNS: (keyof CrawlUrlRow)[] = [
   'h2Count',
   'wordCount',
   'canonical',
+  'canonicalHttp',
   'metaRobots',
   'xRobotsTag',
   'contentType',

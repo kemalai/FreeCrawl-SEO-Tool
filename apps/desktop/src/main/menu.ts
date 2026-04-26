@@ -53,6 +53,12 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => send('generate-sitemap'),
         },
         { type: 'separator' },
+        {
+          label: 'Settings…',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => send('open-settings'),
+        },
+        { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
     },

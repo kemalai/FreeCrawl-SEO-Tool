@@ -1,10 +1,9 @@
 import { useState } from 'react';
-import { Play, Square, Pause, Eraser, ChevronDown, Settings } from 'lucide-react';
+import { Play, Square, Pause, Eraser, ChevronDown, Settings, History } from 'lucide-react';
 import clsx from 'clsx';
 import type { CrawlScope } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { clearCrawlWithConfirm } from '../utils/clearCrawl.js';
-import { SettingsDialog } from './SettingsDialog.js';
 
 const SCOPE_OPTIONS: { value: CrawlScope; label: string; hint: string }[] = [
   { value: 'subdomain', label: 'Subdomain', hint: 'Same subdomain only' },
@@ -20,8 +19,11 @@ export function TopBar() {
   const setProgress = useAppStore((s) => s.setProgress);
   const reset = useAppStore((s) => s.reset);
   const setError = useAppStore((s) => s.setError);
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const recentUrls = useAppStore((s) => s.recentUrls);
+  const addRecentUrl = useAppStore((s) => s.addRecentUrl);
   const [scopeOpen, setScopeOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [recentOpen, setRecentOpen] = useState(false);
 
   const running = progress?.running === true;
   const paused = progress?.paused === true;
@@ -31,10 +33,13 @@ export function TopBar() {
   const activeScope = SCOPE_OPTIONS.find((o) => o.value === config.scope)!;
 
   async function start() {
-    if (!config.startUrl.trim()) {
+    const trimmed = config.startUrl.trim();
+    if (!trimmed) {
       setError('Please enter a starting URL.');
       return;
     }
+    addRecentUrl(trimmed);
+    setRecentOpen(false);
     reset();
     // Flip the UI to "Running" immediately so the user gets feedback
     // before the IPC round-trip and resolveStartUrl probe complete.
@@ -82,17 +87,52 @@ export function TopBar() {
         FreeCrawl
       </div>
       <div className="mx-2 h-5 w-px bg-surface-800" />
-      <input
-        className="input flex-1"
-        placeholder="https://example.com"
-        value={config.startUrl}
-        onChange={(e) => setConfig({ startUrl: e.target.value })}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !running) void start();
-        }}
-        disabled={running}
-        spellCheck={false}
-      />
+      <div className="relative flex-1">
+        <input
+          className="input w-full"
+          placeholder="https://example.com"
+          value={config.startUrl}
+          onChange={(e) => setConfig({ startUrl: e.target.value })}
+          onFocus={() => {
+            if (recentUrls.length > 0) setRecentOpen(true);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !running) void start();
+            if (e.key === 'Escape') setRecentOpen(false);
+          }}
+          disabled={running}
+          spellCheck={false}
+        />
+        {recentOpen && recentUrls.length > 0 && (
+          <>
+            <div
+              className="fixed inset-0 z-10"
+              onClick={() => setRecentOpen(false)}
+            />
+            <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded border border-surface-700 bg-surface-900 shadow-xl">
+              <div className="flex items-center gap-1.5 border-b border-surface-800 px-3 py-1.5 text-[10px] uppercase tracking-wider text-surface-500">
+                <History className="h-3 w-3" />
+                Recent URLs
+              </div>
+              {recentUrls.map((url) => (
+                <button
+                  key={url}
+                  className="flex w-full items-center px-3 py-1.5 text-left text-[12px] text-surface-200 hover:bg-surface-800"
+                  onMouseDown={(e) => {
+                    // mousedown so input blur doesn't race with click
+                    e.preventDefault();
+                    setConfig({ startUrl: url });
+                    setRecentOpen(false);
+                  }}
+                  title={url}
+                >
+                  <span className="truncate">{url}</span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
 
       <div className="relative">
         <button
@@ -172,7 +212,6 @@ export function TopBar() {
       >
         <Settings className="h-3.5 w-3.5" />
       </button>
-      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import * as os from 'node:os';
 import { fetch as undiciFetch } from 'undici';
 import PQueue from 'p-queue';
 import type {
@@ -27,6 +28,7 @@ export interface CrawlerEvents {
   progress: (p: CrawlProgress) => void;
   done: (summary: CrawlSummary) => void;
   error: (message: string) => void;
+  info: (message: string) => void;
 }
 
 interface QueueItem {
@@ -68,6 +70,13 @@ export class Crawler extends EventEmitter {
   private stopped = false;
   private running = false;
   private paused = false;
+  /**
+   * Tracks "the queue is paused because the memory soft cap was hit, not
+   * because the user clicked Pause." Lets the memory monitor resume only
+   * the auto-pauses it caused, never overriding a user pause.
+   */
+  private memoryAutoPaused = false;
+  private memoryMonitorTimer: NodeJS.Timeout | null = null;
   private robots: RobotsChecker | null = null;
   private progressTimer: NodeJS.Timeout | null = null;
   private readonly includeRegexes: RegExp[];
@@ -154,6 +163,9 @@ export class Crawler extends EventEmitter {
     // progress events, and link classification all see the same canonical value.
     this.config = { ...this.config, startUrl: start };
 
+    this.applyProcessPriority();
+    this.startMemoryMonitor();
+
     // Fresh-start vs. resume decision. If the start URL matches the one
     // recorded from the previous crawl, we keep existing rows and resume.
     // If it differs (or there is no previous crawl), we wipe the tables.
@@ -186,18 +198,21 @@ export class Crawler extends EventEmitter {
             this.config.userAgent,
             controller.signal,
           );
+          // Sitemap entry cap follows the crawl-level cap so 1M-URL crawls
+          // can ingest the full sitemap, with a sensible floor for tiny caps.
+          const sitemapMaxUrls = Math.max(50_000, this.config.maxUrls);
           const result = await fetchSitemaps(roots, {
             userAgent: this.config.userAgent,
             signal: controller.signal,
             timeoutMs: this.config.requestTimeoutMs,
-            maxUrls: 50_000,
+            maxUrls: sitemapMaxUrls,
             maxDepth: 3,
           });
           this.db.setSitemapUrls(result.entries);
           if (result.entries.length > 0) {
             this.emit(
-              'error',
-              `Sitemap: parsed ${result.sitemapsParsed.length}/${result.sitemapsTried.length}, ${result.entries.length} URLs${result.truncated ? ' (truncated at 50k)' : ''}`,
+              'info',
+              `Sitemap: parsed ${result.sitemapsParsed.length}/${result.sitemapsTried.length}, ${result.entries.length} URLs${result.truncated ? ` (truncated at ${sitemapMaxUrls.toLocaleString()})` : ''}`,
             );
           }
         } finally {
@@ -227,6 +242,11 @@ export class Crawler extends EventEmitter {
     this.db.recomputeInlinks();
     this.db.recomputeRedirectChains();
     this.running = false;
+    this.stopMemoryMonitor();
+    // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
+    // heap that's no longer needed once the queue is drained.
+    this.seen.clear();
+    this.externalSeen.clear();
     this.emitProgress();
     this.emit('done', this.db.getSummary());
   }
@@ -278,6 +298,9 @@ export class Crawler extends EventEmitter {
       startUrl: urls[0]!,
     };
 
+    this.applyProcessPriority();
+    this.startMemoryMonitor();
+
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
 
     for (const u of urls) {
@@ -295,6 +318,9 @@ export class Crawler extends EventEmitter {
     this.db.recomputeInlinks();
     this.db.recomputeRedirectChains();
     this.running = false;
+    this.stopMemoryMonitor();
+    this.seen.clear();
+    this.externalSeen.clear();
     this.emitProgress();
     this.emit('done', this.db.getSummary());
   }
@@ -400,6 +426,7 @@ export class Crawler extends EventEmitter {
     this.stopped = true;
     this.running = false;
     this.paused = false;
+    this.stopMemoryMonitor();
     // Drop any queued work. If paused, unblock onIdle() so start() can resolve.
     this.queue.clear();
     this.externalQueue.clear();
@@ -432,6 +459,78 @@ export class Crawler extends EventEmitter {
     return this.paused;
   }
 
+  /**
+   * Apply the configured OS scheduling priority to the current process.
+   * `os.setPriority` throws on unsupported platforms / EPERM, so failure
+   * is logged-as-info, not fatal.
+   */
+  private applyProcessPriority(): void {
+    const map: Record<CrawlConfig['processPriority'], number> = {
+      normal: os.constants.priority.PRIORITY_NORMAL,
+      'below-normal': os.constants.priority.PRIORITY_BELOW_NORMAL,
+      idle: os.constants.priority.PRIORITY_LOW,
+    };
+    const target = map[this.config.processPriority];
+    if (target === undefined) return;
+    try {
+      os.setPriority(0, target);
+      if (this.config.processPriority !== 'normal') {
+        this.emit('info', `Process priority set to ${this.config.processPriority}`);
+      }
+    } catch (err) {
+      this.emit(
+        'info',
+        `Could not set process priority: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Soft memory cap. Polls RSS every 3s; when over `memoryLimitMb`, pauses
+   * the queues (auto-paused flag distinguishes this from user-initiated
+   * pause). When RSS drops below 80% of the cap, auto-resumes — but only
+   * if the user hasn't separately paused. 0 disables the monitor.
+   */
+  private startMemoryMonitor(): void {
+    const limitMb = this.config.memoryLimitMb;
+    if (!limitMb || limitMb <= 0) return;
+    const limitBytes = limitMb * 1024 * 1024;
+    const resumeAtBytes = limitBytes * 0.8;
+    this.memoryMonitorTimer = setInterval(() => {
+      if (this.stopped) return;
+      const rss = process.memoryUsage().rss;
+      if (!this.memoryAutoPaused && !this.paused && rss > limitBytes) {
+        this.memoryAutoPaused = true;
+        this.queue.pause();
+        this.externalQueue.pause();
+        this.emit(
+          'info',
+          `Memory soft limit hit (${Math.round(rss / 1024 / 1024)} MB > ${limitMb} MB) — auto-pausing queue`,
+        );
+      } else if (this.memoryAutoPaused && rss < resumeAtBytes) {
+        this.memoryAutoPaused = false;
+        if (!this.paused) {
+          this.queue.start();
+          this.externalQueue.start();
+          this.emit(
+            'info',
+            `Memory back under threshold (${Math.round(rss / 1024 / 1024)} MB) — resuming queue`,
+          );
+        }
+      }
+    }, 3000);
+    // Don't keep the event loop alive for the timer alone.
+    this.memoryMonitorTimer.unref?.();
+  }
+
+  private stopMemoryMonitor(): void {
+    if (this.memoryMonitorTimer) {
+      clearInterval(this.memoryMonitorTimer);
+      this.memoryMonitorTimer = null;
+    }
+    this.memoryAutoPaused = false;
+  }
+
   /** Re-queue a specific URL (e.g. user-triggered Re-Spider). */
   requeueUrl(url: string, depth = 0): void {
     if (this.stopped) return;
@@ -446,6 +545,16 @@ export class Crawler extends EventEmitter {
     if (item.depth > this.config.maxDepth) return;
     if (this.robots && !this.robots.isAllowed(item.url)) return;
     if (!this.passesUrlFilter(item.url)) return;
+    // Hard cap on the in-memory pending queue. Beyond this we drop new
+    // discoveries — the alternative is unbounded heap growth on big
+    // sitemaps / dense link graphs. `seen` still grows, but each entry
+    // is ~80 bytes vs a queued item carrying the closure + URL string.
+    if (
+      this.config.maxQueueSize > 0 &&
+      this.queue.size + this.queue.pending >= this.config.maxQueueSize
+    ) {
+      return;
+    }
 
     this.seen.add(item.url);
     this.pending++;
@@ -493,6 +602,14 @@ export class Crawler extends EventEmitter {
       const csp = res.headers.get('content-security-policy');
       const referrerPolicy = res.headers.get('referrer-policy');
       const permissionsPolicy = res.headers.get('permissions-policy');
+      // `Link: <url>; rel="canonical"` HTTP response header — Google honours
+      // this in addition to (and equal weight to) the HTML <link rel=canonical>.
+      // PDFs and other non-HTML resources can only express canonicals here.
+      const linkHeader = res.headers.get('link');
+      const canonicalHttpRaw = parseLinkRelCanonical(linkHeader);
+      const canonicalHttp = canonicalHttpRaw
+        ? normalizeUrl(canonicalHttpRaw, item.url, this.urlRewrites)
+        : null;
 
       const kind = detectContentKind(item.url, contentType);
 
@@ -533,6 +650,7 @@ export class Crawler extends EventEmitter {
           csp,
           referrerPolicy,
           permissionsPolicy,
+          canonicalHttp,
         });
         if (redirectUrlId) this.db.setUrlHeaders(redirectUrlId, allHeaders);
         this.crawled++;
@@ -580,6 +698,7 @@ export class Crawler extends EventEmitter {
           csp,
           referrerPolicy,
           permissionsPolicy,
+          canonicalHttp,
         });
         if (nonHtmlUrlId) this.db.setUrlHeaders(nonHtmlUrlId, allHeaders);
         this.crawled++;
@@ -593,6 +712,16 @@ export class Crawler extends EventEmitter {
         customSearchTerms: this.config.customSearchTerms,
         urlRewrites: this.urlRewrites,
       });
+
+      // Charset resolution — prefer the document's own declaration (HTML5
+      // `<meta charset>` or legacy `<meta http-equiv>`); fall back to the
+      // HTTP Content-Type header's `charset=` parameter so older sites
+      // without a meta still surface a value.
+      let charset: string | null = parsed.charset;
+      if (!charset && contentType) {
+        const m = contentType.toLowerCase().match(/charset\s*=\s*([^\s;]+)/);
+        if (m && m[1]) charset = m[1];
+      }
 
       const xRobotsLower = xRobotsTag?.toLowerCase() ?? '';
       const headerNoindex = xRobotsLower.includes('noindex');
@@ -611,6 +740,11 @@ export class Crawler extends EventEmitter {
       ) {
         indexability = 'non-indexable:canonical';
         reason = `canonical points to ${parsed.canonical}`;
+      } else if (!parsed.canonical && canonicalHttp && canonicalHttp !== item.url) {
+        // No HTML canonical, but the HTTP `Link` header points elsewhere —
+        // Google still treats the page as canonicalised to that target.
+        indexability = 'non-indexable:canonical';
+        reason = `HTTP canonical points to ${canonicalHttp}`;
       }
 
       // Respect-Nofollow default (Screaming-Frog style): `rel="nofollow"`
@@ -641,6 +775,7 @@ export class Crawler extends EventEmitter {
         wordCount: parsed.wordCount,
         canonical: parsed.canonical,
         canonicalCount: parsed.canonicalCount,
+        canonicalHttp,
         metaRobots: parsed.metaRobots,
         xRobotsTag,
         contentType,
@@ -684,6 +819,9 @@ export class Crawler extends EventEmitter {
         amphtml: parsed.amphtml,
         favicon: parsed.favicon,
         mixedContentCount: parsed.mixedContentCount,
+        metaRefresh: parsed.metaRefresh,
+        metaRefreshUrl: parsed.metaRefreshUrl,
+        charset,
       });
       if (urlId) this.db.setUrlHeaders(urlId, allHeaders);
       this.db.insertLinks(urlId, storableLinks, item.depth);
@@ -834,6 +972,56 @@ function parseIntSafe(v: string | null | undefined): number | null {
   if (!v) return null;
   const n = Number.parseInt(v, 10);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Extract the URL of the first `rel="canonical"` entry from an RFC 8288
+ * `Link:` HTTP header. Returns null when the header is absent or contains
+ * no canonical entry.
+ *
+ * Format reminder: `<https://a/>; rel="next", <https://b/>; rel="canonical"`
+ *  - entries are separated by commas, but commas inside `<…>` (URLs with
+ *    encoded commas) must be ignored — we track angle-bracket depth to avoid
+ *    splitting in the middle of a URL.
+ *  - parameters are `;`-separated; `rel` may be quoted or bare and is
+ *    case-insensitive.
+ */
+function parseLinkRelCanonical(linkHeader: string | null): string | null {
+  if (!linkHeader) return null;
+  const entries: string[] = [];
+  let depth = 0;
+  let cur = '';
+  for (let i = 0; i < linkHeader.length; i++) {
+    const ch = linkHeader[i]!;
+    if (ch === '<') {
+      depth++;
+      cur += ch;
+      continue;
+    }
+    if (ch === '>') {
+      depth = Math.max(0, depth - 1);
+      cur += ch;
+      continue;
+    }
+    if (ch === ',' && depth === 0) {
+      if (cur.trim()) entries.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur.trim()) entries.push(cur);
+
+  for (const entry of entries) {
+    const m = entry.match(/^\s*<([^>]+)>\s*(.*)$/);
+    if (!m) continue;
+    const [, uri, rest] = m as unknown as [string, string, string];
+    if (/(^|;)\s*rel\s*=\s*"?canonical"?\s*(;|$)/i.test(rest)) {
+      const trimmed = uri.trim();
+      return trimmed || null;
+    }
+  }
+  return null;
 }
 
 function detectContentKind(url: string, contentType: string | null): ContentKind {

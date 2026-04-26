@@ -108,6 +108,7 @@ export type MenuEvent =
   | 'generate-sitemap'
   | 'open-robots-tester'
   | 'open-reports'
+  | 'open-settings'
   | 'about';
 
 export interface ExportCsvResult {

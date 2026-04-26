@@ -404,6 +404,30 @@ function buildTree(o: OverviewCounts | null): Node[] {
           label: 'Canonicals',
           children: [
             {
+              key: 'issues-canonicals-missing',
+              label: 'Canonical Missing',
+              count: o.issues.canonicalMissing,
+              category: 'issues:canonical-missing',
+            },
+            {
+              key: 'issues-canonicals-self',
+              label: 'Self-Referencing',
+              count: o.issues.canonicalSelfReferencing,
+              category: 'issues:canonical-self-referencing',
+            },
+            {
+              key: 'issues-canonicals-non-self',
+              label: 'Canonicalised (→ other)',
+              count: o.issues.canonicalNonSelf,
+              category: 'issues:canonical-non-self',
+            },
+            {
+              key: 'issues-canonicals-mismatch',
+              label: 'HTTP vs HTML Mismatch',
+              count: o.issues.canonicalMismatch,
+              category: 'issues:canonical-mismatch',
+            },
+            {
               key: 'issues-canonicals-multiple',
               label: 'Multiple Canonicals',
               count: o.issues.multipleCanonicals,
@@ -414,6 +438,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Canonical → Non-200',
               count: o.issues.canonicalToNon200,
               category: 'issues:canonical-to-non-200',
+            },
+            {
+              key: 'issues-canonicals-redirect',
+              label: 'Canonical → Redirect',
+              count: o.issues.canonicalToRedirect,
+              category: 'issues:canonical-to-redirect',
+            },
+            {
+              key: 'issues-canonicals-noindex',
+              label: 'Canonical → Noindex',
+              count: o.issues.canonicalToNoindex,
+              category: 'issues:canonical-to-noindex',
             },
           ],
         },
@@ -456,6 +492,24 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Large (>1MB)',
               count: o.issues.pageLarge,
               category: 'issues:page-large',
+            },
+          ],
+        },
+        {
+          key: 'issues-document',
+          label: 'Document',
+          children: [
+            {
+              key: 'issues-meta-refresh',
+              label: 'Meta Refresh Used',
+              count: o.issues.metaRefreshUsed,
+              category: 'issues:meta-refresh-used',
+            },
+            {
+              key: 'issues-charset-missing',
+              label: 'Charset Missing',
+              count: o.issues.charsetMissing,
+              category: 'issues:charset-missing',
             },
           ],
         },

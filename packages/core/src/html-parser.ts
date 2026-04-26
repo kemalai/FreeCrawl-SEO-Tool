@@ -69,6 +69,21 @@ export interface ParsedPage {
    * substring match counts. Empty if no terms requested.
    */
   customSearchHits: Record<string, number>;
+  /** Raw `content` attribute of `<meta http-equiv="refresh">`, else null. */
+  metaRefresh: string | null;
+  /**
+   * Absolute redirect target parsed from the meta-refresh content's
+   * `url=…` parameter, normalized via `normalizeUrl`. Null when the
+   * meta-refresh sets only a delay (page reload), or has no parseable URL.
+   */
+  metaRefreshUrl: string | null;
+  /**
+   * Declared character encoding from the document itself — lowercased.
+   * Looks at `<meta charset>` first, then `<meta http-equiv="Content-Type">`'s
+   * `charset=` parameter. Null when neither is present (the HTTP
+   * Content-Type header is checked separately by the crawler).
+   */
+  charset: string | null;
   links: DiscoveredLink[];
   images: DiscoveredImage[];
   hasNoindex: boolean;
@@ -207,6 +222,41 @@ export function parseHtml(
     ($('link[rel="icon"]').first().attr('href') ?? '').trim() ||
     ($('link[rel="shortcut icon"]').first().attr('href') ?? '').trim();
   const favicon = faviconRaw ? normalizeUrl(faviconRaw, pageUrl, opts.urlRewrites) : null;
+
+  // Meta refresh — `<meta http-equiv="refresh" content="N; url=…">`.
+  // Even when the URL is absent (pure auto-reload) we still capture the
+  // raw content so the issue filter can flag the page for using meta
+  // refresh at all (Google explicitly discourages it as a redirect).
+  const metaRefreshRaw = (
+    $('meta[http-equiv="refresh"], meta[http-equiv="Refresh"], meta[http-equiv="REFRESH"]')
+      .first()
+      .attr('content') ?? ''
+  ).trim();
+  let metaRefresh: string | null = metaRefreshRaw || null;
+  let metaRefreshUrl: string | null = null;
+  if (metaRefresh) {
+    // Format is `<seconds>[; url=<URL>]`. Parameters are case-insensitive
+    // and may be separated by `;` or `,`. Quotes around the URL are
+    // optional and we strip them defensively.
+    const urlMatch = metaRefresh.match(/[;,]\s*url\s*=\s*['"]?([^'"\s;,]+)['"]?/i);
+    if (urlMatch && urlMatch[1]) {
+      metaRefreshUrl = normalizeUrl(urlMatch[1], pageUrl, opts.urlRewrites);
+    }
+  }
+
+  // Document-declared character encoding. HTML5's `<meta charset>` wins;
+  // legacy `<meta http-equiv="Content-Type">` is parsed as a fallback so
+  // older sites still surface a value.
+  let charset = ($('meta[charset]').first().attr('charset') ?? '').trim().toLowerCase() || null;
+  if (!charset) {
+    const ctMeta = (
+      $('meta[http-equiv="Content-Type"], meta[http-equiv="content-type"]')
+        .first()
+        .attr('content') ?? ''
+    ).toLowerCase();
+    const m = ctMeta.match(/charset\s*=\s*([^\s;]+)/);
+    if (m && m[1]) charset = m[1];
+  }
 
   // Mixed content — only relevant on HTTPS pages. We scan the standard
   // subresource elements (Google's mixed-content audit list); plain
@@ -361,6 +411,9 @@ export function parseHtml(
     favicon,
     mixedContentCount,
     customSearchHits,
+    metaRefresh,
+    metaRefreshUrl,
+    charset,
     links: [...linkMap.values()],
     images: [...imageMap.values()],
     hasNoindex,

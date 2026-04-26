@@ -48,7 +48,13 @@ export type UrlCategory =
   | 'issues:h1-multiple'
   | 'issues:heading-skipped-level'
   | 'issues:multiple-canonicals'
+  | 'issues:canonical-missing'
+  | 'issues:canonical-self-referencing'
+  | 'issues:canonical-non-self'
+  | 'issues:canonical-mismatch'
   | 'issues:canonical-to-non-200'
+  | 'issues:canonical-to-redirect'
+  | 'issues:canonical-to-noindex'
   | 'issues:content-thin'
   | 'issues:response-slow'
   | 'issues:response-very-slow'
@@ -80,6 +86,8 @@ export type UrlCategory =
   | 'issues:non-indexable-in-sitemap'
   | 'issues:non-200-in-sitemap'
   | 'issues:image-missing-alt'
+  | 'issues:meta-refresh-used'
+  | 'issues:charset-missing'
   | 'issues:broken-links-all'
   | 'issues:broken-links-internal'
   | 'issues:broken-links-external';
@@ -118,6 +126,8 @@ export interface CrawlUrlRow {
   wordCount: number | null;
   canonical: string | null;
   canonicalCount: number;
+  /** `<URL>; rel="canonical"` parsed out of the `Link:` HTTP response header. */
+  canonicalHttp: string | null;
   metaRobots: string | null;
   xRobotsTag: string | null;
   contentType: string | null;
@@ -167,6 +177,16 @@ export interface CrawlUrlRow {
   permissionsPolicy: string | null;
   /** JSON-stringified `{ term: count, ... }` or null. */
   customSearchHits: string | null;
+  /** Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo". */
+  metaRefresh: string | null;
+  /** Absolute redirect URL parsed from the meta-refresh content, when present. */
+  metaRefreshUrl: string | null;
+  /**
+   * Declared character encoding (lowercased). Sourced from `<meta charset>` /
+   * `<meta http-equiv="Content-Type">`, with the HTTP Content-Type
+   * `charset=` parameter as fallback. Null when the page declares neither.
+   */
+  charset: string | null;
   crawledAt: string;
 }
 
@@ -249,6 +269,22 @@ export interface CrawlConfig {
    *  - `add`    — `…/foo` → `…/foo/`  (only when path has no trailing `.ext`)
    */
   trailingSlash: 'leave' | 'strip' | 'add';
+  /**
+   * Hardware / resource caps. All `0` means unlimited.
+   *
+   *  - `memoryLimitMb`: when crawler RSS exceeds this, the queue is
+   *    auto-paused. It auto-resumes once RSS falls below 80% of the limit.
+   *    Lets the user run a 1M-URL crawl on a constrained machine without
+   *    OOMs. Soft cap — not a hard `--max-old-space-size` enforcement.
+   *  - `maxQueueSize`: hard cap on the in-memory pending queue (`enqueue`
+   *    drops new items beyond this). Bounds peak heap during fan-out
+   *    bursts (e.g. a sitemap dump of 100k URLs). `seen`-set still grows.
+   *  - `processPriority`: OS scheduler hint. `idle` and `below-normal`
+   *    let the user keep the machine usable while crawling.
+   */
+  memoryLimitMb: number;
+  maxQueueSize: number;
+  processPriority: 'normal' | 'below-normal' | 'idle';
 }
 
 export interface OverviewCounts {
@@ -291,7 +327,13 @@ export interface OverviewCounts {
     h1Multiple: number;
     headingSkippedLevel: number;
     multipleCanonicals: number;
+    canonicalMissing: number;
+    canonicalSelfReferencing: number;
+    canonicalNonSelf: number;
+    canonicalMismatch: number;
     canonicalToNon200: number;
+    canonicalToRedirect: number;
+    canonicalToNoindex: number;
     contentThin: number;
     responseSlow: number;
     responseVerySlow: number;
@@ -323,6 +365,8 @@ export interface OverviewCounts {
     nonIndexableInSitemap: number;
     non200InSitemap: number;
     imageMissingAlt: number;
+    metaRefreshUsed: number;
+    charsetMissing: number;
     brokenLinksInternal: number;
     brokenLinksExternal: number;
   };
@@ -521,7 +565,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   startUrl: '',
   scope: 'subdomain',
   maxDepth: 10,
-  maxUrls: 100_000,
+  maxUrls: 1_000_000,
   maxConcurrency: 20,
   maxRps: 20,
   requestTimeoutMs: 20_000,
@@ -543,4 +587,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   forceHttps: false,
   lowercasePath: false,
   trailingSlash: 'leave',
+  memoryLimitMb: 0,
+  maxQueueSize: 0,
+  processPriority: 'normal',
 };

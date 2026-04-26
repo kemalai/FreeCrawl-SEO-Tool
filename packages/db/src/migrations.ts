@@ -448,6 +448,38 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 23,
+    name: 'add_canonical_http',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'canonical_http')) {
+        db.exec('ALTER TABLE urls ADD COLUMN canonical_http TEXT');
+      }
+    },
+  },
+  {
+    version: 24,
+    name: 'add_meta_refresh_and_charset',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      // Raw `<meta http-equiv="refresh">` content attribute (e.g. "5; url=/foo").
+      if (!has('meta_refresh')) db.exec('ALTER TABLE urls ADD COLUMN meta_refresh TEXT');
+      // Parsed redirect target from the meta-refresh content, normalised
+      // to absolute URL when present, else null.
+      if (!has('meta_refresh_url'))
+        db.exec('ALTER TABLE urls ADD COLUMN meta_refresh_url TEXT');
+      // Declared character encoding — prefers `<meta charset>` /
+      // `<meta http-equiv="Content-Type">`, falls back to the HTTP
+      // Content-Type header `charset=` parameter. Lowercased.
+      if (!has('charset')) db.exec('ALTER TABLE urls ADD COLUMN charset TEXT');
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {
