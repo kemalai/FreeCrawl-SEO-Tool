@@ -2,7 +2,7 @@ import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import type { ProjectDb } from '@freecrawl/db';
-import type { CrawlUrlRow } from '@freecrawl/shared-types';
+import type { CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
 
 const CSV_COLUMNS: (keyof CrawlUrlRow)[] = [
   'url',
@@ -43,7 +43,7 @@ function escapeCsv(value: unknown): string {
 export async function exportUrlsToCsv(
   db: ProjectDb,
   filePath: string,
-  options: { selectedIds?: number[] } = {},
+  options: { selectedIds?: number[]; category?: UrlCategory } = {},
 ): Promise<{ rowsWritten: number }> {
   let rowsWritten = 0;
   const header = CSV_COLUMNS.join(',') + '\n';
@@ -51,7 +51,9 @@ export async function exportUrlsToCsv(
   const source: Iterable<CrawlUrlRow> =
     options.selectedIds && options.selectedIds.length > 0
       ? db.iterateUrlsByIds(options.selectedIds)
-      : db.iterateAllUrls();
+      : options.category && options.category !== 'all'
+        ? db.iterateUrlsByCategory(options.category)
+        : db.iterateAllUrls();
 
   const generator = async function* (): AsyncGenerator<string> {
     yield '﻿' + header;

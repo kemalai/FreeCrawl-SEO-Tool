@@ -11,6 +11,7 @@ import {
   type ExportJsonResult,
   type ExportHtmlReportInput,
   type ExportHtmlReportResult,
+  type BulkExportResult,
   type CompareLoadInput,
   type CompareLoadResult,
   type GraphSnapshotInput,
@@ -25,11 +26,19 @@ import {
   type MenuEvent,
   type RobotsTestInput,
   type RobotsTestResult,
+  type SitemapValidateInput,
+  type SitemapValidateResult,
   type PagesPerDirectoryInput,
   type PagesPerDirectoryRow,
   type StatusCodeHistogramRow,
   type DepthHistogramRow,
   type ResponseTimeHistogramRow,
+  type TopUrlsInput,
+  type TopUrlsRow,
+  type ExternalDomainHealthRow,
+  type SettingsExportInput,
+  type SettingsExportResult,
+  type SettingsImportResult,
   type OverviewCounts,
   type SitemapGenerateInput,
   type SitemapGenerateResult,
@@ -37,6 +46,8 @@ import {
   type UrlContextMenuInput,
   type UrlDetail,
   type UrlDetailInput,
+  type UrlSourceInput,
+  type UrlSourceResult,
   type UrlsQueryInput,
   type UrlsQueryResult,
 } from '@freecrawl/shared-types';
@@ -65,10 +76,16 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.crawlAddUrl, url),
   projectSaveAs: (): Promise<{ filePath: string; bytesWritten: number } | null> =>
     ipcRenderer.invoke(IPC.projectSaveAs),
+  projectOpen: (filePath?: string): Promise<{ filePath: string } | null> =>
+    ipcRenderer.invoke(IPC.projectOpen, filePath),
+  projectCurrentPath: (): Promise<string | null> =>
+    ipcRenderer.invoke(IPC.projectCurrentPath),
   urlsQuery: (input: UrlsQueryInput): Promise<UrlsQueryResult> =>
     ipcRenderer.invoke(IPC.urlsQuery, input),
   urlDetailGet: (input: UrlDetailInput): Promise<UrlDetail | null> =>
     ipcRenderer.invoke(IPC.urlDetailGet, input),
+  urlSourceGet: (input: UrlSourceInput): Promise<UrlSourceResult> =>
+    ipcRenderer.invoke(IPC.urlSourceGet, input),
   urlContextMenu: (input: UrlContextMenuInput): Promise<void> =>
     ipcRenderer.invoke(IPC.urlContextMenu, input),
   urlBulkContextMenu: (input: UrlBulkContextMenuInput): Promise<void> =>
@@ -85,6 +102,7 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.exportJson, input),
   exportHtmlReport: (input: ExportHtmlReportInput): Promise<ExportHtmlReportResult> =>
     ipcRenderer.invoke(IPC.exportHtmlReport, input),
+  exportBulk: (): Promise<BulkExportResult> => ipcRenderer.invoke(IPC.exportBulk),
   compareLoad: (input: CompareLoadInput): Promise<CompareLoadResult> =>
     ipcRenderer.invoke(IPC.compareLoad, input),
   graphSnapshot: (input: GraphSnapshotInput): Promise<GraphSnapshotResult> =>
@@ -110,6 +128,8 @@ const api: FreeCrawlApi = {
   logsOpenWindow: (): Promise<void> => ipcRenderer.invoke(IPC.logsOpenWindow),
   robotsTest: (input: RobotsTestInput): Promise<RobotsTestResult> =>
     ipcRenderer.invoke(IPC.robotsTest, input),
+  sitemapValidate: (input: SitemapValidateInput): Promise<SitemapValidateResult> =>
+    ipcRenderer.invoke(IPC.sitemapValidate, input),
   reportsPagesPerDirectory: (
     input: PagesPerDirectoryInput,
   ): Promise<PagesPerDirectoryRow[]> => ipcRenderer.invoke(IPC.reportsPagesPerDirectory, input),
@@ -119,6 +139,16 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.reportsDepthHistogram),
   reportsResponseTimeHistogram: (): Promise<ResponseTimeHistogramRow[]> =>
     ipcRenderer.invoke(IPC.reportsResponseTimeHistogram),
+  reportsTopUrls: (input: TopUrlsInput): Promise<TopUrlsRow[]> =>
+    ipcRenderer.invoke(IPC.reportsTopUrls, input),
+  reportsExternalDomainHealth: (
+    limit?: number,
+  ): Promise<ExternalDomainHealthRow[]> =>
+    ipcRenderer.invoke(IPC.reportsExternalDomainHealth, limit),
+  prefsExportSettings: (input: SettingsExportInput): Promise<SettingsExportResult> =>
+    ipcRenderer.invoke(IPC.prefsExportSettings, input),
+  prefsImportSettings: (): Promise<SettingsImportResult> =>
+    ipcRenderer.invoke(IPC.prefsImportSettings),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onProgress: (cb) => subscribe<CrawlProgress>(IPC.crawlProgress, cb),
   onDone: (cb) => subscribe<CrawlSummary>(IPC.crawlDone, cb),

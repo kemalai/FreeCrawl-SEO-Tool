@@ -556,6 +556,159 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 28,
+    name: 'add_v0_3_issue_columns',
+    // TEMA 10 — extra signals surfaced as columns so issue counts/filters
+    // are simple SQL without a re-parse on read. Each is independently
+    // null-safe + defaulted so old projects upgrade cleanly.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('title_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN title_count INTEGER NOT NULL DEFAULT 0');
+      if (!has('images_empty_alt'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN images_empty_alt INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('empty_anchor_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN empty_anchor_count INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('apple_touch_icon'))
+        db.exec('ALTER TABLE urls ADD COLUMN apple_touch_icon TEXT');
+      if (!has('manifest_url')) db.exec('ALTER TABLE urls ADD COLUMN manifest_url TEXT');
+      if (!has('feed_url')) db.exec('ALTER TABLE urls ADD COLUMN feed_url TEXT');
+    },
+  },
+  {
+    version: 29,
+    name: 'add_microdata_rdfa_pixel_width',
+    // TEMA 11 — Microdata/RDFa counts, insecure form action + missing-SRI
+    // counters, plus pixel-width estimates for title/meta so the SERP
+    // truncation issue checks are pure SQL.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('microdata_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN microdata_count INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('rdfa_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN rdfa_count INTEGER NOT NULL DEFAULT 0');
+      if (!has('insecure_form_action_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN insecure_form_action_count INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('missing_sri_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN missing_sri_count INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('title_pixel_width'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN title_pixel_width INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('meta_pixel_width'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN meta_pixel_width INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 30,
+    name: 'add_ttfb_and_cookies',
+    // TEMA 12 — TTFB measurement (excludes retry overhead) + cookie
+    // security flag analysis (Secure / HttpOnly / SameSite). Cookie values
+    // themselves are never stored — only per-page counts of how many were
+    // missing each flag.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('ttfb_ms')) db.exec('ALTER TABLE urls ADD COLUMN ttfb_ms INTEGER');
+      if (!has('cookies_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN cookies_count INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('cookies_insecure'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN cookies_insecure INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('cookies_no_httponly'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN cookies_no_httponly INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('cookies_no_samesite'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN cookies_no_samesite INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 31,
+    name: 'add_http_protocol_and_query_length',
+    // TEMA 13 — HTTP protocol indicator (Alt-Svc heuristic) + query
+    // string length, surfaced as columns so URL-structure issue checks
+    // are pure SQL.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('http_protocol'))
+        db.exec('ALTER TABLE urls ADD COLUMN http_protocol TEXT');
+      if (!has('query_string_length'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN query_string_length INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 32,
+    name: 'add_render_blocking_and_keepalive',
+    // TEMA 14 — Performance signals: head-blocking script/style count +
+    // HTTP keep-alive presence. Both surface as integer columns so the
+    // issue checks are pure SQL.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('render_blocking_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN render_blocking_count INTEGER NOT NULL DEFAULT 0',
+        );
+      // 1 = keep-alive enabled (or implicit), 0 = `Connection: close` seen.
+      // -1 sentinel (default) = no signal yet (older rows / pre-migration).
+      if (!has('keep_alive'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN keep_alive INTEGER NOT NULL DEFAULT -1',
+        );
+    },
+  },
+  {
+    version: 33,
+    name: 'add_url_sources_table',
+    // TEMA 16 — View Source detail tab. Body HTML is stored in a sibling
+    // table so the hot `urls` rowset stays compact (the body can be
+    // hundreds of KB per page; keeping it inline would bloat every list
+    // query). Truncated to a configurable cap (default 1 MB) so memory
+    // stays bounded on huge crawls.
+    up: `
+      CREATE TABLE IF NOT EXISTS url_sources (
+        url_id        INTEGER PRIMARY KEY REFERENCES urls(id) ON DELETE CASCADE,
+        body          TEXT NOT NULL,
+        body_length   INTEGER NOT NULL,
+        truncated     INTEGER NOT NULL DEFAULT 0,
+        captured_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `,
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

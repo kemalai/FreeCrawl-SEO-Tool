@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import {
+  DEFAULT_CRAWL_CONFIG,
   IPC,
   type ConfirmClearResult,
   type CrawlConfig,
@@ -24,12 +25,23 @@ import {
   type ExportJsonResult,
   type ExportHtmlReportInput,
   type ExportHtmlReportResult,
+  type BulkExportFile,
+  type BulkExportResult,
+  type UrlCategory,
   type CompareLoadInput,
   type CompareLoadResult,
   type GraphSnapshotInput,
   type GraphSnapshotResult,
   type AnchorTextRow,
   type RobotsTestInput,
+  type SitemapValidateInput,
+  type SitemapValidateResult,
+  type TopUrlsInput,
+  type TopUrlsRow,
+  type ExternalDomainHealthRow,
+  type SettingsExportInput,
+  type SettingsExportResult,
+  type SettingsImportResult,
   type PagesPerDirectoryInput,
   type ImagesQueryInput,
   type ImagesQueryResult,
@@ -42,6 +54,8 @@ import {
   type UrlContextMenuInput,
   type UrlDetail,
   type UrlDetailInput,
+  type UrlSourceInput,
+  type UrlSourceResult,
   type UrlsQueryInput,
   type UrlsQueryResult,
 } from '@freecrawl/shared-types';
@@ -53,6 +67,8 @@ import {
   exportHtmlReport,
   compareCrawls,
   testUrlAgainstRobots,
+  fetchSitemaps,
+  validateSitemap,
 } from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
@@ -122,16 +138,115 @@ function fireDataChanged(): void {
   mainWindow?.webContents.send(IPC.dataChanged);
 }
 
+/** Currently-open project file path (empty when using the default scratch DB). */
+let currentProjectPath = '';
+
 function getDb(): ProjectDb {
   if (!db) {
     const dataDir = join(app.getPath('userData'), 'projects');
     mkdirSync(dataDir, { recursive: true });
-    db = new ProjectDb(join(dataDir, 'default.seoproject'));
+    const defaultPath = join(dataDir, 'default.seoproject');
+    db = new ProjectDb(defaultPath);
+    currentProjectPath = '';
     // Fresh start on every app launch — clear any data carried over from
     // the previous session. Explicit Save Project will be added later.
     db.reset();
   }
   return db;
+}
+
+/**
+ * Swap the active DB to an existing `.seoproject` file. Stops any running
+ * crawl, closes the previous DB, and broadcasts `dataChanged` so the
+ * renderer reloads its views. Used by File → Open Recent and Open Project.
+ */
+function openProjectAtPath(filePath: string): void {
+  if (activeCrawler) {
+    activeCrawler.stop();
+    activeCrawler = null;
+  }
+  if (db) {
+    try {
+      db.close();
+    } catch {
+      // best-effort; new DB will replace it regardless
+    }
+    db = null;
+  }
+  db = new ProjectDb(filePath);
+  currentProjectPath = filePath;
+  pushRecentProject(filePath);
+  rebuildMenu();
+  if (mainWindow) {
+    mainWindow.setTitle(`FreeCrawl SEO Tool v${app.getVersion()} — ${filePath}`);
+  }
+  fireDataChanged();
+}
+
+function getRecentProjects(): string[] {
+  const raw = prefsCache['recentProjects'];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((p): p is string => typeof p === 'string' && p.length > 0).slice(0, 10);
+}
+
+function pushRecentProject(filePath: string): void {
+  const list = getRecentProjects().filter((p) => p !== filePath);
+  list.unshift(filePath);
+  prefsCache['recentProjects'] = list.slice(0, 10);
+  schedulePrefsWrite();
+}
+
+function clearRecentProjects(): void {
+  prefsCache['recentProjects'] = [];
+  schedulePrefsWrite();
+  rebuildMenu();
+}
+
+function rebuildMenu(): void {
+  Menu.setApplicationMenu(
+    buildAppMenu({
+      onOpenLogs: openLogsWindow,
+      onOpenProject: () => void promptOpenProject(),
+      onOpenRecent: (path) => {
+        try {
+          openProjectAtPath(path);
+        } catch (err) {
+          dialog.showErrorBox(
+            'Open Project Failed',
+            `Could not open ${path}.\n\n${(err as Error).message}`,
+          );
+          // Drop the bad entry so it doesn't keep failing.
+          const list = getRecentProjects().filter((p) => p !== path);
+          prefsCache['recentProjects'] = list;
+          schedulePrefsWrite();
+          rebuildMenu();
+        }
+      },
+      onClearRecent: () => clearRecentProjects(),
+      recentProjects: getRecentProjects(),
+    }),
+  );
+}
+
+async function promptOpenProject(): Promise<void> {
+  if (!mainWindow) return;
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Open Project',
+    properties: ['openFile'],
+    filters: [
+      { name: 'FreeCrawl Project', extensions: ['seoproject', 'sqlite', 'db'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (res.canceled || res.filePaths.length === 0) return;
+  try {
+    openProjectAtPath(res.filePaths[0]!);
+  } catch (err) {
+    dialog.showErrorBox(
+      'Open Project Failed',
+      `Could not open the selected file.\n\n${(err as Error).message}`,
+    );
+  }
 }
 
 function createWindow(): void {
@@ -158,11 +273,32 @@ function createWindow(): void {
   mainWindow.on('page-title-updated', (e) => e.preventDefault());
 
   // ESC exits fullscreen (matches the F11-toggle pairing on Windows and
-  // the macOS native behaviour).
-  mainWindow.webContents.on('before-input-event', (_e, input) => {
-    if (input.type === 'keyDown' && input.key === 'Escape' && mainWindow?.isFullScreen()) {
+  // the macOS native behaviour). Same handler also swallows the default
+  // Electron dev-tools shortcuts (F12 + Ctrl/Cmd+Shift+I + Ctrl/Cmd+Alt+I)
+  // so users can't open the inspector — productisation choice, not a
+  // security one (renderer is sandboxed regardless).
+  mainWindow.webContents.on('before-input-event', (e, input) => {
+    if (input.type !== 'keyDown') return;
+    if (input.key === 'Escape' && mainWindow?.isFullScreen()) {
       mainWindow.setFullScreen(false);
+      return;
     }
+    const key = input.key.toLowerCase();
+    const mod = input.control || input.meta;
+    const isF12 = key === 'f12';
+    const isCtrlShiftI = mod && input.shift && key === 'i';
+    const isCtrlAltI = mod && input.alt && key === 'i';
+    const isCtrlShiftJ = mod && input.shift && key === 'j';
+    const isCtrlShiftC = mod && input.shift && key === 'c';
+    if (isF12 || isCtrlShiftI || isCtrlAltI || isCtrlShiftJ || isCtrlShiftC) {
+      e.preventDefault();
+    }
+  });
+
+  // Belt-and-braces: if anything else (extension, programmatic call) tries
+  // to open dev tools, slam them shut immediately.
+  mainWindow.webContents.on('devtools-opened', () => {
+    mainWindow?.webContents.closeDevTools();
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -211,6 +347,24 @@ function openLogsWindow(): void {
     if (logsWindow === win) logsWindow = null;
   });
 
+  // Same dev-tools lockdown as the main window.
+  win.webContents.on('before-input-event', (e, input) => {
+    if (input.type !== 'keyDown') return;
+    const key = input.key.toLowerCase();
+    const mod = input.control || input.meta;
+    const isF12 = key === 'f12';
+    const isCtrlShiftI = mod && input.shift && key === 'i';
+    const isCtrlAltI = mod && input.alt && key === 'i';
+    const isCtrlShiftJ = mod && input.shift && key === 'j';
+    const isCtrlShiftC = mod && input.shift && key === 'c';
+    if (isF12 || isCtrlShiftI || isCtrlAltI || isCtrlShiftJ || isCtrlShiftC) {
+      e.preventDefault();
+    }
+  });
+  win.webContents.on('devtools-opened', () => {
+    win.webContents.closeDevTools();
+  });
+
   if (process.env['ELECTRON_RENDERER_URL']) {
     void win.loadURL(process.env['ELECTRON_RENDERER_URL'] + '?logs=1');
   } else {
@@ -235,6 +389,46 @@ function registerIpc(): void {
   );
 
   ipcMain.handle(
+    IPC.sitemapValidate,
+    async (_e, input: SitemapValidateInput): Promise<SitemapValidateResult> => {
+      const ac = new AbortController();
+      const timeout = setTimeout(() => ac.abort(), 30_000);
+      try {
+        const ua = input.userAgent || DEFAULT_CRAWL_CONFIG.userAgent;
+        const result = await fetchSitemaps([input.url], {
+          userAgent: ua,
+          signal: ac.signal,
+          timeoutMs: 30_000,
+          maxUrls: 100_000,
+          maxDepth: 3,
+        });
+        const lastmodSamples = result.entries
+          .slice(0, 50)
+          .map((e) => e.lastmod ?? '')
+          .filter(Boolean)
+          .slice(0, 10);
+        const validation = validateSitemap({
+          urlCount: result.entries.length,
+          fileBytes: 0,
+          lastmodSamples,
+        });
+        return {
+          url: input.url,
+          sitemapsTried: result.sitemapsTried,
+          sitemapsParsed: result.sitemapsParsed,
+          errors: result.errors,
+          urlCount: result.entries.length,
+          truncated: result.truncated,
+          findings: validation.findings,
+          lastmodSamples,
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+  );
+
+  ipcMain.handle(
     IPC.reportsPagesPerDirectory,
     (_e, input: PagesPerDirectoryInput) =>
       getDb().getPagesPerDirectory({ depth: input.depth, limit: input.limit }),
@@ -246,6 +440,101 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.reportsResponseTimeHistogram, () =>
     getDb().getResponseTimeHistogram(),
+  );
+
+  ipcMain.handle(
+    IPC.reportsTopUrls,
+    (_e, input: TopUrlsInput): TopUrlsRow[] => {
+      const limit = Math.min(500, Math.max(1, input.limit ?? 25));
+      const column =
+        input.metric === 'response-time'
+          ? 'response_time_ms'
+          : input.metric === 'inlinks'
+            ? 'inlinks'
+            : input.metric === 'outlinks'
+              ? 'outlinks'
+              : input.metric === 'depth'
+                ? 'depth'
+                : 'content_length';
+      return getDb().topUrlsBy(column, limit);
+    },
+  );
+
+  ipcMain.handle(
+    IPC.reportsExternalDomainHealth,
+    (_e, limit: number | undefined): ExternalDomainHealthRow[] =>
+      getDb().externalDomainHealth(limit ?? 100),
+  );
+
+  ipcMain.handle(
+    IPC.prefsExportSettings,
+    async (_e, input: SettingsExportInput): Promise<SettingsExportResult> => {
+      let filePath = input.filePath ?? '';
+      if (!filePath) {
+        if (!mainWindow) return { filePath: '', bytesWritten: 0 };
+        const res = await dialog.showSaveDialog(mainWindow, {
+          title: 'Export Settings',
+          defaultPath: 'freecrawl-settings.json',
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+        });
+        if (res.canceled || !res.filePath) return { filePath: '', bytesWritten: 0 };
+        filePath = res.filePath;
+      }
+      const payload = {
+        // Lightweight envelope — version + timestamp lets future imports
+        // detect schema drift without breaking on the raw config blob.
+        format: 'freecrawl/settings',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        config: input.config,
+      };
+      const json = JSON.stringify(payload, null, 2);
+      writeFileSync(filePath, json, 'utf8');
+      return { filePath, bytesWritten: Buffer.byteLength(json, 'utf8') };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.prefsImportSettings,
+    async (): Promise<SettingsImportResult> => {
+      if (!mainWindow) return { filePath: '', config: null, unknownFields: [] };
+      const res = await dialog.showOpenDialog(mainWindow, {
+        title: 'Import Settings',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (res.canceled || res.filePaths.length === 0) {
+        return { filePath: '', config: null, unknownFields: [] };
+      }
+      const filePath = res.filePaths[0]!;
+      let raw: unknown;
+      try {
+        const text = readFileSync(filePath, 'utf8');
+        raw = JSON.parse(text);
+      } catch (err) {
+        dialog.showErrorBox(
+          'Import Failed',
+          `Cannot parse JSON: ${(err as Error).message}`,
+        );
+        return { filePath: '', config: null, unknownFields: [] };
+      }
+      // Accept both the wrapped envelope and a bare CrawlConfig object —
+      // bare objects are useful for hand-edited setting fragments.
+      const config =
+        raw && typeof raw === 'object' && 'config' in (raw as Record<string, unknown>)
+          ? ((raw as { config: unknown }).config as Record<string, unknown>)
+          : (raw as Record<string, unknown>);
+      if (!config || typeof config !== 'object') {
+        dialog.showErrorBox(
+          'Import Failed',
+          'Imported file does not contain a settings object.',
+        );
+        return { filePath: '', config: null, unknownFields: [] };
+      }
+      const knownKeys = new Set(Object.keys(DEFAULT_CRAWL_CONFIG));
+      const unknownFields = Object.keys(config).filter((k) => !knownKeys.has(k));
+      return { filePath, config, unknownFields };
+    },
   );
 
   // Stream every new entry to the logs window if it's open. Subscriber
@@ -398,9 +687,57 @@ function registerIpc(): void {
         buttons: ['OK'],
         noLink: true,
       });
+      // Saved snapshot is a valid project on disk — pin it as the active
+      // project and add to recents.
+      try {
+        openProjectAtPath(target);
+      } catch (err) {
+        // Fall through; saving succeeded even if reopening failed for some
+        // reason (rare — same file we just wrote).
+        logger.log('warn', 'main', `Save Project As: reopen failed: ${(err as Error).message}`);
+      }
       return { filePath: target, bytesWritten: bytes };
     },
   );
+
+  ipcMain.handle(
+    IPC.projectOpen,
+    async (
+      _e,
+      filePath: string | undefined,
+    ): Promise<{ filePath: string } | null> => {
+      let target = filePath;
+      if (!target) {
+        if (!mainWindow) return null;
+        const res = await dialog.showOpenDialog(mainWindow, {
+          title: 'Open Project',
+          properties: ['openFile'],
+          filters: [
+            { name: 'FreeCrawl Project', extensions: ['seoproject', 'sqlite', 'db'] },
+            { name: 'All Files', extensions: ['*'] },
+          ],
+        });
+        if (res.canceled || res.filePaths.length === 0) return null;
+        target = res.filePaths[0]!;
+      }
+      try {
+        openProjectAtPath(target);
+        return { filePath: target };
+      } catch (err) {
+        if (mainWindow) {
+          dialog.showErrorBox(
+            'Open Project Failed',
+            `Could not open ${target}.\n\n${(err as Error).message}`,
+          );
+        }
+        return null;
+      }
+    },
+  );
+
+  ipcMain.handle(IPC.projectCurrentPath, (): string | null => {
+    return currentProjectPath || null;
+  });
 
   ipcMain.handle(IPC.confirmClear, async (): Promise<ConfirmClearResult> => {
     const win = mainWindow;
@@ -603,6 +940,22 @@ function registerIpc(): void {
     return getDb().getUrlDetail(input.id, input.linkLimit ?? 500);
   });
 
+  ipcMain.handle(
+    IPC.urlSourceGet,
+    (_e, input: UrlSourceInput): UrlSourceResult => {
+      const r = getDb().getUrlSource(input.id);
+      if (!r) {
+        return { body: null, bodyLength: 0, truncated: false, capturedAt: null };
+      }
+      return {
+        body: r.body,
+        bodyLength: r.bodyLength,
+        truncated: r.truncated,
+        capturedAt: r.capturedAt,
+      };
+    },
+  );
+
   ipcMain.handle(IPC.summaryGet, (): CrawlSummary => {
     return getDb().getSummary();
   });
@@ -651,6 +1004,140 @@ function registerIpc(): void {
       return { filePath, rowsWritten };
     },
   );
+
+  ipcMain.handle(IPC.exportBulk, async (): Promise<BulkExportResult> => {
+    if (!mainWindow) {
+      return { outputDir: '', files: [], errors: [] };
+    }
+    const dirRes = await dialog.showOpenDialog(mainWindow, {
+      title: 'Bulk Export — choose output folder',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (dirRes.canceled || dirRes.filePaths.length === 0) {
+      return { outputDir: '', files: [], errors: [] };
+    }
+    const outputDir = dirRes.filePaths[0]!;
+    const tasks: { label: string; file: string; category: UrlCategory }[] = [
+      { label: 'All URLs', file: 'all-urls.csv', category: 'all' },
+      { label: 'Internal HTML', file: 'internal-html.csv', category: 'internal:html' },
+      { label: 'Internal All', file: 'internal-all.csv', category: 'internal:all' },
+      { label: 'External All', file: 'external-all.csv', category: 'external:all' },
+      { label: '2xx Success', file: 'status-2xx.csv', category: 'status:2xx' },
+      { label: '3xx Redirects', file: 'status-3xx.csv', category: 'status:3xx' },
+      { label: '4xx Client Errors', file: 'status-4xx.csv', category: 'status:4xx' },
+      { label: '5xx Server Errors', file: 'status-5xx.csv', category: 'status:5xx' },
+      { label: 'Indexable', file: 'indexable.csv', category: 'indexability:indexable' },
+      {
+        label: 'Non-Indexable',
+        file: 'non-indexable.csv',
+        category: 'indexability:non-indexable',
+      },
+      {
+        label: 'Title Issues — Missing',
+        file: 'issues-title-missing.csv',
+        category: 'issues:title-missing',
+      },
+      {
+        label: 'Title Issues — Duplicate',
+        file: 'issues-title-duplicate.csv',
+        category: 'issues:title-duplicate',
+      },
+      {
+        label: 'Meta Description Issues — Missing',
+        file: 'issues-meta-missing.csv',
+        category: 'issues:meta-missing',
+      },
+      {
+        label: 'H1 Issues — Missing',
+        file: 'issues-h1-missing.csv',
+        category: 'issues:h1-missing',
+      },
+      {
+        label: 'Canonical Issues — Missing',
+        file: 'issues-canonical-missing.csv',
+        category: 'issues:canonical-missing',
+      },
+      {
+        label: 'Pagination Broken',
+        file: 'issues-pagination-broken.csv',
+        category: 'issues:pagination-broken',
+      },
+      {
+        label: 'Mixed Content',
+        file: 'issues-mixed-content.csv',
+        category: 'issues:mixed-content',
+      },
+      {
+        label: 'Insecure Form Action',
+        file: 'issues-insecure-form-action.csv',
+        category: 'issues:insecure-form-action',
+      },
+      {
+        label: 'Hreflang — Reciprocity Missing',
+        file: 'hreflang-reciprocity-missing.csv',
+        category: 'issues:hreflang-reciprocity-missing',
+      },
+      {
+        label: 'Sitemap — Crawled, Not Listed',
+        file: 'sitemap-crawled-not-in-sitemap.csv',
+        category: 'issues:crawled-not-in-sitemap',
+      },
+      {
+        label: 'Image Missing Alt',
+        file: 'issues-image-missing-alt.csv',
+        category: 'issues:image-missing-alt',
+      },
+      {
+        label: 'Near-Duplicate Content',
+        file: 'issues-near-duplicate.csv',
+        category: 'issues:near-duplicate',
+      },
+    ];
+    const files: BulkExportFile[] = [];
+    const errors: { label: string; error: string }[] = [];
+    const database = getDb();
+    for (const task of tasks) {
+      const filePath = join(outputDir, task.file);
+      try {
+        const { rowsWritten } = await exportUrlsToCsv(database, filePath, {
+          category: task.category,
+        });
+        // Skip 0-row files — they bloat the bulk dump and the user almost
+        // certainly doesn't want empty CSVs cluttering the directory.
+        if (rowsWritten === 0) {
+          try {
+            const { unlinkSync } = await import('node:fs');
+            unlinkSync(filePath);
+          } catch {
+            /* ignore */
+          }
+          continue;
+        }
+        files.push({ filePath, label: task.label, category: task.category, rowsWritten });
+      } catch (err) {
+        errors.push({ label: task.label, error: (err as Error).message });
+      }
+    }
+    if (mainWindow) {
+      const totalRows = files.reduce((s, f) => s + f.rowsWritten, 0);
+      await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Bulk Export Complete',
+        message: `${files.length} file(s) written, ${totalRows.toLocaleString()} row(s) total.`,
+        detail:
+          outputDir +
+          (errors.length > 0
+            ? `\n\nErrors:\n${errors.map((e) => `• ${e.label}: ${e.error}`).join('\n')}`
+            : ''),
+        buttons: ['OK', 'Open Folder'],
+        defaultId: 0,
+        noLink: true,
+      }).then((res) => {
+        if (res.response === 1) void shell.openPath(outputDir);
+      });
+    }
+    return { outputDir, files, errors };
+  });
 
   ipcMain.handle(
     IPC.exportHtmlReport,
@@ -823,7 +1310,7 @@ logger.log('info', 'main', `App bootstrap — Node ${process.version} on ${proce
 
 void app.whenReady().then(() => {
   loadPrefs();
-  Menu.setApplicationMenu(buildAppMenu({ onOpenLogs: openLogsWindow }));
+  rebuildMenu();
   registerIpc();
   createWindow();
   logger.log('info', 'main', `App ready — version ${app.getVersion()}`);

@@ -6,6 +6,7 @@ import { TabsBar } from './components/TabsBar.js';
 import { OverviewSidebar } from './components/OverviewSidebar.js';
 import { BottomDetailPanel } from './components/BottomDetailPanel.js';
 import { RobotsTesterDialog } from './components/RobotsTesterDialog.js';
+import { SitemapValidatorDialog } from './components/SitemapValidatorDialog.js';
 import { ReportsDialog } from './components/ReportsDialog.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { CompareDialog } from './components/CompareDialog.js';
@@ -31,6 +32,7 @@ export function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
+  const [sitemapValidatorOpen, setSitemapValidatorOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [visualizationOpen, setVisualizationOpen] = useState(false);
@@ -78,6 +80,12 @@ export function App() {
           break;
         case 'open-robots-tester':
           setRobotsTesterOpen(true);
+          break;
+        case 'open-sitemap-validator':
+          setSitemapValidatorOpen(true);
+          break;
+        case 'export-bulk':
+          void window.freecrawl.exportBulk();
           break;
         case 'open-reports':
           setReportsOpen(true);
@@ -175,6 +183,10 @@ export function App() {
       <RobotsTesterDialog
         open={robotsTesterOpen}
         onClose={() => setRobotsTesterOpen(false)}
+      />
+      <SitemapValidatorDialog
+        open={sitemapValidatorOpen}
+        onClose={() => setSitemapValidatorOpen(false)}
       />
       <ReportsDialog open={reportsOpen} onClose={() => setReportsOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />

@@ -5,6 +5,9 @@ import type {
   StatusCodeHistogramRow,
   DepthHistogramRow,
   ResponseTimeHistogramRow,
+  TopUrlsRow,
+  TopUrlMetric,
+  ExternalDomainHealthRow,
 } from '@freecrawl/shared-types';
 
 interface Props {
@@ -12,7 +15,17 @@ interface Props {
   onClose: () => void;
 }
 
-type ReportKind = 'pages-per-dir' | 'status-codes' | 'depth' | 'response-time';
+type ReportKind =
+  | 'pages-per-dir'
+  | 'status-codes'
+  | 'depth'
+  | 'response-time'
+  | 'slowest-urls'
+  | 'most-inlinks'
+  | 'most-outlinks'
+  | 'biggest-pages'
+  | 'deepest-urls'
+  | 'external-domain-health';
 
 interface ReportRow {
   /** Display key (directory path / status code / depth label). */
@@ -20,6 +33,12 @@ interface ReportRow {
   /** Optional column shown left-of-key (e.g. status-class label). */
   badge?: string;
   count: number;
+  /**
+   * Optional secondary numeric value (response time ms, page bytes, etc.).
+   * When present, rows render `count` as the bar metric and `valueLabel`
+   * as a separate "Value" column.
+   */
+  valueLabel?: string;
 }
 
 const REPORT_LABELS: Record<ReportKind, string> = {
@@ -27,6 +46,12 @@ const REPORT_LABELS: Record<ReportKind, string> = {
   'status-codes': 'Status Code Histogram',
   depth: 'Depth Histogram',
   'response-time': 'Response Time Histogram',
+  'slowest-urls': 'Slowest URLs (Top 25)',
+  'most-inlinks': 'Most-Linked URLs (Top 25)',
+  'most-outlinks': 'Most-Outlinking URLs (Top 25)',
+  'biggest-pages': 'Biggest Pages (Top 25)',
+  'deepest-urls': 'Deepest URLs (Top 25)',
+  'external-domain-health': 'External Domain Health',
 };
 
 const KEY_LABELS: Record<ReportKind, string> = {
@@ -34,6 +59,38 @@ const KEY_LABELS: Record<ReportKind, string> = {
   'status-codes': 'Status',
   depth: 'Depth',
   'response-time': 'Bucket',
+  'slowest-urls': 'URL',
+  'most-inlinks': 'URL',
+  'most-outlinks': 'URL',
+  'biggest-pages': 'URL',
+  'deepest-urls': 'URL',
+  'external-domain-health': 'Domain',
+};
+
+const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
+  'pages-per-dir': null,
+  'status-codes': null,
+  depth: null,
+  'response-time': null,
+  'slowest-urls': 'response-time',
+  'most-inlinks': 'inlinks',
+  'most-outlinks': 'outlinks',
+  'biggest-pages': 'page-size',
+  'deepest-urls': 'depth',
+  'external-domain-health': null,
+};
+
+const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
+  'pages-per-dir': (v) => (v ?? 0).toLocaleString(),
+  'status-codes': (v) => (v ?? 0).toLocaleString(),
+  depth: (v) => (v ?? 0).toLocaleString(),
+  'response-time': (v) => (v ?? 0).toLocaleString(),
+  'slowest-urls': (v) => (v == null ? '—' : `${v.toLocaleString()} ms`),
+  'most-inlinks': (v) => (v ?? 0).toLocaleString(),
+  'most-outlinks': (v) => (v ?? 0).toLocaleString(),
+  'biggest-pages': (v) => (v == null ? '—' : `${(v / 1024).toFixed(1)} KB`),
+  'deepest-urls': (v) => (v ?? 0).toLocaleString(),
+  'external-domain-health': (v) => (v ?? 0).toLocaleString(),
 };
 
 export function ReportsDialog({ open, onClose }: Props) {
@@ -66,7 +123,7 @@ export function ReportsDialog({ open, onClose }: Props) {
           const r = await window.freecrawl.reportsDepthHistogram();
           if (!cancelled)
             setRows(r.map((x: DepthHistogramRow) => ({ key: String(x.depth), count: x.count })));
-        } else {
+        } else if (kind === 'response-time') {
           const r = await window.freecrawl.reportsResponseTimeHistogram();
           if (!cancelled)
             setRows(
@@ -76,6 +133,40 @@ export function ReportsDialog({ open, onClose }: Props) {
                 count: x.count,
               })),
             );
+        } else if (kind === 'external-domain-health') {
+          const r = await window.freecrawl.reportsExternalDomainHealth(100);
+          if (!cancelled)
+            setRows(
+              r.map((x: ExternalDomainHealthRow) => ({
+                key: x.domain,
+                badge:
+                  x.errorRatePercent === 0
+                    ? 'OK'
+                    : x.errorRatePercent < 10
+                      ? 'WARN'
+                      : 'BAD',
+                // Bar = error count so the worst domains spike visually;
+                // value label shows the breakdown.
+                count: x.errorCount,
+                valueLabel: `${x.successCount}/${x.totalUrls} OK · ${x.errorRatePercent}% err${
+                  x.avgResponseTimeMs !== null ? ` · ${x.avgResponseTimeMs}ms avg` : ''
+                }`,
+              })),
+            );
+        } else {
+          const metric = TOP_URL_METRIC[kind];
+          if (metric) {
+            const r = await window.freecrawl.reportsTopUrls({ metric, limit: 25 });
+            if (!cancelled)
+              setRows(
+                r.map((x: TopUrlsRow) => ({
+                  key: x.url,
+                  // Bar metric is the value itself (response time, inlinks, etc.).
+                  count: x.value ?? 0,
+                  valueLabel: VALUE_FORMAT[kind](x.value),
+                })),
+              );
+          }
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -135,6 +226,12 @@ export function ReportsDialog({ open, onClose }: Props) {
               <option value="status-codes">Status Code Histogram</option>
               <option value="depth">Depth Histogram</option>
               <option value="response-time">Response Time Histogram</option>
+              <option value="slowest-urls">Slowest URLs (Top 25)</option>
+              <option value="most-inlinks">Most-Linked URLs (Top 25)</option>
+              <option value="most-outlinks">Most-Outlinking URLs (Top 25)</option>
+              <option value="biggest-pages">Biggest Pages (Top 25)</option>
+              <option value="deepest-urls">Deepest URLs (Top 25)</option>
+              <option value="external-domain-health">External Domain Health</option>
             </select>
           </label>
           {kind === 'pages-per-dir' && (
@@ -192,7 +289,7 @@ export function ReportsDialog({ open, onClose }: Props) {
                         {r.key}
                       </td>
                       <td className="py-1 pr-3 text-right align-top font-mono text-surface-100">
-                        {r.count.toLocaleString()}
+                        {r.valueLabel ?? r.count.toLocaleString()}
                       </td>
                       <td className="py-1 align-top">
                         <div className="flex items-center gap-2">

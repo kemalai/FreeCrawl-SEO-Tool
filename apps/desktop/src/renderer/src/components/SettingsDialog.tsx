@@ -15,6 +15,8 @@ import {
   Trash2,
   Shield,
   Network,
+  Sparkles,
+  Gauge,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -88,8 +90,10 @@ interface FormState {
 }
 
 type SectionKey =
+  | 'presets'
   | 'mode'
   | 'crawler'
+  | 'speed'
   | 'requests'
   | 'filters'
   | 'custom-search'
@@ -111,6 +115,12 @@ interface SectionDef {
 
 const SECTIONS: SectionDef[] = [
   {
+    key: 'presets',
+    label: 'Presets',
+    icon: Sparkles,
+    keywords: 'preset profile fast thorough mobile desktop aggressive',
+  },
+  {
     key: 'mode',
     label: 'Mode',
     icon: ListChecks,
@@ -122,6 +132,13 @@ const SECTIONS: SectionDef[] = [
     icon: Bug,
     keywords:
       'depth max urls concurrency rps timeout delay retry follow redirects robots external nofollow sitemap',
+  },
+  {
+    key: 'speed',
+    label: 'Speed',
+    icon: Gauge,
+    keywords:
+      'speed throughput concurrency threads rps requests per second rate limit crawl delay throttle',
   },
   {
     key: 'requests',
@@ -428,11 +445,41 @@ export function SettingsDialog({ open, onClose }: Props) {
               <span className="text-surface-200">{activeDef.label}</span>
             </div>
             <div className="flex-1 overflow-auto px-5 py-4 text-[12px]">
+              {active === 'presets' && (
+                <PresetsPanel
+                  applyPreset={(p) => setForm((s) => applyPreset(s, p))}
+                  exportSettings={async () => {
+                    // Export the saved CrawlConfig (not the in-progress form),
+                    // so what's exported matches what's been persisted.
+                    await window.freecrawl.prefsExportSettings({
+                      config: config as unknown as Record<string, unknown>,
+                    });
+                  }}
+                  importSettings={async () => {
+                    const r = await window.freecrawl.prefsImportSettings();
+                    if (!r.config) return;
+                    // Apply the imported config to the live store. The form
+                    // re-seeds via useEffect when `config` changes.
+                    setConfig(r.config as Partial<CrawlConfig>);
+                    if (r.unknownFields.length > 0) {
+                      // Surface unknown fields as a non-fatal warning by
+                      // logging — Settings UI doesn't have a toast system.
+                      // eslint-disable-next-line no-console
+                      console.warn(
+                        `Import: ignored unknown fields: ${r.unknownFields.join(', ')}`,
+                      );
+                    }
+                  }}
+                />
+              )}
               {active === 'mode' && (
                 <ModePanel form={form} update={update} />
               )}
               {active === 'crawler' && (
                 <CrawlerPanel form={form} update={update} />
+              )}
+              {active === 'speed' && (
+                <SpeedPanel form={form} update={update} />
               )}
               {active === 'requests' && (
                 <RequestsPanel form={form} update={update} />
@@ -490,6 +537,200 @@ export function SettingsDialog({ open, onClose }: Props) {
 interface PanelProps {
   form: FormState;
   update: <K extends keyof FormState>(key: K, value: FormState[K]) => void;
+}
+
+type PresetKey = 'fast' | 'thorough' | 'mobile' | 'desktop' | 'aggressive';
+
+interface PresetDef {
+  key: PresetKey;
+  label: string;
+  description: string;
+  /** Field overrides applied when the user clicks the preset. */
+  overrides: Partial<FormState>;
+}
+
+const UA_GOOGLEBOT_DESKTOP =
+  'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+const UA_GOOGLEBOT_MOBILE =
+  'Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+
+const PRESETS: PresetDef[] = [
+  {
+    key: 'fast',
+    label: 'Fast',
+    description:
+      'High concurrency, short timeouts — for a quick first sweep on a healthy site. Skips media + retries.',
+    overrides: {
+      maxConcurrency: '40',
+      maxRps: '40',
+      requestTimeoutMs: '10000',
+      crawlDelayMs: '0',
+      retryAttempts: '0',
+      retryInitialDelayMs: '250',
+      excludeExtensionsText: 'pdf,zip,mp4,mp3,webm,mov,avi,iso,exe,dmg',
+      maxRedirects: '5',
+    },
+  },
+  {
+    key: 'thorough',
+    label: 'Thorough',
+    description:
+      'Lower concurrency + extra retries; captures more on flaky origins. The default for large audits.',
+    overrides: {
+      maxConcurrency: '10',
+      maxRps: '10',
+      requestTimeoutMs: '30000',
+      crawlDelayMs: '0',
+      retryAttempts: '3',
+      retryInitialDelayMs: '750',
+      maxRedirects: '15',
+    },
+  },
+  {
+    key: 'mobile',
+    label: 'Mobile-only',
+    description:
+      'Mimic Googlebot Smartphone — primary signal for mobile-first indexing. Combine with viewport audits.',
+    overrides: {
+      userAgent: UA_GOOGLEBOT_MOBILE,
+      acceptLanguage: 'en-US,en;q=0.9',
+      maxConcurrency: '15',
+      maxRps: '15',
+    },
+  },
+  {
+    key: 'desktop',
+    label: 'Desktop-only',
+    description: 'Mimic legacy Googlebot Desktop. Useful for comparing mobile vs. desktop renders.',
+    overrides: {
+      userAgent: UA_GOOGLEBOT_DESKTOP,
+      acceptLanguage: 'en-US,en;q=0.9',
+      maxConcurrency: '15',
+      maxRps: '15',
+    },
+  },
+  {
+    key: 'aggressive',
+    label: 'Aggressive',
+    description:
+      'High parallelism + ignore robots — only for sites you own. Can trip rate-limit / WAF rules; use with caution.',
+    overrides: {
+      maxConcurrency: '60',
+      maxRps: '60',
+      requestTimeoutMs: '15000',
+      crawlDelayMs: '0',
+      retryAttempts: '2',
+      respectRobotsTxt: false,
+      crawlExternal: false,
+    },
+  },
+];
+
+function applyPreset(state: FormState, preset: PresetDef): FormState {
+  // Spread the preset's overrides over the current form so untouched
+  // fields (custom search terms, extraction rules, etc.) survive a preset
+  // switch — only the dimensions the preset cares about change.
+  return { ...state, ...preset.overrides };
+}
+
+function PresetsPanel({
+  applyPreset: apply,
+  exportSettings,
+  importSettings,
+}: {
+  applyPreset: (p: PresetDef) => void;
+  exportSettings: () => Promise<void>;
+  importSettings: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        One-click profiles for common crawl scenarios. Clicking a preset overwrites the affected
+        fields only — your URL list, custom rules, filters, and extraction rules are preserved.
+      </p>
+      <div className="space-y-2">
+        {PRESETS.map((p) => (
+          <div
+            key={p.key}
+            className="flex items-start gap-3 rounded border border-surface-800 bg-surface-950/40 p-3"
+          >
+            <div className="flex-1 min-w-0">
+              <div className="text-[12px] font-medium text-surface-100">{p.label}</div>
+              <div className="mt-0.5 text-[11px] text-surface-400">{p.description}</div>
+              <div className="mt-1.5 flex flex-wrap gap-1 font-mono text-[10px] text-surface-500">
+                {Object.entries(p.overrides).map(([k, v]) => (
+                  <span key={k} className="rounded border border-surface-800 px-1.5 py-0.5">
+                    {k}={String(v)}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <button
+              className="rounded border border-blue-700/60 bg-blue-900/30 px-3 py-1 text-[11px] text-blue-200 hover:bg-blue-900/50"
+              onClick={() => apply(p)}
+            >
+              Apply
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-5 border-t border-surface-800 pt-4">
+        <div className="mb-2 text-[12px] font-medium text-surface-100">Import / Export</div>
+        <p className="mb-2 text-[11px] text-surface-400">
+          Save the current settings to a JSON file (e.g. for sharing with a teammate or version
+          control), or load a previously-exported settings file. Importing replaces the current
+          form with the file's contents — press Save at the bottom to persist.
+        </p>
+        <div className="flex gap-2">
+          <button
+            className="rounded border border-surface-700 px-3 py-1 text-[11px] hover:bg-surface-800 disabled:opacity-50"
+            onClick={async () => {
+              setBusy(true);
+              setMessage(null);
+              try {
+                await exportSettings();
+                setMessage('Settings exported.');
+              } catch (e) {
+                setMessage(`Export failed: ${(e as Error).message}`);
+              } finally {
+                setBusy(false);
+              }
+            }}
+            disabled={busy}
+          >
+            Export…
+          </button>
+          <button
+            className="rounded border border-surface-700 px-3 py-1 text-[11px] hover:bg-surface-800 disabled:opacity-50"
+            onClick={async () => {
+              setBusy(true);
+              setMessage(null);
+              try {
+                await importSettings();
+                setMessage('Settings imported.');
+              } catch (e) {
+                setMessage(`Import failed: ${(e as Error).message}`);
+              } finally {
+                setBusy(false);
+              }
+            }}
+            disabled={busy}
+          >
+            Import…
+          </button>
+          {message && <span className="self-center text-[10px] text-surface-400">{message}</span>}
+        </div>
+      </div>
+
+      <p className="mt-3 text-[10px] text-surface-500">
+        After clicking Apply or Import, review each panel to verify the values, then press Save at
+        the bottom to persist.
+      </p>
+    </>
+  );
 }
 
 function ModePanel({ form, update }: PanelProps) {
@@ -630,6 +871,108 @@ function CrawlerPanel({ form, update }: PanelProps) {
           info="Fetches /robots.txt sitemap directives + /sitemap.xml fallbacks. Powers the 'Non-Indexable in Sitemap' issue filter."
           example="On (default) — cheap I/O, high SEO value."
         />
+      </div>
+    </>
+  );
+}
+
+function SpeedPanel({ form, update }: PanelProps) {
+  // Mirror inputs of the values for the helper-text math; if they aren't
+  // valid numbers we surface "—" instead of NaN. Cheap to recompute on
+  // every render — these strings are short.
+  const conc = Number.parseInt(form.maxConcurrency, 10);
+  const rps = Number.parseInt(form.maxRps, 10);
+  const delay = Number.parseInt(form.crawlDelayMs, 10);
+  const retries = Number.parseInt(form.retryAttempts, 10);
+  const effectiveRps =
+    Number.isFinite(rps) && Number.isFinite(conc) ? Math.min(rps, conc * 5) : null;
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Control crawl throughput. Increasing parallelism speeds the crawl, but every extra request
+        adds load on the target server — pick numbers a host that you don't own can absorb without
+        rate-limiting / 429s.
+      </p>
+
+      <div className="mb-4 rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
+        <div className="mb-0.5 font-medium">Effective ceiling</div>
+        <div className="text-blue-300/90">
+          {effectiveRps !== null ? (
+            <>
+              ~{effectiveRps.toLocaleString()} URL/s ({Number.isFinite(conc) ? conc : '—'} parallel
+              workers, ≤ {Number.isFinite(rps) ? rps : '—'} RPS rate-limit
+              {Number.isFinite(delay) && delay > 0
+                ? `, +${delay} ms post-request delay per worker`
+                : ''}
+              )
+            </>
+          ) : (
+            'Set Max Concurrency and Max RPS to see the projected throughput.'
+          )}
+        </div>
+      </div>
+
+      <Num
+        label="Max Concurrency (parallel workers)"
+        value={form.maxConcurrency}
+        onChange={(v) => update('maxConcurrency', v)}
+        info="Number of HTTP requests in flight at any one time. Equivalent to Screaming Frog's 'Max Threads'. Higher = faster crawl + more load on the target server."
+        example="20 default; 50 on fast first-party servers; 5 if the site rate-limits or returns 429s."
+      />
+      <Num
+        label="Max URL/s (rate limit)"
+        value={form.maxRps}
+        onChange={(v) => update('maxRps', v)}
+        info="Hard ceiling on requests per second across all workers combined. Equivalent to Screaming Frog's 'Max URL/s'. Acts as a token bucket — even with high concurrency the crawler waits between bursts to stay below this rate."
+        example="20 for typical sites; 5 to be polite on shared hosting; 60+ when crawling your own infra."
+      />
+      <Num
+        label="Per-Worker Delay (ms after each request)"
+        value={form.crawlDelayMs}
+        onChange={(v) => update('crawlDelayMs', v)}
+        info="Sleep this long on each worker AFTER a response completes, before it picks up the next URL. Stacks with the global RPS cap — useful for sites that rate-limit on inter-request gap rather than total throughput."
+        example="0 default; 250 ms when a host returns 429 with a 'too fast' message."
+      />
+
+      <div className="mt-4 mb-1.5 text-[11px] font-medium text-surface-300">Retries</div>
+      <Num
+        label="Retry Attempts (per URL on transient errors)"
+        value={form.retryAttempts}
+        onChange={(v) => update('retryAttempts', v)}
+        info="On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."
+        example="2 default; 0 to record errors immediately without retrying; 5 for unreliable upstreams."
+      />
+      <Num
+        label="Initial Retry Delay (ms — exponential backoff)"
+        value={form.retryInitialDelayMs}
+        onChange={(v) => update('retryInitialDelayMs', v)}
+        info="Wait this long before the FIRST retry, doubling on each subsequent attempt (500 → 1000 → 2000 …)."
+        example="500 default. Bump to 2000 when retrying against a flaky API."
+      />
+      <p className="mt-1 text-[10px] text-surface-500">
+        Worst-case delay per failed URL ≈ initialDelay × (2 ^ attempts − 1) ={' '}
+        {Number.isFinite(retries) && Number.isFinite(delay)
+          ? `${(Number.parseInt(form.retryInitialDelayMs, 10) || 500) *
+              (2 ** Math.max(0, retries) - 1)} ms`
+          : '—'}
+      </p>
+
+      <div className="mt-5 rounded border border-surface-800 bg-surface-950/40 px-3 py-2 text-[10px] text-surface-400">
+        <div className="mb-1 font-medium text-surface-300">Throughput tips</div>
+        <ul className="list-disc space-y-0.5 pl-4">
+          <li>
+            For a quick first sweep on a healthy site try the <strong>Fast</strong> preset (Settings
+            → Presets) — concurrency 40, RPS 40, no retries.
+          </li>
+          <li>
+            For unreliable origins or slow APIs try <strong>Thorough</strong> — concurrency 10, 3
+            retries, 30 s timeout.
+          </li>
+          <li>
+            Concurrency × HTTP keep-alive = the steady-state connection count. Most servers comfortably
+            handle 20–40; corporate proxies / WAFs often cap at 8–10.
+          </li>
+        </ul>
       </div>
     </>
   );

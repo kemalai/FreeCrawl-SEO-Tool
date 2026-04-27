@@ -86,6 +86,7 @@ export type UrlCategory =
   | 'issues:non-indexable-in-sitemap'
   | 'issues:non-200-in-sitemap'
   | 'issues:image-missing-alt'
+  | 'issues:image-empty-alt'
   | 'issues:meta-refresh-used'
   | 'issues:charset-missing'
   | 'issues:broken-links-all'
@@ -98,7 +99,31 @@ export type UrlCategory =
   | 'issues:hreflang-reciprocity-missing'
   | 'issues:hreflang-target-issues'
   | 'issues:crawled-not-in-sitemap'
-  | 'issues:redirect-in-sitemap';
+  | 'issues:redirect-in-sitemap'
+  | 'issues:h1-empty'
+  | 'issues:h1-too-long'
+  | 'issues:title-multiple'
+  | 'issues:url-fragment'
+  | 'issues:url-spaces'
+  | 'issues:link-empty-anchor'
+  | 'issues:apple-touch-icon-missing'
+  | 'issues:manifest-missing'
+  | 'issues:feed-missing'
+  | 'issues:title-pixel-width-too-long'
+  | 'issues:meta-pixel-width-too-long'
+  | 'issues:insecure-form-action'
+  | 'issues:missing-sri'
+  | 'issues:ttfb-slow'
+  | 'issues:ttfb-very-slow'
+  | 'issues:cookie-no-secure'
+  | 'issues:cookie-no-httponly'
+  | 'issues:cookie-no-samesite'
+  | 'issues:query-string-too-long'
+  | 'issues:folder-depth-too-deep'
+  | 'issues:http2-not-supported'
+  | 'issues:render-blocking'
+  | 'issues:keepalive-disabled'
+  | 'issues:title-placeholder';
 
 export type Indexability =
   | 'indexable'
@@ -141,11 +166,20 @@ export interface CrawlUrlRow {
   contentType: string | null;
   contentLength: number | null;
   responseTimeMs: number | null;
+  /**
+   * Time-to-first-byte (ms) — measured as the interval between request
+   * dispatch and headers receipt. `responseTimeMs - ttfbMs` therefore
+   * approximates body-transfer time on the wire. Null when no successful
+   * request was made (network error or pre-fetch abort).
+   */
+  ttfbMs: number | null;
   depth: number;
   inlinks: number;
   outlinks: number;
   imagesCount: number;
   imagesMissingAlt: number;
+  /** Number of `<img>` tags with `alt=""` (decorative, distinct from missing alt). */
+  imagesEmptyAlt: number;
   redirectTarget: string | null;
   lang: string | null;
   viewport: string | null;
@@ -167,6 +201,39 @@ export interface CrawlUrlRow {
   schemaTypes: string | null;
   schemaBlockCount: number;
   schemaInvalidCount: number;
+  /** Microdata `[itemscope]` element count on the page. */
+  microdataCount: number;
+  /** RDFa `[typeof]` / `[vocab]` / `[property]` attribute count. */
+  rdfaCount: number;
+  /** `<form action="http://…">` count when the page itself is HTTPS. */
+  insecureFormActionCount: number;
+  /** Third-party `<script>` / `<link rel=stylesheet>` without `integrity`. */
+  missingSriCount: number;
+  /** Render-blocking `<head>` resources count (script/link rel=stylesheet). */
+  renderBlockingCount: number;
+  /** Whether the response declared `Connection: keep-alive` / HTTP/1.1 implicit keep-alive. */
+  keepAlive: boolean;
+  /** Estimated SERP pixel width of `title` (Arial 18 px). 0 when no title. */
+  titlePixelWidth: number;
+  /** Estimated SERP pixel width of `metaDescription` (Arial 13 px-equiv). */
+  metaPixelWidth: number;
+  /** Total Set-Cookie response-headers seen on this page. */
+  cookiesCount: number;
+  /** Cookies that don't set the `Secure` flag. */
+  cookiesInsecure: number;
+  /** Cookies that don't set `HttpOnly`. */
+  cookiesNoHttpOnly: number;
+  /** Cookies that don't set `SameSite=…`. */
+  cookiesNoSameSite: number;
+  /**
+   * Best-effort HTTP protocol indicator inferred from the `Alt-Svc`
+   * response header. `'h2'` / `'h3'` when the origin advertises HTTP/2
+   * or HTTP/3 support, `'http/1.1'` otherwise. Null when no Alt-Svc was
+   * observed and we have no other signal.
+   */
+  httpProtocol: string | null;
+  /** Query-string length in characters (0 when no `?`). */
+  queryStringLength: number;
   paginationNext: string | null;
   paginationPrev: string | null;
   /** JSON-stringified array of `{ lang, href }` objects, or null. */
@@ -174,7 +241,17 @@ export interface CrawlUrlRow {
   hreflangCount: number;
   amphtml: string | null;
   favicon: string | null;
+  /** Resolved `<link rel="apple-touch-icon">` URL, else null. */
+  appleTouchIcon: string | null;
+  /** Resolved `<link rel="manifest">` URL (web app manifest), else null. */
+  manifestUrl: string | null;
+  /** Resolved RSS / Atom `<link rel="alternate" type="application/rss+xml|atom+xml">` URL, else null. */
+  feedUrl: string | null;
   mixedContentCount: number;
+  /** Number of `<title>` elements (>1 is a duplicate-tag issue). */
+  titleCount: number;
+  /** Number of internal hyperlinks with no anchor text or alt — accessibility/SEO issue. */
+  emptyAnchorCount: number;
   /** Hreflang entries on this page whose `lang` is not a valid BCP-47 / `x-default` token. */
   hreflangInvalidCount: number;
   /** True if this page declares hreflang alternates but no self-referencing entry. */
@@ -402,6 +479,37 @@ export interface CrawlConfig {
    * for the last hop is kept with its 3xx status. 0 disables.
    */
   maxRedirects: number;
+  /**
+   * URL length warning threshold (chars). The "URL Too Long" issue trips
+   * when `LENGTH(url) > maxUrlLength`. Default 2048 (RFC-suggested
+   * practical ceiling). 0 disables the check.
+   */
+  maxUrlLength: number;
+  /**
+   * Query-string length warning threshold (chars). Trips "Query String
+   * Too Long" when `LENGTH(query) > maxQueryStringLength`. 0 disables.
+   */
+  maxQueryStringLength: number;
+  /**
+   * Path-segment depth threshold. Trips "Folder Depth Too Deep" when
+   * `folder_depth > maxFolderDepth`. 0 disables. Useful for spotting
+   * over-nested URL structures that bury content from crawlers.
+   */
+  maxFolderDepth: number;
+  /**
+   * Persist a per-page raw HTML snapshot in the project file so the
+   * View Source detail tab can show the body. Default `true`. Disable
+   * for crawls that don't need source browsing — saves ~ avg HTML size
+   * per crawled URL on disk (typically 30-200 KB / page).
+   */
+  storeBodySnapshots: boolean;
+  /**
+   * Per-page body cap (bytes) when `storeBodySnapshots` is on. Bodies
+   * over this are truncated and flagged. Default 1 MB — covers the
+   * 99.9th percentile of HTML pages without letting one adversarial
+   * 50 MB page bloat the DB. 0 disables truncation (not recommended).
+   */
+  bodySnapshotMaxBytes: number;
 }
 
 export interface HttpAuth {
@@ -539,6 +647,31 @@ export interface OverviewCounts {
     redirectInSitemap: number;
     /** Sitemap URL count that the crawl never reached (in sitemap_urls but not in urls). */
     sitemapNotCrawled: number;
+    h1Empty: number;
+    h1TooLong: number;
+    titleMultiple: number;
+    urlFragment: number;
+    urlSpaces: number;
+    imageEmptyAlt: number;
+    linkEmptyAnchor: number;
+    appleTouchIconMissing: number;
+    manifestMissing: number;
+    feedMissing: number;
+    titlePixelWidthTooLong: number;
+    metaPixelWidthTooLong: number;
+    insecureFormAction: number;
+    missingSri: number;
+    ttfbSlow: number;
+    ttfbVerySlow: number;
+    cookieNoSecure: number;
+    cookieNoHttpOnly: number;
+    cookieNoSameSite: number;
+    queryStringTooLong: number;
+    folderDepthTooDeep: number;
+    http2NotSupported: number;
+    renderBlocking: number;
+    keepaliveDisabled: number;
+    titlePlaceholder: number;
   };
 }
 
@@ -768,4 +901,9 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   proxyUrl: '',
   excludeExtensions: [],
   maxRedirects: 10,
+  maxUrlLength: 2048,
+  maxQueryStringLength: 0,
+  maxFolderDepth: 0,
+  storeBodySnapshots: true,
+  bodySnapshotMaxBytes: 1_048_576,
 };

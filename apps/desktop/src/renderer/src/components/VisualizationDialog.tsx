@@ -1,6 +1,47 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, RefreshCw, Sparkles } from 'lucide-react';
+import { X, RefreshCw, Sparkles, Settings2, RotateCcw } from 'lucide-react';
 import cytoscape, { type Core } from 'cytoscape';
+
+/**
+ * User-tunable layout knobs. Persisted in prefs under the
+ * `vis-tuning` key so the settings survive across sessions.
+ */
+interface VisTuning {
+  /** Multiplier on the log-scaled node radius. 1.0 = baseline (6–24 px). */
+  nodeSizeScale: number;
+  /** Multiplier on cose `nodeRepulsion`. 1.0 = baseline 1,000,000. */
+  repulsionScale: number;
+  /** Multiplier on cose `idealEdgeLength`. 1.0 = baseline 400 px. */
+  edgeLengthScale: number;
+  /** Multiplier on cose `componentSpacing`. 1.0 = baseline 400 px. */
+  componentSpacingScale: number;
+  /** Edge opacity 0–1. Lower = less visual noise on dense graphs. */
+  edgeOpacity: number;
+}
+
+const DEFAULT_TUNING: VisTuning = {
+  // Empirically tuned for typical SEO crawls (50–500 internal nodes,
+  // hub-spoke link topology dominated by a navbar). Node radius ×3 makes
+  // dots clickable without overlap; ×1.3 repulsion gives just enough
+  // breathing room without throwing outliers off-canvas.
+  nodeSizeScale: 3,
+  repulsionScale: 1.3,
+  edgeLengthScale: 1,
+  componentSpacingScale: 1,
+  edgeOpacity: 0.4,
+};
+
+function loadTuning(): VisTuning {
+  try {
+    const saved = window.freecrawl?.prefsGet('vis-tuning');
+    if (saved && typeof saved === 'object') {
+      return { ...DEFAULT_TUNING, ...(saved as Partial<VisTuning>) };
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_TUNING;
+}
 import type {
   AnchorTextRow,
   GraphSnapshotResult,
@@ -47,22 +88,68 @@ function indexColor(i: Indexability): string {
   return '#737373';
 }
 
-function nodeSize(inlinks: number): number {
-  // Log-scale: a 100x inlinks node is only ~3x bigger than a singleton
-  // — keeps the canvas legible on power-law sites.
-  return 8 + Math.log2(inlinks + 1) * 4;
+function nodeSize(inlinks: number, scale = 1): number {
+  // Log-scale + hard cap so a hub with 10K inlinks doesn't dominate the
+  // canvas. Baseline range is 6–24 px; the user-tunable `scale` factor
+  // multiplies both ends linearly so 0.5× = 3–12 px, 2× = 12–48 px.
+  const raw = 6 + Math.log2(inlinks + 1) * 1.8;
+  return Math.min(raw, 24) * scale;
 }
+
+/**
+ * Label-display modes. The default is `hover` because graphs >100 nodes
+ * become a wall of overlapping text otherwise — the previous "always-on"
+ * default produced a dense unreadable mass on real sites.
+ */
+type LabelMode = 'hover' | 'top' | 'always';
 
 export function VisualizationDialog({ open, onClose }: Props) {
   const [graph, setGraph] = useState<GraphSnapshotResult | null>(null);
   const [anchors, setAnchors] = useState<AnchorTextRow[]>([]);
   const [layout, setLayout] = useState<LayoutKind>('cose');
   const [colorMode, setColorMode] = useState<ColorMode>('status');
-  const [nodeLimit, setNodeLimit] = useState(500);
+  const [nodeLimit, setNodeLimit] = useState(150);
+  const [labelMode, setLabelMode] = useState<LabelMode>('hover');
   const [loading, setLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<Core | null>(null);
   const [hover, setHover] = useState<string | null>(null);
+  const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
+  const [tuning, setTuning] = useState<VisTuning>(() => loadTuning());
+  const [tunerOpen, setTunerOpen] = useState(false);
+
+  function patchTuning(patch: Partial<VisTuning>) {
+    setTuning((prev) => {
+      const next = { ...prev, ...patch };
+      try {
+        window.freecrawl?.prefsSet('vis-tuning', next);
+      } catch {
+        // best-effort persistence
+      }
+      return next;
+    });
+  }
+  /**
+   * Floating label overlay state — rendered as plain HTML on top of the
+   * Cytoscape canvas so the font size stays fixed in CSS pixels regardless
+   * of the user's zoom level (built-in cytoscape labels scale with zoom,
+   * which makes them unreadable at low zoom and giant at high zoom).
+   */
+  const [labelOverlay, setLabelOverlay] = useState<{
+    text: string;
+    /** Container-relative pixel position of the node centre (post-zoom). */
+    x: number;
+    y: number;
+    /** Node radius in CSS pixels — used to push the label below the dot. */
+    radius: number;
+  } | null>(null);
+  // Mirror selectedUrl into a ref so cytoscape event handlers (which
+  // close over the initial state) can read the latest value without
+  // tearing down the whole event-listener stack on every selection change.
+  const selectedUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedUrlRef.current = selectedUrl;
+  }, [selectedUrl]);
 
   useEffect(() => {
     if (!open) return;
@@ -93,7 +180,7 @@ export function VisualizationDialog({ open, onClose }: Props) {
     }
   }
 
-  // Render Cytoscape whenever graph / layout / colorMode change.
+  // Render Cytoscape whenever graph / layout / colorMode / labelMode change.
   useEffect(() => {
     if (!open || !containerRef.current || !graph) return;
 
@@ -102,6 +189,15 @@ export function VisualizationDialog({ open, onClose }: Props) {
       if (colorMode === 'indexability') return indexColor(n.indexability);
       return statusColor(n.statusCode);
     };
+
+    // For "Top" mode: pick the 20 most-linked nodes — they're the ones
+    // people actually want to see labelled (homepage, hubs, category
+    // landing pages). Everything else stays unlabelled by default.
+    const TOP_LABEL_COUNT = 20;
+    const topByInlinks = [...graph.nodes]
+      .sort((a, b) => b.inlinks - a.inlinks)
+      .slice(0, TOP_LABEL_COUNT);
+    const topIds = new Set(topByInlinks.map((n) => String(n.id)));
 
     const elements = [
       ...graph.nodes.map((n) => ({
@@ -112,7 +208,8 @@ export function VisualizationDialog({ open, onClose }: Props) {
           statusCode: n.statusCode ?? '',
           inlinks: n.inlinks,
           color: colorFn(n),
-          size: nodeSize(n.inlinks),
+          size: nodeSize(n.inlinks, tuning.nodeSizeScale),
+          isTop: topIds.has(String(n.id)) ? 1 : 0,
         },
       })),
       ...graph.edges.map((e) => ({
@@ -129,6 +226,62 @@ export function VisualizationDialog({ open, onClose }: Props) {
       cyRef.current = null;
     }
 
+    // Label visibility selector. `hover` keeps every label hidden until
+    // the user mouses over (the focus class added in the hover handler
+    // overrides this); `top` shows only the 20 most-linked nodes;
+    // `always` is the legacy unreadable mode for completeness.
+    const baseLabelSelector =
+      labelMode === 'always'
+        ? 'node'
+        : labelMode === 'top'
+          ? 'node[isTop = 1]'
+          : 'node.focus';
+
+    // Layout-specific spacing — the previous default cose at 200 nodes
+    // produced overlapping clumps. We bump nodeRepulsion + idealEdgeLength
+    // so the layout runner pushes nodes apart aggressively, which is the
+    // biggest readability lever.
+    const layoutCfg: Record<string, unknown> = {
+      name: layout,
+      animate: false,
+      padding: 30,
+    };
+    if (layout === 'cose') {
+      // Hub-spoke link graphs (a navbar that points to every page) collapse
+      // into a tight ball with default cose forces because every short
+      // navbar edge contracts in the same direction. Counter with extreme
+      // node-pair repulsion + zero gravity so edges have to overcome
+      // ~half-a-million units of push to bring nodes adjacent. The
+      // boundingBox forces a wide canvas so the layout has room to breathe
+      // even when the dialog is small.
+      layoutCfg.nodeRepulsion = () => 1_000_000 * tuning.repulsionScale;
+      layoutCfg.idealEdgeLength = () => 400 * tuning.edgeLengthScale;
+      layoutCfg.edgeElasticity = () => 20;
+      layoutCfg.gravity = 0;
+      layoutCfg.gravityRange = 5.0;
+      layoutCfg.gravityCompound = 0;
+      layoutCfg.numIter = 6000;
+      layoutCfg.nodeOverlap = 200;
+      layoutCfg.componentSpacing = 400 * tuning.componentSpacingScale;
+      layoutCfg.nestingFactor = 1.2;
+      layoutCfg.initialTemp = 2000;
+      layoutCfg.coolingFactor = 0.995;
+      layoutCfg.minTemp = 1.0;
+      layoutCfg.randomize = true;
+      layoutCfg.refresh = 30;
+      layoutCfg.boundingBox = { x1: 0, y1: 0, w: 5000, h: 5000 };
+    } else if (layout === 'breadthfirst') {
+      layoutCfg.spacingFactor = 1.6;
+      layoutCfg.directed = true;
+    } else if (layout === 'circle') {
+      layoutCfg.spacingFactor = 1.4;
+    } else if (layout === 'concentric') {
+      layoutCfg.minNodeSpacing = 30;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      layoutCfg.concentric = (n: any) => Number(n.data('inlinks') ?? 0);
+      layoutCfg.levelWidth = () => 1;
+    }
+
     const cy = cytoscape({
       container: containerRef.current,
       elements,
@@ -141,52 +294,229 @@ export function VisualizationDialog({ open, onClose }: Props) {
           selector: 'node',
           style: {
             'background-color': 'data(color)',
-            label: 'data(label)',
+            // Label visibility is controlled by separate selectors below;
+            // base node has empty label so nothing renders unless the
+            // selector promotes it.
+            label: '',
             color: '#e5e5e5',
-            'font-size': 8,
-            'text-outline-color': '#171717',
-            'text-outline-width': 1,
+            'font-size': 9,
+            'font-weight': 500,
+            'text-outline-color': '#0a0a0a',
+            'text-outline-width': 2,
+            'text-background-color': '#0a0a0a',
+            'text-background-opacity': 0.6,
+            'text-background-padding': 2,
             'text-valign': 'bottom',
             'text-halign': 'center',
-            'text-margin-y': 2,
-            'text-max-width': 80,
+            'text-margin-y': 4,
+            'text-max-width': 140,
+            'text-wrap': 'ellipsis',
+            'border-width': 0,
             width: 'data(size)',
             height: 'data(size)',
           },
         },
         {
+          // Selector for nodes that SHOULD show their label.
+          selector: baseLabelSelector,
+          style: {
+            label: 'data(label)',
+          },
+        },
+        {
+          // Hover/focus highlight — bright outline, on top. Label is
+          // rendered via the HTML overlay so it stays at fixed CSS size
+          // regardless of zoom; we don't promote `label` here.
+          selector: 'node.focus',
+          style: {
+            'border-width': 2,
+            'border-color': '#fbbf24',
+            'z-index': 999,
+          },
+        },
+        {
+          // Persistent selection — same yellow border as focus but stays
+          // until the user explicitly clicks empty canvas to deselect.
+          selector: 'node.selected',
+          style: {
+            'border-width': 3,
+            'border-color': '#f59e0b',
+            'z-index': 1000,
+          },
+        },
+        {
+          // Faded non-neighbours when a node is selected.
+          selector: 'node.faded',
+          style: {
+            opacity: 0.25,
+            'text-opacity': 0,
+          },
+        },
+        {
           selector: 'edge',
           style: {
-            width: 0.6,
+            width: 0.7,
             'line-color': '#404040',
             'curve-style': 'bezier',
             'target-arrow-color': '#525252',
             'target-arrow-shape': 'triangle',
             'arrow-scale': 0.6,
-            opacity: 0.5,
+            opacity: tuning.edgeOpacity,
+          },
+        },
+        {
+          selector: 'edge.focus',
+          style: {
+            'line-color': '#fbbf24',
+            'target-arrow-color': '#fbbf24',
+            opacity: 0.9,
+            width: 1.4,
+            'z-index': 999,
+          },
+        },
+        {
+          selector: 'edge.faded',
+          style: {
+            opacity: 0.08,
           },
         },
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ] as any),
-      layout: {
-        name: layout,
-        animate: false,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      layout: layoutCfg as any,
       wheelSensitivity: 0.2,
+      minZoom: 0.05,
+      maxZoom: 4,
     });
 
+    /**
+     * Place the floating overlay label over a node. We translate cytoscape
+     * model coords → rendered (canvas) coords → screen-pixel coords inside
+     * the container so the label sits under the dot at a fixed CSS size
+     * regardless of zoom.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const placeLabel = (node: any) => {
+      const pos = node.renderedPosition();
+      const zoom = cy.zoom();
+      const radius = (node.data('size') as number) * zoom * 0.5;
+      setLabelOverlay({
+        text: String(node.data('fullUrl') ?? ''),
+        x: pos.x,
+        y: pos.y,
+        radius,
+      });
+    };
+
     cy.on('mouseover', 'node', (e) => {
-      setHover(String(e.target.data('fullUrl')));
+      const node = e.target;
+      setHover(String(node.data('fullUrl')));
+      placeLabel(node);
+      // Highlight the hovered node + its directly-connected neighbours;
+      // fade everything else so the user can read the surrounding cluster
+      // even on a dense canvas. We avoid touching nodes that have the
+      // `selected` class so a persisted selection stays visible.
+      cy.batch(() => {
+        cy.elements().not('.selected').addClass('faded');
+        const neighbourhood = node.closedNeighborhood();
+        neighbourhood.removeClass('faded');
+        node.addClass('focus');
+        neighbourhood.edges().addClass('focus');
+      });
     });
-    cy.on('mouseout', 'node', () => setHover(null));
+    cy.on('mouseout', 'node', () => {
+      setHover(null);
+      // Don't drop the label overlay if a node is selected — keep showing
+      // the selected node's URL. Otherwise clear it.
+      const sel = cy.$('node.selected');
+      if (sel.length > 0) {
+        placeLabel(sel[0]!);
+      } else {
+        setLabelOverlay(null);
+      }
+      cy.batch(() => {
+        cy.elements().removeClass('faded');
+        cy.elements().removeClass('focus');
+        // Re-apply faded to non-selected when there IS a selection so the
+        // persistent highlight stays visible.
+        if (sel.length > 0) {
+          const keep = sel[0]!.closedNeighborhood();
+          cy.elements().not(keep).addClass('faded');
+          keep.edges().addClass('focus');
+        }
+      });
+    });
+
+    // Click-to-select. Persists until the user clicks empty canvas (which
+    // first cancels the selection) or another node. We DO NOT animate the
+    // viewport on selection — the previous behaviour zoomed the camera,
+    // which felt jarring and lost the user's mental map of the graph.
+    cy.on('tap', 'node', (e) => {
+      const node = e.target;
+      setSelectedUrl(String(node.data('fullUrl')));
+      placeLabel(node);
+      cy.batch(() => {
+        cy.elements().removeClass('selected');
+        node.addClass('selected');
+        // Fade non-neighbours so the selection's locality is obvious even
+        // after the mouse leaves the dot.
+        cy.elements().addClass('faded');
+        const keep = node.closedNeighborhood();
+        keep.removeClass('faded');
+        keep.edges().addClass('focus');
+      });
+    });
+    cy.on('tap', (e) => {
+      // Empty-canvas click. Two-stage behaviour:
+      //   1) If something is selected, the click clears the selection
+      //      (and only that — no auto zoom-fit, the user might want to
+      //      stay where they were panning).
+      //   2) If nothing is selected, the click is a no-op.
+      // Double-click on empty canvas is the explicit "fit to all" gesture
+      // (handled separately below) so a stray pan-click doesn't yank the
+      // viewport every time.
+      if (e.target !== cy) return;
+      if (selectedUrlRef.current) {
+        setSelectedUrl(null);
+        setLabelOverlay(null);
+        cy.batch(() => {
+          cy.elements().removeClass('selected');
+          cy.elements().removeClass('faded');
+          cy.elements().removeClass('focus');
+        });
+      }
+    });
+    cy.on('dbltap', (e) => {
+      if (e.target === cy) {
+        cy.animate({ fit: { eles: cy.elements(), padding: 30 }, duration: 250 });
+      }
+    });
+
+    // Keep the overlay glued to the node as the user pans / zooms.
+    cy.on('pan zoom render', () => {
+      const sel = cy.$('node.selected');
+      if (sel.length > 0) {
+        placeLabel(sel[0]!);
+      }
+    });
+
+    // Double-click opens the URL in the system browser — the most-asked
+    // affordance in graph views ("which page is this?").
+    cy.on('dbltap', 'node', (e) => {
+      const url = String(e.target.data('fullUrl') ?? '');
+      if (url) {
+        // Renderer can use window.open with target=_blank — Electron's
+        // setWindowOpenHandler in main routes that to shell.openExternal.
+        window.open(url, '_blank');
+      }
+    });
 
     cyRef.current = cy;
     return () => {
       cy.destroy();
       cyRef.current = null;
     };
-  }, [open, graph, layout, colorMode]);
+  }, [open, graph, layout, colorMode, labelMode, tuning]);
 
   if (!open) return null;
 
@@ -237,13 +567,35 @@ export function VisualizationDialog({ open, onClose }: Props) {
                 value={String(nodeLimit)}
                 onChange={(e) => setNodeLimit(Number(e.target.value))}
               >
-                <option value="200">200</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="150">150</option>
+                <option value="300">300</option>
                 <option value="500">500</option>
                 <option value="1000">1,000</option>
                 <option value="2000">2,000</option>
-                <option value="5000">5,000</option>
               </select>
             </label>
+            <label className="flex items-center gap-1 text-surface-400">
+              Labels:
+              <select
+                className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                value={labelMode}
+                onChange={(e) => setLabelMode(e.target.value as LabelMode)}
+                title="Hover = on demand · Top 20 = only the most-linked hubs · All = every node"
+              >
+                <option value="hover">Hover Only</option>
+                <option value="top">Top 20</option>
+                <option value="always">All</option>
+              </select>
+            </label>
+            <button
+              className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
+              onClick={() => cyRef.current?.fit(undefined, 30)}
+              title="Fit graph to view"
+            >
+              Fit
+            </button>
             <button
               className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
               onClick={() => loadGraph()}
@@ -256,6 +608,30 @@ export function VisualizationDialog({ open, onClose }: Props) {
               )}
               Reload
             </button>
+            <div className="relative">
+              <button
+                data-tuning-anchor="1"
+                className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] ${
+                  tunerOpen
+                    ? 'border-blue-500 bg-surface-800 text-blue-200'
+                    : 'border-surface-700 text-surface-200 hover:border-blue-500 hover:bg-surface-800'
+                }`}
+                onClick={() => setTunerOpen((v) => !v)}
+                title="Layout tuning"
+                aria-label="Layout tuning"
+              >
+                <Settings2 className="h-3 w-3" />
+              </button>
+              {tunerOpen && (
+                <TuningPopover
+                  tuning={tuning}
+                  patch={patchTuning}
+                  reset={() => patchTuning(DEFAULT_TUNING)}
+                  reload={() => loadGraph()}
+                  close={() => setTunerOpen(false)}
+                />
+              )}
+            </div>
           </div>
           <button
             className="ml-auto rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-surface-100"
@@ -267,12 +643,35 @@ export function VisualizationDialog({ open, onClose }: Props) {
         </div>
 
         <div className="flex flex-1 min-h-0">
-          <div className="relative flex-1 bg-surface-950">
+          <div className="relative flex-1 overflow-hidden bg-surface-950">
             <div ref={containerRef} className="absolute inset-0" />
+            {labelOverlay && (
+              <div
+                className="pointer-events-none absolute z-10 -translate-x-1/2 whitespace-nowrap rounded border border-amber-500/70 bg-surface-950/95 px-2 py-0.5 font-mono text-[12px] text-amber-100 shadow-lg"
+                style={{
+                  // Offset the label below the node by its rendered radius
+                  // plus a small constant so the dot and the label never
+                  // overlap. Position is in CSS pixels — fixed regardless
+                  // of cytoscape zoom.
+                  left: `${labelOverlay.x}px`,
+                  top: `${labelOverlay.y + labelOverlay.radius + 6}px`,
+                  maxWidth: '440px',
+                  textOverflow: 'ellipsis',
+                  overflow: 'hidden',
+                }}
+              >
+                {labelOverlay.text}
+              </div>
+            )}
             {graph && (
               <div className="pointer-events-none absolute left-3 top-3 rounded bg-surface-900/80 px-2 py-1 text-[10px] text-surface-300">
                 {graph.nodes.length.toLocaleString()} nodes ·{' '}
                 {graph.edges.length.toLocaleString()} edges
+              </div>
+            )}
+            {graph && (
+              <div className="pointer-events-none absolute right-3 top-3 rounded bg-surface-900/80 px-2 py-1 text-[10px] text-surface-400">
+                Hover = neighbours · Click = select · Empty click = clear · Double-click node = open · Double-click canvas = fit
               </div>
             )}
             {hover && (
@@ -328,6 +727,171 @@ export function VisualizationDialog({ open, onClose }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Floating tuning popover anchored under the gear button. Exposes the
+ * five layout knobs we expose to the user via sliders. Changes apply
+ * live (Cytoscape re-renders on every `tuning` state change) and persist
+ * to prefs.
+ */
+function TuningPopover({
+  tuning,
+  patch,
+  reset,
+  reload,
+  close,
+}: {
+  tuning: VisTuning;
+  patch: (p: Partial<VisTuning>) => void;
+  reset: () => void;
+  reload: () => void;
+  close: () => void;
+}) {
+  // Close on outside click — popover is anchor-relative so a global
+  // click listener on `mousedown` is the standard pattern. We attach to
+  // mousedown rather than click so it fires before any selection or
+  // drag-start inside the canvas.
+  const popRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const onDocDown = (e: MouseEvent) => {
+      if (!popRef.current) return;
+      if (popRef.current.contains(e.target as Node)) return;
+      // Don't close when clicking the gear button itself — it owns the
+      // toggle. Detect by walking up to find a [data-tuning-anchor] guard.
+      let n = e.target as HTMLElement | null;
+      while (n) {
+        if (n.dataset && n.dataset['tuningAnchor'] === '1') return;
+        n = n.parentElement;
+      }
+      close();
+    };
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, [close]);
+
+  return (
+    <div
+      ref={popRef}
+      className="absolute right-0 top-full z-30 mt-1 w-80 rounded-md border border-surface-700 bg-surface-900 p-3 text-[11px] shadow-2xl"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-[12px] font-semibold text-surface-100">Layout Tuning</div>
+        <button
+          className="flex items-center gap-1 rounded border border-surface-700 px-2 py-0.5 text-[10px] text-surface-300 hover:bg-surface-800"
+          onClick={reset}
+          title="Reset to defaults"
+        >
+          <RotateCcw className="h-3 w-3" />
+          Reset
+        </button>
+      </div>
+
+      <Slider
+        label="Node size"
+        value={tuning.nodeSizeScale}
+        min={0.4}
+        max={3}
+        step={0.1}
+        format={(v) => `${v.toFixed(1)}×`}
+        onChange={(v) => patch({ nodeSizeScale: v })}
+        hint="Scales every dot's radius. Lower = tighter graph, higher = easier to click but more overlap."
+      />
+      <Slider
+        label="Node distance (repulsion)"
+        value={tuning.repulsionScale}
+        min={0.2}
+        max={5}
+        step={0.1}
+        format={(v) => `${v.toFixed(1)}×`}
+        onChange={(v) => patch({ repulsionScale: v })}
+        hint="How strongly nodes push each other apart. Higher = more breathing room. Force-Directed only."
+      />
+      <Slider
+        label="Edge length"
+        value={tuning.edgeLengthScale}
+        min={0.3}
+        max={4}
+        step={0.1}
+        format={(v) => `${v.toFixed(1)}×`}
+        onChange={(v) => patch({ edgeLengthScale: v })}
+        hint="Target rest-length for connections. Higher = longer edges. Force-Directed only."
+      />
+      <Slider
+        label="Cluster spacing"
+        value={tuning.componentSpacingScale}
+        min={0.3}
+        max={4}
+        step={0.1}
+        format={(v) => `${v.toFixed(1)}×`}
+        onChange={(v) => patch({ componentSpacingScale: v })}
+        hint="Gap between disconnected sub-graphs. Higher = isolated clusters spread further apart."
+      />
+      <Slider
+        label="Edge opacity"
+        value={tuning.edgeOpacity}
+        min={0.05}
+        max={1}
+        step={0.05}
+        format={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => patch({ edgeOpacity: v })}
+        hint="Lower = less visual noise on dense graphs."
+      />
+
+      <div className="mt-3 flex items-center justify-between gap-2 border-t border-surface-800 pt-2">
+        <div className="text-[10px] text-surface-500">
+          Some changes need a layout re-run.
+        </div>
+        <button
+          className="flex items-center gap-1 rounded bg-blue-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-blue-500"
+          onClick={() => reload()}
+        >
+          <RefreshCw className="h-3 w-3" />
+          Re-run layout
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Slider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  format,
+  onChange,
+  hint,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  format: (v: number) => string;
+  onChange: (v: number) => void;
+  hint?: string;
+}) {
+  return (
+    <label className="mb-2.5 block">
+      <div className="mb-0.5 flex items-baseline justify-between">
+        <span className="text-surface-300">{label}</span>
+        <span className="font-mono text-surface-100">{format(value)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number.parseFloat(e.target.value))}
+        className="w-full accent-blue-500"
+      />
+      {hint && <div className="mt-0.5 text-[10px] leading-snug text-surface-500">{hint}</div>}
+    </label>
   );
 }
 

@@ -3,14 +3,27 @@ import { parseArgs } from 'node:util';
 import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { DEFAULT_CRAWL_CONFIG } from '@freecrawl/shared-types';
-import { Crawler, exportUrlsToCsv, exportUrlsToJson } from '@freecrawl/core';
+import {
+  Crawler,
+  compareCrawls,
+  exportUrlsToCsv,
+  exportUrlsToJson,
+  testUrlAgainstRobots,
+  fetchSitemaps,
+  validateSitemap,
+} from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
 
 function help(): void {
   console.log(`freecrawl — headless SEO crawler
 
 Usage:
-  freecrawl <url> [options]
+  freecrawl <url> [options]                       Spider mode (default)
+  freecrawl --list <file> [options]               List mode (one URL per line)
+  freecrawl validate-sitemap <sitemap-url>        Fetch + validate a sitemap.xml
+  freecrawl audit-robots <url> [--user-agent UA]  Test if a URL is allowed by robots.txt
+  freecrawl compare <before.seoproject> <after.seoproject>
+                                                  Cross-project diff (added / removed / status / title / meta / h1 / canonical / indexability / response_time)
 
 Options:
   --depth <n>         Max crawl depth (default: ${DEFAULT_CRAWL_CONFIG.maxDepth})
@@ -52,6 +65,45 @@ async function main(): Promise<void> {
       help: { type: 'boolean', short: 'h' },
     },
   });
+
+  // Subcommands: `validate-sitemap <url>` and `audit-robots <url>` short-
+  // circuit the crawl path — they're standalone diagnostics that don't
+  // touch the project DB.
+  if (positionals[0] === 'validate-sitemap') {
+    if (!positionals[1]) {
+      console.error('Usage: freecrawl validate-sitemap <sitemap-url>');
+      process.exit(2);
+    }
+    const exitCode = await runValidateSitemap(
+      positionals[1],
+      values['user-agent'] ?? DEFAULT_CRAWL_CONFIG.userAgent,
+    );
+    process.exit(exitCode);
+  }
+  if (positionals[0] === 'audit-robots') {
+    if (!positionals[1]) {
+      console.error('Usage: freecrawl audit-robots <url> [--user-agent UA]');
+      process.exit(2);
+    }
+    const exitCode = await runAuditRobots(
+      positionals[1],
+      values['user-agent'] ?? DEFAULT_CRAWL_CONFIG.userAgent,
+    );
+    process.exit(exitCode);
+  }
+  if (positionals[0] === 'compare') {
+    if (!positionals[1] || !positionals[2]) {
+      console.error(
+        'Usage: freecrawl compare <before.seoproject> <after.seoproject>',
+      );
+      process.exit(2);
+    }
+    const exitCode = runCompare(
+      resolve(positionals[1]),
+      resolve(positionals[2]),
+    );
+    process.exit(exitCode);
+  }
 
   // List mode is selected by `--list`; otherwise we need a positional URL.
   const listFile = values.list;
@@ -158,6 +210,143 @@ function parseHeaders(values: string[] | undefined): Record<string, string> {
     if (key) out[key] = value;
   }
   return out;
+}
+
+/**
+ * Fetch a sitemap (or sitemap-index) URL, walk it, and report URL count +
+ * lastmod sample validity. Exit 0 = clean, 1 = warnings, 2 = fetch failure.
+ */
+async function runValidateSitemap(rawUrl: string, userAgent: string): Promise<number> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    console.error(`Invalid URL: ${rawUrl}`);
+    return 2;
+  }
+  const ac = new AbortController();
+  const timeout = setTimeout(() => ac.abort(), 30_000);
+  try {
+    // Walk the sitemap (and any nested indexes) up to a reasonable cap so
+    // pathological sites can't hang the CLI.
+    const result = await fetchSitemaps([parsed.toString()], {
+      userAgent,
+      signal: ac.signal,
+      timeoutMs: 30_000,
+      maxUrls: 100_000,
+      maxDepth: 3,
+    });
+    if (result.errors.length > 0 && result.entries.length === 0) {
+      console.error(`Sitemap fetch failed:`);
+      for (const e of result.errors) console.error(`  ${e.sitemap}: ${e.error}`);
+      return 2;
+    }
+    const lastmodSamples = result.entries
+      .slice(0, 50)
+      .map((e) => e.lastmod ?? '')
+      .filter(Boolean)
+      .slice(0, 10);
+    const validation = validateSitemap({
+      urlCount: result.entries.length,
+      fileBytes: 0, // Unknown without a head request; size cap is best-effort here.
+      lastmodSamples,
+    });
+    console.log(`Sitemap: ${rawUrl}`);
+    console.log(`  Sitemaps tried: ${result.sitemapsTried.length}`);
+    console.log(`  Sitemaps parsed: ${result.sitemapsParsed.length}`);
+    console.log(`  URL entries: ${result.entries.length}${result.truncated ? ' (truncated)' : ''}`);
+    if (result.errors.length > 0) {
+      console.log(`  Errors:`);
+      for (const e of result.errors) console.log(`    ${e.sitemap}: ${e.error}`);
+    }
+    if (validation.findings.length > 0) {
+      console.log(`  Findings:`);
+      for (const f of validation.findings) console.log(`    - ${f}`);
+      return 1;
+    }
+    console.log('  OK');
+    return 0;
+  } catch (err) {
+    console.error(`Validation error: ${(err as Error).message}`);
+    return 2;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Run the configured robots.txt against a single URL — print whether it's
+ * allowed, the matched user-agent's crawl-delay, and any declared sitemaps.
+ */
+async function runAuditRobots(rawUrl: string, userAgent: string): Promise<number> {
+  try {
+    new URL(rawUrl);
+  } catch {
+    console.error(`Invalid URL: ${rawUrl}`);
+    return 2;
+  }
+  const result = await testUrlAgainstRobots(rawUrl, userAgent);
+  console.log(`URL:        ${result.url}`);
+  console.log(`robots.txt: ${result.robotsUrl}`);
+  if (result.error) {
+    console.log(`Status:     fetch error — ${result.error}`);
+    console.log('Verdict:    ALLOWED (default-allow when robots.txt is unreachable)');
+    return 0;
+  }
+  console.log(`Status:     HTTP ${result.status ?? '—'}`);
+  console.log(`User-Agent: ${userAgent}`);
+  console.log(`Crawl-Delay: ${result.crawlDelay ?? '—'}`);
+  if (result.sitemaps.length > 0) {
+    console.log(`Sitemaps:`);
+    for (const s of result.sitemaps) console.log(`  - ${s}`);
+  }
+  console.log(`Verdict:    ${result.allowed ? 'ALLOWED' : 'DISALLOWED'}`);
+  return result.allowed ? 0 : 1;
+}
+
+/**
+ * Cross-project diff. Opens two `.seoproject` files (read-only — never
+ * mutates), runs the same `compareCrawls` engine the desktop Compare
+ * dialog uses, and prints a category-grouped count + samples to stdout.
+ *
+ * Exit code: 0 when both projects load and diff completes; 1 when at
+ * least one diff category had non-zero results (useful for CI gates that
+ * want to fail on regressions); 2 on fatal load error.
+ */
+function runCompare(beforePath: string, afterPath: string): number {
+  let before: ProjectDb;
+  let after: ProjectDb;
+  try {
+    before = new ProjectDb(beforePath);
+  } catch (err) {
+    console.error(`Cannot open before project: ${(err as Error).message}`);
+    return 2;
+  }
+  try {
+    after = new ProjectDb(afterPath);
+  } catch (err) {
+    before.close();
+    console.error(`Cannot open after project: ${(err as Error).message}`);
+    return 2;
+  }
+  try {
+    const summary = compareCrawls(before, after);
+    console.log(`Compare: ${beforePath} → ${afterPath}`);
+    console.log(`  Total before: ${summary.totalA}`);
+    console.log(`  Total after:  ${summary.totalB}`);
+    console.log(`  Diff:`);
+    for (const [cat, count] of Object.entries(summary.counts)) {
+      console.log(`    ${cat.padEnd(15)} ${count}`);
+    }
+    const totalDiff = Object.values(summary.counts).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    return totalDiff > 0 ? 1 : 0;
+  } finally {
+    before.close();
+    after.close();
+  }
 }
 
 main().catch((err: unknown) => {

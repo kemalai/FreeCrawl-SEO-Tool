@@ -19,6 +19,8 @@ export interface HreflangEntry {
 
 export interface ParsedPage {
   title: string | null;
+  /** Number of `<title>` elements in the document. >1 is a tag-duplication bug. */
+  titleCount: number;
   metaDescription: string | null;
   h1: string | null;
   h1Count: number;
@@ -51,6 +53,28 @@ export interface ParsedPage {
   schemaBlockCount: number;
   /** Number of JSON-LD blocks that failed to parse. */
   schemaInvalidCount: number;
+  /** Number of Microdata `itemscope` elements declared on the page. */
+  microdataCount: number;
+  /** Number of RDFa `typeof` / `vocab` / `property` attribute occurrences. */
+  rdfaCount: number;
+  /**
+   * Number of `<form action="http://…">` elements declared on a HTTPS page.
+   * 0 when the page itself is plain-HTTP (insecure already; no special
+   * relationship to flag).
+   */
+  insecureFormActionCount: number;
+  /**
+   * Number of `<script>` / `<link rel="stylesheet">` referencing a third-
+   * party origin without an `integrity` attribute. SRI is recommended for
+   * any cross-origin subresource that you don't fully control.
+   */
+  missingSriCount: number;
+  /**
+   * Number of render-blocking resources in `<head>`: `<script src>` without
+   * `async`/`defer`/`type=module`, plus `<link rel="stylesheet">` (excl.
+   * `media=print`). These delay first-paint until fetched and parsed.
+   */
+  renderBlockingCount: number;
   /** `<link rel="next">` href, normalized to absolute URL. */
   paginationNext: string | null;
   /** `<link rel="prev">` href, normalized to absolute URL. */
@@ -61,6 +85,16 @@ export interface ParsedPage {
   amphtml: string | null;
   /** Resolved favicon URL from `<link rel="icon">` / `shortcut icon`, else null. */
   favicon: string | null;
+  /** Resolved `<link rel="apple-touch-icon">` URL, else null. */
+  appleTouchIcon: string | null;
+  /** Resolved `<link rel="manifest">` URL, else null. */
+  manifestUrl: string | null;
+  /** Resolved RSS / Atom feed `<link rel="alternate">` URL, else null. */
+  feedUrl: string | null;
+  /** Number of internal hyperlinks with no usable anchor text or image alt. */
+  emptyAnchorCount: number;
+  /** Number of `<img>` with explicit `alt=""` (decorative — distinct from missing alt). */
+  imagesEmptyAlt: number;
   /**
    * Number of `http://` subresources (img, script, stylesheet, iframe, …)
    * referenced from a HTTPS page — i.e. mixed-content findings. Always 0
@@ -137,7 +171,9 @@ export function parseHtml(
   // We parse with decodeEntities:false for speed, so extracted strings
   // contain raw entities like `&#39;` or `&amp;`. Decode them before
   // storing so UI / CSV export / search see human-readable text.
-  const title = decodeEntities($('title').first().text().trim()) || null;
+  const titleEls = $('title');
+  const titleCount = titleEls.length;
+  const title = decodeEntities(titleEls.first().text().trim()) || null;
   const metaDescription =
     decodeEntities(($('meta[name="description"]').attr('content') ?? '').trim()) || null;
   const h1 = decodeEntities($('h1').first().text().trim()) || null;
@@ -208,6 +244,77 @@ export function parseHtml(
   });
   const schemaTypes = [...schemaTypeSet].sort();
 
+  // Microdata & RDFa — alternative structured-data formats. We only count
+  // occurrences (not the type vocabulary), because the data model varies
+  // per author and the Issues panel only needs presence/absence to flag a
+  // missing-structured-data page. Schema.org microdata uses `itemscope`;
+  // RDFa uses `typeof` / `vocab` / `property`.
+  const microdataCount = $('[itemscope]').length;
+  const rdfaCount =
+    $('[typeof]').length + $('[vocab]').length + $('[property]').length;
+
+  // Insecure form action — HTTPS page with `<form action="http://…">`.
+  // Browsers warn ("not secure" interstitial) when the user submits.
+  let insecureFormActionCount = 0;
+  if (pageUrl.startsWith('https://')) {
+    $('form[action]').each((_, el) => {
+      const action = ($(el).attr('action') ?? '').trim();
+      if (action.startsWith('http://')) insecureFormActionCount++;
+    });
+  }
+
+  // Subresource Integrity — flag third-party `<script>` / `<link rel=stylesheet>`
+  // without an `integrity` attribute. We compare hosts so first-party
+  // resources (same origin) don't trip the count; SRI is mainly a
+  // recommendation for CDN-hosted dependencies.
+  let missingSriCount = 0;
+  let pageHost = '';
+  try {
+    pageHost = new URL(pageUrl).host;
+  } catch {
+    /* no-op */
+  }
+  if (pageHost) {
+    $('script[src], link[rel="stylesheet"][href]').each((_, el) => {
+      const $el = $(el);
+      const ref = ($el.attr('src') ?? $el.attr('href') ?? '').trim();
+      if (!ref || ref.startsWith('data:')) return;
+      let host = '';
+      try {
+        host = new URL(ref, pageUrl).host;
+      } catch {
+        return;
+      }
+      if (!host || host === pageHost) return;
+      const integrity = ($el.attr('integrity') ?? '').trim();
+      if (!integrity) missingSriCount++;
+    });
+  }
+
+  // Render-blocking resources — `<head>` `<script>` without `async`/`defer`
+  // and `<link rel="stylesheet">` (any). Both block first-paint until
+  // they're fetched + parsed. Lighthouse audits these as the #1 LCP
+  // optimisation lever for content-heavy pages.
+  let renderBlockingCount = 0;
+  $('head script[src]').each((_, el) => {
+    const $el = $(el);
+    const isAsync = $el.attr('async') !== undefined;
+    const isDefer = $el.attr('defer') !== undefined;
+    const isModule = ($el.attr('type') ?? '').toLowerCase() === 'module';
+    // ES modules are deferred by spec — not render-blocking.
+    if (!isAsync && !isDefer && !isModule) renderBlockingCount++;
+  });
+  $('head link[rel="stylesheet"]').each((_, el) => {
+    const $el = $(el);
+    // Stylesheets with a `media` of `print` / `all` (default) are not
+    // render-blocking when print-only. We only count default + screen.
+    const media = ($el.attr('media') ?? '').trim().toLowerCase();
+    if (media === 'print') return;
+    // `<link rel="preload" as="style">` doesn't block; only true rel=stylesheet
+    // counts here (selector already excludes preload).
+    renderBlockingCount++;
+  });
+
   // Pagination — `<link rel="next">` / `<link rel="prev">`. Resolved to
   // absolute via normalizeUrl so the values are comparable to the URLs
   // we crawl and store.
@@ -244,6 +351,33 @@ export function parseHtml(
     ($('link[rel="icon"]').first().attr('href') ?? '').trim() ||
     ($('link[rel="shortcut icon"]').first().attr('href') ?? '').trim();
   const favicon = faviconRaw ? normalizeUrl(faviconRaw, pageUrl, opts.urlRewrites) : null;
+
+  // Apple touch icon — iOS/iPadOS home-screen icon. Multiple sizes can be
+  // declared; we surface the first to keep the column simple.
+  const appleTouchRaw =
+    ($('link[rel="apple-touch-icon"]').first().attr('href') ?? '').trim() ||
+    ($('link[rel="apple-touch-icon-precomposed"]').first().attr('href') ?? '').trim();
+  const appleTouchIcon = appleTouchRaw
+    ? normalizeUrl(appleTouchRaw, pageUrl, opts.urlRewrites)
+    : null;
+
+  // Web app manifest — PWA support signal.
+  const manifestRaw = ($('link[rel="manifest"]').first().attr('href') ?? '').trim();
+  const manifestUrl = manifestRaw
+    ? normalizeUrl(manifestRaw, pageUrl, opts.urlRewrites)
+    : null;
+
+  // RSS / Atom feed — `<link rel="alternate" type="application/rss+xml">` or
+  // atom equivalent. We surface the first declared feed; many sites declare
+  // both.
+  const feedRaw =
+    (
+      $('link[rel="alternate"][type="application/rss+xml"]').first().attr('href') ?? ''
+    ).trim() ||
+    (
+      $('link[rel="alternate"][type="application/atom+xml"]').first().attr('href') ?? ''
+    ).trim();
+  const feedUrl = feedRaw ? normalizeUrl(feedRaw, pageUrl, opts.urlRewrites) : null;
 
   // Meta refresh — `<meta http-equiv="refresh" content="N; url=…">`.
   // Even when the URL is absent (pure auto-reload) we still capture the
@@ -333,6 +467,7 @@ export function parseHtml(
   const hasNoindex = metaRobots !== null && metaRobots.includes('noindex');
   const hasNofollow = metaRobots !== null && metaRobots.includes('nofollow');
 
+  let emptyAnchorCount = 0;
   const linkMap = new Map<string, DiscoveredLink>();
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href');
@@ -362,6 +497,11 @@ export function parseHtml(
     const linkPath = buildLinkPath(el);
     const linkPosition = detectLinkPosition(el);
 
+    // Empty anchor: no usable text inside the <a> AND no alt on a nested
+    // image. Common accessibility/SEO failure on icon-only or image-only
+    // links. Only count internal links — externals aren't our problem.
+    if (isInternal && !anchor && !altText) emptyAnchorCount++;
+
     linkMap.set(normalized, {
       fromUrl: pageUrl,
       toUrl: normalized,
@@ -378,6 +518,7 @@ export function parseHtml(
     });
   });
 
+  let imagesEmptyAlt = 0;
   const imageMap = new Map<string, DiscoveredImage>();
   $('img[src]').each((_, el) => {
     const rawSrc = $(el).attr('src');
@@ -395,6 +536,13 @@ export function parseHtml(
       altAttr === undefined
         ? null // alt missing entirely (accessibility issue)
         : decodeEntities(altAttr.trim()); // empty string means decorative — kept as ''
+    // Count `alt=""` (decorative) separately from missing alt — Screaming
+    // Frog distinguishes them in its accessibility filters and so should we.
+    if (altAttr !== undefined && (alt === '' || alt === null)) {
+      // alt="" specifically; missing-alt is tallied at the DB level via
+      // image_usages rows whose alt is null.
+      if (altAttr.trim() === '') imagesEmptyAlt++;
+    }
     const width = parseIntAttr($(el).attr('width'));
     const height = parseIntAttr($(el).attr('height'));
     const isInternal = isSameHost(pageUrl, normalized, opts);
@@ -410,6 +558,7 @@ export function parseHtml(
 
   return {
     title,
+    titleCount,
     metaDescription,
     h1,
     h1Count,
@@ -438,11 +587,21 @@ export function parseHtml(
     schemaTypes,
     schemaBlockCount,
     schemaInvalidCount,
+    microdataCount,
+    rdfaCount,
+    insecureFormActionCount,
+    missingSriCount,
+    renderBlockingCount,
     paginationNext,
     paginationPrev,
     hreflangs,
     amphtml,
     favicon,
+    appleTouchIcon,
+    manifestUrl,
+    feedUrl,
+    emptyAnchorCount,
+    imagesEmptyAlt,
     mixedContentCount,
     customSearchHits,
     metaRefresh,
@@ -503,6 +662,50 @@ function detectPathType(rawHref: string): LinkPathType {
   if (h.startsWith('//')) return 'protocol-relative';
   if (h.startsWith('/')) return 'root-relative';
   return 'path-relative';
+}
+
+/**
+ * Approximate pixel width of `text` rendered in Arial 18 px (Google SERP
+ * title font). Uses a per-character width table derived from canvas
+ * measurements — accuracy is ~±2% which is plenty for the usual "is the
+ * title going to truncate?" question. Skipping HTML canvas keeps this
+ * pure-Node so the same code runs in CLI and tests.
+ *
+ * Reference truncation thresholds (Google):
+ *   - Title: ~600 px before "..." appears
+ *   - Meta description: ~990 px (mobile) / ~920 px (desktop)
+ */
+const ARIAL_18_WIDTHS: Record<string, number> = {
+  // Narrow
+  i: 5, l: 5, '!': 5, '|': 5, '.': 5, ',': 5, ';': 5, ':': 5, "'": 4, '`': 6,
+  // Medium-narrow
+  f: 6, j: 5, t: 6, r: 6, ' ': 5,
+  // Average lowercase
+  a: 10, b: 10, c: 9, d: 10, e: 10, g: 10, h: 10, k: 9, n: 10, o: 10, p: 10,
+  q: 10, s: 9, u: 10, v: 9, x: 9, y: 9, z: 9,
+  // Wide lowercase
+  m: 15, w: 13,
+  // Average uppercase
+  A: 12, B: 12, C: 13, D: 13, E: 12, F: 11, G: 14, H: 13, I: 5, J: 9,
+  K: 12, L: 10, N: 13, O: 14, P: 12, Q: 14, R: 13, S: 12, T: 11, U: 13,
+  V: 12, X: 12, Y: 12, Z: 11,
+  // Wide uppercase
+  M: 15, W: 17,
+  // Digits + common punctuation
+  '0': 10, '1': 10, '2': 10, '3': 10, '4': 10, '5': 10, '6': 10, '7': 10,
+  '8': 10, '9': 10, '-': 6, '_': 10, '/': 5, '?': 10, '(': 6, ')': 6,
+  '[': 6, ']': 6, '{': 6, '}': 6, '"': 7, '*': 7, '+': 11, '=': 11, '<': 11, '>': 11,
+  '#': 11, '$': 10, '%': 16, '&': 12, '@': 18,
+};
+const ARIAL_18_DEFAULT = 10;
+
+export function estimatePixelWidth(text: string): number {
+  if (!text) return 0;
+  let total = 0;
+  for (const ch of text) {
+    total += ARIAL_18_WIDTHS[ch] ?? ARIAL_18_DEFAULT;
+  }
+  return total;
 }
 
 /**

@@ -1,7 +1,7 @@
 export { Crawler } from './crawler.js';
 export type { CrawlerEvents } from './crawler.js';
 export { normalizeUrl, isSameHost, resolveStartUrl } from './url-utils.js';
-export { parseHtml } from './html-parser.js';
+export { parseHtml, estimatePixelWidth } from './html-parser.js';
 export { exportUrlsToCsv } from './csv-export.js';
 export { exportUrlsToJson, type JsonExportOptions } from './json-export.js';
 export { testUrlAgainstRobots, type RobotsTestResult } from './robots.js';
@@ -13,6 +13,11 @@ export {
   type SitemapExportResult,
 } from './sitemap-export.js';
 export { exportHtmlReport, type HtmlReportOptions } from './html-report.js';
+export {
+  analyseCookies,
+  extractSetCookies,
+  type CookieSecuritySummary,
+} from './cookies.js';
 export {
   postCrawlCompleteWebhook,
   type WebhookPayload,

@@ -19,9 +19,15 @@ import {
   isInScope,
   resolveStartUrl,
 } from './url-utils.js';
-import { parseHtml } from './html-parser.js';
+import { parseHtml, estimatePixelWidth } from './html-parser.js';
+import { analyseCookies, extractSetCookies } from './cookies.js';
 import { loadRobots, type RobotsChecker } from './robots.js';
-import { defaultRequestHeaders, formatFetchError, initHttpClient } from './http-client.js';
+import {
+  defaultRequestHeaders,
+  detectHttpProtocol,
+  formatFetchError,
+  initHttpClient,
+} from './http-client.js';
 import { discoverSitemapUrls, fetchSitemaps } from './sitemap.js';
 
 export interface CrawlerEvents {
@@ -782,6 +788,21 @@ export class Crawler extends EventEmitter {
         ? normalizeUrl(canonicalHttpRaw, item.url, this.urlRewrites)
         : null;
 
+      // HTTP protocol — heuristic via Alt-Svc (best-effort; undici doesn't
+      // surface the actually-negotiated ALPN protocol on Response).
+      const httpProtocol = detectHttpProtocol(res.headers.get('alt-svc'));
+
+      // Query-string length — characters after the first `?` (no `?` → 0).
+      const qIdx = item.url.indexOf('?');
+      const queryStringLength = qIdx >= 0 ? item.url.length - qIdx - 1 : 0;
+
+      // Keep-alive: HTTP/1.1 default is keep-alive; absence of an explicit
+      // `Connection: close` is good. HTTP/2 multiplexes a single connection
+      // — keep-alive is implicit and always true. We treat anything except
+      // `Connection: close` as keep-alive enabled.
+      const connectionHeader = (res.headers.get('connection') ?? '').toLowerCase();
+      const keepAlive = !connectionHeader.includes('close');
+
       const kind = detectContentKind(item.url, contentType);
 
       // Materialize all response headers once — used for the HTTP Headers
@@ -789,6 +810,16 @@ export class Crawler extends EventEmitter {
       // can also call setUrlHeaders right after we have a urlId.
       const allHeaders: [string, string][] = [];
       res.headers.forEach((v, k) => allHeaders.push([k, v]));
+
+      // Cookie security analysis — Set-Cookie response headers, parsed
+      // into per-cookie rows so we can count missing Secure / HttpOnly /
+      // SameSite flags. Cookie values themselves are never stored.
+      const cookieSummary = analyseCookies(extractSetCookies(allHeaders));
+
+      // TTFB on the successful attempt (excludes retry overhead). Falls
+      // back to total response time if for any reason ttfbMs wasn't set
+      // (defensive — fetchWithRetry always assigns it).
+      const ttfbMs = (res as { ttfbMs?: number }).ttfbMs ?? responseTimeMs;
 
       // 3xx redirect — record hop, optionally enqueue target, stop.
       if (statusCode >= 300 && statusCode < 400) {
@@ -812,6 +843,7 @@ export class Crawler extends EventEmitter {
           contentLength: parseIntSafe(contentLengthHeader),
           xRobotsTag,
           responseTimeMs,
+          ttfbMs,
           depth: item.depth,
           redirectTarget: target,
           hsts,
@@ -822,6 +854,13 @@ export class Crawler extends EventEmitter {
           referrerPolicy,
           permissionsPolicy,
           canonicalHttp,
+          cookiesCount: cookieSummary.count,
+          cookiesInsecure: cookieSummary.insecureCount,
+          cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
+          cookiesNoSameSite: cookieSummary.noSameSiteCount,
+          httpProtocol,
+          queryStringLength,
+          keepAlive,
         });
         if (redirectUrlId) this.db.setUrlHeaders(redirectUrlId, allHeaders);
         this.crawled++;
@@ -873,6 +912,7 @@ export class Crawler extends EventEmitter {
           contentLength: parseIntSafe(contentLengthHeader),
           xRobotsTag,
           responseTimeMs,
+          ttfbMs,
           depth: item.depth,
           hsts,
           xFrameOptions,
@@ -882,6 +922,13 @@ export class Crawler extends EventEmitter {
           referrerPolicy,
           permissionsPolicy,
           canonicalHttp,
+          cookiesCount: cookieSummary.count,
+          cookiesInsecure: cookieSummary.insecureCount,
+          cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
+          cookiesNoSameSite: cookieSummary.noSameSiteCount,
+          httpProtocol,
+          queryStringLength,
+          keepAlive,
         });
         if (nonHtmlUrlId) this.db.setUrlHeaders(nonHtmlUrlId, allHeaders);
         this.crawled++;
@@ -965,6 +1012,7 @@ export class Crawler extends EventEmitter {
         contentType,
         contentLength: bodyLength,
         responseTimeMs,
+        ttfbMs,
         depth: item.depth,
         outlinks: storableLinks.length,
         imagesCount: parsed.images.length,
@@ -1002,6 +1050,9 @@ export class Crawler extends EventEmitter {
         hreflangCount: parsed.hreflangs.length,
         amphtml: parsed.amphtml,
         favicon: parsed.favicon,
+        appleTouchIcon: parsed.appleTouchIcon,
+        manifestUrl: parsed.manifestUrl,
+        feedUrl: parsed.feedUrl,
         mixedContentCount: parsed.mixedContentCount,
         metaRefresh: parsed.metaRefresh,
         metaRefreshUrl: parsed.metaRefreshUrl,
@@ -1011,8 +1062,42 @@ export class Crawler extends EventEmitter {
           : null,
         simhash: parsed.simhash,
         contentHash: parsed.contentHash,
+        titleCount: parsed.titleCount,
+        imagesEmptyAlt: parsed.imagesEmptyAlt,
+        emptyAnchorCount: parsed.emptyAnchorCount,
+        microdataCount: parsed.microdataCount,
+        rdfaCount: parsed.rdfaCount,
+        insecureFormActionCount: parsed.insecureFormActionCount,
+        missingSriCount: parsed.missingSriCount,
+        titlePixelWidth: estimatePixelWidth(parsed.title ?? ''),
+        metaPixelWidth: estimatePixelWidth(parsed.metaDescription ?? ''),
+        cookiesCount: cookieSummary.count,
+        cookiesInsecure: cookieSummary.insecureCount,
+        cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
+        cookiesNoSameSite: cookieSummary.noSameSiteCount,
+        httpProtocol,
+        queryStringLength,
+        keepAlive,
+        renderBlockingCount: parsed.renderBlockingCount,
       });
       if (urlId) this.db.setUrlHeaders(urlId, allHeaders);
+      // Body snapshot — drives the View Source detail tab. Only HTML
+      // pages get stored (we already gated entry above on `kind === 'html'`).
+      // Capped per `bodySnapshotMaxBytes` so a single page can't blow up
+      // the project file.
+      if (urlId && this.config.storeBodySnapshots) {
+        try {
+          this.db.setUrlSource(
+            urlId,
+            body,
+            this.config.bodySnapshotMaxBytes > 0
+              ? this.config.bodySnapshotMaxBytes
+              : 1_048_576,
+          );
+        } catch {
+          // Best-effort — a snapshot failure must not break the crawl.
+        }
+      }
       this.db.insertLinks(urlId, storableLinks, item.depth);
       this.db.insertImages(urlId, parsed.images);
       for (const link of storableLinks) {
@@ -1067,7 +1152,10 @@ export class Crawler extends EventEmitter {
    * Retries are triggered by network errors, HTTP 429, and 5xx responses —
    * 3xx/4xx (except 429) are treated as final.
    */
-  private async fetchWithRetry(url: string, signal: AbortSignal) {
+  private async fetchWithRetry(
+    url: string,
+    signal: AbortSignal,
+  ): Promise<Response & { ttfbMs: number }> {
     const maxAttempts = Math.max(0, this.config.retryAttempts) + 1;
     const baseDelay = Math.max(0, this.config.retryInitialDelayMs);
     let lastError: unknown = null;
@@ -1075,6 +1163,12 @@ export class Crawler extends EventEmitter {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (this.stopped) throw lastError ?? new Error('crawler stopped');
       try {
+        // TTFB is the time between request dispatch and headers received.
+        // `await undiciFetch(...)` resolves once the response status line +
+        // headers are in — body streaming hasn't started yet — so this is
+        // the right place to mark the timestamp. Per-attempt so a retry's
+        // TTFB doesn't include the failed first attempt's overhead.
+        const tStart = Date.now();
         const res = await undiciFetch(url, {
           method: 'GET',
           headers: defaultRequestHeaders(
@@ -1086,9 +1180,13 @@ export class Crawler extends EventEmitter {
           redirect: 'manual',
           signal,
         });
-        // Final attempt or non-retryable status — return as-is.
+        const ttfbMs = Date.now() - tStart;
+        // Final attempt or non-retryable status — return as-is. We attach
+        // ttfbMs as a non-enumerable property so the existing call sites
+        // can read it without breaking the Response shape elsewhere.
         if (attempt === maxAttempts - 1 || !isRetryableStatus(res.status)) {
-          return res;
+          (res as unknown as { ttfbMs: number }).ttfbMs = ttfbMs;
+          return res as unknown as Response & { ttfbMs: number };
         }
         // Drain body so the connection can be reused, then back off.
         try {

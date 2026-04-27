@@ -105,6 +105,27 @@ interface UrlRowDb {
   content_hash: string | null;
   cluster_id: number;
   cluster_size: number;
+  title_count: number;
+  images_empty_alt: number;
+  empty_anchor_count: number;
+  apple_touch_icon: string | null;
+  manifest_url: string | null;
+  feed_url: string | null;
+  microdata_count: number;
+  rdfa_count: number;
+  insecure_form_action_count: number;
+  missing_sri_count: number;
+  title_pixel_width: number;
+  meta_pixel_width: number;
+  ttfb_ms: number | null;
+  cookies_count: number;
+  cookies_insecure: number;
+  cookies_no_httponly: number;
+  cookies_no_samesite: number;
+  http_protocol: string | null;
+  query_string_length: number;
+  render_blocking_count: number;
+  keep_alive: number;
 }
 
 interface ImageRowDb {
@@ -187,6 +208,27 @@ export interface UpsertUrlInput {
   extractionResults?: string | null;
   simhash?: string | null;
   contentHash?: string | null;
+  titleCount?: number;
+  imagesEmptyAlt?: number;
+  emptyAnchorCount?: number;
+  appleTouchIcon?: string | null;
+  manifestUrl?: string | null;
+  feedUrl?: string | null;
+  microdataCount?: number;
+  rdfaCount?: number;
+  insecureFormActionCount?: number;
+  missingSriCount?: number;
+  titlePixelWidth?: number;
+  metaPixelWidth?: number;
+  ttfbMs?: number | null;
+  cookiesCount?: number;
+  cookiesInsecure?: number;
+  cookiesNoHttpOnly?: number;
+  cookiesNoSameSite?: number;
+  httpProtocol?: string | null;
+  queryStringLength?: number;
+  renderBlockingCount?: number;
+  keepAlive?: boolean;
 }
 
 const UPSERT_URL_SQL = `
@@ -209,7 +251,14 @@ const UPSERT_URL_SQL = `
     custom_search_hits,
     meta_refresh, meta_refresh_url, charset,
     extraction_results,
-    simhash, content_hash
+    simhash, content_hash,
+    title_count, images_empty_alt, empty_anchor_count,
+    apple_touch_icon, manifest_url, feed_url,
+    microdata_count, rdfa_count, insecure_form_action_count, missing_sri_count,
+    title_pixel_width, meta_pixel_width,
+    ttfb_ms, cookies_count, cookies_insecure, cookies_no_httponly, cookies_no_samesite,
+    http_protocol, query_string_length,
+    render_blocking_count, keep_alive
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
@@ -229,7 +278,14 @@ const UPSERT_URL_SQL = `
     :custom_search_hits,
     :meta_refresh, :meta_refresh_url, :charset,
     :extraction_results,
-    :simhash, :content_hash
+    :simhash, :content_hash,
+    :title_count, :images_empty_alt, :empty_anchor_count,
+    :apple_touch_icon, :manifest_url, :feed_url,
+    :microdata_count, :rdfa_count, :insecure_form_action_count, :missing_sri_count,
+    :title_pixel_width, :meta_pixel_width,
+    :ttfb_ms, :cookies_count, :cookies_insecure, :cookies_no_httponly, :cookies_no_samesite,
+    :http_protocol, :query_string_length,
+    :render_blocking_count, :keep_alive
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -302,6 +358,27 @@ const UPSERT_URL_SQL = `
     extraction_results = excluded.extraction_results,
     simhash = excluded.simhash,
     content_hash = excluded.content_hash,
+    title_count = excluded.title_count,
+    images_empty_alt = excluded.images_empty_alt,
+    empty_anchor_count = excluded.empty_anchor_count,
+    apple_touch_icon = excluded.apple_touch_icon,
+    manifest_url = excluded.manifest_url,
+    feed_url = excluded.feed_url,
+    microdata_count = excluded.microdata_count,
+    rdfa_count = excluded.rdfa_count,
+    insecure_form_action_count = excluded.insecure_form_action_count,
+    missing_sri_count = excluded.missing_sri_count,
+    title_pixel_width = excluded.title_pixel_width,
+    meta_pixel_width = excluded.meta_pixel_width,
+    ttfb_ms = excluded.ttfb_ms,
+    cookies_count = excluded.cookies_count,
+    cookies_insecure = excluded.cookies_insecure,
+    cookies_no_httponly = excluded.cookies_no_httponly,
+    cookies_no_samesite = excluded.cookies_no_samesite,
+    http_protocol = excluded.http_protocol,
+    query_string_length = excluded.query_string_length,
+    render_blocking_count = excluded.render_blocking_count,
+    keep_alive = excluded.keep_alive,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -349,6 +426,7 @@ export class ProjectDb {
        DELETE FROM images;
        DELETE FROM links;
        DELETE FROM headers;
+       DELETE FROM url_sources;
        DELETE FROM sitemap_urls;
        DELETE FROM urls;
        DELETE FROM project_meta;`,
@@ -592,6 +670,27 @@ export class ProjectDb {
       extraction_results: input.extractionResults ?? null,
       simhash: input.simhash ?? null,
       content_hash: input.contentHash ?? null,
+      title_count: input.titleCount ?? 0,
+      images_empty_alt: input.imagesEmptyAlt ?? 0,
+      empty_anchor_count: input.emptyAnchorCount ?? 0,
+      apple_touch_icon: input.appleTouchIcon ?? null,
+      manifest_url: input.manifestUrl ?? null,
+      feed_url: input.feedUrl ?? null,
+      microdata_count: input.microdataCount ?? 0,
+      rdfa_count: input.rdfaCount ?? 0,
+      insecure_form_action_count: input.insecureFormActionCount ?? 0,
+      missing_sri_count: input.missingSriCount ?? 0,
+      title_pixel_width: input.titlePixelWidth ?? 0,
+      meta_pixel_width: input.metaPixelWidth ?? 0,
+      ttfb_ms: input.ttfbMs ?? null,
+      cookies_count: input.cookiesCount ?? 0,
+      cookies_insecure: input.cookiesInsecure ?? 0,
+      cookies_no_httponly: input.cookiesNoHttpOnly ?? 0,
+      cookies_no_samesite: input.cookiesNoSameSite ?? 0,
+      http_protocol: input.httpProtocol ?? null,
+      query_string_length: input.queryStringLength ?? 0,
+      render_blocking_count: input.renderBlockingCount ?? 0,
+      keep_alive: input.keepAlive === undefined ? -1 : input.keepAlive ? 1 : 0,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -1763,7 +1862,8 @@ export class ProjectDb {
       ),
       cspMissing: countWhere(`${html} AND (csp IS NULL OR csp = '')`),
       structuredDataMissing: countWhere(
-        `${html} AND schema_block_count = 0 AND schema_invalid_count = 0`,
+        `${html} AND schema_block_count = 0 AND schema_invalid_count = 0
+         AND microdata_count = 0 AND rdfa_count = 0`,
       ),
       structuredDataInvalid: countWhere(`${html} AND schema_invalid_count > 0`),
       paginationBroken: countWhere(
@@ -1846,6 +1946,59 @@ export class ProjectDb {
           )
           .get() as { c: number }
       ).c,
+      h1Empty: countWhere(`${html} AND h1_count > 0 AND (h1 IS NULL OR h1 = '')`),
+      h1TooLong: countWhere(`${html} AND h1_length > 70`),
+      titleMultiple: countWhere(`${html} AND title_count > 1`),
+      urlFragment: countWhere("is_external = 0 AND INSTR(url, '#') > 0"),
+      urlSpaces: countWhere(
+        "is_external = 0 AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)",
+      ),
+      imageEmptyAlt: countWhere(`${html} AND images_empty_alt > 0`),
+      linkEmptyAnchor: countWhere(`${html} AND empty_anchor_count > 0`),
+      appleTouchIconMissing: countWhere(
+        `${html} AND status_code >= 200 AND status_code < 300
+         AND (apple_touch_icon IS NULL OR apple_touch_icon = '')`,
+      ),
+      manifestMissing: countWhere(
+        `${html} AND status_code >= 200 AND status_code < 300
+         AND (manifest_url IS NULL OR manifest_url = '')`,
+      ),
+      feedMissing: countWhere(
+        `${html} AND status_code >= 200 AND status_code < 300
+         AND (feed_url IS NULL OR feed_url = '')`,
+      ),
+      titlePixelWidthTooLong: countWhere(`${html} AND title_pixel_width > 600`),
+      metaPixelWidthTooLong: countWhere(`${html} AND meta_pixel_width > 990`),
+      insecureFormAction: countWhere(
+        `${html} AND url LIKE 'https://%' AND insecure_form_action_count > 0`,
+      ),
+      missingSri: countWhere(`${html} AND missing_sri_count > 0`),
+      ttfbSlow: countWhere('is_external = 0 AND ttfb_ms IS NOT NULL AND ttfb_ms > 600'),
+      ttfbVerySlow: countWhere(
+        'is_external = 0 AND ttfb_ms IS NOT NULL AND ttfb_ms > 1800',
+      ),
+      cookieNoSecure: countWhere(
+        "is_external = 0 AND cookies_insecure > 0 AND url LIKE 'https://%'",
+      ),
+      cookieNoHttpOnly: countWhere('is_external = 0 AND cookies_no_httponly > 0'),
+      cookieNoSameSite: countWhere('is_external = 0 AND cookies_no_samesite > 0'),
+      queryStringTooLong: countWhere('is_external = 0 AND query_string_length > 100'),
+      folderDepthTooDeep: countWhere('is_external = 0 AND folder_depth > 4'),
+      http2NotSupported: countWhere(
+        `${html} AND http_protocol = 'http/1.1'`,
+      ),
+      renderBlocking: countWhere(`${html} AND render_blocking_count > 5`),
+      keepaliveDisabled: countWhere('is_external = 0 AND keep_alive = 0'),
+      titlePlaceholder: countWhere(
+        `${html} AND title IS NOT NULL AND title != ''
+         AND (
+           LOWER(title) IN ('untitled', 'untitled document', 'default title',
+                             'new page', 'page', 'home', 'index', 'document',
+                             'welcome', 'untitled-1', 'untitled 1', 'home page')
+           OR LOWER(title) LIKE 'page %'
+           OR LOWER(title) LIKE 'untitled%'
+         )`,
+      ),
     };
   }
 
@@ -2088,6 +2241,59 @@ export class ProjectDb {
       .all(urlId) as { name: string; value: string }[];
   }
 
+  /**
+   * Persist (or overwrite) the raw HTML body snapshot for a URL — drives
+   * the View Source detail tab. Body length is capped at `cap` bytes
+   * (default 1 MB) so a single adversarial page can't bloat the project
+   * file. The full pre-truncation length is stored alongside the snippet
+   * so the UI can warn the user when a body was clipped.
+   */
+  setUrlSource(urlId: number, body: string, cap = 1_048_576): void {
+    const fullLength = Buffer.byteLength(body, 'utf8');
+    let stored = body;
+    let truncated = 0;
+    if (fullLength > cap) {
+      // Slice on bytes, not chars — surrogate-pair safe via Buffer.
+      stored = Buffer.from(body, 'utf8').slice(0, cap).toString('utf8');
+      truncated = 1;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO url_sources (url_id, body, body_length, truncated)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(url_id) DO UPDATE SET
+           body = excluded.body,
+           body_length = excluded.body_length,
+           truncated = excluded.truncated,
+           captured_at = CURRENT_TIMESTAMP`,
+      )
+      .run(urlId, stored, fullLength, truncated);
+  }
+
+  /**
+   * Read back the raw HTML body for a URL. Returns null when no snapshot
+   * was stored — typically because the page is non-HTML, the crawl
+   * predates this feature, or storeBodySnapshots was disabled in config.
+   */
+  getUrlSource(
+    urlId: number,
+  ): { body: string; bodyLength: number; truncated: boolean; capturedAt: string } | null {
+    const row = this.db
+      .prepare(
+        'SELECT body, body_length, truncated, captured_at FROM url_sources WHERE url_id = ?',
+      )
+      .get(urlId) as
+      | { body: string; body_length: number; truncated: number; captured_at: string }
+      | undefined;
+    if (!row) return null;
+    return {
+      body: row.body,
+      bodyLength: row.body_length,
+      truncated: row.truncated === 1,
+      capturedAt: row.captured_at,
+    };
+  }
+
   *iterateAllUrls(): IterableIterator<CrawlUrlRow> {
     const rows = this.db.prepare('SELECT * FROM urls ORDER BY id').all() as unknown as UrlRowDb[];
     for (const row of rows) {
@@ -2101,6 +2307,22 @@ export class ProjectDb {
     const rows = this.db
       .prepare(`SELECT * FROM urls WHERE id IN (${placeholders}) ORDER BY id`)
       .all(...ids) as unknown as UrlRowDb[];
+    for (const row of rows) {
+      yield this.rowFromDb(row);
+    }
+  }
+
+  /**
+   * Yield every URL row that matches a sidebar category filter — same
+   * predicate the URL table view uses, so what you see is what you export.
+   * `category === 'all'` walks the full urls table.
+   */
+  *iterateUrlsByCategory(category: UrlCategory): IterableIterator<CrawlUrlRow> {
+    const where = categoryWhereClause(category);
+    const sql = where
+      ? `SELECT * FROM urls WHERE ${where} ORDER BY id`
+      : 'SELECT * FROM urls ORDER BY id';
+    const rows = this.db.prepare(sql).all() as unknown as UrlRowDb[];
     for (const row of rows) {
       yield this.rowFromDb(row);
     }
@@ -2234,6 +2456,79 @@ export class ProjectDb {
   }
 
   /**
+   * External-domain health rollup. Aggregates every external URL we
+   * probed (via link extraction) by host, surfacing the per-domain
+   * success/error split, average response time, and error-rate %. Sorted
+   * by `errorCount DESC, totalUrls DESC` so the worst offenders top.
+   *
+   * Used by the "Outgoing External Link Health" report — actionable
+   * signal: a partner / CDN / 3rd-party widget whose error rate spikes is
+   * the single most useful external-link metric for SEO.
+   */
+  externalDomainHealth(
+    limit = 100,
+  ): {
+    domain: string;
+    totalUrls: number;
+    successCount: number;
+    errorCount: number;
+    avgResponseTimeMs: number | null;
+    errorRatePercent: number;
+  }[] {
+    // Grouping by URL substring is faster than parsing per-row in JS for
+    // large datasets — we extract the host between `://` and the next `/`
+    // / `?` / `#`. Pages we never probed (status_code IS NULL) are skipped
+    // so we don't penalise a slow crawl.
+    const rows = this.db
+      .prepare(
+        `WITH parsed AS (
+           SELECT
+             LOWER(
+               SUBSTR(
+                 url,
+                 INSTR(url, '://') + 3,
+                 CASE
+                   WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
+                     THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
+                   ELSE LENGTH(url)
+                 END
+               )
+             ) AS domain,
+             status_code,
+             response_time_ms
+           FROM urls
+           WHERE is_external = 1 AND status_code IS NOT NULL
+         )
+         SELECT
+           domain,
+           COUNT(*) AS total,
+           SUM(CASE WHEN status_code >= 200 AND status_code < 400 THEN 1 ELSE 0 END) AS success,
+           SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors,
+           AVG(response_time_ms) AS avg_rt
+         FROM parsed
+         WHERE domain != ''
+         GROUP BY domain
+         ORDER BY errors DESC, total DESC
+         LIMIT ?`,
+      )
+      .all(limit) as {
+      domain: string;
+      total: number;
+      success: number;
+      errors: number;
+      avg_rt: number | null;
+    }[];
+    return rows.map((r) => ({
+      domain: r.domain,
+      totalUrls: r.total,
+      successCount: r.success,
+      errorCount: r.errors,
+      avgResponseTimeMs: r.avg_rt === null ? null : Math.round(r.avg_rt),
+      errorRatePercent: r.total > 0 ? Math.round((r.errors / r.total) * 1000) / 10 : 0,
+    }));
+  }
+
+  /**
    * Internal-image entries linked to a single page URL. Used by the
    * image sitemap variant — Google's `image:image` extension allows up
    * to 1000 entries per `<url>` entry.
@@ -2343,6 +2638,27 @@ export class ProjectDb {
     contentHash: r.content_hash,
     clusterId: r.cluster_id,
     clusterSize: r.cluster_size,
+    titleCount: r.title_count ?? 0,
+    imagesEmptyAlt: r.images_empty_alt ?? 0,
+    emptyAnchorCount: r.empty_anchor_count ?? 0,
+    appleTouchIcon: r.apple_touch_icon ?? null,
+    manifestUrl: r.manifest_url ?? null,
+    feedUrl: r.feed_url ?? null,
+    microdataCount: r.microdata_count ?? 0,
+    rdfaCount: r.rdfa_count ?? 0,
+    insecureFormActionCount: r.insecure_form_action_count ?? 0,
+    missingSriCount: r.missing_sri_count ?? 0,
+    titlePixelWidth: r.title_pixel_width ?? 0,
+    metaPixelWidth: r.meta_pixel_width ?? 0,
+    ttfbMs: r.ttfb_ms ?? null,
+    cookiesCount: r.cookies_count ?? 0,
+    cookiesInsecure: r.cookies_insecure ?? 0,
+    cookiesNoHttpOnly: r.cookies_no_httponly ?? 0,
+    cookiesNoSameSite: r.cookies_no_samesite ?? 0,
+    httpProtocol: r.http_protocol ?? null,
+    queryStringLength: r.query_string_length ?? 0,
+    renderBlockingCount: r.render_blocking_count ?? 0,
+    keepAlive: r.keep_alive === 1,
     crawledAt: r.crawled_at,
   });
 
@@ -2721,11 +3037,13 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND (csp IS NULL OR csp = '')`;
     case 'issues:structured-data-missing':
-      // "Missing" = no valid JSON-LD block AND no malformed block either;
-      // if parsing failed we surface it under the invalid filter instead
-      // so it's actionable, not confused with "nothing declared".
+      // "Missing" = no valid JSON-LD block AND no malformed block either,
+      // AND no Microdata `[itemscope]`, AND no RDFa attributes. Schema.org
+      // accepts all three formats, so a page using only Microdata isn't
+      // missing structured data even though JSON-LD is empty.
       return `is_external = 0 AND content_kind = 'html'
-              AND schema_block_count = 0 AND schema_invalid_count = 0`;
+              AND schema_block_count = 0 AND schema_invalid_count = 0
+              AND microdata_count = 0 AND rdfa_count = 0`;
     case 'issues:structured-data-invalid':
       return `is_external = 0 AND content_kind = 'html' AND schema_invalid_count > 0`;
     case 'issues:pagination-broken':
@@ -2865,6 +3183,134 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0
               AND status_code >= 300 AND status_code < 400
               AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`;
+    case 'issues:h1-empty':
+      // Document has at least one <h1> tag but its text content is empty —
+      // distinct from h1-missing (no <h1> at all). Common with image-only
+      // headers + missing alt.
+      return `is_external = 0 AND content_kind = 'html'
+              AND h1_count > 0 AND (h1 IS NULL OR h1 = '')`;
+    case 'issues:h1-too-long':
+      // 70 chars matches Screaming Frog's default H1 length warn.
+      return "is_external = 0 AND content_kind = 'html' AND h1_length > 70";
+    case 'issues:title-multiple':
+      // More than one <title> tag — spec says exactly one in <head>.
+      // Browsers pick the first; SEO tools' behaviour varies.
+      return "is_external = 0 AND content_kind = 'html' AND title_count > 1";
+    case 'issues:url-fragment':
+      // A `#` in the URL means the crawler reached a fragment that wasn't
+      // stripped earlier (URL normaliser usually does, but List-mode +
+      // some redirect chains can leave it).
+      return "is_external = 0 AND INSTR(url, '#') > 0";
+    case 'issues:url-spaces':
+      // Literal space or `%20` in URL — encoding bug, often from CMS that
+      // produced filenames with spaces.
+      return "is_external = 0 AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)";
+    case 'issues:image-empty-alt':
+      // alt="" specifically. Decorative images use this intentionally, but
+      // many sites apply it to content images by mistake.
+      return "is_external = 0 AND content_kind = 'html' AND images_empty_alt > 0";
+    case 'issues:link-empty-anchor':
+      // Internal links whose anchor has no usable text or alt — Lighthouse
+      // a11y "links must have discernible names".
+      return "is_external = 0 AND content_kind = 'html' AND empty_anchor_count > 0";
+    case 'issues:apple-touch-icon-missing':
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (apple_touch_icon IS NULL OR apple_touch_icon = '')`;
+    case 'issues:manifest-missing':
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (manifest_url IS NULL OR manifest_url = '')`;
+    case 'issues:feed-missing':
+      // Informational — only useful on sites that publish content; we
+      // surface it but don't put it in default sidebar.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (feed_url IS NULL OR feed_url = '')`;
+    case 'issues:title-pixel-width-too-long':
+      // Google truncates SERP title at ~600px (Arial 18px). Below that the
+      // full title shows; above it the trailing characters become "...".
+      // 600px ≈ 60 chars of average mix, but heavy uppercase or wide
+      // letters (M, W, …) can hit 600px well before that.
+      return `is_external = 0 AND content_kind = 'html'
+              AND title_pixel_width > 600`;
+    case 'issues:meta-pixel-width-too-long':
+      // Meta description truncation point on desktop SERP is ~990px and on
+      // mobile ~990px-ish. We use 990px as the ceiling — same threshold
+      // applied across viewports keeps the issue check predictable.
+      return `is_external = 0 AND content_kind = 'html'
+              AND meta_pixel_width > 990`;
+    case 'issues:insecure-form-action':
+      // HTTPS page submitting form data over plain HTTP. Browsers warn
+      // ("Not Secure" interstitial) on submit; one of the highest-ROI
+      // findings to fix on a transition-to-HTTPS site.
+      return `is_external = 0 AND content_kind = 'html'
+              AND url LIKE 'https://%' AND insecure_form_action_count > 0`;
+    case 'issues:missing-sri':
+      // Third-party `<script>` / `<link rel=stylesheet>` without an
+      // `integrity` attribute. Mostly informational — a defence-in-depth
+      // recommendation rather than a hard requirement.
+      return `is_external = 0 AND content_kind = 'html'
+              AND missing_sri_count > 0`;
+    case 'issues:ttfb-slow':
+      // TTFB > 600 ms is the Core Web Vitals "needs improvement" boundary
+      // (Google CrUX). Crawls measure ttfb_ms as request → headers, so
+      // it's not exactly equivalent to a real-user RTT but tracks closely.
+      return `is_external = 0 AND ttfb_ms IS NOT NULL AND ttfb_ms > 600`;
+    case 'issues:ttfb-very-slow':
+      // > 1.8 s is the CrUX "poor" boundary.
+      return `is_external = 0 AND ttfb_ms IS NOT NULL AND ttfb_ms > 1800`;
+    case 'issues:cookie-no-secure':
+      // At least one Set-Cookie missing the `Secure` flag — over HTTPS
+      // this lets a downgrade-attack snoop the cookie.
+      return `is_external = 0 AND cookies_insecure > 0 AND url LIKE 'https://%'`;
+    case 'issues:cookie-no-httponly':
+      // Missing HttpOnly — JS can read the cookie, expanding the XSS blast
+      // radius. Session cookies should always be HttpOnly.
+      return `is_external = 0 AND cookies_no_httponly > 0`;
+    case 'issues:cookie-no-samesite':
+      // Missing SameSite — Chrome treats absent as `Lax` since 80, but
+      // explicit declaration is recommended for cross-browser parity.
+      return `is_external = 0 AND cookies_no_samesite > 0`;
+    case 'issues:query-string-too-long':
+      // Long query strings indicate session-id explosion or faceted-nav
+      // gone wrong; >100 chars is a practical Screaming-Frog warn.
+      return `is_external = 0 AND query_string_length > 100`;
+    case 'issues:folder-depth-too-deep':
+      // Path-segment depth beyond the conservative SF threshold of 4
+      // hides content from Googlebot's link-graph crawl heuristics.
+      return `is_external = 0 AND folder_depth > 4`;
+    case 'issues:http2-not-supported':
+      // Origin advertises only HTTP/1.1 (no Alt-Svc / no h2 token).
+      // Informational — modern browsers still work fine, but HTTP/2 is
+      // a free CWV win on multi-resource pages.
+      return `is_external = 0 AND content_kind = 'html'
+              AND http_protocol = 'http/1.1'`;
+    case 'issues:render-blocking':
+      // 5+ render-blocking head resources is the SF threshold — every one
+      // delays first-paint until fetched + parsed. Lighthouse flags this
+      // as the top LCP optimisation lever for content-heavy pages.
+      return `is_external = 0 AND content_kind = 'html'
+              AND render_blocking_count > 5`;
+    case 'issues:keepalive-disabled':
+      // Server explicitly closed the connection. -1 sentinel = no signal,
+      // 0 = Connection: close seen, 1 = keep-alive (or implicit). Only
+      // flag when we have a positive signal of `close`.
+      return `is_external = 0 AND keep_alive = 0`;
+    case 'issues:title-placeholder':
+      // Common CMS placeholders: "Untitled", "Default Title", "New Page",
+      // "Home" / "Page N". Catches default theme/template values that
+      // never got customised — major SEO own-goal because every page
+      // shares the same dead-on-arrival SERP snippet.
+      return `is_external = 0 AND content_kind = 'html'
+              AND title IS NOT NULL AND title != ''
+              AND (
+                LOWER(title) IN ('untitled', 'untitled document', 'default title',
+                                  'new page', 'page', 'home', 'index', 'document',
+                                  'welcome', 'untitled-1', 'untitled 1', 'home page')
+                OR LOWER(title) LIKE 'page %'
+                OR LOWER(title) LIKE 'untitled%'
+              )`;
     default:
       return null;
   }

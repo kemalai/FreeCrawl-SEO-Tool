@@ -17,6 +17,8 @@ export function TopBar() {
   const setConfig = useAppStore((s) => s.setConfig);
   const progress = useAppStore((s) => s.progress);
   const setProgress = useAppStore((s) => s.setProgress);
+  const summary = useAppStore((s) => s.summary);
+  const overview = useAppStore((s) => s.overview);
   const reset = useAppStore((s) => s.reset);
   const setError = useAppStore((s) => s.setError);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
@@ -27,9 +29,22 @@ export function TopBar() {
 
   const running = progress?.running === true;
   const paused = progress?.paused === true;
-  // Clear only makes sense when there's something to wipe — disable it
-  // when the crawl table is empty so it can't be clicked accidentally.
-  const hasData = (progress?.discovered ?? 0) > 0 || (progress?.crawled ?? 0) > 0;
+  // Clear is enabled whenever there's anything to wipe. We check four
+  // signals because each one alone is incomplete:
+  //   - `progress.discovered/crawled` covers a fresh run
+  //   - `summary.total` covers post-`done` state (progress may have
+  //     been wiped to its idle baseline by then)
+  //   - `overview.summary.totalInternalUrls` covers projects opened
+  //     from disk via File → Open Recent (no progress event ever
+  //     fired for those rows)
+  //   - `paused` is a "running" sub-state where the table already has
+  //     rows that the user might want to dump
+  const hasData =
+    (progress?.discovered ?? 0) > 0 ||
+    (progress?.crawled ?? 0) > 0 ||
+    (summary?.total ?? 0) > 0 ||
+    (overview?.summary.totalInternalUrls ?? 0) > 0 ||
+    (overview?.summary.totalExternalUrls ?? 0) > 0;
   const activeScope = SCOPE_OPTIONS.find((o) => o.value === config.scope)!;
 
   async function start() {

@@ -337,6 +337,24 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.titleDuplicate,
               category: 'issues:title-duplicate',
             },
+            {
+              key: 'issues-title-multiple',
+              label: 'Multiple <title> Tags',
+              count: o.issues.titleMultiple,
+              category: 'issues:title-multiple',
+            },
+            {
+              key: 'issues-title-pixel-width',
+              label: 'Pixel Width Truncated (>600px)',
+              count: o.issues.titlePixelWidthTooLong,
+              category: 'issues:title-pixel-width-too-long',
+            },
+            {
+              key: 'issues-title-placeholder',
+              label: 'Placeholder Title',
+              count: o.issues.titlePlaceholder,
+              category: 'issues:title-placeholder',
+            },
           ],
         },
         {
@@ -367,6 +385,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.metaDuplicate,
               category: 'issues:meta-duplicate',
             },
+            {
+              key: 'issues-meta-pixel-width',
+              label: 'Pixel Width Truncated (>990px)',
+              count: o.issues.metaPixelWidthTooLong,
+              category: 'issues:meta-pixel-width-too-long',
+            },
           ],
         },
         {
@@ -390,6 +414,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Multiple',
               count: o.issues.h1Multiple,
               category: 'issues:h1-multiple',
+            },
+            {
+              key: 'issues-h1-empty',
+              label: 'Empty',
+              count: o.issues.h1Empty,
+              category: 'issues:h1-empty',
+            },
+            {
+              key: 'issues-h1-too-long',
+              label: 'Over 70 Characters',
+              count: o.issues.h1TooLong,
+              category: 'issues:h1-too-long',
             },
             {
               key: 'issues-heading-skipped',
@@ -493,6 +529,42 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.responseVerySlow,
               category: 'issues:response-very-slow',
             },
+            {
+              key: 'issues-ttfb-slow',
+              label: 'TTFB Slow (>600ms)',
+              count: o.issues.ttfbSlow,
+              category: 'issues:ttfb-slow',
+            },
+            {
+              key: 'issues-ttfb-very-slow',
+              label: 'TTFB Very Slow (>1.8s)',
+              count: o.issues.ttfbVerySlow,
+              category: 'issues:ttfb-very-slow',
+            },
+          ],
+        },
+        {
+          key: 'issues-cookies',
+          label: 'Cookies',
+          children: [
+            {
+              key: 'issues-cookies-no-secure',
+              label: 'Missing Secure (HTTPS)',
+              count: o.issues.cookieNoSecure,
+              category: 'issues:cookie-no-secure',
+            },
+            {
+              key: 'issues-cookies-no-httponly',
+              label: 'Missing HttpOnly',
+              count: o.issues.cookieNoHttpOnly,
+              category: 'issues:cookie-no-httponly',
+            },
+            {
+              key: 'issues-cookies-no-samesite',
+              label: 'Missing SameSite',
+              count: o.issues.cookieNoSameSite,
+              category: 'issues:cookie-no-samesite',
+            },
           ],
         },
         {
@@ -564,6 +636,30 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Many Query Params (>5)',
               count: o.issues.urlManyParams,
               category: 'issues:url-many-params',
+            },
+            {
+              key: 'issues-url-fragment',
+              label: 'Fragment (#) in URL',
+              count: o.issues.urlFragment,
+              category: 'issues:url-fragment',
+            },
+            {
+              key: 'issues-url-spaces',
+              label: 'Spaces in URL',
+              count: o.issues.urlSpaces,
+              category: 'issues:url-spaces',
+            },
+            {
+              key: 'issues-url-query-too-long',
+              label: 'Long Query String (>100 chars)',
+              count: o.issues.queryStringTooLong,
+              category: 'issues:query-string-too-long',
+            },
+            {
+              key: 'issues-url-folder-too-deep',
+              label: 'Folder Depth >4',
+              count: o.issues.folderDepthTooDeep,
+              category: 'issues:folder-depth-too-deep',
             },
           ],
         },
@@ -643,6 +739,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.mixedContent,
               category: 'issues:mixed-content',
             },
+            {
+              key: 'issues-insecure-form-action',
+              label: 'Insecure Form Action',
+              count: o.issues.insecureFormAction,
+              category: 'issues:insecure-form-action',
+            },
+            {
+              key: 'issues-missing-sri',
+              label: 'Missing SRI (3rd-party)',
+              count: o.issues.missingSri,
+              category: 'issues:missing-sri',
+            },
           ],
         },
         {
@@ -691,6 +799,24 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.compressionMissing,
               category: 'issues:compression-missing',
             },
+            {
+              key: 'issues-http2-not-supported',
+              label: 'HTTP/2 Not Advertised',
+              count: o.issues.http2NotSupported,
+              category: 'issues:http2-not-supported',
+            },
+            {
+              key: 'issues-render-blocking',
+              label: 'Render-Blocking Head (>5)',
+              count: o.issues.renderBlocking,
+              category: 'issues:render-blocking',
+            },
+            {
+              key: 'issues-keepalive-disabled',
+              label: 'Keep-Alive Disabled',
+              count: o.issues.keepaliveDisabled,
+              category: 'issues:keepalive-disabled',
+            },
           ],
         },
         {
@@ -729,7 +855,7 @@ function buildTree(o: OverviewCounts | null): Node[] {
           children: [
             {
               key: 'issues-schema-missing',
-              label: 'JSON-LD Missing',
+              label: 'No Structured Data',
               count: o.issues.structuredDataMissing,
               category: 'issues:structured-data-missing',
             },
@@ -799,6 +925,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.imageMissingAlt,
               category: 'issues:image-missing-alt',
             },
+            {
+              key: 'issues-images-empty-alt',
+              label: 'Empty Alt',
+              count: o.issues.imageEmptyAlt,
+              category: 'issues:image-empty-alt',
+            },
           ],
         },
         {
@@ -822,6 +954,36 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Broken External',
               count: o.issues.brokenLinksExternal,
               category: 'issues:broken-links-external',
+            },
+            {
+              key: 'issues-link-empty-anchor',
+              label: 'Empty Anchor Text',
+              count: o.issues.linkEmptyAnchor,
+              category: 'issues:link-empty-anchor',
+            },
+          ],
+        },
+        {
+          key: 'issues-pwa',
+          label: 'PWA / Discovery',
+          children: [
+            {
+              key: 'issues-apple-touch-missing',
+              label: 'Apple Touch Icon Missing',
+              count: o.issues.appleTouchIconMissing,
+              category: 'issues:apple-touch-icon-missing',
+            },
+            {
+              key: 'issues-manifest-missing',
+              label: 'Web Manifest Missing',
+              count: o.issues.manifestMissing,
+              category: 'issues:manifest-missing',
+            },
+            {
+              key: 'issues-feed-missing',
+              label: 'RSS/Atom Feed Missing',
+              count: o.issues.feedMissing,
+              category: 'issues:feed-missing',
             },
           ],
         },

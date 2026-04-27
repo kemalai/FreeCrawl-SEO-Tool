@@ -68,10 +68,14 @@ export async function testUrlAgainstRobots(
   url: string,
   userAgent: string,
 ): Promise<RobotsTestResult> {
+  // Be lenient about input — users routinely paste bare hosts like
+  // `gamesatis.com`, `www.example.com/foo`, or `//host/path`. Prepend
+  // `https://` when the scheme is missing so `new URL()` succeeds.
+  const probedUrl = normalizeRobotsTestInput(url);
   let origin = '';
   let robotsUrl = '';
   try {
-    origin = new URL(url).origin;
+    origin = new URL(probedUrl).origin;
     robotsUrl = new URL('/robots.txt', origin).toString();
   } catch {
     return {
@@ -110,7 +114,7 @@ export async function testUrlAgainstRobots(
       // Per the robots.txt RFC: any non-success makes the site "allow all"
       // for crawlers. Reflect that explicitly.
       return {
-        url,
+        url: probedUrl,
         robotsUrl,
         status,
         body: null,
@@ -122,7 +126,7 @@ export async function testUrlAgainstRobots(
     }
   } catch (err) {
     return {
-      url,
+      url: probedUrl,
       robotsUrl,
       status,
       body: null,
@@ -144,13 +148,38 @@ export async function testUrlAgainstRobots(
     }
   }
   return {
-    url,
+    url: probedUrl,
     robotsUrl,
     status,
     body,
-    allowed: parser.isAllowed(url, userAgent) ?? true,
+    allowed: parser.isAllowed(probedUrl, userAgent) ?? true,
     crawlDelay: parser.getCrawlDelay(userAgent) ?? null,
     sitemaps,
     error: null,
   };
+}
+
+/**
+ * Coerce flexible user input into a fully-qualified URL.
+ *  - `gamesatis.com`        → `https://gamesatis.com/`
+ *  - `www.example.com/foo`  → `https://www.example.com/foo`
+ *  - `//host/path`          → `https://host/path`
+ *  - `http://x` / `https://x` → unchanged
+ *  - `mailto:x` / `ftp://x` etc. → unchanged (we'll fail later in `new URL`
+ *    if we can't derive an http/https origin, which is the right outcome)
+ *
+ * The `(?!\d+:)` negative lookahead avoids treating `1.2.3.4:8080` as a
+ * scheme — a port-only host should still get the https prefix.
+ */
+function normalizeRobotsTestInput(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  // Real scheme present — accept as-is. Match `[a-z][a-z0-9+.-]*:` per RFC
+  // 3986, but exclude pure-numeric `:` (port shorthand) so we don't
+  // mistake `1.2.3.4:8080` for an unknown scheme.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/^\d+:/.test(trimmed)) {
+    return trimmed;
+  }
+  return `https://${trimmed}`;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import type {
   CrawlUrlRow,
@@ -7,6 +7,7 @@ import type {
   LinkPosition,
   LinkType,
   UrlDetail,
+  UrlSourceResult,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
@@ -24,7 +25,7 @@ const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'outlinks', label: 'Outlinks' },
   { key: 'serp-snippet', label: 'SERP Snippet' },
   { key: 'http-headers', label: 'HTTP Headers' },
-  { key: 'view-source', label: 'View Source', disabled: true },
+  { key: 'view-source', label: 'View Source' },
 ];
 
 export function BottomDetailPanel() {
@@ -144,9 +145,195 @@ export function BottomDetailPanel() {
         )}
         {detail && subTab === 'serp-snippet' && <SerpSnippet row={detail.row} />}
         {detail && subTab === 'http-headers' && <HttpHeadersView headers={detail.headers} />}
+        {detail && subTab === 'view-source' && (
+          <ViewSourceView urlId={selectedUrlId} pageUrl={detail.row.url} />
+        )}
       </div>
     </div>
   );
+}
+
+function ViewSourceView({
+  urlId,
+  pageUrl,
+}: {
+  urlId: number | null;
+  pageUrl: string;
+}) {
+  const [src, setSrc] = useState<UrlSourceResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState('');
+  const [wrap, setWrap] = useState(false);
+
+  useEffect(() => {
+    if (urlId === null) {
+      setSrc(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void window.freecrawl
+      .urlSourceGet({ id: urlId })
+      .then((r) => {
+        if (!cancelled) setSrc(r);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [urlId]);
+
+  if (loading && !src) {
+    return <div className="p-4 text-[11px] text-surface-500">Loading source…</div>;
+  }
+  if (!src || src.body === null) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        No HTML body stored for this URL.
+        <div className="mt-1 text-[10px] text-surface-600">
+          View Source is only captured for HTML pages crawled with the
+          <span className="font-mono">storeBodySnapshots</span> setting enabled.
+        </div>
+      </div>
+    );
+  }
+
+  const body = src.body;
+  const matches = search ? countMatches(body, search) : 0;
+
+  function copy() {
+    void navigator.clipboard.writeText(body);
+  }
+
+  function download() {
+    const blob = new Blob([body], { type: 'text/html;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    let filename = 'page.html';
+    try {
+      const u = new URL(pageUrl);
+      const seg = u.pathname.replace(/\/+$/, '').split('/').pop() || u.hostname;
+      filename = `${(seg || 'page').replace(/[^a-z0-9._-]/gi, '_')}.html`;
+    } catch {
+      /* ignore */
+    }
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5_000);
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-2 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+        <span className="text-surface-500">
+          {(src.bodyLength / 1024).toFixed(1)} KB
+          {src.truncated && (
+            <span className="ml-1 rounded bg-amber-900/40 px-1.5 py-0.5 text-[9px] uppercase text-amber-300">
+              truncated
+            </span>
+          )}
+        </span>
+        {src.capturedAt && (
+          <span className="text-surface-600">· captured {src.capturedAt}</span>
+        )}
+        <input
+          type="text"
+          className="ml-3 w-48 rounded border border-surface-700 bg-surface-950 px-2 py-0.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+          placeholder="Search source…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          spellCheck={false}
+        />
+        {search && (
+          <span className="text-surface-500">
+            {matches} match{matches === 1 ? '' : 'es'}
+          </span>
+        )}
+        <label className="flex items-center gap-1 text-surface-400">
+          <input
+            type="checkbox"
+            checked={wrap}
+            onChange={(e) => setWrap(e.target.checked)}
+            className="h-3 w-3"
+          />
+          Wrap
+        </label>
+        <div className="ml-auto flex gap-1.5">
+          <button
+            className="rounded border border-surface-700 px-2 py-0.5 text-[10px] hover:bg-surface-800"
+            onClick={copy}
+          >
+            Copy
+          </button>
+          <button
+            className="rounded border border-surface-700 px-2 py-0.5 text-[10px] hover:bg-surface-800"
+            onClick={download}
+          >
+            Download
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-auto bg-surface-950 p-3">
+        <pre
+          className={clsx(
+            'font-mono text-[10.5px] leading-[14px] text-surface-200',
+            wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre',
+          )}
+        >
+          {search ? renderHighlighted(body, search) : body}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function countMatches(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  const h = haystack.toLowerCase();
+  const n = needle.toLowerCase();
+  let count = 0;
+  let pos = 0;
+  while ((pos = h.indexOf(n, pos)) !== -1) {
+    count++;
+    pos += n.length;
+  }
+  return count;
+}
+
+function renderHighlighted(body: string, needle: string): ReactNode {
+  if (!needle) return body;
+  const out: ReactNode[] = [];
+  const lower = body.toLowerCase();
+  const lowerNeedle = needle.toLowerCase();
+  let pos = 0;
+  // Cap at 5000 highlights so a runaway search term ("a") doesn't tank
+  // the renderer with hundreds of thousands of <mark> nodes.
+  const MAX_HITS = 5000;
+  let hits = 0;
+  while (pos < body.length && hits < MAX_HITS) {
+    const idx = lower.indexOf(lowerNeedle, pos);
+    if (idx === -1) {
+      out.push(body.slice(pos));
+      break;
+    }
+    if (idx > pos) out.push(body.slice(pos, idx));
+    out.push(
+      <mark
+        key={`m${idx}`}
+        className="rounded bg-amber-500/40 text-amber-100"
+      >
+        {body.slice(idx, idx + needle.length)}
+      </mark>,
+    );
+    pos = idx + needle.length;
+    hits++;
+  }
+  if (pos < body.length && hits >= MAX_HITS) {
+    out.push(body.slice(pos));
+  }
+  return out;
 }
 
 function HttpHeadersView({ headers }: { headers: { name: string; value: string }[] }) {
@@ -182,8 +369,21 @@ function HttpHeadersView({ headers }: { headers: { name: string; value: string }
 }
 
 function NameValueView({ row }: { row: CrawlUrlRow }) {
-  const pixelWidthTitle = row.title ? measurePixelWidth(row.title, 15) : null;
-  const pixelWidthDesc = row.metaDescription ? measurePixelWidth(row.metaDescription, 13) : null;
+  // Server-side pixel-width is the source of truth (drives the issue
+  // filters); fall back to the renderer estimate only when the column is
+  // legitimately 0 because the title/desc is empty.
+  const pixelWidthTitle =
+    row.title && row.titlePixelWidth > 0
+      ? row.titlePixelWidth
+      : row.title
+        ? measurePixelWidth(row.title, 15)
+        : null;
+  const pixelWidthDesc =
+    row.metaDescription && row.metaPixelWidth > 0
+      ? row.metaPixelWidth
+      : row.metaDescription
+        ? measurePixelWidth(row.metaDescription, 13)
+        : null;
 
   const fields: [string, string | number | null | undefined][] = [
     ['Address', row.url],
@@ -195,6 +395,14 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Content Kind', row.contentKind],
     ['Size (Bytes)', row.contentLength],
     ['Response Time (ms)', row.responseTimeMs],
+    ['TTFB (ms)', row.ttfbMs],
+    ['HTTP Protocol', row.httpProtocol],
+    ['Query String Length', row.queryStringLength > 0 ? row.queryStringLength : null],
+    [
+      'Render-Blocking (head)',
+      row.renderBlockingCount > 0 ? row.renderBlockingCount : null,
+    ],
+    ['Keep-Alive', row.keepAlive ? 'yes' : null],
     ['Title 1', row.title],
     ['Title 1 Length', row.titleLength],
     ['Title 1 Pixel Width', pixelWidthTitle],
@@ -241,12 +449,26 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Schema Types', row.schemaTypes],
     ['JSON-LD Blocks', row.schemaBlockCount],
     ['Invalid JSON-LD Blocks', row.schemaInvalidCount > 0 ? row.schemaInvalidCount : null],
+    ['Microdata Items', row.microdataCount > 0 ? row.microdataCount : null],
+    ['RDFa Attributes', row.rdfaCount > 0 ? row.rdfaCount : null],
+    ['Insecure Form Actions', row.insecureFormActionCount > 0 ? row.insecureFormActionCount : null],
+    ['Missing SRI (3rd-party)', row.missingSriCount > 0 ? row.missingSriCount : null],
+    ['Cookies Set', row.cookiesCount > 0 ? row.cookiesCount : null],
+    ['Cookies Missing Secure', row.cookiesInsecure > 0 ? row.cookiesInsecure : null],
+    ['Cookies Missing HttpOnly', row.cookiesNoHttpOnly > 0 ? row.cookiesNoHttpOnly : null],
+    ['Cookies Missing SameSite', row.cookiesNoSameSite > 0 ? row.cookiesNoSameSite : null],
     ['Pagination Next', row.paginationNext],
     ['Pagination Prev', row.paginationPrev],
     ['Hreflang Count', row.hreflangCount > 0 ? row.hreflangCount : null],
     ['Hreflangs', summarizeHreflangs(row.hreflangs)],
     ['AMP HTML', row.amphtml],
     ['Favicon', row.favicon],
+    ['Apple Touch Icon', row.appleTouchIcon],
+    ['Web Manifest', row.manifestUrl],
+    ['RSS / Atom Feed', row.feedUrl],
+    ['Title Tag Count', row.titleCount > 1 ? row.titleCount : null],
+    ['Empty-Alt Images', row.imagesEmptyAlt > 0 ? row.imagesEmptyAlt : null],
+    ['Empty Anchor Links', row.emptyAnchorCount > 0 ? row.emptyAnchorCount : null],
     ['Mixed Content (subresources)', row.mixedContentCount > 0 ? row.mixedContentCount : null],
     [
       'Redirect Chain Length',

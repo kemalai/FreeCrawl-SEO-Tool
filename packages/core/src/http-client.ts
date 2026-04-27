@@ -35,13 +35,17 @@ export function initHttpClient(opts: { proxyOverride?: string } = {}): void {
   // matching curl / git / npm / pip behaviour. A non-empty config
   // override (Settings → Auth → Proxy URL) takes precedence so the
   // user can route a single project through a different proxy.
-  const proxyUrl =
-    (opts.proxyOverride && opts.proxyOverride.trim()) ||
+  // ECMAScript forbids mixing `||` with `??` in the same expression
+  // without parentheses (SyntaxError on parse). The `??` chain must be
+  // grouped, then OR'd with the override.
+  const envProxy =
     process.env['HTTPS_PROXY'] ??
     process.env['https_proxy'] ??
     process.env['HTTP_PROXY'] ??
     process.env['http_proxy'] ??
     null;
+  const proxyUrl =
+    (opts.proxyOverride && opts.proxyOverride.trim()) || envProxy;
 
   if (proxyUrl) {
     setGlobalDispatcher(new ProxyAgent({ uri: proxyUrl }));
@@ -67,6 +71,30 @@ export function initHttpClient(opts: { proxyOverride?: string } = {}): void {
   });
 
   setGlobalDispatcher(agent);
+}
+
+/**
+ * Best-effort HTTP protocol detector. We can't ask undici-fetch which
+ * ALPN/protocol was actually negotiated for the connection that served
+ * the response — that information is buried in the dispatcher and not
+ * exposed on the Response object. Instead we read the `Alt-Svc` header
+ * the origin advertises (RFC 7838): if it lists `h2=` / `h3=`, the site
+ * supports HTTP/2 / HTTP/3. The site might still serve THIS request over
+ * HTTP/1.1, but in practice modern origins that advertise h2 also
+ * negotiate it whenever the client (undici) supports it.
+ *
+ * Returns:
+ *   - `'h3'`        when Alt-Svc advertises h3 (Quic / HTTP/3)
+ *   - `'h2'`        when Alt-Svc advertises h2 (HTTP/2)
+ *   - `'http/1.1'`  when Alt-Svc is absent or only lists older protocols
+ *   - `null`        when no signal could be derived (e.g. fetch error)
+ */
+export function detectHttpProtocol(altSvcHeader: string | null): string | null {
+  if (altSvcHeader === null) return 'http/1.1';
+  const v = altSvcHeader.toLowerCase();
+  if (v.includes('h3=')) return 'h3';
+  if (v.includes('h2=')) return 'h2';
+  return 'http/1.1';
 }
 
 /**

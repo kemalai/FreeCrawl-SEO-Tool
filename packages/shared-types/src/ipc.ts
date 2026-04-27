@@ -20,11 +20,14 @@ export const IPC = {
   crawlClear: 'crawl:clear',
   crawlAddUrl: 'crawl:add-url',
   projectSaveAs: 'project:save-as',
+  projectOpen: 'project:open',
+  projectCurrentPath: 'project:current-path',
   crawlProgress: 'crawl:progress',
   crawlDone: 'crawl:done',
   crawlError: 'crawl:error',
   urlsQuery: 'urls:query',
   urlDetailGet: 'urls:detail',
+  urlSourceGet: 'urls:source',
   urlContextMenu: 'url:context-menu',
   urlBulkContextMenu: 'url:bulk-context-menu',
   imagesQuery: 'images:query',
@@ -34,6 +37,7 @@ export const IPC = {
   exportCsv: 'export:csv',
   exportJson: 'export:json',
   exportHtmlReport: 'export:html-report',
+  exportBulk: 'export:bulk',
   compareLoad: 'compare:load',
   graphSnapshot: 'graph:snapshot',
   topAnchorTexts: 'graph:anchor-texts',
@@ -50,10 +54,15 @@ export const IPC = {
   logsEntry: 'logs:entry',
   logsOpenWindow: 'logs:open-window',
   robotsTest: 'robots:test',
+  sitemapValidate: 'sitemap:validate',
   reportsPagesPerDirectory: 'reports:pages-per-directory',
   reportsStatusCodeHistogram: 'reports:status-code-histogram',
   reportsDepthHistogram: 'reports:depth-histogram',
   reportsResponseTimeHistogram: 'reports:response-time-histogram',
+  reportsTopUrls: 'reports:top-urls',
+  reportsExternalDomainHealth: 'reports:external-domain-health',
+  prefsExportSettings: 'prefs:export-settings',
+  prefsImportSettings: 'prefs:import-settings',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -113,11 +122,13 @@ export type MenuEvent =
   | 'export-csv'
   | 'export-json'
   | 'export-html-report'
+  | 'export-bulk'
   | 'compare-with-project'
   | 'save-project-as'
   | 'open-visualization'
   | 'generate-sitemap'
   | 'open-robots-tester'
+  | 'open-sitemap-validator'
   | 'open-reports'
   | 'open-settings'
   | 'about';
@@ -147,6 +158,25 @@ export interface ExportHtmlReportInput {
 export interface ExportHtmlReportResult {
   filePath: string;
   bytesWritten: number;
+}
+
+/** One file produced by a Bulk Export run. */
+export interface BulkExportFile {
+  /** Absolute output path. */
+  filePath: string;
+  /** Display label (e.g. "Internal HTML"). */
+  label: string;
+  /** Category that drove this export. */
+  category: UrlCategory;
+  rowsWritten: number;
+}
+
+export interface BulkExportResult {
+  /** Empty if the user cancelled the folder picker. */
+  outputDir: string;
+  files: BulkExportFile[];
+  /** Files that failed to write — exposed so the UI can summarise partial successes. */
+  errors: { label: string; error: string }[];
 }
 
 export type CompareCategory =
@@ -236,6 +266,21 @@ export interface UrlDetailInput {
   linkLimit?: number;
 }
 
+export interface UrlSourceInput {
+  id: number;
+}
+
+export interface UrlSourceResult {
+  /** Raw HTML body. Null when no snapshot was stored for this URL. */
+  body: string | null;
+  /** Pre-truncation byte length of the original response body. */
+  bodyLength: number;
+  /** True when the stored body was clipped at `bodySnapshotMaxBytes`. */
+  truncated: boolean;
+  /** ISO timestamp of when the snapshot was captured. */
+  capturedAt: string | null;
+}
+
 export interface UrlContextMenuInput {
   url: string;
   urlId: number;
@@ -283,6 +328,57 @@ export interface ResponseTimeHistogramRow {
   count: number;
 }
 
+export type TopUrlMetric =
+  | 'response-time'
+  | 'inlinks'
+  | 'outlinks'
+  | 'depth'
+  | 'page-size';
+
+export interface TopUrlsInput {
+  metric: TopUrlMetric;
+  /** Default 25, capped at 500. */
+  limit?: number;
+}
+
+export interface TopUrlsRow {
+  url: string;
+  /** Numeric value for the chosen metric (ms / count / depth / bytes). */
+  value: number | null;
+}
+
+export interface ExternalDomainHealthRow {
+  domain: string;
+  totalUrls: number;
+  successCount: number;
+  errorCount: number;
+  /** Average response time across all probes for this domain (ms). */
+  avgResponseTimeMs: number | null;
+  errorRatePercent: number;
+}
+
+export interface SettingsExportInput {
+  /** Optional output path; absent triggers the file picker. */
+  filePath?: string;
+  /** Config payload to write — caller passes the in-memory CrawlConfig. */
+  config: Record<string, unknown>;
+}
+
+export interface SettingsExportResult {
+  /** Empty when the user cancelled the picker. */
+  filePath: string;
+  bytesWritten: number;
+}
+
+export interface SettingsImportResult {
+  /** Empty when the user cancelled. */
+  filePath: string;
+  /** Parsed config object — caller merges into the active config. */
+  config: Record<string, unknown> | null;
+  /** Fields in the imported file that we don't recognise (ignored). */
+  unknownFields: string[];
+}
+
 export interface RobotsTestResult {
   url: string;
   robotsUrl: string;
@@ -292,6 +388,31 @@ export interface RobotsTestResult {
   crawlDelay: number | null;
   sitemaps: string[];
   error: string | null;
+}
+
+export interface SitemapValidateInput {
+  /** A sitemap.xml or sitemap-index.xml URL to fetch and validate. */
+  url: string;
+  /** Optional User-Agent override (defaults to FreeCrawl's). */
+  userAgent?: string;
+}
+
+export interface SitemapValidateResult {
+  url: string;
+  /** Sitemap URLs we attempted to fetch (root + children via index). */
+  sitemapsTried: string[];
+  /** Sitemap URLs that returned valid XML and were parsed. */
+  sitemapsParsed: string[];
+  /** Per-sitemap fetch errors. */
+  errors: { sitemap: string; error: string }[];
+  /** Total URL entries discovered across the (possibly nested) sitemap tree. */
+  urlCount: number;
+  /** True when the internal cap was hit while walking. */
+  truncated: boolean;
+  /** Findings from the protocol-validity check (URL count, file size, lastmod). */
+  findings: string[];
+  /** Sample of `<lastmod>` values from up to the first ~50 entries. */
+  lastmodSamples: string[];
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -315,8 +436,11 @@ export interface FreeCrawlApi {
   crawlClear(): Promise<void>;
   crawlAddUrl(url: string): Promise<{ accepted: boolean }>;
   projectSaveAs(): Promise<{ filePath: string; bytesWritten: number } | null>;
+  projectOpen(filePath?: string): Promise<{ filePath: string } | null>;
+  projectCurrentPath(): Promise<string | null>;
   urlsQuery(input: UrlsQueryInput): Promise<UrlsQueryResult>;
   urlDetailGet(input: UrlDetailInput): Promise<UrlDetail | null>;
+  urlSourceGet(input: UrlSourceInput): Promise<UrlSourceResult>;
   urlContextMenu(input: UrlContextMenuInput): Promise<void>;
   urlBulkContextMenu(input: UrlBulkContextMenuInput): Promise<void>;
   imagesQuery(input: ImagesQueryInput): Promise<ImagesQueryResult>;
@@ -326,6 +450,7 @@ export interface FreeCrawlApi {
   exportCsv(input: ExportCsvInput): Promise<ExportCsvResult>;
   exportJson(input: ExportJsonInput): Promise<ExportJsonResult>;
   exportHtmlReport(input: ExportHtmlReportInput): Promise<ExportHtmlReportResult>;
+  exportBulk(): Promise<BulkExportResult>;
   compareLoad(input: CompareLoadInput): Promise<CompareLoadResult>;
   graphSnapshot(input: GraphSnapshotInput): Promise<GraphSnapshotResult>;
   topAnchorTexts(limit?: number): Promise<AnchorTextRow[]>;
@@ -340,10 +465,15 @@ export interface FreeCrawlApi {
   logsClear(): Promise<void>;
   logsOpenWindow(): Promise<void>;
   robotsTest(input: RobotsTestInput): Promise<RobotsTestResult>;
+  sitemapValidate(input: SitemapValidateInput): Promise<SitemapValidateResult>;
   reportsPagesPerDirectory(input: PagesPerDirectoryInput): Promise<PagesPerDirectoryRow[]>;
   reportsStatusCodeHistogram(): Promise<StatusCodeHistogramRow[]>;
   reportsDepthHistogram(): Promise<DepthHistogramRow[]>;
   reportsResponseTimeHistogram(): Promise<ResponseTimeHistogramRow[]>;
+  reportsTopUrls(input: TopUrlsInput): Promise<TopUrlsRow[]>;
+  reportsExternalDomainHealth(limit?: number): Promise<ExternalDomainHealthRow[]>;
+  prefsExportSettings(input: SettingsExportInput): Promise<SettingsExportResult>;
+  prefsImportSettings(): Promise<SettingsImportResult>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onProgress(cb: (p: CrawlProgress) => void): () => void;
   onDone(cb: (summary: CrawlSummary) => void): () => void;
