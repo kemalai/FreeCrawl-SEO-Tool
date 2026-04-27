@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.2.1] — 2026-04-27
+
+### Added
+- **30+ new issue checks** — H1 Empty, H1 Too Long (>70), Multiple `<title>` Tags, Title Pixel Width Truncated (>600 px Arial 18), Title Placeholder ("Untitled" / "Default" / "Page N"), Meta Description Pixel Width Truncated (>990 px), Fragment in URL, Spaces in URL, Long Query String (>100 chars), Folder Depth >4, Image Empty Alt, Empty Anchor Text, Apple Touch Icon Missing, Web Manifest Missing, RSS/Atom Feed Missing, Insecure Form Action (HTTPS → HTTP), Missing SRI (3rd-party subresource), TTFB Slow (>600 ms), TTFB Very Slow (>1.8 s), Cookies Missing Secure / HttpOnly / SameSite, HTTP/2 Not Advertised, Render-Blocking Head Resources (>5), Keep-Alive Disabled.
+- **View Source detail tab** — every HTML page's raw body is captured during crawl into a sibling `url_sources` table (capped at `bodySnapshotMaxBytes`, default 1 MB; `storeBodySnapshots` config knob to disable). The new sub-tab in the URL Details panel renders the source with case-insensitive search + match highlighting (≤5K hits cap), a Wrap toggle, and Copy / Download buttons. Truncated badge surfaces when the body was clipped.
+- **TTFB measurement** — request-to-headers timing captured per successful attempt (retry overhead excluded) and stored as `ttfb_ms`. Powers the two new TTFB issue filters and a new "TTFB (ms)" row in the URL Details panel.
+- **Cookie security analysis** — `Set-Cookie` response headers are split RFC-6265-correctly (Expires-date safe), security flags counted per page (`cookies_count`, `cookies_insecure`, `cookies_no_httponly`, `cookies_no_samesite`). Cookie values are never stored; only the per-flag counts. Three issue filters surface them.
+- **HTTP/2 detection** — best-effort heuristic via `Alt-Svc` header (`h2=` / `h3=` advertised → HTTP/2 / HTTP/3 capable). Stored as `http_protocol`; "HTTP/2 Not Advertised" issue surfaces origins still on HTTP/1.1.
+- **Render-blocking + keep-alive detection** — html-parser counts `<head>` `<script src>` (no async/defer/type=module) + `<link rel=stylesheet>` (excl. media=print) → `render_blocking_count`. Crawler captures `Connection: close` → `keep_alive` flag.
+- **Microdata + RDFa structured-data** — `[itemscope]` and `[typeof]/[vocab]/[property]` counted alongside JSON-LD; the "No Structured Data" issue now triggers only when ALL three formats are absent (no more false positives on Microdata-first sites).
+- **Apple Touch Icon, Web Manifest, RSS/Atom feed detection** — `<link rel="apple-touch-icon">` (incl. legacy `-precomposed`), `<link rel="manifest">`, `<link rel="alternate" type="application/rss+xml|atom+xml">` URLs absolute-resolved and surfaced in the URL Details panel + sidebar issue filters.
+- **Pixel-width estimation for title + meta description** — per-character Arial 18 px width table approximates Google SERP truncation (600 / 990 px thresholds); replaces the previous client-side approximation that drove the URL Details panel.
+- **Bulk Export menu** — File → Bulk Export… opens a folder picker, then writes ~22 curated CSVs (Internal HTML / All, External All, 2xx / 3xx / 4xx / 5xx, Indexable / Non-Indexable, Title / Meta / H1 / Canonical Issues, Pagination Broken, Mixed Content, Insecure Form Action, Hreflang Reciprocity, Sitemap Crawled-Not-Listed, Image Missing Alt, Near-Duplicate). 0-row files auto-deleted; concludes with "Open Folder" prompt.
+- **Sitemap Validator dialog** — Help → Sitemap Validator… fetches a sitemap URL, walks nested sitemap-index entries up to depth 3 / 100K URLs, shows tried/parsed/error counts + `<lastmod>` samples + protocol findings. Tolerant input (bare hosts auto-prefixed with `https://`).
+- **6 new Reports** — Slowest URLs, Most-Linked URLs, Most-Outlinking URLs, Biggest Pages, Deepest URLs, External Domain Health (per-host success/error rollup with avg response time + error-rate %). Brings total to 10 reports in the Reports dialog.
+- **Recent Projects** — File → Open Project… (`Ctrl+O`) and File → Open Recent submenu (last 10 projects, persisted; bad entries auto-pruned; "Clear Recent" command). Save Project As… now also pins the saved file as the active project.
+- **Settings preset profiles** — Settings → **Presets**: one-click Fast / Thorough / Mobile-only Googlebot / Desktop-only Googlebot / Aggressive. Apply only writes affected fields; URL list, custom rules, filters, and extraction rules are preserved.
+- **Settings Import / Export** — Settings → Presets → Export… / Import… buttons. JSON envelope `{format, version, exportedAt, config}`. Bare CrawlConfig fragments accepted; unknown fields warn-and-skip.
+- **CLI subcommands** — `freecrawl validate-sitemap <url>`, `freecrawl audit-robots <url>`, `freecrawl compare <before.seoproject> <after.seoproject>`. Each returns a CI-friendly exit code (0 / 1 / 2).
+- **Settings → Speed** dedicated panel — pulls Max Concurrency / Max URL/s / Per-Worker Delay / Retry knobs out of the generic Crawler section. Live "Effective ceiling" banner + worst-case retry-delay math. Throughput tips at the bottom.
+- **Visualization tuning popover** — gear icon next to Reload opens 5 sliders (node size, repulsion, edge length, cluster spacing, edge opacity). Persists to prefs across sessions; live preview; Reset + Re-run-layout buttons.
+
+### Changed
+- **Force-Directed visualization defaults rebuilt** — node radius 6–24 px (down from 8–48), tuned cose layout (1M repulsion, 400 px ideal-edge, 0 gravity, 5000-px boundingBox) so hub-spoke topologies fan out instead of collapsing into a tight ball. Default node count 150 (was 500).
+- **Visualization labels hidden by default** — new "Labels" mode (Hover Only / Top 20 / All). Hover highlights the node + its closed neighbourhood; non-neighbours fade to 25% opacity. Click selects (persists until empty-canvas click); double-click on a node opens its URL.
+- **Visualization label rendering** — switched from cytoscape's built-in (zoom-scaled, illegible at low zoom) to a fixed-size HTML overlay positioned via `node.renderedPosition()`. Stays at 12 px regardless of zoom level / display DPI.
+- **Robots.txt Tester accepts bare hosts** — `gamesatis.com`, `www.example.com/foo`, `//host/path` are auto-prefixed with `https://`. Same normalisation in the CLI's `audit-robots`.
+- **CSV exporter accepts a category filter** — `exportUrlsToCsv(db, path, { category })` walks `iterateUrlsByCategory` directly, replacing the old "all rows" behaviour for selection-less exports. Underpins Bulk Export.
+- **OverviewSidebar sections expanded to ~100 issue filters** — new groups: **Cookies** (Missing Secure / HttpOnly / SameSite), **PWA / Discovery** (Apple Touch / Manifest / Feed). Existing groups (Title, H1, URL, Performance, Security Headers, Images, Links, Structured Data) gained 1–4 entries each.
+- **Settings dialog grew to 14 sections** — added **Presets** and **Speed** sections; preset application + JSON import/export inside Presets.
+- **Body snapshots auto-stored during crawl** — every HTML page's raw response now goes into `url_sources` so View Source works without re-fetching. Disable via `storeBodySnapshots: false` to save disk on snapshot-free runs.
+
+### Fixed
+- **Clear button stuck disabled after crawl completion / Open Recent** — Clear is now enabled whenever any of `progress.discovered`, `progress.crawled`, `summary.total`, or `overview.summary.totalInternalUrls / totalExternalUrls` is non-zero. Previously it only checked the live progress counters, which were reset to 0 in the final emitProgress.
+- **`SyntaxError: Unexpected token '??'` on Electron startup** — `http-client.ts` mixed `||` and `??` without parentheses (illegal per ES2020). Refactored to compute the env-proxy chain into a helper variable first.
+- **Robots.txt Tester rejected hostnames without scheme** — bare hosts now auto-resolve to `https://<host>/robots.txt`.
+
+### Removed
+- **Developer Tools menu item + keyboard shortcuts** — View → Developer Tools entry removed. F12 / Ctrl+Shift+I / Ctrl+Alt+I / Ctrl+Shift+J / Ctrl+Shift+C swallowed via `before-input-event`. Belt-and-braces `devtools-opened` hook closes them if anything else opens them programmatically. Applied to both main + Logs windows.
+
 ## [0.2.0] — 2026-04-26
 
 ### Added
