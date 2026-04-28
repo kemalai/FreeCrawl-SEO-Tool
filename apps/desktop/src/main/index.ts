@@ -147,6 +147,139 @@ function fireDataChanged(): void {
   mainWindow?.webContents.send(IPC.dataChanged);
 }
 
+/**
+ * Per-app-session set of diagnostic categories already surfaced in a
+ * popup. Cleared when the user starts a fresh crawl so re-running after
+ * fixing the issue can show the dialog again if it recurs.
+ */
+const shownDiagnosticDialogs = new Set<string>();
+
+interface DiagnosticDialog {
+  key: string;
+  title: string;
+  message: string;
+  detail: string;
+}
+
+/**
+ * Match a crawler error string against environment-issue patterns and
+ * return a user-facing dialog spec, or null when the error is site-
+ * specific (404 / WAF block / timeout) and shouldn't pop a modal.
+ */
+function categorizeDiagnostic(msg: string): DiagnosticDialog | null {
+  if (/\bquery(A|AAAA|Soa|Srv|Mx|Txt|Ns|Cname|Any|Naptr|Ptr)\b/i.test(msg) && /ECONNREFUSED/.test(msg)) {
+    return {
+      key: 'dns-refused',
+      title: 'DNS Connection Blocked',
+      message: 'Your machine cannot reach a DNS server — port 53 is being refused.',
+      detail:
+        'Likely causes:\n' +
+        '  • Active VPN that lost its DNS route (NordVPN, ProtonVPN, ExpressVPN, …)\n' +
+        '  • Local DNS filter (AdGuard, Pi-hole, NextDNS)\n' +
+        '  • Corporate firewall blocking outbound DNS\n\n' +
+        'Try one of these:\n' +
+        '  1. Disconnect the VPN and retry the crawl.\n' +
+        '  2. Pause AdGuard / Pi-hole / NextDNS temporarily.\n' +
+        '  3. Set your Windows DNS to 1.1.1.1 or 8.8.8.8 (Settings → Network → Properties → IPv4 → Manual DNS).\n' +
+        '  4. Run "services.msc", restart the "DNS Client" service.\n\n' +
+        'Click "Open Logs" to see the full error chain.',
+    };
+  }
+  if (/EDESTRUCTION/.test(msg)) {
+    return {
+      key: 'dns-destroyed',
+      title: 'DNS Resolver Crashed',
+      message:
+        "Windows' DNS resolver was destroyed mid-query. Crawls cannot resolve hostnames until it recovers.",
+      detail:
+        'This usually follows a VPN flicker, network adapter reset, or a previous DNS timeout.\n\n' +
+        'Try one of these:\n' +
+        '  1. Open "services.msc", find "DNS Client", right-click → Restart.\n' +
+        '  2. Reconnect your network adapter (Wi-Fi off / on).\n' +
+        '  3. As a last resort, restart the computer.\n\n' +
+        'Click "Open Logs" to see the full error chain.',
+    };
+  }
+  if (/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|DEPTH_ZERO_SELF_SIGNED_CERT/.test(msg)) {
+    return {
+      key: 'tls-inspection',
+      title: 'TLS Certificate Rejected',
+      message: 'A TLS certificate failed verification — usually because antivirus or a corporate proxy is intercepting HTTPS.',
+      detail:
+        'Common culprits: Kaspersky, ESET, Bitdefender, Zscaler, BlueCoat, Fortigate.\n\n' +
+        'Try one of these:\n' +
+        '  1. Whitelist FreeCrawl in your antivirus.\n' +
+        '  2. Export the antivirus / proxy root CA as PEM and set the NODE_EXTRA_CA_CERTS environment variable to it before launching.\n' +
+        '  3. Temporarily disable HTTPS scanning in your antivirus.\n\n' +
+        'Click "Open Logs" to see the full error chain.',
+    };
+  }
+  if (/Invalid start URL/.test(msg)) {
+    return {
+      key: 'seed-unreachable',
+      title: 'Start URL Unreachable',
+      message: 'FreeCrawl could not reach the URL you entered — neither HTTPS nor HTTP responded within 5 seconds.',
+      detail:
+        'Try one of these:\n' +
+        '  1. Open the URL in a browser to confirm the site is up.\n' +
+        '  2. Check your internet connection.\n' +
+        '  3. If you are on a VPN or behind a corporate proxy, set HTTPS_PROXY before launching, or configure Settings → Network → Proxy URL.\n' +
+        '  4. Verify the URL is spelled correctly (typos in the host).\n\n' +
+        'Click "Open Logs" for the diagnostic trail.',
+    };
+  }
+  return null;
+}
+
+function diagnosticDialogPrefKey(key: string): string {
+  return `skipDiag:${key}`;
+}
+
+function isDontShowAgain(key: string): boolean {
+  loadPrefs();
+  return prefsCache[diagnosticDialogPrefKey(key)] === true;
+}
+
+/**
+ * Modal dialog with "Open Logs" / "Dismiss" actions and a "Don't show
+ * again" checkbox that persists to user prefs (per-diagnostic-key, so
+ * dismissing the DNS dialog doesn't suppress TLS warnings).
+ */
+function showDiagnosticDialog(diag: DiagnosticDialog): void {
+  const win = mainWindow;
+  if (!win) return;
+  void dialog
+    .showMessageBox(win, {
+      type: 'warning',
+      title: diag.title,
+      message: diag.message,
+      detail: diag.detail,
+      buttons: ['Open Logs', 'Dismiss'],
+      defaultId: 0,
+      cancelId: 1,
+      checkboxLabel: "Don't show this again",
+      checkboxChecked: false,
+      noLink: true,
+    })
+    .then((res) => {
+      if (res.checkboxChecked) {
+        loadPrefs();
+        prefsCache[diagnosticDialogPrefKey(diag.key)] = true;
+        schedulePrefsWrite();
+      }
+      if (res.response === 0) openLogsWindow();
+    });
+}
+
+function maybeShowDiagnosticDialog(msg: string): void {
+  const diag = categorizeDiagnostic(msg);
+  if (!diag) return;
+  if (shownDiagnosticDialogs.has(diag.key)) return;
+  if (isDontShowAgain(diag.key)) return;
+  shownDiagnosticDialogs.add(diag.key);
+  showDiagnosticDialog(diag);
+}
+
 /** Currently-open project file path (empty when using the default scratch DB). */
 let currentProjectPath = '';
 
@@ -233,8 +366,44 @@ function rebuildMenu(): void {
       },
       onClearRecent: () => clearRecentProjects(),
       recentProjects: getRecentProjects(),
+      onResetDiagnosticDialogs: () => resetDiagnosticDialogs(),
     }),
   );
+}
+
+/**
+ * Wipe every `skipDiag:*` flag from the prefs so dismissed-with-checkbox
+ * diagnostic popups can fire again. Logs a single line so the user gets
+ * confirmation in the log panel.
+ */
+function resetDiagnosticDialogs(): void {
+  loadPrefs();
+  let removed = 0;
+  for (const k of Object.keys(prefsCache)) {
+    if (k.startsWith('skipDiag:')) {
+      delete prefsCache[k];
+      removed++;
+    }
+  }
+  shownDiagnosticDialogs.clear();
+  if (removed > 0) schedulePrefsWrite();
+  logger.log(
+    'info',
+    'main',
+    `Diagnostic warnings reset (${removed} suppressed dialog${removed === 1 ? '' : 's'} re-enabled).`,
+  );
+  if (mainWindow) {
+    void dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Diagnostic Warnings Reset',
+      message:
+        removed === 0
+          ? 'No suppressed diagnostic warnings to reset.'
+          : `Re-enabled ${removed} previously dismissed warning${removed === 1 ? '' : 's'}. They will pop up again the next time the underlying issue occurs.`,
+      buttons: ['OK'],
+      noLink: true,
+    });
+  }
 }
 
 async function promptOpenProject(): Promise<void> {
@@ -608,6 +777,9 @@ function registerIpc(): void {
       activeCrawler.stop();
       logger.log('info', 'crawler', 'Stopped previous crawl before starting a new one');
     }
+    // Reset per-session diagnostic dedup so a re-run after fixing the
+    // environment can pop the dialog again if the same issue recurs.
+    shownDiagnosticDialogs.clear();
     logger.log(
       'info',
       'crawler',
@@ -658,6 +830,12 @@ function registerIpc(): void {
       if (activeCrawler !== crawler) return;
       logger.log('error', 'crawler', msg);
       mainWindow?.webContents.send(IPC.crawlError, msg);
+      // Match against environment-specific failure patterns (DNS / TLS
+      // inspection / unreachable seed) and surface a modal popup the
+      // first time each category fires per crawl session. Site-specific
+      // 4xx/WAF/timeout errors are NOT promoted to popups — they belong
+      // in the log panel, not in the user's face.
+      maybeShowDiagnosticDialog(msg);
     });
     crawler.on('warn', (msg: string) => {
       if (activeCrawler !== crawler) return;

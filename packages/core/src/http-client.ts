@@ -128,6 +128,23 @@ export function formatFetchError(err: unknown): string {
   }
   const chain = parts.join(' -> ');
   // Friendly hints for the most common packaged-app failure modes.
+  // ORDER MATTERS — more specific patterns must come first. DNS-layer
+  // errors (queryA / queryAAAA / EDESTRUCTION) frequently surface as
+  // ECONNREFUSED or ETIMEDOUT in the chain — without the early DNS
+  // branch they would be misattributed to HTTP-layer connect failures.
+  const isDnsQuery = /\bquery(A|AAAA|Soa|Srv|Mx|Txt|Naptr|Ptr|Ns|Cname|Any)\b/i.test(chain);
+  if (isDnsQuery && /ECONNREFUSED/.test(chain)) {
+    return `${chain}  (DNS server refused on port 53 — your local DNS resolver / VPN / Pi-hole / AdGuard / corporate firewall is blocking outbound DNS. Try: switch network, disable VPN, or set Windows/macOS DNS to 1.1.1.1 / 8.8.8.8.)`;
+  }
+  if (isDnsQuery && /ETIMEOUT|ETIMEDOUT/.test(chain)) {
+    return `${chain}  (DNS query timed out — DNS server is unreachable or rate-limiting; switch DNS provider or check VPN / firewall)`;
+  }
+  if (/EDESTRUCTION/.test(chain)) {
+    return `${chain}  (DNS resolver was destroyed mid-query — usually a previous DNS lookup timed out or the network adapter was reset. Often follows a queryA ECONNREFUSED on the same host. Try restarting Windows DNS Client (services.msc → "DNS Client") or reconnecting your network adapter.)`;
+  }
+  if (/ENOTFOUND|EAI_AGAIN|ENODATA|ESERVFAIL|EREFUSED|ENOTIMP|ENONAME/.test(chain)) {
+    return `${chain}  (DNS lookup failed — host doesn't resolve. Check internet connection, DNS provider, /etc/hosts override, or whether the domain still exists.)`;
+  }
   if (/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|CERT_HAS_EXPIRED|DEPTH_ZERO_SELF_SIGNED_CERT|UNABLE_TO_VERIFY_LEAF_SIGNATURE/.test(chain)) {
     return `${chain}  (TLS certificate rejected — likely corporate proxy or antivirus HTTPS inspection; set NODE_EXTRA_CA_CERTS to your CA bundle)`;
   }
@@ -145,9 +162,6 @@ export function formatFetchError(err: unknown): string {
   }
   if (/ECONNREFUSED/.test(chain)) {
     return `${chain}  (host actively refused the connection — port closed, service down, or local firewall blocking outbound)`;
-  }
-  if (/ENOTFOUND|EAI_AGAIN/.test(chain)) {
-    return `${chain}  (DNS lookup failed — check internet connection / DNS or your /etc/hosts override)`;
   }
   if (/EPROTO|ERR_SSL_|TLSV1_ALERT|HANDSHAKE_FAILURE|WRONG_VERSION_NUMBER/.test(chain)) {
     return `${chain}  (TLS handshake failed — origin uses an outdated cipher suite or HTTPS inspection corrupted the handshake)`;

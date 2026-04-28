@@ -17,6 +17,8 @@ export interface AppMenuHandlers {
   onClearRecent: () => void;
   /** Recently-opened/saved project paths, most recent first. May be empty. */
   recentProjects: readonly string[];
+  /** Re-enable any "Don't show again" diagnostic dialogs the user dismissed. */
+  onResetDiagnosticDialogs: () => void;
 }
 
 export function buildAppMenu(handlers: AppMenuHandlers): Menu {
@@ -165,6 +167,12 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         {
           label: 'Sitemap Validator…',
           click: () => send('open-sitemap-validator'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Reset Diagnostic Warnings',
+          toolTip: 'Re-enable popup warnings you previously dismissed with "Don\'t show again"',
+          click: () => handlers.onResetDiagnosticDialogs(),
         },
         { type: 'separator' },
         { label: 'About FreeCrawl SEO', click: () => send('about') },
