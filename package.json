@@ -1,8 +1,8 @@
 {
   "name": "freecrawl-seo",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
-  "description": "Open-source desktop SEO crawler — a free alternative to Screaming Frog",
+  "description": "Open-source desktop SEO crawler \u00e2\u20ac\u201d a free alternative to Screaming Frog",
   "license": "MIT",
   "author": "kemalai",
   "type": "module",

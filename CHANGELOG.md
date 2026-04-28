@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.2] — 2026-04-28
+
+### Added
+- **50+ new SEO issue checks** — analytics coverage (GA4 missing / multiple / legacy UA / pixel-without-policy), large images (>200 KB), SSL/TLS cert (expired / expiring ≤30 d / weak signature / old protocol), HSTS quality (no preload / short max-age / no includeSubDomains), anchor text (too long / generic), form accessibility (unlabeled inputs), lazy-loading missing on images, broken `<img src>`, `target="_blank"` without `rel="noopener"`, empty pages, OG/Twitter/canonical absolute-URL checks, description equals title, single-word title, external-links-too-many (>100), zero outlinks.
+- **6 new sub-tabs in URL Details panel** — Outline (heading hierarchy), Images, Resources, Extracted Data, Cookies, Structured Data — alongside existing Details / Inlinks / Outlinks / SERP / Headers / Source.
+- **SSL/TLS certificate audit** — post-crawl TLS handshake probe per HTTPS host stores cert validity / issuer / subject / signature algorithm / protocol in `host_certs`; powers 4 SSL issue filters and a TLS panel in the Details view.
+- **Image weight probe** — post-crawl HEAD pass on internal images persists `byte_size`; powers the "Large Image" issue and the new Image-Weight-Per-Page report.
+- **7 new Reports** — Analytics Coverage, Link Positions, Image Weight Per Page, Inlinks Histogram, Word-Count Histogram, Server Headers, plus existing entries — Reports dialog now lists 16 reports.
+- **Document outline** — heading hierarchy (up to 200 entries) captured per page, surfaced in the new Outline sub-tab.
+- **Server header capture** — `Server` response header stored per URL; powers the Server Headers report and a row in the URL Details panel.
+- **Drag & drop list import** — drop a `.txt` / `.csv` / `.list` file onto the app to populate List mode and start a crawl in one motion.
+- **Custom robots.txt in tester** — Robots.txt Tester dialog accepts a pasted or file-loaded custom `robots.txt` body so you can verify rules before deploying them.
+- **CLI `--config` and `--json` flags** — layered config (defaults → file → flags) for CI; `--json` emits a machine-readable summary to stdout.
+- **Detailed network diagnostics in Logs panel** — every crawl now logs runtime info (Node / Electron / undici versions, OS), proxy state (config / env / none), CA bundle, TLS-validation flag, retry attempts, abort reasons, and 4xx / 5xx response interpretations (403 → bot/WAF, 429 → rate limit, 503 → server error). Failed fetches now surface in the Logs window with full root-cause chain — no more silent fails.
+
+### Changed
+- **`formatFetchError` hint coverage** — extended to `UND_ERR_HEADERS_TIMEOUT` (WAF / Cloudflare challenge), `UND_ERR_BODY_TIMEOUT`, `ECONNRESET / EPIPE` (antivirus / firewall TLS inspection), `EPROTO / TLSV1_ALERT / WRONG_VERSION_NUMBER` (TLS handshake), `NGHTTP2_ / GOAWAY` (HTTP/2 protocol error), `AbortError`. Each carries an actionable hint embedded in the log line.
+- **README Features section condensed** — long bulleted feature lists collapsed into a 10-line high-signal summary.
+
+### Fixed
+- **Crawler hung in "Running" forever after an unreachable seed URL** — `start()` now emits a `done` event and clears `running` when `resolveStartUrl` returns null, with an explicit error message in the Logs panel.
+- **Silent fetch failures** — failed URL fetches were stored to the DB but never logged; users saw `Crawl done: total=1 failed=1` with no clue why. The fetch catch path now emits an `error` (seed URL) or `warn` (any other URL) entry with the full diagnostic chain.
+
 ## [0.2.1] — 2026-04-27
 
 ### Added
