@@ -1,14 +1,17 @@
 import dns from 'node:dns';
 import { Agent, ProxyAgent, setGlobalDispatcher } from 'undici';
-import CacheableLookup from 'cacheable-lookup';
+import { createResilientLookup, type DnsResolverHook } from './dns-resolver.js';
 
 let initialized = false;
 
 /**
  * Configure the global undici dispatcher and Node DNS once per process.
  *
- * - `cacheable-lookup` caches DNS results so we don't saturate libuv's
- *   4-thread lookup pool when running 50+ concurrent requests.
+ * - `createResilientLookup` is a 3-tier DNS cascade (OS → public UDP →
+ *   DoH-over-HTTPS) with built-in caching. Replaces cacheable-lookup
+ *   and adds automatic recovery on systems with broken Windows DNS
+ *   Client / port-53 blocked / DNS hijacking — without asking the
+ *   user to do anything. See `dns-resolver.ts` for the cascade rules.
  * - `ipv4first` avoids 1–2s stalls when a host has a dead AAAA record.
  * - `autoSelectFamily` enables Happy Eyeballs (RFC 8305) — races IPv4/IPv6
  *   and uses whichever connects first. Important for dual-stack hosts
@@ -20,16 +23,13 @@ let initialized = false;
  *   connections per origin, long keep-alive, tight headers timeout so a
  *   stuck origin can't freeze the pool.
  */
-export function initHttpClient(opts: { proxyOverride?: string } = {}): void {
+export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsResolverHook } = {}): void {
   if (initialized) return;
   initialized = true;
 
   dns.setDefaultResultOrder('ipv4first');
 
-  const cacheable = new CacheableLookup({
-    maxTtl: 300,
-    errorTtl: 15,
-  });
+  const lookup = createResilientLookup({ onEvent: opts.onDnsEvent });
 
   // Corporate proxy detection — env vars are the universal contract,
   // matching curl / git / npm / pip behaviour. A non-empty config
@@ -60,9 +60,9 @@ export function initHttpClient(opts: { proxyOverride?: string } = {}): void {
     headersTimeout: 10_000,
     bodyTimeout: 30_000,
     connect: {
-      // cacheable-lookup.lookup matches Node's dns.lookup signature, which
-      // is compatible with undici at runtime but the typings diverge.
-      lookup: cacheable.lookup.bind(cacheable) as never,
+      // 3-tier resilient lookup matches Node's dns.lookup signature,
+      // which is compatible with undici at runtime but the typings diverge.
+      lookup: lookup as never,
       // Happy Eyeballs — prevents a broken AAAA route from stalling the
       // entire crawl on dual-stack hosts.
       autoSelectFamily: true,
@@ -134,16 +134,16 @@ export function formatFetchError(err: unknown): string {
   // branch they would be misattributed to HTTP-layer connect failures.
   const isDnsQuery = /\bquery(A|AAAA|Soa|Srv|Mx|Txt|Naptr|Ptr|Ns|Cname|Any)\b/i.test(chain);
   if (isDnsQuery && /ECONNREFUSED/.test(chain)) {
-    return `${chain}  (DNS server refused on port 53 — your local DNS resolver / VPN / Pi-hole / AdGuard / corporate firewall is blocking outbound DNS. Try: switch network, disable VPN, or set Windows/macOS DNS to 1.1.1.1 / 8.8.8.8.)`;
+    return `${chain}  (DNS server refused on port 53 — automatic DNS-over-HTTPS fallback (Cloudflare 1.1.1.1) is also failing. Likely cause: antivirus / firewall blocking ALL outbound traffic, or no internet connection. Whitelist FreeCrawl in your security software.)`;
   }
   if (isDnsQuery && /ETIMEOUT|ETIMEDOUT/.test(chain)) {
-    return `${chain}  (DNS query timed out — DNS server is unreachable or rate-limiting; switch DNS provider or check VPN / firewall)`;
+    return `${chain}  (DNS query timed out — automatic public-DNS + DoH fallbacks also timed out. Check whether you have internet access at all, and whether antivirus / firewall is blocking FreeCrawl from reaching the network.)`;
   }
   if (/EDESTRUCTION/.test(chain)) {
-    return `${chain}  (DNS resolver was destroyed mid-query — usually a previous DNS lookup timed out or the network adapter was reset. Often follows a queryA ECONNREFUSED on the same host. Try restarting Windows DNS Client (services.msc → "DNS Client") or reconnecting your network adapter.)`;
+    return `${chain}  (System DNS resolver crashed — FreeCrawl automatically falls back to public DNS (1.1.1.1, 8.8.8.8) and DoH-over-HTTPS, no user action needed. If this error still surfaces, all three layers failed: check internet connection and that antivirus is not blocking FreeCrawl.)`;
   }
   if (/ENOTFOUND|EAI_AGAIN|ENODATA|ESERVFAIL|EREFUSED|ENOTIMP|ENONAME/.test(chain)) {
-    return `${chain}  (DNS lookup failed — host doesn't resolve. Check internet connection, DNS provider, /etc/hosts override, or whether the domain still exists.)`;
+    return `${chain}  (DNS lookup failed across all 3 layers (OS, public DNS, DoH). Most likely the host genuinely doesn't exist, or your machine has no internet at all. Check the spelling and your connection.)`;
   }
   if (/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|CERT_HAS_EXPIRED|DEPTH_ZERO_SELF_SIGNED_CERT|UNABLE_TO_VERIFY_LEAF_SIGNATURE/.test(chain)) {
     return `${chain}  (TLS certificate rejected — likely corporate proxy or antivirus HTTPS inspection; set NODE_EXTRA_CA_CERTS to your CA bundle)`;

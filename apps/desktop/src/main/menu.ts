@@ -19,6 +19,8 @@ export interface AppMenuHandlers {
   recentProjects: readonly string[];
   /** Re-enable any "Don't show again" diagnostic dialogs the user dismissed. */
   onResetDiagnosticDialogs: () => void;
+  /** Reveal the on-disk logs directory in the OS file manager. */
+  onOpenLogsFolder: () => void;
 }
 
 export function buildAppMenu(handlers: AppMenuHandlers): Menu {
@@ -159,6 +161,11 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: 'Show Logs…',
           accelerator: 'CmdOrCtrl+L',
           click: () => handlers.onOpenLogs(),
+        },
+        {
+          label: 'Open Logs Folder',
+          toolTip: 'Open the directory where rotated log files are persisted on disk',
+          click: () => handlers.onOpenLogsFolder(),
         },
         {
           label: 'Robots.txt Tester…',

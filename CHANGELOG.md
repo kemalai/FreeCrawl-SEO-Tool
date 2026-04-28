@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.4] — 2026-04-28
+
+### Added
+- **Automatic 3-tier DNS bypass** — crawls now keep working on machines with broken system DNS, with **zero user action required**. New resilient resolver cascades through (1) Node OS lookup → (2) direct UDP to public DNS servers (1.1.1.1, 1.0.0.1, 8.8.8.8, 9.9.9.9) → (3) DNS-over-HTTPS to Cloudflare / Google over port 443. Tier 3 connects to IP literals with SNI override + custom `checkServerIdentity`, so it works even when **port 53 is fully blocked** (Pi-hole, AdGuard, restrictive firewall, broken VPN). Solves the `EDESTRUCTION queryA` / `ECONNREFUSED queryA` failures that previously stopped crawls at 1 URL on misconfigured Windows / macOS / Linux machines. After 3 OS-DNS failures within 60 s, Tier 1 is auto-skipped globally so a sustained outage doesn't pay the per-host failure tax.
+- **DNS bypass visibility in Logs** — when the cascade falls back to Tier 2 or Tier 3, a single `warn` entry is emitted per crawl ("DNS bypass active: system resolver unavailable, falling back to public DNS …"). Subsequent per-host lookups stay at debug level so the log panel doesn't flood.
+
+### Changed
+- **Logs window performance** — major optimisation pass: virtualised list (only ~20 visible rows mounted), 250 ms render coalescing in renderer + 100 ms batch coalescing in main process, 200-entry ring buffer (full history persisted to disk), `useDeferredValue` for filter / level changes, memoised rows with strict comparator, CSS `contain: strict` on the scroller, drag/resize busy-flag pauses live updates, `backgroundThrottling: false` so logs flow even when window is hidden, parent-window decoupling so the Logs window no longer competes with the main window for DWM compositor time.
+- **Disk-persistent logging** — every log entry is now also written to `<userData>/logs/freecrawl-<ISO>.log` (rotated at 25 MB, 10 files retained). Help → "Open Logs Folder" reveals the directory. Logs survive crashes and exceed the 200-entry in-memory tail.
+- **Single-instance lock** — only one FreeCrawl can run per machine; launching a second instance refocuses the existing window. Eliminates Chromium GPU cache `Erişim engellendi (0x5)` / `Gpu Cache Creation failed: -2` errors caused by two processes racing for the same cache directory on startup.
+- **Diagnostic popup messaging rewritten** — DNS popups no longer recommend "restart Windows DNS Client" (the new resolver does that for you). They now only fire when ALL THREE DNS layers failed, which means the real diagnosis is "no internet" or "antivirus blocking everything", not a fixable DNS quirk.
+- **Polling intervals reduced** — Overview sidebar 1500 ms → 3000 ms (with in-flight coalescing), Broken Links / Images tabs 1500 ms → 3000 ms, lazy URL rows live-refresh 250 ms → 750 ms. Cuts background IPC volume by ~60 % during crawls.
+
+### Fixed
+- **`fetch failed -> EDESTRUCTION queryA` / `ECONNREFUSED queryA` errors** — the underlying cause (Windows DNS Client mid-query crash, port-53 blocked by VPN/firewall, antivirus DNS hijacking) is now bypassed automatically by the resilient resolver instead of failing the crawl.
+- **Logs window kept freezing the entire app after a crawl finished** — post-crawl SQL passes (inlinks recompute, redirect chains, hreflang reciprocity, duplicates, image probes, TLS probes) now yield to the Node event loop between phases via `setImmediate`, so the IPC channel stays live and the renderer doesn't stall.
+- **Logs window stuttered during drag/resize** — busy-flag from main process pauses renderer state updates during window manipulation; React `startTransition` lets the compositor preempt log applications.
+- **`formatFetchError` DNS messages** — updated to reference the automatic 3-tier fallback ("automatic DNS-over-HTTPS fallback active") instead of asking the user to manually restart services.
+
 ## [0.2.3] — 2026-04-28
 
 ### Added

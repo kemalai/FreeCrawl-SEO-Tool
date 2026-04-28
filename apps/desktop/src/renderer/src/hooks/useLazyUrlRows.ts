@@ -3,11 +3,12 @@ import type { AdvancedFilter, CrawlUrlRow, UrlCategory } from '@freecrawl/shared
 
 const CHUNK_SIZE = 500;
 const MAX_CACHED_CHUNKS = 8;
-// Live-refresh cadence during an active crawl. 250 ms keeps perceived
-// row arrival close to "as they're crawled" without saturating the COUNT
-// query — at 20 RPS the user sees ~5 rows per tick instead of 30 in a
-// 1.5 s lump (which felt like the program had stalled).
-const LIVE_REFRESH_MS = 250;
+// Live-refresh cadence during an active crawl. 750 ms strikes a balance
+// between perceived "row streaming" smoothness and the cost of a COUNT
+// query + per-chunk fetch every tick. At 100 URL/s the user still sees
+// ~75 new rows per tick (continuous flow), while leaving 3× more main-
+// thread headroom than the previous 250 ms cadence.
+const LIVE_REFRESH_MS = 750;
 
 export interface LazyRowsOpts {
   category: UrlCategory;

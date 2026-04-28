@@ -53,8 +53,21 @@ export const IPC = {
   confirmClear: 'confirm:clear',
   logsGetAll: 'logs:get-all',
   logsClear: 'logs:clear',
+  /** Single log entry — kept for compatibility but not used for the
+   * live tail anymore; high-volume crawls would saturate the IPC
+   * channel. The renderer receives entries via `logsBatch` instead. */
   logsEntry: 'logs:entry',
+  /** Coalesced batch of log entries delivered at most every ~100 ms.
+   * One IPC round-trip carries 1–N entries — at 200 logs/s during
+   * heavy crawls this drops IPC volume from ~200 msgs/s to ~10. */
+  logsBatch: 'logs:batch',
   logsOpenWindow: 'logs:open-window',
+  /** main → logs renderer: pause / resume the live setState pump while
+   * the user is dragging or resizing the Logs window. Prevents the
+   * renderer's render loop from competing with the OS compositor for
+   * the main thread, which is what causes the visible "kasma" during
+   * drag. */
+  logsBusy: 'logs:busy',
   robotsTest: 'robots:test',
   sitemapValidate: 'sitemap:validate',
   reportsPagesPerDirectory: 'reports:pages-per-directory',
@@ -601,6 +614,8 @@ export interface FreeCrawlApi {
   prefsExportSettings(input: SettingsExportInput): Promise<SettingsExportResult>;
   prefsImportSettings(): Promise<SettingsImportResult>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
+  onLogsBatch(cb: (entries: LogEntry[]) => void): () => void;
+  onLogsBusy(cb: (busy: boolean) => void): () => void;
   onProgress(cb: (p: CrawlProgress) => void): () => void;
   onDone(cb: (summary: CrawlSummary) => void): () => void;
   onError(cb: (message: string) => void): () => void;

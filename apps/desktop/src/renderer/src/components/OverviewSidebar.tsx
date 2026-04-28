@@ -15,7 +15,6 @@ interface Node {
 export function OverviewSidebar() {
   const overview = useAppStore((s) => s.overview);
   const setOverview = useAppStore((s) => s.setOverview);
-  const progress = useAppStore((s) => s.progress);
   const dataVersion = useAppStore((s) => s.dataVersion);
   const activeCategory = useAppStore((s) => s.activeCategory);
   const navigateToCategory = useAppStore((s) => s.navigateToCategory);
@@ -37,19 +36,37 @@ export function OverviewSidebar() {
     ]),
   );
 
+  // Background polling. Independent of `progress.crawled` so a busy
+  // crawl that fires progress events twice per second doesn't restart
+  // the interval (and re-fire `load()` immediately) on every tick.
+  // Dependency is `dataVersion` only — bumped from elsewhere when a
+  // user-initiated mutation needs an immediate refresh.
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     const load = async () => {
-      const o = await window.freecrawl.overviewGet();
-      if (!cancelled) setOverview(o);
+      // Coalesce overlapping calls — getOverviewCounts is an aggregate
+      // SQL pass over 70+ issue WHERE clauses; on a 1M-URL DB it can
+      // run ~200–500 ms and main-process IPC handlers run serially, so
+      // overlapping calls just queue up and starve other IPCs.
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const o = await window.freecrawl.overviewGet();
+        if (!cancelled) setOverview(o);
+      } finally {
+        inFlight = false;
+      }
     };
     void load();
-    const id = setInterval(load, 1500);
+    // 3000 ms cadence — at 100 URL/s that's 300 new rows between
+    // refreshes, perceptually still "live" without slamming the DB.
+    const id = setInterval(load, 3000);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [progress?.crawled, dataVersion, setOverview]);
+  }, [dataVersion, setOverview]);
 
   const toggle = (k: string) => {
     setExpanded((prev) => {

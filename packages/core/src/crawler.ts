@@ -29,6 +29,7 @@ import {
   formatFetchError,
   initHttpClient,
 } from './http-client.js';
+import { setActiveDnsHook } from './dns-resolver.js';
 import { discoverSitemapUrls, fetchSitemaps } from './sitemap.js';
 
 export interface CrawlerEvents {
@@ -189,6 +190,11 @@ export class Crawler extends EventEmitter {
     // probing HTTPS then HTTP on unreachable hosts).
     this.emitProgress();
 
+    // Surface DNS-tier escalations into the log panel so a user whose
+    // system DNS is broken can see "fallback active" instead of a silent
+    // recovery (or, worse, a silent recovery that they think didn't help).
+    this.installDnsHook();
+
     // Environment diagnostics — proxy, CA bundle, TLS, runtime versions.
     // Logged once per crawl so support can tell at a glance whether a
     // user is behind a corporate proxy / antivirus HTTPS inspection / has
@@ -278,11 +284,28 @@ export class Crawler extends EventEmitter {
       this.progressTimer = null;
     }
 
+    // Post-crawl heavy lifting. Each step is a synchronous SQL pass
+    // that can take 1–3 s on a 1M-URL crawl; if we run them all in a
+    // tight sequence the main process JS thread stays blocked for the
+    // entire duration, IPC dispatch starves, and any other window
+    // (especially Logs) freezes visibly. Yielding to the event loop
+    // between steps lets queued IPC mesajları (logs:batch, progress,
+    // dataChanged) get serviced.
+    await yieldToEventLoop();
+    this.emit('info', 'Recomputing inlinks…');
     this.db.recomputeInlinks();
+    await yieldToEventLoop();
+    this.emit('info', 'Recomputing redirect chains…');
     this.db.recomputeRedirectChains();
+    await yieldToEventLoop();
+    this.emit('info', 'Recomputing hreflang analysis…');
     this.db.recomputeHreflangAnalysis();
+    await yieldToEventLoop();
+    this.emit('info', 'Clustering duplicates…');
     this.runDuplicateClustering();
+    await yieldToEventLoop();
     await this.runImageSizeProbes();
+    await yieldToEventLoop();
     await this.runTlsCertProbes();
     this.running = false;
     this.stopMemoryMonitor();
@@ -616,11 +639,20 @@ export class Crawler extends EventEmitter {
       this.progressTimer = null;
     }
 
+    // Same yielding strategy as spider mode — see the comment block
+    // above the spider-mode recompute. SQL aggregates blocking the JS
+    // thread starve IPC dispatch and freeze every other window.
+    await yieldToEventLoop();
     this.db.recomputeInlinks();
+    await yieldToEventLoop();
     this.db.recomputeRedirectChains();
+    await yieldToEventLoop();
     this.db.recomputeHreflangAnalysis();
+    await yieldToEventLoop();
     this.runDuplicateClustering();
+    await yieldToEventLoop();
     await this.runImageSizeProbes();
+    await yieldToEventLoop();
     await this.runTlsCertProbes();
     this.running = false;
     this.stopMemoryMonitor();
@@ -829,6 +861,64 @@ export class Crawler extends EventEmitter {
 
   get isPaused(): boolean {
     return this.paused;
+  }
+
+  private dnsAnnouncedTier2 = false;
+  private dnsAnnouncedTier3 = false;
+
+  /**
+   * Wire DNS-tier escalation events from the global resilient resolver
+   * into this Crawler's event stream. Surfaces in the in-app Logs window
+   * as a one-time `warn` per tier per crawl ("DNS bypass active …"), then
+   * subsequent per-host lookups stay at debug level so the log panel
+   * isn't flooded.
+   *
+   * The hook is auto-cleared when this crawl emits `done` so a future
+   * Crawler instance — or a stop()-then-restart cycle — installs a fresh
+   * announcement state and we don't leak `this` into module-level state.
+   */
+  private installDnsHook(): void {
+    this.dnsAnnouncedTier2 = false;
+    this.dnsAnnouncedTier3 = false;
+    setActiveDnsHook((event) => {
+      if (event.outcome === 'success' && event.tier === 'public-udp') {
+        if (!this.dnsAnnouncedTier2) {
+          this.dnsAnnouncedTier2 = true;
+          this.emit(
+            'warn',
+            `DNS bypass active: system resolver unavailable, falling back to public DNS (${event.via}) for ${event.hostname}. Crawl continues automatically — no user action required.`,
+          );
+        } else {
+          this.emit(
+            'debug',
+            `DNS via public UDP: ${event.hostname} (${event.via}) in ${event.durationMs}ms`,
+          );
+        }
+      } else if (event.outcome === 'success' && event.tier === 'doh') {
+        if (!this.dnsAnnouncedTier3) {
+          this.dnsAnnouncedTier3 = true;
+          this.emit(
+            'warn',
+            `DNS bypass active (DoH): port-53 unreachable on this network, resolving via DNS-over-HTTPS to ${event.via} for ${event.hostname}. Crawl continues automatically — no user action required.`,
+          );
+        } else {
+          this.emit(
+            'debug',
+            `DNS via DoH: ${event.hostname} (${event.via}) in ${event.durationMs}ms`,
+          );
+        }
+      } else if (event.outcome === 'failure') {
+        // Tier failures during a successful cascade are normal (Tier 1
+        // failed → Tier 2 succeeded). Keep them at debug so the panel
+        // doesn't fill with "queryA ECONNREFUSED" entries that the user
+        // can't act on.
+        this.emit(
+          'debug',
+          `DNS tier '${event.tier}' failed for ${event.hostname}: ${event.error ?? 'unknown'}`,
+        );
+      }
+    });
+    this.once('done', () => setActiveDnsHook(null));
   }
 
   /**
@@ -1572,6 +1662,17 @@ export class Crawler extends EventEmitter {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Yield control back to the Node event loop so any queued IPC messages
+ * (logs batch, progress emit, dataChanged) get a chance to dispatch
+ * before the next synchronous SQL pass blocks the thread again.
+ * `setImmediate` runs after I/O callbacks but before the next timers
+ * phase — exactly the slot we want for "let everything else breathe".
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function isRetryableStatus(status: number): boolean {

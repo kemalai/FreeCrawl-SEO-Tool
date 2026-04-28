@@ -167,36 +167,40 @@ interface DiagnosticDialog {
  * specific (404 / WAF block / timeout) and shouldn't pop a modal.
  */
 function categorizeDiagnostic(msg: string): DiagnosticDialog | null {
+  // Note: FreeCrawl now auto-bypasses broken DNS via a 3-tier cascade
+  // (OS → public DNS UDP → DNS-over-HTTPS on port 443). Users almost
+  // never see these dialogs in normal operation. This dialog only fires
+  // when ALL THREE tiers failed — so the diagnosis is "internet is down
+  // or the antivirus / firewall is blocking every form of outbound
+  // traffic", not "restart Windows DNS Client".
   if (/\bquery(A|AAAA|Soa|Srv|Mx|Txt|Ns|Cname|Any|Naptr|Ptr)\b/i.test(msg) && /ECONNREFUSED/.test(msg)) {
     return {
       key: 'dns-refused',
-      title: 'DNS Connection Blocked',
-      message: 'Your machine cannot reach a DNS server — port 53 is being refused.',
+      title: 'No Network Connectivity',
+      message: 'FreeCrawl tried 3 layers of DNS lookup (system, public servers on port 53, and DNS-over-HTTPS on port 443) — every one was refused. Your machine appears to have no working internet connection.',
       detail:
-        'Likely causes:\n' +
-        '  • Active VPN that lost its DNS route (NordVPN, ProtonVPN, ExpressVPN, …)\n' +
-        '  • Local DNS filter (AdGuard, Pi-hole, NextDNS)\n' +
-        '  • Corporate firewall blocking outbound DNS\n\n' +
-        'Try one of these:\n' +
-        '  1. Disconnect the VPN and retry the crawl.\n' +
-        '  2. Pause AdGuard / Pi-hole / NextDNS temporarily.\n' +
-        '  3. Set your Windows DNS to 1.1.1.1 or 8.8.8.8 (Settings → Network → Properties → IPv4 → Manual DNS).\n' +
-        '  4. Run "services.msc", restart the "DNS Client" service.\n\n' +
+        'FreeCrawl already attempts to bypass broken system DNS automatically — if you see this dialog, even DNS-over-HTTPS over port 443 failed.\n\n' +
+        'Most likely causes (in order):\n' +
+        '  1. Antivirus / endpoint security is blocking FreeCrawl from making ANY outbound connection. Whitelist FreeCrawl in your security software.\n' +
+        '  2. You are not connected to the internet — check Wi-Fi / Ethernet.\n' +
+        '  3. A corporate firewall is blocking all outbound traffic — set HTTPS_PROXY in Settings → Network.\n' +
+        '  4. Active VPN is in a broken state — disconnect and try again.\n\n' +
         'Click "Open Logs" to see the full error chain.',
     };
   }
   if (/EDESTRUCTION/.test(msg)) {
     return {
       key: 'dns-destroyed',
-      title: 'DNS Resolver Crashed',
+      title: 'Network Stack Unresponsive',
       message:
-        "Windows' DNS resolver was destroyed mid-query. Crawls cannot resolve hostnames until it recovers.",
+        "Your system's DNS resolver crashed AND FreeCrawl's automatic DNS-over-HTTPS bypass also failed. This means the network stack is in a broken state — not just DNS.",
       detail:
-        'This usually follows a VPN flicker, network adapter reset, or a previous DNS timeout.\n\n' +
-        'Try one of these:\n' +
-        '  1. Open "services.msc", find "DNS Client", right-click → Restart.\n' +
-        '  2. Reconnect your network adapter (Wi-Fi off / on).\n' +
-        '  3. As a last resort, restart the computer.\n\n' +
+        'FreeCrawl normally recovers from a crashed Windows DNS Client by routing lookups through Cloudflare/Google over HTTPS:443. If you are seeing this dialog, that fallback also failed — usually because the operating-system network stack itself needs a reset.\n\n' +
+        'Try one of these (in order of effort):\n' +
+        '  1. Toggle airplane mode / disconnect & reconnect Wi-Fi.\n' +
+        '  2. Restart the network adapter (Settings → Network → Change adapter options).\n' +
+        '  3. Open "services.msc", find "DNS Client", right-click → Restart (Windows only).\n' +
+        '  4. As a last resort, restart the computer.\n\n' +
         'Click "Open Logs" to see the full error chain.',
     };
   }
@@ -367,8 +371,31 @@ function rebuildMenu(): void {
       onClearRecent: () => clearRecentProjects(),
       recentProjects: getRecentProjects(),
       onResetDiagnosticDialogs: () => resetDiagnosticDialogs(),
+      onOpenLogsFolder: () => openLogsFolder(),
     }),
   );
+}
+
+/**
+ * Reveal the on-disk logs directory in the OS file manager. Falls back
+ * to a dialog with the path if the directory hasn't been created yet
+ * (e.g. running in a sandbox where userData is read-only).
+ */
+function openLogsFolder(): void {
+  const dir = logger.getLogsDirectory();
+  if (!dir) {
+    if (mainWindow) {
+      void dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Logs Folder Unavailable',
+        message: 'Disk logging has not been initialised. Logs are kept in memory only for this session.',
+        buttons: ['OK'],
+        noLink: true,
+      });
+    }
+    return;
+  }
+  void shell.openPath(dir);
 }
 
 /**
@@ -510,12 +537,21 @@ function openLogsWindow(): void {
     show: false,
     backgroundColor: '#0a0a0a',
     title: 'FreeCrawl — Logs',
-    parent: mainWindow ?? undefined,
+    // Intentionally NOT a child of mainWindow — `parent: mainWindow`
+    // links the two windows in the OS compositor (DWM on Windows) so
+    // that when the main process is busy doing post-crawl recompute /
+    // SQL aggregates, the Logs window's frame production stalls along
+    // with mainWindow's, causing the user-visible "totally frozen"
+    // state right after a crawl finishes. Standalone window dispatches
+    // its frames independently.
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
+      // Don't slow the renderer's frame loop just because the window
+      // briefly loses focus during a drag.
+      backgroundThrottling: false,
     },
   });
   win.setMenu(null);
@@ -550,6 +586,40 @@ function openLogsWindow(): void {
   }
   logsWindow = win;
   logger.log('info', 'main', 'Logs window opened');
+
+  // Drag/resize busy signal — pause the renderer's live setState pump
+  // while the user is moving/resizing the Logs window. Without this,
+  // the renderer competes with the OS compositor for the main thread.
+  //
+  // Critical perf detail: Windows fires `move` once per pixel during
+  // drag (50–80 calls/s). Doing meaningful work in that handler floods
+  // the main process. We rate-limit the busy-signal handler to one
+  // pass every ~150 ms — past that the busy state is already on, the
+  // scheduled timeout already exists, and there is nothing for further
+  // move ticks to do.
+  let busyTimer: NodeJS.Timeout | null = null;
+  let lastBusyTickMs = 0;
+  let isBusy = false;
+  const setBusy = (busy: boolean): void => {
+    if (busy === isBusy) return;
+    isBusy = busy;
+    if (!win.isDestroyed()) win.webContents.send(IPC.logsBusy, busy);
+  };
+  const markBusy = (): void => {
+    const now = Date.now();
+    if (isBusy && now - lastBusyTickMs < 150) return; // already busy + recent tick
+    lastBusyTickMs = now;
+    setBusy(true);
+    if (busyTimer) clearTimeout(busyTimer);
+    // 200 ms after the last gesture tick → resume live updates.
+    busyTimer = setTimeout(() => setBusy(false), 200);
+  };
+  win.on('move', markBusy);
+  win.on('will-resize', markBusy);
+  win.on('resize', markBusy);
+  win.on('closed', () => {
+    if (busyTimer) clearTimeout(busyTimer);
+  });
 }
 
 function registerIpc(): void {
@@ -746,12 +816,29 @@ function registerIpc(): void {
     },
   );
 
-  // Stream every new entry to the logs window if it's open. Subscriber
-  // is registered for the process lifetime — the log window can come
-  // and go, we just check before sending.
-  logger.subscribe((entry) => {
+  // Stream new entries to the logs window in coalesced batches. A heavy
+  // crawl emits 100–300 logs/s; sending each as its own IPC message
+  // saturated the renderer's event loop and caused visible UI stutters
+  // even with renderer-side batching, because every IPC dispatch
+  // costs serialise + V8-deserialise + main-thread work in the
+  // renderer process. Batching at 100 ms drops IPC volume by ~10–30×
+  // while still feeling "live" in the log panel.
+  let logsBatch: import('@freecrawl/shared-types').LogEntry[] = [];
+  let logsFlushTimer: NodeJS.Timeout | null = null;
+  const flushLogsBatch = (): void => {
+    logsFlushTimer = null;
+    if (logsBatch.length === 0) return;
+    const payload = logsBatch;
+    logsBatch = [];
     if (logsWindow && !logsWindow.isDestroyed()) {
-      logsWindow.webContents.send(IPC.logsEntry, entry);
+      logsWindow.webContents.send(IPC.logsBatch, payload);
+    }
+  };
+  logger.subscribe((entry) => {
+    if (!logsWindow || logsWindow.isDestroyed()) return;
+    logsBatch.push(entry);
+    if (logsFlushTimer === null) {
+      logsFlushTimer = setTimeout(flushLogsBatch, 100);
     }
   });
 
@@ -1565,7 +1652,46 @@ function registerIpc(): void {
 logger.installGlobalHooks();
 logger.log('info', 'main', `App bootstrap — Node ${process.version} on ${process.platform}`);
 
+// Single-instance guard. Without this, double-clicking the launcher
+// shortcut while the app is already open spawns a second Electron
+// process that races for the same userData/Cache/GPUCache directories
+// and produces the "Unable to move the cache: Erişim engellendi (0x5)"
+// errors on stderr. The second instance is told to quit; the original
+// window is brought to focus so the user gets the expected behaviour.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
+// Suppress Chromium's GPU disk cache. Windows users whose %APPDATA%
+// is synced by OneDrive / Dropbox / antivirus real-time scanners hit
+// transient ACCESS_DENIED errors when Chromium tries to rotate or
+// move its GPU shader cache. The cache only affects shader-compile
+// warm-up time on second launch (~50 ms) so disabling it costs us
+// nothing, while it removes a recurring source of stderr noise and
+// startup-time errors.
+app.commandLine.appendSwitch('disable-gpu-disk-cache');
+app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
+
 void app.whenReady().then(() => {
+  // Disk logging is bootstrapped after `app.whenReady()` — `getPath('userData')`
+  // is only valid post-ready. Prior log lines are still in the ring buffer
+  // and will be flushed to disk lazily via subsequent writes.
+  try {
+    logger.initFileLogging(app.getPath('userData'));
+    const logFile = logger.getCurrentLogFile();
+    if (logFile) logger.log('info', 'main', `Disk log file: ${logFile}`);
+  } catch (err) {
+    logger.log('warn', 'main', `Disk logging unavailable: ${(err as Error).message}`);
+  }
   loadPrefs();
   rebuildMenu();
   registerIpc();
@@ -1582,5 +1708,8 @@ app.on('window-all-closed', () => {
   db?.close();
   db = null;
   flushPrefs();
+  // Flush the disk log stream before exit so the last lines aren't lost
+  // if the OS kills the process during a Quit-All cycle.
+  logger.flushFileLogging();
   if (process.platform !== 'darwin') app.quit();
 });

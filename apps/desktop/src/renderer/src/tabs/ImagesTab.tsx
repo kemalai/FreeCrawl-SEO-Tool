@@ -9,7 +9,7 @@ const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
 const ROW_NUM_WIDTH = 56;
 const STATUS_BAR_HEIGHT = 22;
-const POLL_MS = 1500;
+const POLL_MS = 3000;
 const PAGE_SIZE = 5000;
 
 type SortKey = 'src' | 'alt' | 'width' | 'height' | 'occurrences';

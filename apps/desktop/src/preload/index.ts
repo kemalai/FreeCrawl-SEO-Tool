@@ -175,6 +175,8 @@ const api: FreeCrawlApi = {
   prefsImportSettings: (): Promise<SettingsImportResult> =>
     ipcRenderer.invoke(IPC.prefsImportSettings),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
+  onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
+  onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),
   onProgress: (cb) => subscribe<CrawlProgress>(IPC.crawlProgress, cb),
   onDone: (cb) => subscribe<CrawlSummary>(IPC.crawlDone, cb),
   onError: (cb) => subscribe<string>(IPC.crawlError, cb),
