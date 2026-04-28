@@ -355,6 +355,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.titlePlaceholder,
               category: 'issues:title-placeholder',
             },
+            {
+              key: 'issues-title-single-word',
+              label: 'Single-Word Title',
+              count: o.issues.titleSingleWord,
+              category: 'issues:title-single-word',
+            },
           ],
         },
         {
@@ -390,6 +396,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Pixel Width Truncated (>990px)',
               count: o.issues.metaPixelWidthTooLong,
               category: 'issues:meta-pixel-width-too-long',
+            },
+            {
+              key: 'issues-description-equals-title',
+              label: 'Description = Title',
+              count: o.issues.descriptionEqualsTitle,
+              category: 'issues:description-equals-title',
             },
           ],
         },
@@ -487,6 +499,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.canonicalToNoindex,
               category: 'issues:canonical-to-noindex',
             },
+            {
+              key: 'issues-canonical-not-absolute',
+              label: 'Canonical Not Absolute',
+              count: o.issues.canonicalNotAbsolute,
+              category: 'issues:canonical-not-absolute',
+            },
           ],
         },
         {
@@ -498,6 +516,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Thin Content (<300 words)',
               count: o.issues.contentThin,
               category: 'issues:content-thin',
+            },
+            {
+              key: 'issues-page-empty',
+              label: 'Empty Page (<30 words)',
+              count: o.issues.pageEmpty,
+              category: 'issues:page-empty',
             },
             {
               key: 'issues-near-duplicate',
@@ -673,6 +697,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.langMissing,
               category: 'issues:lang-missing',
             },
+            {
+              key: 'issues-form-input-unlabeled',
+              label: 'Form Inputs Missing Label',
+              count: o.issues.formInputUnlabeled,
+              category: 'issues:form-input-unlabeled',
+            },
           ],
         },
         {
@@ -703,6 +733,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.twitterMissing,
               category: 'issues:twitter-missing',
             },
+            {
+              key: 'issues-og-image-not-absolute',
+              label: 'OG Image Not Absolute',
+              count: o.issues.ogImageNotAbsolute,
+              category: 'issues:og-image-not-absolute',
+            },
+            {
+              key: 'issues-twitter-image-not-absolute',
+              label: 'Twitter Image Not Absolute',
+              count: o.issues.twitterImageNotAbsolute,
+              category: 'issues:twitter-image-not-absolute',
+            },
           ],
         },
         {
@@ -714,6 +756,24 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'HSTS Missing',
               count: o.issues.hstsMissing,
               category: 'issues:hsts-missing',
+            },
+            {
+              key: 'issues-hsts-no-preload',
+              label: 'HSTS Missing Preload',
+              count: o.issues.hstsNoPreload,
+              category: 'issues:hsts-no-preload',
+            },
+            {
+              key: 'issues-hsts-max-age-short',
+              label: 'HSTS Max-Age <1y',
+              count: o.issues.hstsMaxAgeShort,
+              category: 'issues:hsts-max-age-short',
+            },
+            {
+              key: 'issues-hsts-no-includesubdomains',
+              label: 'HSTS Missing includeSubDomains',
+              count: o.issues.hstsNoIncludeSubdomains,
+              category: 'issues:hsts-no-includesubdomains',
             },
             {
               key: 'issues-xframe-missing',
@@ -750,6 +810,36 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Missing SRI (3rd-party)',
               count: o.issues.missingSri,
               category: 'issues:missing-sri',
+            },
+          ],
+        },
+        {
+          key: 'issues-ssl',
+          label: 'SSL / TLS',
+          children: [
+            {
+              key: 'issues-ssl-cert-expired',
+              label: 'Certificate Expired',
+              count: o.issues.sslCertExpired,
+              category: 'issues:ssl-cert-expired',
+            },
+            {
+              key: 'issues-ssl-cert-expiring-soon',
+              label: 'Certificate Expiring (≤30d)',
+              count: o.issues.sslCertExpiringSoon,
+              category: 'issues:ssl-cert-expiring-soon',
+            },
+            {
+              key: 'issues-ssl-protocol-old',
+              label: 'Deprecated TLS Protocol',
+              count: o.issues.sslProtocolOld,
+              category: 'issues:ssl-protocol-old',
+            },
+            {
+              key: 'issues-ssl-signature-weak',
+              label: 'Weak Signature Algorithm',
+              count: o.issues.sslSignatureWeak,
+              category: 'issues:ssl-signature-weak',
             },
           ],
         },
@@ -817,6 +907,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.keepaliveDisabled,
               category: 'issues:keepalive-disabled',
             },
+            {
+              key: 'issues-image-too-large',
+              label: 'Large Image (>100KB)',
+              count: o.issues.imageTooLarge,
+              category: 'issues:image-too-large',
+            },
           ],
         },
         {
@@ -864,6 +960,36 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Invalid JSON-LD',
               count: o.issues.structuredDataInvalid,
               category: 'issues:structured-data-invalid',
+            },
+          ],
+        },
+        {
+          key: 'issues-analytics',
+          label: 'Analytics',
+          children: [
+            {
+              key: 'issues-analytics-missing',
+              label: 'No Analytics Detected',
+              count: o.issues.analyticsMissing,
+              category: 'issues:analytics-missing',
+            },
+            {
+              key: 'issues-analytics-multiple-ga4',
+              label: 'Multiple GA4 IDs',
+              count: o.issues.analyticsMultipleGa4,
+              category: 'issues:analytics-multiple-ga4',
+            },
+            {
+              key: 'issues-analytics-ua-legacy',
+              label: 'Universal Analytics (Sunset)',
+              count: o.issues.analyticsUaLegacy,
+              category: 'issues:analytics-ua-legacy',
+            },
+            {
+              key: 'issues-analytics-pixel-without-policy',
+              label: 'Pixel Without Permissions-Policy',
+              count: o.issues.analyticsPixelWithoutPolicy,
+              category: 'issues:analytics-pixel-without-policy',
             },
           ],
         },
@@ -931,6 +1057,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.imageEmptyAlt,
               category: 'issues:image-empty-alt',
             },
+            {
+              key: 'issues-images-no-lazy-loading',
+              label: 'Low Lazy-Loading Adoption',
+              count: o.issues.imagesNoLazyLoading,
+              category: 'issues:images-no-lazy-loading',
+            },
+            {
+              key: 'issues-image-broken-src',
+              label: 'Broken Image Src',
+              count: o.issues.imageBrokenSrc,
+              category: 'issues:image-broken-src',
+            },
           ],
         },
         {
@@ -960,6 +1098,36 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Empty Anchor Text',
               count: o.issues.linkEmptyAnchor,
               category: 'issues:link-empty-anchor',
+            },
+            {
+              key: 'issues-anchor-text-too-long',
+              label: 'Anchor Text Too Long (>100)',
+              count: o.issues.anchorTextTooLong,
+              category: 'issues:anchor-text-too-long',
+            },
+            {
+              key: 'issues-anchor-text-generic',
+              label: 'Generic Anchor Text',
+              count: o.issues.anchorTextGeneric,
+              category: 'issues:anchor-text-generic',
+            },
+            {
+              key: 'issues-target-blank-no-noopener',
+              label: 'target=_blank without noopener',
+              count: o.issues.targetBlankNoNoopener,
+              category: 'issues:target-blank-no-noopener',
+            },
+            {
+              key: 'issues-external-links-too-many',
+              label: 'External Links > 100',
+              count: o.issues.externalLinksTooMany,
+              category: 'issues:external-links-too-many',
+            },
+            {
+              key: 'issues-outlinks-zero',
+              label: 'No Outlinks (Dead-End)',
+              count: o.issues.outlinksZero,
+              category: 'issues:outlinks-zero',
             },
           ],
         },

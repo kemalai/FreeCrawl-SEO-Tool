@@ -8,6 +8,11 @@ import type {
   TopUrlsRow,
   TopUrlMetric,
   ExternalDomainHealthRow,
+  AnalyticsCoverageRow,
+  LinkPositionRow,
+  ImageWeightRow,
+  BucketHistogramRow,
+  ServerHeaderRow,
 } from '@freecrawl/shared-types';
 
 interface Props {
@@ -25,7 +30,13 @@ type ReportKind =
   | 'most-outlinks'
   | 'biggest-pages'
   | 'deepest-urls'
-  | 'external-domain-health';
+  | 'external-domain-health'
+  | 'analytics-coverage'
+  | 'link-positions'
+  | 'image-weight'
+  | 'inlinks-histogram'
+  | 'word-count-histogram'
+  | 'server-headers';
 
 interface ReportRow {
   /** Display key (directory path / status code / depth label). */
@@ -52,6 +63,12 @@ const REPORT_LABELS: Record<ReportKind, string> = {
   'biggest-pages': 'Biggest Pages (Top 25)',
   'deepest-urls': 'Deepest URLs (Top 25)',
   'external-domain-health': 'External Domain Health',
+  'analytics-coverage': 'Analytics Tracker Coverage',
+  'link-positions': 'Internal Link Positions',
+  'image-weight': 'Image Weight per Page (Top 25)',
+  'inlinks-histogram': 'Inlinks Histogram',
+  'word-count-histogram': 'Word Count Histogram',
+  'server-headers': 'Server Stack (Server Header)',
 };
 
 const KEY_LABELS: Record<ReportKind, string> = {
@@ -65,6 +82,12 @@ const KEY_LABELS: Record<ReportKind, string> = {
   'biggest-pages': 'URL',
   'deepest-urls': 'URL',
   'external-domain-health': 'Domain',
+  'analytics-coverage': 'Tracker',
+  'link-positions': 'Position',
+  'image-weight': 'URL',
+  'inlinks-histogram': 'Bucket',
+  'word-count-histogram': 'Bucket',
+  'server-headers': 'Server',
 };
 
 const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
@@ -78,6 +101,12 @@ const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
   'biggest-pages': 'page-size',
   'deepest-urls': 'depth',
   'external-domain-health': null,
+  'analytics-coverage': null,
+  'link-positions': null,
+  'image-weight': null,
+  'inlinks-histogram': null,
+  'word-count-histogram': null,
+  'server-headers': null,
 };
 
 const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
@@ -91,6 +120,17 @@ const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
   'biggest-pages': (v) => (v == null ? '—' : `${(v / 1024).toFixed(1)} KB`),
   'deepest-urls': (v) => (v ?? 0).toLocaleString(),
   'external-domain-health': (v) => (v ?? 0).toLocaleString(),
+  'analytics-coverage': (v) => (v ?? 0).toLocaleString(),
+  'link-positions': (v) => (v ?? 0).toLocaleString(),
+  'image-weight': (v) => {
+    if (v == null) return '—';
+    if (v < 1024) return `${v} B`;
+    if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+    return `${(v / 1024 / 1024).toFixed(2)} MB`;
+  },
+  'inlinks-histogram': (v) => (v ?? 0).toLocaleString(),
+  'word-count-histogram': (v) => (v ?? 0).toLocaleString(),
+  'server-headers': (v) => (v ?? 0).toLocaleString(),
 };
 
 export function ReportsDialog({ open, onClose }: Props) {
@@ -153,6 +193,51 @@ export function ReportsDialog({ open, onClose }: Props) {
                 }`,
               })),
             );
+        } else if (kind === 'analytics-coverage') {
+          const r = await window.freecrawl.reportsAnalyticsCoverage();
+          if (!cancelled)
+            setRows(
+              r.map((x: AnalyticsCoverageRow) => ({
+                key: x.name,
+                count: x.pageCount,
+                valueLabel: `${x.pageCount.toLocaleString()} pages · ${x.distinctIds} distinct ID${
+                  x.distinctIds === 1 ? '' : 's'
+                }${x.sampleIds.length > 0 ? ` · ${x.sampleIds.join(', ')}` : ''}`,
+              })),
+            );
+        } else if (kind === 'link-positions') {
+          const r = await window.freecrawl.reportsLinkPositions();
+          if (!cancelled)
+            setRows(
+              r.map((x: LinkPositionRow) => ({
+                key: x.position,
+                count: x.count,
+              })),
+            );
+        } else if (kind === 'image-weight') {
+          const r = await window.freecrawl.reportsImageWeightPerPage(25);
+          if (!cancelled)
+            setRows(
+              r.map((x: ImageWeightRow) => ({
+                key: x.url,
+                count: x.imageBytes,
+                valueLabel: `${VALUE_FORMAT['image-weight'](x.imageBytes)} · ${
+                  x.imageCount
+                } image${x.imageCount === 1 ? '' : 's'}`,
+              })),
+            );
+        } else if (kind === 'inlinks-histogram') {
+          const r = await window.freecrawl.reportsInlinksHistogram();
+          if (!cancelled)
+            setRows(r.map((x: BucketHistogramRow) => ({ key: x.label, count: x.count })));
+        } else if (kind === 'word-count-histogram') {
+          const r = await window.freecrawl.reportsWordCountHistogram();
+          if (!cancelled)
+            setRows(r.map((x: BucketHistogramRow) => ({ key: x.label, count: x.count })));
+        } else if (kind === 'server-headers') {
+          const r = await window.freecrawl.reportsServerHeaders();
+          if (!cancelled)
+            setRows(r.map((x: ServerHeaderRow) => ({ key: x.server, count: x.count })));
         } else {
           const metric = TOP_URL_METRIC[kind];
           if (metric) {
@@ -232,6 +317,12 @@ export function ReportsDialog({ open, onClose }: Props) {
               <option value="biggest-pages">Biggest Pages (Top 25)</option>
               <option value="deepest-urls">Deepest URLs (Top 25)</option>
               <option value="external-domain-health">External Domain Health</option>
+              <option value="analytics-coverage">Analytics Tracker Coverage</option>
+              <option value="link-positions">Internal Link Positions</option>
+              <option value="image-weight">Image Weight per Page (Top 25)</option>
+              <option value="inlinks-histogram">Inlinks Histogram</option>
+              <option value="word-count-histogram">Word Count Histogram</option>
+              <option value="server-headers">Server Stack</option>
             </select>
           </label>
           {kind === 'pages-per-dir' && (

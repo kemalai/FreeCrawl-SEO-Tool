@@ -15,6 +15,11 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
   const [userAgent, setUserAgent] = useState(config.userAgent);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<RobotsTestResult | null>(null);
+  // Custom-policy mode lets the user paste a draft robots.txt and test it
+  // against URLs without deploying. Off by default so the basic flow
+  // (probe live robots.txt) still works in one click.
+  const [useCustom, setUseCustom] = useState(false);
+  const [customRobots, setCustomRobots] = useState('');
 
   // Re-seed inputs whenever the dialog opens — pre-fills the URL with the
   // current crawl's start URL (handy: most "why is this blocked?" checks
@@ -43,11 +48,29 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
     if (!url.trim()) return;
     setRunning(true);
     try {
-      const r = await window.freecrawl.robotsTest({ url: url.trim(), userAgent });
+      const r = await window.freecrawl.robotsTest({
+        url: url.trim(),
+        userAgent,
+        customRobots: useCustom ? customRobots : undefined,
+      });
       setResult(r);
     } finally {
       setRunning(false);
     }
+  }
+
+  async function loadFromFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.txt,text/plain,robots.txt';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      setCustomRobots(text);
+      setUseCustom(true);
+    };
+    input.click();
   }
 
   return (
@@ -100,18 +123,53 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
             />
           </label>
 
+          <div className="mb-3 flex items-center gap-2 rounded border border-surface-800 bg-surface-950 px-2 py-1.5">
+            <label className="flex items-center gap-1.5 text-[11px] text-surface-300">
+              <input
+                type="checkbox"
+                checked={useCustom}
+                onChange={(e) => setUseCustom(e.target.checked)}
+                className="h-3 w-3"
+              />
+              Test against a custom robots.txt (draft mode)
+            </label>
+            <button
+              type="button"
+              className="ml-auto rounded border border-surface-700 px-2 py-0.5 text-[10px] hover:bg-surface-800"
+              onClick={() => void loadFromFile()}
+              disabled={running}
+            >
+              Load from file…
+            </button>
+          </div>
+
+          {useCustom && (
+            <label className="mb-3 flex flex-col gap-1">
+              <span className="text-[10px] text-surface-400">
+                Custom robots.txt body (parsed — no fetch)
+              </span>
+              <textarea
+                className="h-40 w-full resize-y rounded border border-surface-700 bg-surface-950 px-2 py-1.5 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                value={customRobots}
+                onChange={(e) => setCustomRobots(e.target.value)}
+                placeholder={`User-agent: *\nDisallow: /admin/\nDisallow: /private/\nSitemap: https://example.com/sitemap.xml`}
+                spellCheck={false}
+              />
+            </label>
+          )}
+
           <div className="mb-4 flex items-center gap-2">
             <button
               className="rounded bg-blue-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-500 disabled:opacity-50"
               onClick={runTest}
               disabled={running || !url.trim()}
             >
-              {running ? 'Testing…' : 'Test'}
+              {running ? 'Testing…' : useCustom ? 'Test (custom)' : 'Test'}
             </button>
             {result?.robotsUrl && (
               <span className="text-[10px] text-surface-500">
                 robots.txt: <span className="font-mono text-surface-300">{result.robotsUrl}</span>
-                {result.status !== null && (
+                {result.status !== null && result.status > 0 && (
                   <span className="ml-2">→ HTTP {result.status}</span>
                 )}
               </span>

@@ -36,6 +36,11 @@ import {
   type TopUrlsInput,
   type TopUrlsRow,
   type ExternalDomainHealthRow,
+  type AnalyticsCoverageRow,
+  type LinkPositionRow,
+  type ImageWeightRow,
+  type BucketHistogramRow,
+  type ServerHeaderRow,
   type SettingsExportInput,
   type SettingsExportResult,
   type SettingsImportResult,
@@ -48,6 +53,10 @@ import {
   type UrlDetailInput,
   type UrlSourceInput,
   type UrlSourceResult,
+  type UrlPageImagesInput,
+  type UrlPageImagesResult,
+  type UrlCertInfoInput,
+  type UrlCertInfoResult,
   type UrlsQueryInput,
   type UrlsQueryResult,
 } from '@freecrawl/shared-types';
@@ -86,6 +95,10 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.urlDetailGet, input),
   urlSourceGet: (input: UrlSourceInput): Promise<UrlSourceResult> =>
     ipcRenderer.invoke(IPC.urlSourceGet, input),
+  urlPageImages: (input: UrlPageImagesInput): Promise<UrlPageImagesResult> =>
+    ipcRenderer.invoke(IPC.urlPageImages, input),
+  urlCertInfo: (input: UrlCertInfoInput): Promise<UrlCertInfoResult> =>
+    ipcRenderer.invoke(IPC.urlCertInfo, input),
   urlContextMenu: (input: UrlContextMenuInput): Promise<void> =>
     ipcRenderer.invoke(IPC.urlContextMenu, input),
   urlBulkContextMenu: (input: UrlBulkContextMenuInput): Promise<void> =>
@@ -145,6 +158,18 @@ const api: FreeCrawlApi = {
     limit?: number,
   ): Promise<ExternalDomainHealthRow[]> =>
     ipcRenderer.invoke(IPC.reportsExternalDomainHealth, limit),
+  reportsAnalyticsCoverage: (): Promise<AnalyticsCoverageRow[]> =>
+    ipcRenderer.invoke(IPC.reportsAnalyticsCoverage),
+  reportsLinkPositions: (): Promise<LinkPositionRow[]> =>
+    ipcRenderer.invoke(IPC.reportsLinkPositions),
+  reportsImageWeightPerPage: (limit?: number): Promise<ImageWeightRow[]> =>
+    ipcRenderer.invoke(IPC.reportsImageWeightPerPage, limit),
+  reportsInlinksHistogram: (): Promise<BucketHistogramRow[]> =>
+    ipcRenderer.invoke(IPC.reportsInlinksHistogram),
+  reportsWordCountHistogram: (): Promise<BucketHistogramRow[]> =>
+    ipcRenderer.invoke(IPC.reportsWordCountHistogram),
+  reportsServerHeaders: (): Promise<ServerHeaderRow[]> =>
+    ipcRenderer.invoke(IPC.reportsServerHeaders),
   prefsExportSettings: (input: SettingsExportInput): Promise<SettingsExportResult> =>
     ipcRenderer.invoke(IPC.prefsExportSettings, input),
   prefsImportSettings: (): Promise<SettingsImportResult> =>

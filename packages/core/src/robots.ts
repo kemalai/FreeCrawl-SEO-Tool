@@ -67,6 +67,7 @@ export interface RobotsTestResult {
 export async function testUrlAgainstRobots(
   url: string,
   userAgent: string,
+  customRobotsBody?: string,
 ): Promise<RobotsTestResult> {
   // Be lenient about input — users routinely paste bare hosts like
   // `gamesatis.com`, `www.example.com/foo`, or `//host/path`. Prepend
@@ -87,6 +88,32 @@ export async function testUrlAgainstRobots(
       crawlDelay: null,
       sitemaps: [],
       error: 'Invalid URL — cannot derive robots.txt location.',
+    };
+  }
+
+  // Custom-policy mode: skip the network entirely and parse the user's
+  // pasted robots.txt against the URL. Useful for testing a draft
+  // before deploying it. We still emit `robotsUrl` (the live one) for
+  // reference but tag the body source as `<custom>`.
+  if (customRobotsBody !== undefined) {
+    const body = customRobotsBody.length > 8192
+      ? customRobotsBody.slice(0, 8189) + '...'
+      : customRobotsBody;
+    const parser = robotsParser(robotsUrl, body);
+    const sitemaps: string[] = [];
+    for (const line of body.split(/\r?\n/)) {
+      const m = /^\s*sitemap\s*:\s*(\S+)/i.exec(line);
+      if (m && m[1]) sitemaps.push(m[1]);
+    }
+    return {
+      url: probedUrl,
+      robotsUrl: '<custom>',
+      status: 0,
+      body,
+      allowed: parser.isAllowed(probedUrl, userAgent) ?? true,
+      crawlDelay: parser.getCrawlDelay(userAgent) ?? null,
+      sitemaps,
+      error: null,
     };
   }
 

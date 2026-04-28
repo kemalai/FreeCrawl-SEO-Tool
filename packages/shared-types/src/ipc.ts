@@ -28,6 +28,8 @@ export const IPC = {
   urlsQuery: 'urls:query',
   urlDetailGet: 'urls:detail',
   urlSourceGet: 'urls:source',
+  urlPageImages: 'urls:page-images',
+  urlCertInfo: 'urls:cert-info',
   urlContextMenu: 'url:context-menu',
   urlBulkContextMenu: 'url:bulk-context-menu',
   imagesQuery: 'images:query',
@@ -61,6 +63,12 @@ export const IPC = {
   reportsResponseTimeHistogram: 'reports:response-time-histogram',
   reportsTopUrls: 'reports:top-urls',
   reportsExternalDomainHealth: 'reports:external-domain-health',
+  reportsAnalyticsCoverage: 'reports:analytics-coverage',
+  reportsLinkPositions: 'reports:link-positions',
+  reportsImageWeightPerPage: 'reports:image-weight-per-page',
+  reportsInlinksHistogram: 'reports:inlinks-histogram',
+  reportsWordCountHistogram: 'reports:word-count-histogram',
+  reportsServerHeaders: 'reports:server-headers',
   prefsExportSettings: 'prefs:export-settings',
   prefsImportSettings: 'prefs:import-settings',
 } as const;
@@ -281,6 +289,57 @@ export interface UrlSourceResult {
   capturedAt: string | null;
 }
 
+export interface UrlPageImagesInput {
+  /** ID of the page URL whose `<img>` references should be returned. */
+  id: number;
+  limit?: number;
+}
+
+export interface UrlCertInfoInput {
+  /** ID of the page URL — its host is looked up against `host_certs`. */
+  id: number;
+}
+
+/**
+ * Cached TLS-probe result for the host of a single page. All fields are
+ * null when the URL is HTTP-only or when no probe has run yet for this
+ * host. `daysUntilExpiry` is computed at probe time, so a long-lived
+ * project file might surface a stale negative value — re-crawl to refresh.
+ */
+export interface UrlCertInfoResult {
+  host: string | null;
+  validFrom: string | null;
+  validTo: string | null;
+  daysUntilExpiry: number | null;
+  issuer: string | null;
+  subject: string | null;
+  signatureAlgorithm: string | null;
+  protocol: string | null;
+  /** 200 = handshake OK + cert read, 0 = error/timeout, -1 = no probe yet. */
+  probeStatus: number;
+  probeError: string | null;
+  probedAt: string | null;
+}
+
+/**
+ * One image reference on a single page. Combines the canonical entry from
+ * the `images` table with the per-page alt text recorded in `image_usages`.
+ * The Detail Panel renders these alongside missing-alt warnings.
+ */
+export interface UrlPageImageRow {
+  src: string;
+  alt: string | null;
+  width: number | null;
+  height: number | null;
+  isInternal: boolean;
+  /** HEAD-probe Content-Length in bytes; null when not yet probed / no header. */
+  byteSize: number | null;
+}
+
+export interface UrlPageImagesResult {
+  rows: UrlPageImageRow[];
+}
+
 export interface UrlContextMenuInput {
   url: string;
   urlId: number;
@@ -298,6 +357,13 @@ export interface ConfirmClearResult {
 export interface RobotsTestInput {
   url: string;
   userAgent: string;
+  /**
+   * Optional custom robots.txt body to test against, instead of fetching
+   * the live robots.txt from the URL's origin. Useful for testing a
+   * draft policy before deploying it. When set, no network request is
+   * made and `result.robotsUrl` is the literal string `"<custom>"`.
+   */
+  customRobots?: string;
 }
 
 export interface PagesPerDirectoryInput {
@@ -355,6 +421,58 @@ export interface ExternalDomainHealthRow {
   /** Average response time across all probes for this domain (ms). */
   avgResponseTimeMs: number | null;
   errorRatePercent: number;
+}
+
+/**
+ * One row in the Link Position report. Aggregates internal links by the
+ * page region they live in (navigation / header / content / sidebar /
+ * footer / aside) so the user can see how their internal-link weight is
+ * distributed.
+ */
+export interface LinkPositionRow {
+  position: string;
+  count: number;
+}
+
+/**
+ * One row in the Image Weight per Page report. `imageBytes` is the sum
+ * of HEAD-probed `Content-Length` for every internal image referenced
+ * from this page. Lets the user spot the image-heaviest pages without
+ * having to inspect each detail panel one by one.
+ */
+export interface ImageWeightRow {
+  url: string;
+  imageBytes: number;
+  imageCount: number;
+}
+
+/** Generic bucketed histogram row used by Inlinks / Word-Count reports. */
+export interface BucketHistogramRow {
+  label: string;
+  count: number;
+}
+
+/** One row in the Server Stack report — `Server` response-header rollup. */
+export interface ServerHeaderRow {
+  server: string;
+  count: number;
+}
+
+/**
+ * One row in the Analytics Coverage report. Counts how many indexable HTML
+ * pages declare a given tracker — useful to spot incomplete rollouts
+ * ("GA4 only on 80% of pages") or duplicated stacks ("GTM and gtag both
+ * loaded everywhere").
+ */
+export interface AnalyticsCoverageRow {
+  /** Tracker product name, e.g. `"Google Analytics 4"`. */
+  name: string;
+  /** Number of pages on which this tracker was detected. */
+  pageCount: number;
+  /** Number of distinct IDs seen for this tracker (e.g. multiple GA4 properties). */
+  distinctIds: number;
+  /** Up to 5 sample IDs for quick eyeballing of the rollout. */
+  sampleIds: string[];
 }
 
 export interface SettingsExportInput {
@@ -441,6 +559,8 @@ export interface FreeCrawlApi {
   urlsQuery(input: UrlsQueryInput): Promise<UrlsQueryResult>;
   urlDetailGet(input: UrlDetailInput): Promise<UrlDetail | null>;
   urlSourceGet(input: UrlSourceInput): Promise<UrlSourceResult>;
+  urlPageImages(input: UrlPageImagesInput): Promise<UrlPageImagesResult>;
+  urlCertInfo(input: UrlCertInfoInput): Promise<UrlCertInfoResult>;
   urlContextMenu(input: UrlContextMenuInput): Promise<void>;
   urlBulkContextMenu(input: UrlBulkContextMenuInput): Promise<void>;
   imagesQuery(input: ImagesQueryInput): Promise<ImagesQueryResult>;
@@ -472,6 +592,12 @@ export interface FreeCrawlApi {
   reportsResponseTimeHistogram(): Promise<ResponseTimeHistogramRow[]>;
   reportsTopUrls(input: TopUrlsInput): Promise<TopUrlsRow[]>;
   reportsExternalDomainHealth(limit?: number): Promise<ExternalDomainHealthRow[]>;
+  reportsAnalyticsCoverage(): Promise<AnalyticsCoverageRow[]>;
+  reportsLinkPositions(): Promise<LinkPositionRow[]>;
+  reportsImageWeightPerPage(limit?: number): Promise<ImageWeightRow[]>;
+  reportsInlinksHistogram(): Promise<BucketHistogramRow[]>;
+  reportsWordCountHistogram(): Promise<BucketHistogramRow[]>;
+  reportsServerHeaders(): Promise<ServerHeaderRow[]>;
   prefsExportSettings(input: SettingsExportInput): Promise<SettingsExportResult>;
   prefsImportSettings(): Promise<SettingsImportResult>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;

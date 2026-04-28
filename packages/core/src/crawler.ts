@@ -23,6 +23,7 @@ import { parseHtml, estimatePixelWidth } from './html-parser.js';
 import { analyseCookies, extractSetCookies } from './cookies.js';
 import { loadRobots, type RobotsChecker } from './robots.js';
 import {
+  collectNetworkDiagnostics,
   defaultRequestHeaders,
   detectHttpProtocol,
   formatFetchError,
@@ -34,7 +35,9 @@ export interface CrawlerEvents {
   progress: (p: CrawlProgress) => void;
   done: (summary: CrawlSummary) => void;
   error: (message: string) => void;
+  warn: (message: string) => void;
   info: (message: string) => void;
+  debug: (message: string) => void;
 }
 
 interface QueueItem {
@@ -186,16 +189,41 @@ export class Crawler extends EventEmitter {
     // probing HTTPS then HTTP on unreachable hosts).
     this.emitProgress();
 
+    // Environment diagnostics — proxy, CA bundle, TLS, runtime versions.
+    // Logged once per crawl so support can tell at a glance whether a
+    // user is behind a corporate proxy / antivirus HTTPS inspection / has
+    // disabled TLS validation, all of which affect what crawls can reach.
+    this.emitEnvDiagnostics();
+
     if (this.config.mode === 'list') {
       await this.startListMode();
       return;
     }
 
-    const start = await resolveStartUrl(this.config.startUrl, this.config.userAgent);
+    const startProbeT0 = Date.now();
+    const start = await resolveStartUrl(this.config.startUrl, this.config.userAgent, 5000, (info) => {
+      this.emit(
+        'debug',
+        `resolveStartUrl: ${info.method} ${info.url} -> ${info.outcome}${
+          info.detail ? ` (${info.detail})` : ''
+        }`,
+      );
+    });
     if (!start) {
-      this.emit('error', `Invalid start URL: ${this.config.startUrl}`);
+      this.emit(
+        'error',
+        `Invalid start URL: ${this.config.startUrl} — neither https:// nor http:// responded within 5s. Check that the host is reachable from this machine (try opening it in a browser).`,
+      );
+      this.running = false;
+      this.emitProgress();
+      // Without this the UI hangs in "Running" forever after a bad start URL.
+      if (!this.stopped) this.emit('done', this.db.getSummary());
       return;
     }
+    this.emit(
+      'info',
+      `Start URL resolved: ${this.config.startUrl} -> ${start} (in ${Date.now() - startProbeT0} ms)`,
+    );
     // Persist the resolved URL back into the active config so scope checks,
     // progress events, and link classification all see the same canonical value.
     this.config = { ...this.config, startUrl: start };
@@ -254,6 +282,8 @@ export class Crawler extends EventEmitter {
     this.db.recomputeRedirectChains();
     this.db.recomputeHreflangAnalysis();
     this.runDuplicateClustering();
+    await this.runImageSizeProbes();
+    await this.runTlsCertProbes();
     this.running = false;
     this.stopMemoryMonitor();
     // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
@@ -333,6 +363,196 @@ export class Crawler extends EventEmitter {
   }
 
   /**
+   * Post-crawl HEAD probe over internal images so the DB knows their byte
+   * size for the "Large Image" issue. HEAD-only — no body download — so
+   * cost is one round-trip per image. Concurrency is bounded by the same
+   * setting as the main crawl; failures are silent (probe_status stays
+   * null and the issue check skips them rather than false-positives).
+   */
+  private async runImageSizeProbes(): Promise<void> {
+    if (!this.config.probeImageSizes) return;
+    if (this.stopped) return;
+    let unprobed: { id: number; src: string }[] = [];
+    try {
+      unprobed = this.db.unprobedInternalImages(20_000);
+    } catch (err) {
+      this.emit(
+        'info',
+        `image-size probe skipped (DB query failed): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    if (unprobed.length === 0) return;
+    this.emit('info', `Probing ${unprobed.length} image size(s)…`);
+
+    const concurrency = Math.max(1, Math.min(this.config.maxConcurrency, 20));
+    let cursor = 0;
+    let probed = 0;
+    let large = 0;
+    const threshold = Math.max(1, this.config.largeImageBytes);
+    const userAgent = this.config.userAgent;
+
+    const worker = async (): Promise<void> => {
+      while (!this.stopped) {
+        const idx = cursor++;
+        if (idx >= unprobed.length) return;
+        const entry = unprobed[idx];
+        if (!entry) return;
+        const controller = new AbortController();
+        const timeout = setTimeout(
+          () => controller.abort(),
+          Math.max(2_000, this.config.requestTimeoutMs / 2),
+        );
+        try {
+          const res = await undiciFetch(entry.src, {
+            method: 'HEAD',
+            headers: defaultRequestHeaders(
+              userAgent,
+              this.config.acceptLanguage,
+              this.config.customHeaders,
+              this.config.auth,
+            ),
+            redirect: 'follow',
+            signal: controller.signal,
+          });
+          const lenStr = res.headers.get('content-length');
+          const len = lenStr !== null ? Number.parseInt(lenStr, 10) : null;
+          this.db.setImageSize(
+            entry.id,
+            Number.isFinite(len) && len !== null && len >= 0 ? len : null,
+            res.status,
+          );
+          if (Number.isFinite(len) && len !== null && len > threshold) {
+            large++;
+          }
+          probed++;
+          // Drain body — HEAD has none, but undici treats 1xx/204 weirdly.
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* ignore */
+          }
+        } catch {
+          // Mark with status 0 so we don't re-probe on the next crawl.
+          try {
+            this.db.setImageSize(entry.id, null, 0);
+          } catch {
+            /* ignore */
+          }
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+    };
+
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < concurrency; i++) workers.push(worker());
+    await Promise.all(workers);
+    this.emit(
+      'info',
+      `Image probe complete: ${probed} sized, ${large} > ${(threshold / 1024).toFixed(0)} KB`,
+    );
+  }
+
+  /**
+   * Post-crawl TLS handshake probe. Walks unique HTTPS hosts crawled,
+   * opens one TLS connection per host, persists the peer cert details
+   * for the SSL audit issues. Concurrency is small (4) because most
+   * crawls have at most a few unique hosts and the cost is dominated by
+   * the handshake round-trip, not throughput.
+   */
+  private async runTlsCertProbes(): Promise<void> {
+    if (!this.config.probeTlsCerts) return;
+    if (this.stopped) return;
+    let hosts: string[] = [];
+    try {
+      hosts = this.db.unprobedHttpsHosts(2_000);
+    } catch (err) {
+      this.emit(
+        'info',
+        `TLS probe skipped (DB query failed): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    if (hosts.length === 0) return;
+    this.emit('info', `Probing TLS certificates for ${hosts.length} host(s)…`);
+
+    // Lazy-import the TLS module so CLI / non-HTTPS workflows don't pay
+    // the load cost.
+    const { probeTlsCert } = await import('./tls-probe.js');
+
+    const concurrency = 4;
+    let cursor = 0;
+    let probed = 0;
+    let expired = 0;
+    let expiringSoon = 0;
+
+    const worker = async (): Promise<void> => {
+      while (!this.stopped) {
+        const idx = cursor++;
+        if (idx >= hosts.length) return;
+        const host = hosts[idx];
+        if (!host) return;
+        try {
+          const info = await probeTlsCert(
+            host,
+            443,
+            Math.max(2_000, this.config.requestTimeoutMs / 2),
+          );
+          this.db.setHostCert({
+            host,
+            port: 443,
+            validFrom: info.validFrom,
+            validTo: info.validTo,
+            daysUntilExpiry: info.daysUntilExpiry,
+            issuer: info.issuer,
+            subject: info.subject,
+            signatureAlgorithm: info.signatureAlgorithm,
+            protocol: info.protocol,
+            probeStatus: info.error ? 0 : 200,
+            probeError: info.error,
+          });
+          if (info.daysUntilExpiry !== null) {
+            if (info.daysUntilExpiry < 0) expired++;
+            else if (info.daysUntilExpiry <= 30) expiringSoon++;
+          }
+          probed++;
+        } catch (err) {
+          try {
+            this.db.setHostCert({
+              host,
+              port: 443,
+              validFrom: null,
+              validTo: null,
+              daysUntilExpiry: null,
+              issuer: null,
+              subject: null,
+              signatureAlgorithm: null,
+              protocol: null,
+              probeStatus: 0,
+              probeError: err instanceof Error ? err.message : String(err),
+            });
+          } catch {
+            /* ignore — DB failure is non-fatal for the probe pass */
+          }
+        }
+      }
+    };
+
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < concurrency; i++) workers.push(worker());
+    await Promise.all(workers);
+    this.emit(
+      'info',
+      `TLS probe complete: ${probed} hosts, ${expired} expired, ${expiringSoon} expiring ≤30d`,
+    );
+  }
+
+  /**
    * List-mode entry point — fetch each URL in `urlList` exactly once, no
    * link follow, no robots.txt, no sitemap discovery. The start URL field
    * is repurposed to a list-fingerprint so the resume / reset decision
@@ -400,6 +620,8 @@ export class Crawler extends EventEmitter {
     this.db.recomputeRedirectChains();
     this.db.recomputeHreflangAnalysis();
     this.runDuplicateClustering();
+    await this.runImageSizeProbes();
+    await this.runTlsCertProbes();
     this.running = false;
     this.stopMemoryMonitor();
     this.seen.clear();
@@ -610,6 +832,49 @@ export class Crawler extends EventEmitter {
   }
 
   /**
+   * One-shot environment diagnostics emitted as soon as a crawl starts.
+   * Surfaces the proxy / TLS / runtime context to the log panel so a user
+   * (or support) can tell at a glance whether a packaged-app crawl is
+   * being intercepted by a corporate proxy or antivirus HTTPS inspection.
+   * Each line is its own log entry so filtering by source = "crawler"
+   * picks them up alongside the rest of the crawl noise.
+   */
+  private emitEnvDiagnostics(): void {
+    const diag = collectNetworkDiagnostics({ proxyOverride: this.config.proxyUrl });
+    this.emit(
+      'info',
+      `Runtime: Node ${process.version} on ${process.platform}/${process.arch}` +
+        (diag.electronVersion ? ` (Electron ${diag.electronVersion})` : '') +
+        (diag.undiciVersion ? `, undici ${diag.undiciVersion}` : ''),
+    );
+    if (diag.proxyUrl) {
+      this.emit(
+        'warn',
+        `HTTP proxy active (${diag.proxySource}): ${diag.proxyUrl}` +
+          (diag.noProxy ? ` — bypass list: ${diag.noProxy}` : ''),
+      );
+    } else {
+      this.emit('info', 'No HTTP proxy configured (direct connections to origins).');
+    }
+    if (diag.caBundleSet) {
+      this.emit(
+        'info',
+        'NODE_EXTRA_CA_CERTS is set — using a custom CA bundle (corporate root or self-signed).',
+      );
+    }
+    if (!diag.tlsRejectUnauthorized) {
+      this.emit(
+        'warn',
+        'NODE_TLS_REJECT_UNAUTHORIZED=0 — TLS certificate validation is DISABLED. Crawls will trust any cert; only set this for testing.',
+      );
+    }
+    this.emit(
+      'debug',
+      `Crawl config: timeoutMs=${this.config.requestTimeoutMs}, retries=${this.config.retryAttempts}, ua="${this.config.userAgent}", followRedirects=${this.config.followRedirects}, respectRobots=${this.config.respectRobotsTxt}, sitemaps=${this.config.discoverSitemaps}`,
+    );
+  }
+
+  /**
    * Apply the configured OS scheduling priority to the current process.
    * `os.setPriority` throws on unsupported platforms / EPERM, so failure
    * is logged-as-info, not fatal.
@@ -768,6 +1033,34 @@ export class Crawler extends EventEmitter {
 
       const statusCode = res.status;
       const contentType = res.headers.get('content-type');
+      // Surface 4xx / 5xx in the log panel so users can see WAF / bot
+      // responses (403 from Cloudflare, 429 rate limits, 503 outages, …).
+      // Seed-URL non-2xx is escalated to error because the crawl will
+      // produce zero pages without it.
+      if (statusCode >= 400) {
+        const isSeed = item.depth === 0 && item.url === this.config.startUrl;
+        const serverHint = res.headers.get('server');
+        const cfRay = res.headers.get('cf-ray');
+        const wafHint = cfRay
+          ? ` [Cloudflare ${cfRay}]`
+          : serverHint
+            ? ` [server: ${serverHint}]`
+            : '';
+        this.emit(
+          isSeed ? 'error' : 'warn',
+          `HTTP ${statusCode} on ${item.url}${wafHint} — likely ${
+            statusCode === 403
+              ? 'bot/WAF block (try a browser-like User-Agent in Settings)'
+              : statusCode === 429
+                ? 'rate limited (lower max RPS / concurrency in Settings)'
+                : statusCode === 451
+                  ? 'legal block / geofence'
+                  : statusCode >= 500
+                    ? 'server error'
+                    : 'client error'
+          }`,
+        );
+      }
       const contentLengthHeader = res.headers.get('content-length');
       const xRobotsTag = res.headers.get('x-robots-tag');
       // Security / performance headers — captured per URL for the Security
@@ -779,6 +1072,9 @@ export class Crawler extends EventEmitter {
       const csp = res.headers.get('content-security-policy');
       const referrerPolicy = res.headers.get('referrer-policy');
       const permissionsPolicy = res.headers.get('permissions-policy');
+      // Stack auditing — captured raw, no parsing. Sites typically return
+      // `nginx/1.25.0`, `cloudflare`, `Apache/2.4.41`, `Microsoft-IIS/10`.
+      const serverHeader = res.headers.get('server');
       // `Link: <url>; rel="canonical"` HTTP response header — Google honours
       // this in addition to (and equal weight to) the HTML <link rel=canonical>.
       // PDFs and other non-HTML resources can only express canonicals here.
@@ -861,6 +1157,7 @@ export class Crawler extends EventEmitter {
           httpProtocol,
           queryStringLength,
           keepAlive,
+          serverHeader,
         });
         if (redirectUrlId) this.db.setUrlHeaders(redirectUrlId, allHeaders);
         this.crawled++;
@@ -929,6 +1226,7 @@ export class Crawler extends EventEmitter {
           httpProtocol,
           queryStringLength,
           keepAlive,
+          serverHeader,
         });
         if (nonHtmlUrlId) this.db.setUrlHeaders(nonHtmlUrlId, allHeaders);
         this.crawled++;
@@ -939,6 +1237,7 @@ export class Crawler extends EventEmitter {
       const bodyLength = parseIntSafe(contentLengthHeader) ?? Buffer.byteLength(body, 'utf8');
       const parsed = parseHtml(body, item.url, {
         includeSubdomains: this.config.scope === 'all-subdomains',
+        cdnHosts: this.config.cdnHosts,
         customSearchTerms: this.config.customSearchTerms,
         urlRewrites: this.urlRewrites,
         customExtractionRules: this.config.customExtractionRules,
@@ -1079,6 +1378,16 @@ export class Crawler extends EventEmitter {
         queryStringLength,
         keepAlive,
         renderBlockingCount: parsed.renderBlockingCount,
+        analyticsTrackers:
+          parsed.analyticsTrackers.length > 0
+            ? JSON.stringify(parsed.analyticsTrackers)
+            : null,
+        formInputCount: parsed.formInputCount,
+        formInputUnlabeled: parsed.formInputUnlabeledCount,
+        imagesLazy: parsed.imagesLazy,
+        headings:
+          parsed.headings.length > 0 ? JSON.stringify(parsed.headings) : null,
+        serverHeader,
       });
       if (urlId) this.db.setUrlHeaders(urlId, allHeaders);
       // Body snapshot — drives the View Source detail tab. Only HTML
@@ -1126,6 +1435,15 @@ export class Crawler extends EventEmitter {
     } catch (err) {
       this.failed++;
       const detail = formatFetchError(err);
+      const elapsed = Date.now() - t0;
+      // Distinguish the seed URL (depth 0 means the user's start URL or a
+      // top-level list entry) — its failure is much higher-signal because
+      // the crawl can't make any progress without it.
+      const isSeed = item.depth === 0 && item.url === this.config.startUrl;
+      this.emit(
+        isSeed ? 'error' : 'warn',
+        `Fetch failed [${elapsed}ms] ${item.url}: ${detail}`,
+      );
       this.db.upsertUrl({
         url: item.url,
         contentKind: 'html',
@@ -1133,7 +1451,7 @@ export class Crawler extends EventEmitter {
         statusText: detail,
         indexability: 'non-indexable:client-error',
         indexabilityReason: `Network error: ${detail}`,
-        responseTimeMs: Date.now() - t0,
+        responseTimeMs: elapsed,
         depth: item.depth,
       });
     } finally {
@@ -1195,12 +1513,33 @@ export class Crawler extends EventEmitter {
           /* ignore */
         }
         lastError = new Error(`HTTP ${res.status}`);
+        this.emit(
+          'warn',
+          `Retry ${attempt + 1}/${maxAttempts - 1} for ${url}: HTTP ${res.status} after ${ttfbMs}ms`,
+        );
       } catch (err) {
         lastError = err;
+        const elapsedMs = Date.now() - (this.startedAt > 0 ? this.startedAt : Date.now());
         // Don't keep retrying after stop() / timeout abort — the controller
         // has already fired, so further attempts will fail immediately.
-        if (signal.aborted) throw err;
-        if (attempt === maxAttempts - 1) throw err;
+        if (signal.aborted) {
+          this.emit(
+            'debug',
+            `Fetch aborted ${url}: ${formatFetchError(err)} (signal already triggered, no further retries)`,
+          );
+          throw err;
+        }
+        if (attempt === maxAttempts - 1) {
+          this.emit(
+            'debug',
+            `Final attempt ${attempt + 1}/${maxAttempts} failed for ${url}: ${formatFetchError(err)}`,
+          );
+          throw err;
+        }
+        this.emit(
+          'warn',
+          `Retry ${attempt + 1}/${maxAttempts - 1} for ${url}: ${formatFetchError(err)} (elapsed ${elapsedMs}ms)`,
+        );
       }
       const delay = baseDelay * 2 ** attempt;
       await sleep(delay);

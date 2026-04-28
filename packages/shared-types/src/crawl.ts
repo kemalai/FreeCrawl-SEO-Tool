@@ -123,7 +123,33 @@ export type UrlCategory =
   | 'issues:http2-not-supported'
   | 'issues:render-blocking'
   | 'issues:keepalive-disabled'
-  | 'issues:title-placeholder';
+  | 'issues:title-placeholder'
+  | 'issues:analytics-missing'
+  | 'issues:analytics-multiple-ga4'
+  | 'issues:analytics-ua-legacy'
+  | 'issues:analytics-pixel-without-policy'
+  | 'issues:image-too-large'
+  | 'issues:ssl-cert-expired'
+  | 'issues:ssl-cert-expiring-soon'
+  | 'issues:ssl-protocol-old'
+  | 'issues:ssl-signature-weak'
+  | 'issues:hsts-no-preload'
+  | 'issues:hsts-max-age-short'
+  | 'issues:hsts-no-includesubdomains'
+  | 'issues:anchor-text-too-long'
+  | 'issues:anchor-text-generic'
+  | 'issues:form-input-unlabeled'
+  | 'issues:images-no-lazy-loading'
+  | 'issues:image-broken-src'
+  | 'issues:target-blank-no-noopener'
+  | 'issues:page-empty'
+  | 'issues:og-image-not-absolute'
+  | 'issues:twitter-image-not-absolute'
+  | 'issues:canonical-not-absolute'
+  | 'issues:description-equals-title'
+  | 'issues:title-single-word'
+  | 'issues:external-links-too-many'
+  | 'issues:outlinks-zero'
 
 export type Indexability =
   | 'indexable'
@@ -180,6 +206,25 @@ export interface CrawlUrlRow {
   imagesMissingAlt: number;
   /** Number of `<img>` tags with `alt=""` (decorative, distinct from missing alt). */
   imagesEmptyAlt: number;
+  /** Number of `<img>` tags with `loading="lazy"`. */
+  imagesLazy: number;
+  /** Total user-facing form inputs (input/textarea/select, excluding hidden/submit/button/image/reset). */
+  formInputCount: number;
+  /** Form inputs without label / aria-label / title (WCAG 1.3.1, 4.1.2 violation). */
+  formInputUnlabeled: number;
+  /**
+   * JSON-stringified `Array<{ level: 1..6, text: string }>` of every
+   * heading on the page in source order, or null when the page has no
+   * headings. Capped at 200 entries server-side.
+   */
+  headings: string | null;
+  /**
+   * Raw `Server` response header (e.g. `"nginx/1.25.0"`, `"cloudflare"`,
+   * `"Apache/2.4.41 (Ubuntu)"`). Useful for stack auditing — surfaces
+   * what server software the site is running and its version. Null when
+   * the server didn't send a `Server` header.
+   */
+  serverHeader: string | null;
   redirectTarget: string | null;
   lang: string | null;
   viewport: string | null;
@@ -213,6 +258,12 @@ export interface CrawlUrlRow {
   renderBlockingCount: number;
   /** Whether the response declared `Connection: keep-alive` / HTTP/1.1 implicit keep-alive. */
   keepAlive: boolean;
+  /**
+   * JSON-stringified array of detected analytics / marketing trackers, e.g.
+   * `[{"name":"Google Analytics 4","id":"G-ABC123"}]`. Null when no
+   * trackers were detected. Schema: `Array<{ name: string; id: string | null }>`.
+   */
+  analyticsTrackers: string | null;
   /** Estimated SERP pixel width of `title` (Arial 18 px). 0 when no title. */
   titlePixelWidth: number;
   /** Estimated SERP pixel width of `metaDescription` (Arial 13 px-equiv). */
@@ -510,6 +561,36 @@ export interface CrawlConfig {
    * 50 MB page bloat the DB. 0 disables truncation (not recommended).
    */
   bodySnapshotMaxBytes: number;
+  /**
+   * After the HTML crawl finishes, run a HEAD probe against every
+   * internal image referenced from a crawled page so the DB picks up
+   * `Content-Length` for the "Large Image" issue check. Only HEAD —
+   * no body download — so cost is minimal even for image-heavy sites.
+   * Default `true`. Disable to skip image weighing entirely.
+   */
+  probeImageSizes: boolean;
+  /**
+   * Image-size warning threshold (bytes). Trips the "Large Image" issue
+   * when an internal image's `Content-Length` exceeds this. Default
+   * 102 400 (100 KB) — Google's PageSpeed audit threshold.
+   */
+  largeImageBytes: number;
+  /**
+   * After the HTML crawl finishes, open one TLS handshake per unique
+   * HTTPS host so the DB picks up cert expiry / issuer / signature
+   * algorithm / protocol for the SSL audit issues. Default `true`. One
+   * connect per host — typically a handful of probes for a site crawl.
+   */
+  probeTlsCerts: boolean;
+  /**
+   * Hostnames (lowercase, no scheme/port) that should be treated as
+   * "same host" for scope purposes — used to keep CDN-served subdomains
+   * (`cdn.example.com`, `static.example.com`, custom Cloudflare /
+   * Fastly hostnames) within the internal crawl set rather than being
+   * counted as external. Wildcards via leading `*.` are supported, e.g.
+   * `*.cloudfront.net`.
+   */
+  cdnHosts: string[];
 }
 
 export interface HttpAuth {
@@ -672,6 +753,58 @@ export interface OverviewCounts {
     renderBlocking: number;
     keepaliveDisabled: number;
     titlePlaceholder: number;
+    /** Indexable HTML pages with no detected analytics tracker at all. */
+    analyticsMissing: number;
+    /** Pages with more than one GA4 measurement ID (configuration error). */
+    analyticsMultipleGa4: number;
+    /** Pages still loading legacy Universal Analytics (UA-XXXXX-Y). */
+    analyticsUaLegacy: number;
+    /** Pages running a tracking pixel (FB / TikTok / Pinterest / LinkedIn) without a Permissions-Policy. */
+    analyticsPixelWithoutPolicy: number;
+    /** Pages referencing at least one internal image whose `Content-Length` exceeds the configured large-image threshold. */
+    imageTooLarge: number;
+    /** HTTPS pages whose host's certificate is already past `valid_to`. */
+    sslCertExpired: number;
+    /** HTTPS pages whose host's certificate expires within the next 30 days. */
+    sslCertExpiringSoon: number;
+    /** HTTPS pages negotiated on a deprecated TLS version (TLSv1.0 / TLSv1.1). */
+    sslProtocolOld: number;
+    /** HTTPS pages whose certificate uses a deprecated signature algorithm (SHA1 / MD5). */
+    sslSignatureWeak: number;
+    /** HTTPS pages whose HSTS header is missing the `preload` directive. */
+    hstsNoPreload: number;
+    /** HTTPS pages whose HSTS `max-age` is below the 1-year preload threshold (31536000). */
+    hstsMaxAgeShort: number;
+    /** HTTPS pages whose HSTS header lacks `includeSubDomains`. */
+    hstsNoIncludeSubdomains: number;
+    /** Pages with at least one outgoing link whose anchor text exceeds 100 chars. */
+    anchorTextTooLong: number;
+    /** Pages with at least one outgoing link whose anchor is a generic phrase ("click here", "read more", …). */
+    anchorTextGeneric: number;
+    /** Pages with at least one form input that has no associated `<label>` / aria-label / title. */
+    formInputUnlabeled: number;
+    /** Pages with ≥5 images but lazy-loading adoption below 50%. */
+    imagesNoLazyLoading: number;
+    /** Pages referencing at least one image whose HEAD probe returned a 4xx/5xx status. */
+    imageBrokenSrc: number;
+    /** Pages with at least one `<a target="_blank">` without `rel="noopener"` (reverse-tabnabbing risk). */
+    targetBlankNoNoopener: number;
+    /** 2xx HTML pages whose body has fewer than 30 words (near-empty / placeholder). */
+    pageEmpty: number;
+    /** Pages whose `og:image` is a relative URL — Facebook / LinkedIn require absolute URLs. */
+    ogImageNotAbsolute: number;
+    /** Pages whose `twitter:image` is a relative URL — Twitter requires absolute URLs. */
+    twitterImageNotAbsolute: number;
+    /** Pages whose `<link rel="canonical">` points to a relative URL — Google recommends absolute. */
+    canonicalNotAbsolute: number;
+    /** Pages whose meta description text matches the title verbatim (lazy SEO copy-paste). */
+    descriptionEqualsTitle: number;
+    /** Pages whose title is a single token (likely too generic, no SERP CTR). */
+    titleSingleWord: number;
+    /** Pages with > 100 outgoing external links (link-farm / spam signal). */
+    externalLinksTooMany: number;
+    /** Indexable HTML pages with zero outlinks (link dead-end / orphan leaf). */
+    outlinksZero: number;
   };
 }
 
@@ -906,4 +1039,8 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   maxFolderDepth: 0,
   storeBodySnapshots: true,
   bodySnapshotMaxBytes: 1_048_576,
+  probeImageSizes: true,
+  largeImageBytes: 102_400,
+  probeTlsCerts: true,
+  cdnHosts: [],
 };

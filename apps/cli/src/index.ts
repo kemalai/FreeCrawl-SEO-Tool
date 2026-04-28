@@ -37,10 +37,15 @@ Options:
   --include <regex>   Only crawl URLs matching this regex; repeatable
   --exclude <regex>   Skip URLs matching this regex; repeatable
   --list <file>       List-mode crawl: fetch every URL in <file> (one per line), no link follow
+  --config <file>     Load CrawlConfig from a JSON file (matches Settings → Export Settings format).
+                        Per-flag overrides on the command line still win — useful for CI
+                        ("scheduled config + per-run --max").
   --db <file>         SQLite project file (default: ./crawl.seoproject)
   --out <file>        Export results after crawl. Format auto-detected by extension:
                         *.json → full JSON dump (every captured field)
                         any other → CSV (subset of common columns)
+  --json              Print a machine-readable JSON summary to stdout (instead of human progress).
+                        Useful for CI/CD pipelines.
   -h, --help          Show this help
 `);
 }
@@ -60,8 +65,10 @@ async function main(): Promise<void> {
       include: { type: 'string', multiple: true },
       exclude: { type: 'string', multiple: true },
       list: { type: 'string' },
+      config: { type: 'string' },
       db: { type: 'string' },
       out: { type: 'string' },
+      json: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -135,8 +142,31 @@ async function main(): Promise<void> {
   const dbPath = resolve(values.db ?? 'crawl.seoproject');
   const db = new ProjectDb(dbPath);
 
+  // Layered config: defaults → file (if `--config`) → command-line flags.
+  // The file format matches the Settings → Export Settings envelope
+  // (`{format, version, exportedAt, config}`); a bare `CrawlConfig`
+  // fragment is also accepted so users can hand-author a JSON file.
+  let fileConfig: Record<string, unknown> = {};
+  if (values.config) {
+    try {
+      const raw = readFileSync(resolve(values.config), 'utf8');
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (parsed && typeof parsed === 'object' && 'config' in parsed) {
+        fileConfig = (parsed['config'] as Record<string, unknown>) ?? {};
+      } else {
+        fileConfig = parsed;
+      }
+    } catch (err) {
+      console.error(
+        `Cannot read --config file ${values.config}: ${(err as Error).message}`,
+      );
+      process.exit(2);
+    }
+  }
+
   const config = {
     ...DEFAULT_CRAWL_CONFIG,
+    ...fileConfig,
     mode: listFile ? ('list' as const) : ('spider' as const),
     urlList: listUrls,
     startUrl,
@@ -153,37 +183,67 @@ async function main(): Promise<void> {
   };
 
   const crawler = new Crawler(config, db);
+  const jsonMode = Boolean(values.json);
 
-  crawler.on('progress', (p) => {
-    process.stdout.write(
-      `\r[${p.crawled}/${p.discovered}] pending=${p.pending} failed=${p.failed} @ ${p.urlsPerSecond.toFixed(1)} URL/s  avg=${p.avgResponseTimeMs}ms  t=${Math.round(p.elapsedMs / 1000)}s   `,
-    );
-  });
+  if (!jsonMode) {
+    crawler.on('progress', (p) => {
+      process.stdout.write(
+        `\r[${p.crawled}/${p.discovered}] pending=${p.pending} failed=${p.failed} @ ${p.urlsPerSecond.toFixed(1)} URL/s  avg=${p.avgResponseTimeMs}ms  t=${Math.round(p.elapsedMs / 1000)}s   `,
+      );
+    });
+  }
   crawler.on('error', (msg) => {
     process.stderr.write(`\n[error] ${msg}\n`);
   });
 
   await crawler.start();
-  process.stdout.write('\n');
+  if (!jsonMode) process.stdout.write('\n');
 
   const summary = db.getSummary();
-  console.log(`Done. Total=${summary.total}  Bytes=${summary.totalBytes}  AvgResp=${summary.avgResponseTimeMs}ms`);
-
+  let exportedTo: string | null = null;
+  let rowsWritten = 0;
   if (values.out) {
     const outPath = resolve(values.out);
-    // Auto-detect format from extension. `.json` → full JSON dump, anything
-    // else → CSV (existing behaviour).
+    // Auto-detect format from extension. `.json` -> full JSON dump, anything
+    // else -> CSV (existing behaviour).
     const isJson = outPath.toLowerCase().endsWith('.json');
-    const { rowsWritten } = isJson
+    const r = isJson
       ? await exportUrlsToJson(db, outPath, { pretty: true })
       : await exportUrlsToCsv(db, outPath);
-    console.log(`Wrote ${rowsWritten} rows → ${outPath}`);
+    rowsWritten = r.rowsWritten;
+    exportedTo = outPath;
   }
 
+  const issues = db.getOverviewCounts().issues;
   const hasErrors = Object.keys(summary.byStatus).some((k) => {
     const n = Number.parseInt(k, 10);
     return Number.isFinite(n) && n >= 400;
   });
+
+  if (jsonMode) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          ok: !hasErrors,
+          startUrl,
+          dbPath,
+          summary,
+          issues,
+          exportedTo,
+          rowsExported: exportedTo ? rowsWritten : null,
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+  } else {
+    console.log(
+      `Done. Total=${summary.total}  Bytes=${summary.totalBytes}  AvgResp=${summary.avgResponseTimeMs}ms`,
+    );
+    if (exportedTo) {
+      console.log(`Wrote ${rowsWritten} rows -> ${exportedTo}`);
+    }
+  }
 
   db.close();
   process.exit(hasErrors ? 1 : 0);

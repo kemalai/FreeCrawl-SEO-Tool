@@ -17,6 +17,19 @@ export interface HreflangEntry {
   href: string;
 }
 
+/**
+ * One detected third-party analytics / marketing tracker on a page. The
+ * `name` is the canonical product name (e.g. `"Google Analytics 4"`). The
+ * `id` is the account/property identifier when we can recover it from the
+ * page (e.g. `G-ABC123` for GA4, `GTM-XYZ987` for GTM). Some trackers
+ * (Hotjar, Clarity) also expose IDs; others (LinkedIn Insight, TikTok
+ * Pixel) we only detect by their loader script and surface without an ID.
+ */
+export interface AnalyticsTracker {
+  name: string;
+  id: string | null;
+}
+
 export interface ParsedPage {
   title: string | null;
   /** Number of `<title>` elements in the document. >1 is a tag-duplication bug. */
@@ -96,6 +109,33 @@ export interface ParsedPage {
   /** Number of `<img>` with explicit `alt=""` (decorative — distinct from missing alt). */
   imagesEmptyAlt: number;
   /**
+   * Number of `<img>` declaring `loading="lazy"`. Combined with the total
+   * image count this lets the UI surface pages where lazy-loading isn't
+   * adopted on image-heavy pages — a common LCP / CLS optimisation lever.
+   */
+  imagesLazy: number;
+  /**
+   * Total user-facing form inputs on the page (`<input>`, `<textarea>`,
+   * `<select>`), excluding `type=hidden / submit / button / image / reset`
+   * because those don't accept user data and don't need labels.
+   */
+  formInputCount: number;
+  /**
+   * Form inputs that lack any accessible name source — no associated
+   * `<label for="…">`, no enclosing `<label>`, no `aria-label`,
+   * `aria-labelledby`, or `title` attribute. These fail WCAG 1.3.1 /
+   * 4.1.2 and ship as "unlabeled form field" in axe / Lighthouse audits.
+   */
+  formInputUnlabeledCount: number;
+  /**
+   * Document outline — every `<h1>`–`<h6>` in source order, capped at
+   * 200 entries so a 5000-heading CMS dump can't bloat the row. Drives
+   * the Detail Panel "Outline" sub-tab (skipped-level highlighting,
+   * heading count etc.). `text` is whitespace-collapsed and sliced to
+   * 200 chars per heading to keep the JSON payload small.
+   */
+  headings: { level: number; text: string }[];
+  /**
    * Number of `http://` subresources (img, script, stylesheet, iframe, …)
    * referenced from a HTTPS page — i.e. mixed-content findings. Always 0
    * when the page itself is served over plain HTTP.
@@ -138,6 +178,11 @@ export interface ParsedPage {
    * tokenised body — the basis for the "Exact Duplicate Content" issue.
    */
   contentHash: string | null;
+  /**
+   * Detected third-party analytics / marketing trackers on this page. Empty
+   * array when none. Populated by `detectAnalyticsTrackers`.
+   */
+  analyticsTrackers: AnalyticsTracker[];
   links: DiscoveredLink[];
   images: DiscoveredImage[];
   hasNoindex: boolean;
@@ -149,6 +194,8 @@ export function parseHtml(
   pageUrl: string,
   opts: {
     includeSubdomains?: boolean;
+    /** Hostnames (or `*.suffix.example`) treated as same-host for scope. */
+    cdnHosts?: readonly string[];
     customSearchTerms?: readonly string[];
     /** URL-rewrite policy applied to every link/image/canonical we resolve. */
     urlRewrites?: UrlRewriteOptions;
@@ -183,6 +230,21 @@ export function parseHtml(
   const h4Count = $('h4').length;
   const h5Count = $('h5').length;
   const h6Count = $('h6').length;
+
+  // Document outline — every heading in source order, capped at 200
+  // entries. Used by the Detail Panel "Outline" sub-tab to render the
+  // page's structural hierarchy and flag skipped levels (h1 → h3 with
+  // no h2 in between).
+  const headings: { level: number; text: string }[] = [];
+  $('h1, h2, h3, h4, h5, h6').each((_, el) => {
+    if (headings.length >= 200) return;
+    const tag = (el as { name?: string }).name?.toLowerCase() ?? '';
+    const level = parseInt(tag.slice(1), 10);
+    if (!Number.isFinite(level) || level < 1 || level > 6) return;
+    const raw = $(el).text().replace(/\s+/g, ' ').trim();
+    const text = decodeEntities(raw).slice(0, 200);
+    headings.push({ level, text });
+  });
   const canonicalEls = $('link[rel="canonical"]');
   const canonical = (canonicalEls.first().attr('href') ?? '').trim() || null;
   const canonicalCount = canonicalEls.length;
@@ -431,6 +493,10 @@ export function parseHtml(
   const text = $('body').text().replace(/\s+/g, ' ').trim();
   const wordCount = text.length > 0 ? text.split(' ').filter(Boolean).length : 0;
 
+  // Analytics / marketing trackers — fingerprinted by script src + inline
+  // JS substrings + meta tags. Cheaper to scan once over `$` than per-tracker.
+  const analyticsTrackers = detectAnalyticsTrackers($, html);
+
   // Content fingerprint for the post-crawl duplicate clustering pass.
   // Uses the same trimmed body text as wordCount so the work is reused.
   const { simhash, contentHash } = computeContentFingerprint(text);
@@ -518,7 +584,53 @@ export function parseHtml(
     });
   });
 
+  // Form accessibility — count user-facing inputs (not type=hidden /
+   // submit / button / image / reset, which don't accept user data) and
+   // flag those without an accessible name source. The label association
+   // can come from a wrapping `<label>`, a `<label for="…">` referencing
+   // the input's id, an `aria-label`, an `aria-labelledby`, or a `title`.
+  let formInputCount = 0;
+  let formInputUnlabeledCount = 0;
+  const labelForIds = new Set<string>();
+  $('label[for]').each((_, el) => {
+    const v = ($(el).attr('for') ?? '').trim();
+    if (v) labelForIds.add(v);
+  });
+  $('input, textarea, select').each((_, el) => {
+    const $el = $(el);
+    const tag = (el as { name?: string }).name?.toLowerCase() ?? '';
+    if (tag === 'input') {
+      const t = ($el.attr('type') ?? 'text').toLowerCase();
+      if (
+        t === 'hidden' ||
+        t === 'submit' ||
+        t === 'button' ||
+        t === 'image' ||
+        t === 'reset'
+      ) {
+        return;
+      }
+    }
+    formInputCount++;
+    const id = ($el.attr('id') ?? '').trim();
+    const ariaLabel = ($el.attr('aria-label') ?? '').trim();
+    const ariaLabelledBy = ($el.attr('aria-labelledby') ?? '').trim();
+    const titleAttr = ($el.attr('title') ?? '').trim();
+    const wrappingLabel = $el.parents('label').length > 0;
+    const labeledByFor = id !== '' && labelForIds.has(id);
+    if (
+      !wrappingLabel &&
+      !labeledByFor &&
+      !ariaLabel &&
+      !ariaLabelledBy &&
+      !titleAttr
+    ) {
+      formInputUnlabeledCount++;
+    }
+  });
+
   let imagesEmptyAlt = 0;
+  let imagesLazy = 0;
   const imageMap = new Map<string, DiscoveredImage>();
   $('img[src]').each((_, el) => {
     const rawSrc = $(el).attr('src');
@@ -546,6 +658,12 @@ export function parseHtml(
     const width = parseIntAttr($(el).attr('width'));
     const height = parseIntAttr($(el).attr('height'));
     const isInternal = isSameHost(pageUrl, normalized, opts);
+
+    // Lazy-loading adoption — `loading="lazy"` is the native browser
+    // attribute and the only signal that's reliable without rendering JS.
+    if (($(el).attr('loading') ?? '').trim().toLowerCase() === 'lazy') {
+      imagesLazy++;
+    }
 
     imageMap.set(normalized, {
       src: normalized,
@@ -602,6 +720,10 @@ export function parseHtml(
     feedUrl,
     emptyAnchorCount,
     imagesEmptyAlt,
+    imagesLazy,
+    formInputCount,
+    formInputUnlabeledCount,
+    headings,
     mixedContentCount,
     customSearchHits,
     metaRefresh,
@@ -610,11 +732,200 @@ export function parseHtml(
     extractionResults,
     simhash,
     contentHash,
+    analyticsTrackers,
     links: [...linkMap.values()],
     images: [...imageMap.values()],
     hasNoindex,
     hasNofollow,
   };
+}
+
+/**
+ * Fingerprint scan for ~15 popular analytics / marketing trackers. The
+ * detection mixes three signals so we still catch self-hosted / proxied
+ * loaders while avoiding scanning the entire HTML repeatedly:
+ *
+ *  1. `<script src=…>` host or path matches against a known loader URL.
+ *  2. Inline `<script>` body matches a init-snippet substring (e.g. `fbq(`).
+ *  3. Meta tag presence (e.g. `<meta name="google-site-verification">`).
+ *
+ * IDs are recovered when the script URL or inline snippet exposes them in
+ * a stable position; otherwise the tracker is reported with `id = null`.
+ * Each tracker appears at most once in the output, even when multiple
+ * loader scripts reference it.
+ */
+function detectAnalyticsTrackers(
+  $: cheerio.CheerioAPI,
+  rawHtml: string,
+): AnalyticsTracker[] {
+  const found = new Map<string, AnalyticsTracker>();
+  const add = (name: string, id: string | null = null): void => {
+    const existing = found.get(name);
+    // Keep the more specific (id-bearing) record if we see the same tracker twice.
+    if (!existing || (existing.id === null && id !== null)) {
+      found.set(name, { name, id });
+    }
+  };
+
+  const scriptSrcs: string[] = [];
+  $('script[src]').each((_, el) => {
+    const src = ($(el).attr('src') ?? '').trim();
+    if (src) scriptSrcs.push(src);
+  });
+  const inlineScripts: string[] = [];
+  $('script:not([src])').each((_, el) => {
+    const body = $(el).text();
+    if (body) inlineScripts.push(body);
+  });
+  const inlineBlob = inlineScripts.join('\n');
+
+  // Google Tag Manager — `GTM-XXXXX`. The container URL is the canonical
+  // signal; inline `dataLayer` push by itself is too broad to use.
+  for (const src of scriptSrcs) {
+    const m = src.match(/googletagmanager\.com\/gtm\.js\?id=(GTM-[A-Z0-9]+)/i);
+    if (m && m[1]) add('Google Tag Manager', m[1].toUpperCase());
+  }
+  const gtmInline = inlineBlob.match(/GTM-[A-Z0-9]{4,10}/);
+  if (gtmInline) add('Google Tag Manager', gtmInline[0].toUpperCase());
+
+  // GA4 — `G-XXXXXXX` measurement ID. Loader is `gtag/js?id=G-…`. Old
+  // Universal Analytics IDs (`UA-…`) still exist on legacy sites — surface
+  // them as a separate tracker since Google deprecated UA in July 2023.
+  for (const src of scriptSrcs) {
+    const m = src.match(/gtag\/js\?id=(G-[A-Z0-9]+)/i);
+    if (m && m[1]) add('Google Analytics 4', m[1].toUpperCase());
+  }
+  const ga4Inline = inlineBlob.match(/['"](G-[A-Z0-9]{6,})['"]/);
+  if (ga4Inline && ga4Inline[1]) add('Google Analytics 4', ga4Inline[1].toUpperCase());
+  const uaInline = inlineBlob.match(/UA-\d{4,10}-\d{1,4}/);
+  if (uaInline) add('Google Analytics (UA)', uaInline[0]);
+
+  // Facebook / Meta Pixel — inline `fbq('init', '<id>')`. Loader is
+  // `connect.facebook.net/.../fbevents.js`.
+  if (
+    scriptSrcs.some((s) => /connect\.facebook\.net\/.+\/fbevents\.js/i.test(s)) ||
+    /\bfbq\s*\(\s*['"]init['"]/.test(inlineBlob)
+  ) {
+    const m = inlineBlob.match(/fbq\s*\(\s*['"]init['"]\s*,\s*['"](\d{6,})['"]/);
+    add('Facebook Pixel', m && m[1] ? m[1] : null);
+  }
+
+  // Hotjar — `hjid:<id>` in inline init. Loader: `static.hotjar.com`.
+  if (
+    scriptSrcs.some((s) => /static\.hotjar\.com/i.test(s)) ||
+    /hjid\s*:\s*\d+/.test(inlineBlob)
+  ) {
+    const m = inlineBlob.match(/hjid\s*:\s*(\d+)/);
+    add('Hotjar', m && m[1] ? m[1] : null);
+  }
+
+  // Microsoft Clarity — loader `clarity.ms`. ID encoded in inline init.
+  if (
+    scriptSrcs.some((s) => /clarity\.ms\/tag\//i.test(s)) ||
+    /clarity\.ms\/tag\//.test(inlineBlob)
+  ) {
+    const m = inlineBlob.match(/clarity\.ms\/tag\/([a-z0-9]+)/i);
+    add('Microsoft Clarity', m && m[1] ? m[1] : null);
+  }
+
+  // Matomo (Piwik) — `_paq.push` is the canonical signal; loader at
+  // `matomo.js` / `piwik.js`. Self-hosted, so script src is per-site.
+  if (/_paq\s*=\s*window\._paq/.test(inlineBlob) || /_paq\.push/.test(inlineBlob)) {
+    const m = inlineBlob.match(/setSiteId['"]?\s*,\s*['"]?(\d+)['"]?/);
+    add('Matomo', m && m[1] ? m[1] : null);
+  }
+
+  // Adobe Analytics — loader at `omtrdc.net` (collection edge) or hosted
+  // `s_code.js`. ID isn't reliably recoverable from the page.
+  if (
+    scriptSrcs.some((s) => /omtrdc\.net|s_code\.js|adobedtm\.com/i.test(s))
+  ) {
+    add('Adobe Analytics', null);
+  }
+
+  // Mixpanel
+  if (
+    scriptSrcs.some((s) => /cdn\.mxpnl\.com\/libs\/mixpanel/i.test(s)) ||
+    /mixpanel\.init\(/.test(inlineBlob)
+  ) {
+    const m = inlineBlob.match(/mixpanel\.init\(\s*['"]([a-f0-9]{32})['"]/i);
+    add('Mixpanel', m && m[1] ? m[1] : null);
+  }
+
+  // Yandex Metrica — `mc.yandex.ru/metrika`. Counter ID is in the loader URL.
+  for (const src of scriptSrcs) {
+    const m = src.match(/mc\.yandex\.ru\/metrika\/tag\.js/i);
+    if (m) {
+      const idMatch = inlineBlob.match(/ym\(\s*(\d{4,12})/);
+      add('Yandex Metrica', idMatch && idMatch[1] ? idMatch[1] : null);
+    }
+  }
+
+  // LinkedIn Insight Tag
+  if (
+    scriptSrcs.some((s) => /snap\.licdn\.com\/li\.lms-analytics/i.test(s)) ||
+    /_linkedin_partner_id/.test(inlineBlob)
+  ) {
+    const m = inlineBlob.match(/_linkedin_partner_id\s*=\s*['"]?(\d+)/);
+    add('LinkedIn Insight Tag', m && m[1] ? m[1] : null);
+  }
+
+  // Pinterest Tag
+  if (
+    scriptSrcs.some((s) => /s\.pinimg\.com\/ct\/core\.js/i.test(s)) ||
+    /pintrk\(/.test(inlineBlob)
+  ) {
+    const m = inlineBlob.match(/pintrk\s*\(\s*['"]load['"]\s*,\s*['"](\d+)/);
+    add('Pinterest Tag', m && m[1] ? m[1] : null);
+  }
+
+  // TikTok Pixel
+  if (
+    scriptSrcs.some((s) => /analytics\.tiktok\.com\/i18n\/pixel/i.test(s)) ||
+    /ttq\.load/.test(inlineBlob)
+  ) {
+    const m = inlineBlob.match(/ttq\.load\(\s*['"]([A-Z0-9]{15,25})['"]/);
+    add('TikTok Pixel', m && m[1] ? m[1] : null);
+  }
+
+  // Segment
+  if (
+    scriptSrcs.some((s) => /cdn\.segment\.com\/analytics\.js/i.test(s)) ||
+    /analytics\.load\(/.test(inlineBlob)
+  ) {
+    add('Segment', null);
+  }
+
+  // Plausible (privacy-friendly analytics)
+  if (scriptSrcs.some((s) => /plausible\.io\/js\//i.test(s))) {
+    add('Plausible Analytics', null);
+  }
+
+  // Cloudflare Web Analytics
+  if (scriptSrcs.some((s) => /static\.cloudflareinsights\.com\/beacon/i.test(s))) {
+    add('Cloudflare Web Analytics', null);
+  }
+
+  // Intercom (support / messenger; tracks visitors)
+  if (
+    scriptSrcs.some((s) => /widget\.intercom\.io\/widget\//i.test(s)) ||
+    /Intercom\(['"]boot['"]/.test(inlineBlob)
+  ) {
+    const m = scriptSrcs
+      .map((s) => s.match(/widget\.intercom\.io\/widget\/([a-z0-9]+)/i))
+      .find(Boolean);
+    add('Intercom', m && m[1] ? m[1] : null);
+  }
+
+  // Cheap last-resort tail-scan over the raw HTML for trackers whose only
+  // signal is a noscript pixel (e.g. Facebook, LinkedIn fallback). Skipped
+  // when the cheerio-based pass already found them.
+  if (!found.has('Facebook Pixel') && /facebook\.com\/tr\?id=/.test(rawHtml)) {
+    const m = rawHtml.match(/facebook\.com\/tr\?id=(\d+)/);
+    add('Facebook Pixel', m && m[1] ? m[1] : null);
+  }
+
+  return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function parseIntAttr(v: string | undefined): number | null {

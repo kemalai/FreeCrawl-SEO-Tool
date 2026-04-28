@@ -67,7 +67,7 @@ export function normalizeUrl(
 export function isSameHost(
   urlA: string,
   urlB: string,
-  opts: { includeSubdomains?: boolean } = {},
+  opts: { includeSubdomains?: boolean; cdnHosts?: readonly string[] } = {},
 ): boolean {
   try {
     const a = new URL(urlA);
@@ -76,10 +76,40 @@ export function isSameHost(
       const root = (h: string) => h.split('.').slice(-2).join('.');
       return root(a.hostname) === root(b.hostname);
     }
-    return a.hostname === b.hostname;
+    if (a.hostname === b.hostname) return true;
+    // CDN list — either side matching a configured CDN host counts as
+    // "same host" so static.example.cloudfront.net etc. stays internal.
+    if (opts.cdnHosts && opts.cdnHosts.length > 0) {
+      const aH = a.hostname.toLowerCase();
+      const bH = b.hostname.toLowerCase();
+      for (const raw of opts.cdnHosts) {
+        const rule = raw.trim().toLowerCase();
+        if (!rule) continue;
+        if (matchesCdnRule(aH, rule) && matchesCdnRule(bH, rule)) return true;
+        // Also accept the case where one side is the page host and the
+        // other matches the CDN — typical for an HTML page on the apex
+        // and resources on a CDN subdomain.
+        if (matchesCdnRule(aH, rule) || matchesCdnRule(bH, rule)) return true;
+      }
+    }
+    return false;
   } catch {
     return false;
   }
+}
+
+/**
+ * Does `host` match a CDN rule? Supports two forms:
+ *   - `cdn.example.com`   — exact host match
+ *   - `*.cloudfront.net`  — suffix match on subdomains (one or more
+ *                           labels), but not on the bare apex
+ */
+function matchesCdnRule(host: string, rule: string): boolean {
+  if (rule.startsWith('*.')) {
+    const suffix = rule.slice(1); // ".cloudfront.net"
+    return host.endsWith(suffix) && host.length > suffix.length;
+  }
+  return host === rule;
 }
 
 export function isInScope(
@@ -133,13 +163,33 @@ export function extractExtension(url: string): string {
  *   site like `gamesatis.com` → `www.gamesatis.com` resolves in one
  *   round-trip instead of two HEAD/GET phases.
  */
+export interface ResolveStartUrlAttempt {
+  method: 'HEAD' | 'GET';
+  url: string;
+  outcome: 'ok' | 'fail';
+  status?: number;
+  detail?: string;
+  durationMs: number;
+}
+
 export async function resolveStartUrl(
   raw: string,
   userAgent = 'FreeCrawlSEO/0.1',
   probeTimeoutMs = 3000,
+  onAttempt?: (a: ResolveStartUrlAttempt) => void,
 ): Promise<string | null> {
   const trimmed = raw.trim();
   if (!trimmed) return null;
+
+  const report = (a: ResolveStartUrlAttempt): void => {
+    if (onAttempt) {
+      try {
+        onAttempt(a);
+      } catch {
+        /* observer must never break the resolve */
+      }
+    }
+  };
 
   // Single auto-follow request collapses what used to be two phases —
   // HEAD probe + manual hop-driven redirect chain — into one network
@@ -149,12 +199,13 @@ export async function resolveStartUrl(
   // 800 ms, after which `res.url` is the canonical final URL.
   async function resolveVia(url: string): Promise<string | null> {
     const { fetch: undiciFetch } = await import('undici');
-    const { initHttpClient } = await import('./http-client.js');
+    const { initHttpClient, formatFetchError } = await import('./http-client.js');
     initHttpClient();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), probeTimeoutMs);
     try {
       // HEAD first — cheap and avoids body transfer.
+      const tHead = Date.now();
       try {
         const res = await undiciFetch(url, {
           method: 'HEAD',
@@ -162,25 +213,56 @@ export async function resolveStartUrl(
           redirect: 'follow',
           signal: controller.signal,
         });
+        report({
+          method: 'HEAD',
+          url,
+          outcome: 'ok',
+          status: res.status,
+          durationMs: Date.now() - tHead,
+        });
         return res.url || url;
-      } catch {
+      } catch (err) {
+        report({
+          method: 'HEAD',
+          url,
+          outcome: 'fail',
+          detail: formatFetchError(err),
+          durationMs: Date.now() - tHead,
+        });
         // HEAD may be blocked / WAF'd — retry with GET. Body is cancelled
         // immediately so we don't actually transfer the page.
-        const res = await undiciFetch(url, {
-          method: 'GET',
-          headers: { 'user-agent': userAgent },
-          redirect: 'follow',
-          signal: controller.signal,
-        });
+        const tGet = Date.now();
         try {
-          await res.body?.cancel();
-        } catch {
-          /* ignore */
+          const res = await undiciFetch(url, {
+            method: 'GET',
+            headers: { 'user-agent': userAgent },
+            redirect: 'follow',
+            signal: controller.signal,
+          });
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* ignore */
+          }
+          report({
+            method: 'GET',
+            url,
+            outcome: 'ok',
+            status: res.status,
+            durationMs: Date.now() - tGet,
+          });
+          return res.url || url;
+        } catch (err2) {
+          report({
+            method: 'GET',
+            url,
+            outcome: 'fail',
+            detail: formatFetchError(err2),
+            durationMs: Date.now() - tGet,
+          });
+          return null;
         }
-        return res.url || url;
       }
-    } catch {
-      return null;
     } finally {
       clearTimeout(timeout);
     }

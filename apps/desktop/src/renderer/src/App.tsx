@@ -31,11 +31,66 @@ export function App() {
   const reset = useAppStore((s) => s.reset);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const setConfig = useAppStore((s) => s.setConfig);
   const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
   const [sitemapValidatorOpen, setSitemapValidatorOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [visualizationOpen, setVisualizationOpen] = useState(false);
+  const [dropFlash, setDropFlash] = useState<string | null>(null);
+
+  // Drag & drop URL list — drop a `.txt` / `.csv` of URLs anywhere on the
+  // window to populate List mode + open Settings so the user can review
+  // before clicking Start. Lines starting with `#` are treated as comments
+  // (matches the CLI `--list` parser semantics) and blank lines skipped.
+  useEffect(() => {
+    function onDragOver(e: DragEvent): void {
+      // Cancel default so the drop event fires (browser otherwise opens the
+      // file in-place, navigating away from the app).
+      if (e.dataTransfer?.types?.includes('Files')) {
+        e.preventDefault();
+      }
+    }
+    async function onDrop(e: DragEvent): Promise<void> {
+      const files = e.dataTransfer?.files;
+      if (!files || files.length === 0) return;
+      const file = files[0];
+      if (!file) return;
+      const name = file.name.toLowerCase();
+      if (!/\.(txt|csv|list)$/.test(name)) return;
+      e.preventDefault();
+      const text = await file.text();
+      const urls: string[] = [];
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (line.startsWith('#')) continue;
+        // CSV first column — stop at the first comma so a `url,note` file
+        // is also accepted.
+        const u = line.split(',')[0]?.trim();
+        if (u && /^https?:\/\//i.test(u)) urls.push(u);
+        else if (u) urls.push('https://' + u);
+      }
+      if (urls.length === 0) {
+        setDropFlash(`No URLs found in ${file.name}.`);
+        setTimeout(() => setDropFlash(null), 4000);
+        return;
+      }
+      setConfig({ mode: 'list', urlList: urls, startUrl: urls[0] ?? '' });
+      setSettingsOpen(true);
+      setDropFlash(`Loaded ${urls.length} URLs from ${file.name} into List mode.`);
+      setTimeout(() => setDropFlash(null), 4000);
+    }
+    const dropHandler = (e: DragEvent): void => {
+      void onDrop(e);
+    };
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('drop', dropHandler);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('drop', dropHandler);
+    };
+  }, [setConfig, setSettingsOpen]);
 
   // Redirect react-resizable-panels' persistence away from localStorage and
   // into our JSON prefs file so layout survives Clear (which wipes crawl
@@ -131,6 +186,11 @@ export function App() {
   return (
     <div className="flex h-full flex-col bg-surface-950 text-surface-100">
       <TopBar />
+      {dropFlash && (
+        <div className="border-b border-blue-700/50 bg-blue-900/30 px-4 py-1 text-[11px] text-blue-100">
+          {dropFlash}
+        </div>
+      )}
       <TabsBar />
       <main className="relative flex-1 overflow-hidden">
         <PanelGroup

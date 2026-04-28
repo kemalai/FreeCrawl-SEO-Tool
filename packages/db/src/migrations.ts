@@ -709,6 +709,128 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 34,
+    name: 'add_analytics_trackers',
+    // TEMA 17 — Per-page detected analytics / marketing trackers stored as
+    // a JSON array of `{ name, id }` objects. Single-column variable-shape
+    // storage avoids a child table for what's typically 0-5 entries per
+    // page, and the existing JSON columns (extraction_results, hreflangs)
+    // already use this idiom.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'analytics_trackers')) {
+        db.exec('ALTER TABLE urls ADD COLUMN analytics_trackers TEXT');
+      }
+    },
+  },
+  {
+    version: 35,
+    name: 'add_image_size_columns',
+    // TEMA 20 — Add `byte_size` + `probed_at` + `probe_status` to the
+    // `images` table so we can flag oversize internal images. Filled by an
+    // opt-in HEAD probe pass after the main HTML crawl finishes (cheap:
+    // HEAD only, no body download). Null `byte_size` = never probed (so
+    // we don't false-positive missing data as "fits within budget").
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(images)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('byte_size')) db.exec('ALTER TABLE images ADD COLUMN byte_size INTEGER');
+      if (!has('probed_at')) db.exec('ALTER TABLE images ADD COLUMN probed_at TEXT');
+      if (!has('probe_status'))
+        db.exec('ALTER TABLE images ADD COLUMN probe_status INTEGER');
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_images_byte_size ON images(byte_size) WHERE byte_size IS NOT NULL',
+      );
+    },
+  },
+  {
+    version: 36,
+    name: 'add_host_certs_table',
+    // TEMA 21 — Per-host TLS certificate inspection. Stored in a sibling
+    // table keyed by host because most sites have many URLs per host but
+    // only one cert; denormalising onto `urls` would duplicate the same
+    // expiry date 10k times on a moderate crawl. Filled by a post-crawl
+    // TLS-probe pass (one connect per unique HTTPS host).
+    up: `
+      CREATE TABLE IF NOT EXISTS host_certs (
+        host                 TEXT PRIMARY KEY,
+        port                 INTEGER NOT NULL DEFAULT 443,
+        valid_from           TEXT,
+        valid_to             TEXT,
+        days_until_expiry    INTEGER,
+        issuer               TEXT,
+        subject               TEXT,
+        signature_algorithm  TEXT,
+        protocol             TEXT,
+        probe_status         INTEGER NOT NULL DEFAULT 0,
+        probe_error          TEXT,
+        probed_at            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_host_certs_expiry
+        ON host_certs(days_until_expiry)
+        WHERE days_until_expiry IS NOT NULL;
+    `,
+  },
+  {
+    version: 37,
+    name: 'add_form_accessibility_and_lazy_load',
+    // TEMA 25 — Per-page accessibility / performance counters that the
+    // HTML parser computes but didn't have a column to land in. All
+    // three default to 0 so old projects still upsert cleanly.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('form_input_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN form_input_count INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('form_input_unlabeled'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN form_input_unlabeled INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('images_lazy'))
+        db.exec('ALTER TABLE urls ADD COLUMN images_lazy INTEGER NOT NULL DEFAULT 0');
+    },
+  },
+  {
+    version: 38,
+    name: 'add_headings_outline',
+    // TEMA 26 — Per-page heading outline as a JSON array. Single-column
+    // variable-shape storage (same idiom as `hreflangs`, `analytics_trackers`).
+    // Drives the Detail Panel "Outline" sub-tab.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'headings')) {
+        db.exec('ALTER TABLE urls ADD COLUMN headings TEXT');
+      }
+    },
+  },
+  {
+    version: 39,
+    name: 'add_server_header',
+    // TEMA 32 — Capture the `Server` response header for stack auditing
+    // (nginx / Apache / cloudflare / IIS / Caddy / etc.). Already
+    // captured by the crawler into the headers table; mirroring it onto
+    // the urls row makes the per-page lookup + stack-rollup report a
+    // simple SELECT instead of a JOIN.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'server_header')) {
+        db.exec('ALTER TABLE urls ADD COLUMN server_header TEXT');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

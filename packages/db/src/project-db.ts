@@ -126,6 +126,12 @@ interface UrlRowDb {
   query_string_length: number;
   render_blocking_count: number;
   keep_alive: number;
+  analytics_trackers: string | null;
+  form_input_count: number;
+  form_input_unlabeled: number;
+  images_lazy: number;
+  headings: string | null;
+  server_header: string | null;
 }
 
 interface ImageRowDb {
@@ -229,6 +235,15 @@ export interface UpsertUrlInput {
   queryStringLength?: number;
   renderBlockingCount?: number;
   keepAlive?: boolean;
+  /** JSON-stringified array of `{ name, id }` analytics tracker entries, or null. */
+  analyticsTrackers?: string | null;
+  formInputCount?: number;
+  formInputUnlabeled?: number;
+  imagesLazy?: number;
+  /** JSON-stringified outline array, or null. */
+  headings?: string | null;
+  /** Raw `Server` response header, or null when absent. */
+  serverHeader?: string | null;
 }
 
 const UPSERT_URL_SQL = `
@@ -258,7 +273,11 @@ const UPSERT_URL_SQL = `
     title_pixel_width, meta_pixel_width,
     ttfb_ms, cookies_count, cookies_insecure, cookies_no_httponly, cookies_no_samesite,
     http_protocol, query_string_length,
-    render_blocking_count, keep_alive
+    render_blocking_count, keep_alive,
+    analytics_trackers,
+    form_input_count, form_input_unlabeled, images_lazy,
+    headings,
+    server_header
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
@@ -285,7 +304,11 @@ const UPSERT_URL_SQL = `
     :title_pixel_width, :meta_pixel_width,
     :ttfb_ms, :cookies_count, :cookies_insecure, :cookies_no_httponly, :cookies_no_samesite,
     :http_protocol, :query_string_length,
-    :render_blocking_count, :keep_alive
+    :render_blocking_count, :keep_alive,
+    :analytics_trackers,
+    :form_input_count, :form_input_unlabeled, :images_lazy,
+    :headings,
+    :server_header
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -379,6 +402,12 @@ const UPSERT_URL_SQL = `
     query_string_length = excluded.query_string_length,
     render_blocking_count = excluded.render_blocking_count,
     keep_alive = excluded.keep_alive,
+    analytics_trackers = excluded.analytics_trackers,
+    form_input_count = excluded.form_input_count,
+    form_input_unlabeled = excluded.form_input_unlabeled,
+    images_lazy = excluded.images_lazy,
+    headings = excluded.headings,
+    server_header = excluded.server_header,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -691,6 +720,12 @@ export class ProjectDb {
       query_string_length: input.queryStringLength ?? 0,
       render_blocking_count: input.renderBlockingCount ?? 0,
       keep_alive: input.keepAlive === undefined ? -1 : input.keepAlive ? 1 : 0,
+      analytics_trackers: input.analyticsTrackers ?? null,
+      form_input_count: input.formInputCount ?? 0,
+      form_input_unlabeled: input.formInputUnlabeled ?? 0,
+      images_lazy: input.imagesLazy ?? 0,
+      headings: input.headings ?? null,
+      server_header: input.serverHeader ?? null,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -1999,6 +2034,199 @@ export class ProjectDb {
            OR LOWER(title) LIKE 'untitled%'
          )`,
       ),
+      analyticsMissing: countWhere(
+        `${html} AND status_code BETWEEN 200 AND 299
+         AND indexability = 'indexable'
+         AND (analytics_trackers IS NULL OR analytics_trackers = '[]' OR analytics_trackers = '')`,
+      ),
+      analyticsMultipleGa4: countWhere(
+        `is_external = 0 AND analytics_trackers IS NOT NULL
+         AND (
+           LENGTH(analytics_trackers) - LENGTH(REPLACE(analytics_trackers, '"name":"Google Analytics 4"', ''))
+         ) / LENGTH('"name":"Google Analytics 4"') > 1`,
+      ),
+      analyticsUaLegacy: countWhere(
+        `is_external = 0 AND analytics_trackers IS NOT NULL
+         AND analytics_trackers LIKE '%"name":"Google Analytics (UA)"%'`,
+      ),
+      analyticsPixelWithoutPolicy: countWhere(
+        `${html} AND analytics_trackers IS NOT NULL
+         AND (analytics_trackers LIKE '%"Facebook Pixel"%'
+           OR analytics_trackers LIKE '%"TikTok Pixel"%'
+           OR analytics_trackers LIKE '%"Pinterest Tag"%'
+           OR analytics_trackers LIKE '%"LinkedIn Insight Tag"%')
+         AND (permissions_policy IS NULL OR permissions_policy = '')`,
+      ),
+      imageTooLarge: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM image_usages iu
+             JOIN images i ON i.id = iu.image_id
+            WHERE iu.from_url_id = urls.id
+              AND i.is_internal = 1
+              AND i.byte_size IS NOT NULL
+              AND i.byte_size > 102400
+         )`,
+      ),
+      sslCertExpired: countWhere(
+        `is_external = 0 AND url LIKE 'https://%'
+         AND EXISTS (
+           SELECT 1 FROM host_certs hc
+            WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
+              AND hc.days_until_expiry IS NOT NULL
+              AND hc.days_until_expiry < 0
+         )`,
+      ),
+      sslCertExpiringSoon: countWhere(
+        `is_external = 0 AND url LIKE 'https://%'
+         AND EXISTS (
+           SELECT 1 FROM host_certs hc
+            WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
+              AND hc.days_until_expiry IS NOT NULL
+              AND hc.days_until_expiry >= 0
+              AND hc.days_until_expiry <= 30
+         )`,
+      ),
+      sslProtocolOld: countWhere(
+        `is_external = 0 AND url LIKE 'https://%'
+         AND EXISTS (
+           SELECT 1 FROM host_certs hc
+            WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
+              AND hc.protocol IS NOT NULL
+              AND hc.protocol IN ('TLSv1', 'TLSv1.1', 'SSLv3', 'SSLv2')
+         )`,
+      ),
+      sslSignatureWeak: countWhere(
+        `is_external = 0 AND url LIKE 'https://%'
+         AND EXISTS (
+           SELECT 1 FROM host_certs hc
+            WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
+              AND hc.signature_algorithm IS NOT NULL
+              AND (
+                LOWER(hc.signature_algorithm) LIKE '%sha1%'
+                OR LOWER(hc.signature_algorithm) LIKE '%md5%'
+              )
+         )`,
+      ),
+      hstsNoPreload: countWhere(
+        `${html} AND url LIKE 'https://%'
+         AND hsts IS NOT NULL AND hsts != ''
+         AND LOWER(hsts) NOT LIKE '%preload%'`,
+      ),
+      hstsMaxAgeShort: countWhere(
+        `${html} AND url LIKE 'https://%'
+         AND hsts IS NOT NULL AND hsts != ''
+         AND CAST(
+           TRIM(
+             SUBSTR(
+               LOWER(hsts),
+               INSTR(LOWER(hsts), 'max-age=') + 8,
+               CASE
+                 WHEN INSTR(SUBSTR(LOWER(hsts), INSTR(LOWER(hsts), 'max-age=') + 8), ';') > 0
+                   THEN INSTR(SUBSTR(LOWER(hsts), INSTR(LOWER(hsts), 'max-age=') + 8), ';') - 1
+                 ELSE LENGTH(hsts)
+               END
+             )
+           ) AS INTEGER
+         ) < 31536000`,
+      ),
+      hstsNoIncludeSubdomains: countWhere(
+        `${html} AND url LIKE 'https://%'
+         AND hsts IS NOT NULL AND hsts != ''
+         AND LOWER(hsts) NOT LIKE '%includesubdomains%'`,
+      ),
+      anchorTextTooLong: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM links l
+            WHERE l.from_url_id = urls.id
+              AND l.anchor IS NOT NULL
+              AND LENGTH(l.anchor) > 100
+         )`,
+      ),
+      anchorTextGeneric: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM links l
+            WHERE l.from_url_id = urls.id
+              AND l.anchor IS NOT NULL
+              AND LOWER(TRIM(l.anchor)) IN (
+                'click here', 'click', 'here', 'read more', 'more',
+                'learn more', 'see more', 'continue reading', 'continue',
+                'this link', 'link', 'go', 'buraya', 'tıkla', 'devamı',
+                'devamını oku', 'daha fazla'
+              )
+         )`,
+      ),
+      formInputUnlabeled: countWhere(
+        `${html} AND form_input_unlabeled > 0`,
+      ),
+      imagesNoLazyLoading: countWhere(
+        `${html} AND images_count >= 5 AND (images_lazy * 2) < images_count`,
+      ),
+      imageBrokenSrc: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM image_usages iu
+             JOIN images i ON i.id = iu.image_id
+            WHERE iu.from_url_id = urls.id
+              AND i.probe_status IS NOT NULL
+              AND i.probe_status >= 400
+              AND i.probe_status < 600
+         )`,
+      ),
+      targetBlankNoNoopener: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM links l
+            WHERE l.from_url_id = urls.id
+              AND LOWER(COALESCE(l.target, '')) = '_blank'
+              AND (
+                l.rel IS NULL
+                OR (
+                  LOWER(l.rel) NOT LIKE '%noopener%'
+                  AND LOWER(l.rel) NOT LIKE '%noreferrer%'
+                )
+              )
+         )`,
+      ),
+      pageEmpty: countWhere(
+        `${html} AND status_code BETWEEN 200 AND 299
+         AND word_count IS NOT NULL AND word_count < 30`,
+      ),
+      ogImageNotAbsolute: countWhere(
+        `${html} AND og_image IS NOT NULL AND og_image != ''
+         AND og_image NOT LIKE 'http://%' AND og_image NOT LIKE 'https://%'`,
+      ),
+      twitterImageNotAbsolute: countWhere(
+        `${html} AND twitter_image IS NOT NULL AND twitter_image != ''
+         AND twitter_image NOT LIKE 'http://%' AND twitter_image NOT LIKE 'https://%'`,
+      ),
+      canonicalNotAbsolute: countWhere(
+        `${html} AND canonical IS NOT NULL AND canonical != ''
+         AND canonical NOT LIKE 'http://%' AND canonical NOT LIKE 'https://%'`,
+      ),
+      descriptionEqualsTitle: countWhere(
+        `${html} AND title IS NOT NULL AND title != ''
+         AND meta_description IS NOT NULL AND meta_description != ''
+         AND TRIM(LOWER(title)) = TRIM(LOWER(meta_description))`,
+      ),
+      titleSingleWord: countWhere(
+        `${html} AND title IS NOT NULL AND title != ''
+         AND TRIM(title) NOT LIKE '% %'`,
+      ),
+      externalLinksTooMany: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM (
+             SELECT from_url_id, COUNT(*) AS c
+               FROM links
+              WHERE is_internal = 0
+              GROUP BY from_url_id
+             HAVING c > 100
+           ) e
+           WHERE e.from_url_id = urls.id
+         )`,
+      ),
+      outlinksZero: countWhere(
+        `${html} AND status_code BETWEEN 200 AND 299
+         AND indexability = 'indexable'
+         AND outlinks = 0`,
+      ),
     };
   }
 
@@ -2529,6 +2757,393 @@ export class ProjectDb {
   }
 
   /**
+   * Distinct HTTPS hosts (with crawled URLs) that haven't been TLS-
+   * probed yet. The post-crawl `runTlsCertProbes` pass uses this to do
+   * one TLS handshake per origin instead of one per URL.
+   */
+  unprobedHttpsHosts(limit = 10_000): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT
+            LOWER(SUBSTR(url, 9, INSTR(SUBSTR(url, 9), '/') - 1)) AS host
+           FROM urls
+          WHERE is_external = 0
+            AND status_code IS NOT NULL
+            AND url LIKE 'https://%'
+          LIMIT ?`,
+      )
+      .all(limit) as { host: string }[];
+    const knownHosts = new Set(
+      (this.db.prepare('SELECT host FROM host_certs').all() as { host: string }[]).map(
+        (r) => r.host,
+      ),
+    );
+    return rows
+      .map((r) => r.host)
+      .filter((h) => h && h.length > 0 && !knownHosts.has(h));
+  }
+
+  /**
+   * Persist (or refresh) a single host's TLS-probe result. `probeStatus`
+   * convention: 200 = handshake OK + cert read, 0 = error / timeout.
+   */
+  setHostCert(input: {
+    host: string;
+    port?: number;
+    validFrom: string | null;
+    validTo: string | null;
+    daysUntilExpiry: number | null;
+    issuer: string | null;
+    subject: string | null;
+    signatureAlgorithm: string | null;
+    protocol: string | null;
+    probeStatus: number;
+    probeError: string | null;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO host_certs (
+           host, port, valid_from, valid_to, days_until_expiry,
+           issuer, subject, signature_algorithm, protocol,
+           probe_status, probe_error, probed_at
+         ) VALUES (
+           :host, :port, :valid_from, :valid_to, :days_until_expiry,
+           :issuer, :subject, :signature_algorithm, :protocol,
+           :probe_status, :probe_error, CURRENT_TIMESTAMP
+         )
+         ON CONFLICT(host) DO UPDATE SET
+           valid_from = excluded.valid_from,
+           valid_to = excluded.valid_to,
+           days_until_expiry = excluded.days_until_expiry,
+           issuer = excluded.issuer,
+           subject = excluded.subject,
+           signature_algorithm = excluded.signature_algorithm,
+           protocol = excluded.protocol,
+           probe_status = excluded.probe_status,
+           probe_error = excluded.probe_error,
+           probed_at = CURRENT_TIMESTAMP`,
+      )
+      .run({
+        host: input.host,
+        port: input.port ?? 443,
+        valid_from: input.validFrom,
+        valid_to: input.validTo,
+        days_until_expiry: input.daysUntilExpiry,
+        issuer: input.issuer,
+        subject: input.subject,
+        signature_algorithm: input.signatureAlgorithm,
+        protocol: input.protocol,
+        probe_status: input.probeStatus,
+        probe_error: input.probeError,
+      });
+  }
+
+  /**
+   * Look up the cached TLS cert info for a single URL — joins the URL's
+   * host (parsed from the stored URL) against `host_certs`. Returns null
+   * when no probe data exists (HTTP-only site, or probe disabled).
+   */
+  getHostCertForUrl(urlId: number): {
+    host: string;
+    validFrom: string | null;
+    validTo: string | null;
+    daysUntilExpiry: number | null;
+    issuer: string | null;
+    subject: string | null;
+    signatureAlgorithm: string | null;
+    protocol: string | null;
+    probeStatus: number;
+    probeError: string | null;
+    probedAt: string | null;
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT hc.host, hc.valid_from, hc.valid_to, hc.days_until_expiry,
+                hc.issuer, hc.subject, hc.signature_algorithm, hc.protocol,
+                hc.probe_status, hc.probe_error, hc.probed_at
+           FROM urls u
+           JOIN host_certs hc
+             ON hc.host = LOWER(SUBSTR(u.url, 9, INSTR(SUBSTR(u.url, 9), '/') - 1))
+          WHERE u.id = ?
+            AND u.url LIKE 'https://%'`,
+      )
+      .get(urlId) as
+      | {
+          host: string;
+          valid_from: string | null;
+          valid_to: string | null;
+          days_until_expiry: number | null;
+          issuer: string | null;
+          subject: string | null;
+          signature_algorithm: string | null;
+          protocol: string | null;
+          probe_status: number;
+          probe_error: string | null;
+          probed_at: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      host: row.host,
+      validFrom: row.valid_from,
+      validTo: row.valid_to,
+      daysUntilExpiry: row.days_until_expiry,
+      issuer: row.issuer,
+      subject: row.subject,
+      signatureAlgorithm: row.signature_algorithm,
+      protocol: row.protocol,
+      probeStatus: row.probe_status,
+      probeError: row.probe_error,
+      probedAt: row.probed_at,
+    };
+  }
+
+  /**
+   * Internal images that haven't been HEAD-probed yet — used by the
+   * post-crawl image-size pass to discover oversize PNGs/JPEGs without
+   * re-probing already-sized rows on subsequent crawls.
+   */
+  unprobedInternalImages(limit = 20_000): { id: number; src: string }[] {
+    return this.db
+      .prepare(
+        `SELECT id, src FROM images
+          WHERE is_internal = 1
+            AND probe_status IS NULL
+            AND src LIKE 'http%'
+          ORDER BY id
+          LIMIT ?`,
+      )
+      .all(limit) as { id: number; src: string }[];
+  }
+
+  /**
+   * Update an `images` row with the result of the HEAD probe. `byteSize`
+   * is null when the server didn't return Content-Length, status records
+   * the HTTP code (or 0 when the request errored entirely).
+   */
+  setImageSize(imageId: number, byteSize: number | null, status: number): void {
+    this.db
+      .prepare(
+        `UPDATE images
+            SET byte_size = ?,
+                probe_status = ?,
+                probed_at = CURRENT_TIMESTAMP
+          WHERE id = ?`,
+      )
+      .run(byteSize, status, imageId);
+  }
+
+  /**
+   * Top pages by total internal-image byte weight. Sums the HEAD-probe
+   * `byte_size` for every internal image referenced from each page, so
+   * a page reusing the same 500 KB hero plus 30 thumbnails surfaces as
+   * "this is your image-heaviest URL". Pages with no probed images get
+   * a 0 sum and are filtered out.
+   */
+  imageWeightPerPage(limit = 25): {
+    url: string;
+    imageBytes: number;
+    imageCount: number;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT u.url AS url,
+                COALESCE(SUM(i.byte_size), 0) AS image_bytes,
+                COUNT(i.id) AS image_count
+           FROM urls u
+           JOIN image_usages iu ON iu.from_url_id = u.id
+           JOIN images i ON i.id = iu.image_id
+          WHERE u.is_external = 0
+            AND u.content_kind = 'html'
+            AND i.byte_size IS NOT NULL
+            AND i.is_internal = 1
+          GROUP BY u.id
+          HAVING image_bytes > 0
+          ORDER BY image_bytes DESC
+          LIMIT ?`,
+      )
+      .all(limit) as { url: string; image_bytes: number; image_count: number }[];
+    return rows.map((r) => ({
+      url: r.url,
+      imageBytes: r.image_bytes,
+      imageCount: r.image_count,
+    }));
+  }
+
+  /**
+   * Roll-up of `Server` response-header values across the crawl. Returns
+   * one row per distinct value with a hit count, sorted descending.
+   * Useful for stack auditing — surfaces "we have 92% nginx and 8%
+   * Apache" or "an old IIS host slipped into our subdomain mix".
+   */
+  serverHeaderBreakdown(): { server: string; count: number }[] {
+    return this.db
+      .prepare(
+        `SELECT server_header AS server, COUNT(*) AS count
+           FROM urls
+          WHERE is_external = 0
+            AND server_header IS NOT NULL AND server_header != ''
+          GROUP BY server_header
+          ORDER BY count DESC`,
+      )
+      .all() as { server: string; count: number }[];
+  }
+
+  /**
+   * Inlink histogram — bucket pages by how many internal links point at
+   * them. Useful for understanding internal-link distribution: a healthy
+   * site has a long tail (most pages are link-poor) but no orphans.
+   * Buckets: 0, 1–4, 5–14, 15–49, 50–199, 200+ (matches Screaming Frog
+   * defaults).
+   */
+  inlinksHistogram(): { label: string; count: number }[] {
+    const buckets: { label: string; min: number; max: number }[] = [
+      { label: '0 (orphan)', min: 0, max: 0 },
+      { label: '1–4', min: 1, max: 4 },
+      { label: '5–14', min: 5, max: 14 },
+      { label: '15–49', min: 15, max: 49 },
+      { label: '50–199', min: 50, max: 199 },
+      { label: '200+', min: 200, max: Number.MAX_SAFE_INTEGER },
+    ];
+    return buckets.map((b) => ({
+      label: b.label,
+      count: (
+        this.db
+          .prepare(
+            b.max === Number.MAX_SAFE_INTEGER
+              ? `SELECT COUNT(*) AS c FROM urls
+                 WHERE is_external = 0 AND content_kind = 'html' AND inlinks >= ?`
+              : `SELECT COUNT(*) AS c FROM urls
+                 WHERE is_external = 0 AND content_kind = 'html'
+                   AND inlinks >= ? AND inlinks <= ?`,
+          )
+          .get(
+            ...(b.max === Number.MAX_SAFE_INTEGER ? [b.min] : [b.min, b.max]),
+          ) as { c: number }
+      ).c,
+    }));
+  }
+
+  /**
+   * Word-count histogram — bucket pages by body word count. Lets the
+   * user spot the content distribution (mostly thin? mostly long-form?
+   * what's the median page length?). Buckets follow Screaming Frog's
+   * defaults: 0–99 / 100–249 / 250–499 / 500–999 / 1000–2999 / 3000+.
+   */
+  wordCountHistogram(): { label: string; count: number }[] {
+    const buckets: { label: string; min: number; max: number }[] = [
+      { label: '0–99', min: 0, max: 99 },
+      { label: '100–249', min: 100, max: 249 },
+      { label: '250–499', min: 250, max: 499 },
+      { label: '500–999', min: 500, max: 999 },
+      { label: '1000–2999', min: 1000, max: 2999 },
+      { label: '3000+', min: 3000, max: Number.MAX_SAFE_INTEGER },
+    ];
+    return buckets.map((b) => ({
+      label: b.label,
+      count: (
+        this.db
+          .prepare(
+            b.max === Number.MAX_SAFE_INTEGER
+              ? `SELECT COUNT(*) AS c FROM urls
+                 WHERE is_external = 0 AND content_kind = 'html'
+                   AND word_count IS NOT NULL AND word_count >= ?`
+              : `SELECT COUNT(*) AS c FROM urls
+                 WHERE is_external = 0 AND content_kind = 'html'
+                   AND word_count IS NOT NULL
+                   AND word_count >= ? AND word_count <= ?`,
+          )
+          .get(
+            ...(b.max === Number.MAX_SAFE_INTEGER ? [b.min] : [b.min, b.max]),
+          ) as { c: number }
+      ).c,
+    }));
+  }
+
+  /**
+   * Per-position counts across all internal links — drives the Link
+   * Position report. Uses the `link_position` column populated by the
+   * HTML parser (navigation/header/content/sidebar/footer/aside, with
+   * everything else falling back to `content`).
+   */
+  linkPositionBreakdown(): { position: string; count: number }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT COALESCE(link_position, 'content') AS position, COUNT(*) AS count
+           FROM links
+          WHERE is_internal = 1
+          GROUP BY position
+          ORDER BY count DESC`,
+      )
+      .all() as { position: string; count: number }[];
+    return rows;
+  }
+
+  /**
+   * Roll-up of analytics tracker coverage across the crawl. Walks every
+   * row's `analytics_trackers` JSON column once, counts page hits + unique
+   * IDs per tracker name, and returns sorted by page count desc. Only
+   * indexable HTML pages contribute so non-200 / noindex don't skew the
+   * "what % of the site has GA4 installed" picture.
+   */
+  analyticsCoverage(): {
+    name: string;
+    pageCount: number;
+    distinctIds: number;
+    sampleIds: string[];
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT analytics_trackers FROM urls
+          WHERE is_external = 0
+            AND content_kind = 'html'
+            AND status_code BETWEEN 200 AND 299
+            AND indexability = 'indexable'
+            AND analytics_trackers IS NOT NULL
+            AND analytics_trackers != ''
+            AND analytics_trackers != '[]'`,
+      )
+      .all() as { analytics_trackers: string }[];
+
+    const byName = new Map<
+      string,
+      { pageCount: number; ids: Set<string> }
+    >();
+    for (const r of rows) {
+      let parsed: { name?: unknown; id?: unknown }[];
+      try {
+        const v = JSON.parse(r.analytics_trackers) as unknown;
+        if (!Array.isArray(v)) continue;
+        parsed = v as { name?: unknown; id?: unknown }[];
+      } catch {
+        continue;
+      }
+      const seen = new Set<string>();
+      for (const t of parsed) {
+        if (!t || typeof t.name !== 'string' || !t.name) continue;
+        if (seen.has(t.name)) continue;
+        seen.add(t.name);
+        let entry = byName.get(t.name);
+        if (!entry) {
+          entry = { pageCount: 0, ids: new Set<string>() };
+          byName.set(t.name, entry);
+        }
+        entry.pageCount++;
+        if (typeof t.id === 'string' && t.id) entry.ids.add(t.id);
+      }
+    }
+
+    return [...byName.entries()]
+      .map(([name, entry]) => ({
+        name,
+        pageCount: entry.pageCount,
+        distinctIds: entry.ids.size,
+        sampleIds: [...entry.ids].slice(0, 5),
+      }))
+      .sort((a, b) => b.pageCount - a.pageCount || a.name.localeCompare(b.name));
+  }
+
+  /**
    * Internal-image entries linked to a single page URL. Used by the
    * image sitemap variant — Google's `image:image` extension allows up
    * to 1000 entries per `<url>` entry.
@@ -2544,6 +3159,50 @@ export class ProjectDb {
           LIMIT ?`,
       )
       .all(urlId, limit) as { src: string; alt: string | null }[];
+  }
+
+  /**
+   * Full-detail image rows for a page — drives the Detail Panel "Images"
+   * sub-tab. Includes both internal and external images, with width/height
+   * + per-page alt (which may differ from the canonical row in `images`
+   * when the same image is reused with different alt text).
+   */
+  pageImagesDetailed(
+    urlId: number,
+    limit = 5000,
+  ): {
+    src: string;
+    alt: string | null;
+    width: number | null;
+    height: number | null;
+    isInternal: boolean;
+    byteSize: number | null;
+  }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT i.src, COALESCE(iu.alt, i.alt) AS alt, i.width, i.height, i.is_internal, i.byte_size
+           FROM image_usages iu
+           JOIN images i ON i.id = iu.image_id
+          WHERE iu.from_url_id = ?
+          ORDER BY i.is_internal DESC, i.id
+          LIMIT ?`,
+      )
+      .all(urlId, limit) as {
+      src: string;
+      alt: string | null;
+      width: number | null;
+      height: number | null;
+      is_internal: number;
+      byte_size: number | null;
+    }[];
+    return rows.map((r) => ({
+      src: r.src,
+      alt: r.alt,
+      width: r.width,
+      height: r.height,
+      isInternal: r.is_internal === 1,
+      byteSize: r.byte_size,
+    }));
   }
 
   /**
@@ -2659,6 +3318,12 @@ export class ProjectDb {
     queryStringLength: r.query_string_length ?? 0,
     renderBlockingCount: r.render_blocking_count ?? 0,
     keepAlive: r.keep_alive === 1,
+    analyticsTrackers: r.analytics_trackers ?? null,
+    formInputCount: r.form_input_count ?? 0,
+    formInputUnlabeled: r.form_input_unlabeled ?? 0,
+    imagesLazy: r.images_lazy ?? 0,
+    headings: r.headings ?? null,
+    serverHeader: r.server_header ?? null,
     crawledAt: r.crawled_at,
   });
 
@@ -3311,6 +3976,276 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                 OR LOWER(title) LIKE 'page %'
                 OR LOWER(title) LIKE 'untitled%'
               )`;
+    case 'issues:analytics-missing':
+      // Indexable HTML pages with no detected tracker. Useful as an audit
+      // safety-net — a marketing/content page silently shipping without
+      // analytics is invisible to attribution. Skipped for non-indexable
+      // pages because robots.txt-blocked / noindex pages shouldn't count.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code BETWEEN 200 AND 299
+              AND indexability = 'indexable'
+              AND (analytics_trackers IS NULL OR analytics_trackers = '[]' OR analytics_trackers = '')`;
+    case 'issues:analytics-multiple-ga4':
+      // Multiple `Google Analytics 4` entries imply mis-installed GA
+      // (Tag Manager + hardcoded gtag, or two property IDs). The pattern
+      // ".*?\"name\":\"Google Analytics 4\".*?\"name\":\"Google Analytics 4\""
+      // is awkward in SQL, so we use a position-based check.
+      return `is_external = 0 AND analytics_trackers IS NOT NULL
+              AND (
+                LENGTH(analytics_trackers) - LENGTH(REPLACE(analytics_trackers, '"name":"Google Analytics 4"', ''))
+              ) / LENGTH('"name":"Google Analytics 4"') > 1`;
+    case 'issues:analytics-ua-legacy':
+      // Universal Analytics (UA-XXXXX-Y) was sunset 2023-07-01. Any page
+      // still loading it is gathering no data — pure dead weight.
+      return `is_external = 0 AND analytics_trackers IS NOT NULL
+              AND analytics_trackers LIKE '%"name":"Google Analytics (UA)"%'`;
+    case 'issues:analytics-pixel-without-policy':
+      // Tracking pixels (FB / TikTok / Pinterest / LinkedIn) that share
+      // PII with third parties should be paired with a Permissions-Policy
+      // declaring the feature scope. Surfacing pages with pixels but no
+      // Permissions-Policy header helps GDPR / privacy audits.
+      return `is_external = 0 AND content_kind = 'html'
+              AND analytics_trackers IS NOT NULL
+              AND (analytics_trackers LIKE '%"Facebook Pixel"%'
+                OR analytics_trackers LIKE '%"TikTok Pixel"%'
+                OR analytics_trackers LIKE '%"Pinterest Tag"%'
+                OR analytics_trackers LIKE '%"LinkedIn Insight Tag"%')
+              AND (permissions_policy IS NULL OR permissions_policy = '')`;
+    case 'issues:image-too-large':
+      // Pages that reference at least one internal image whose probed
+      // Content-Length is > 100 KB (the PageSpeed Insights threshold).
+      // EXISTS is faster than IN(...) on a join because SQLite can stop
+      // after the first hit per page.
+      return `is_external = 0 AND content_kind = 'html'
+              AND EXISTS (
+                SELECT 1 FROM image_usages iu
+                  JOIN images i ON i.id = iu.image_id
+                 WHERE iu.from_url_id = urls.id
+                   AND i.is_internal = 1
+                   AND i.byte_size IS NOT NULL
+                   AND i.byte_size > 102400
+              )`;
+    case 'issues:ssl-cert-expired':
+      // HTTPS pages whose host's certificate is past `valid_to`. The
+      // host is parsed inline from the URL because storing it as a column
+      // would balloon the row count for an aggregation we run rarely.
+      return `is_external = 0 AND url LIKE 'https://%'
+              AND EXISTS (
+                SELECT 1 FROM host_certs hc
+                 WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
+                   AND hc.days_until_expiry IS NOT NULL
+                   AND hc.days_until_expiry < 0
+              )`;
+    case 'issues:ssl-cert-expiring-soon':
+      // 30-day warning window — matches Let's Encrypt's reminder cadence
+      // and the Mozilla Observatory's "expiring soon" threshold.
+      return `is_external = 0 AND url LIKE 'https://%'
+              AND EXISTS (
+                SELECT 1 FROM host_certs hc
+                 WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
+                   AND hc.days_until_expiry IS NOT NULL
+                   AND hc.days_until_expiry >= 0
+                   AND hc.days_until_expiry <= 30
+              )`;
+    case 'issues:ssl-protocol-old':
+      // TLSv1.0 / TLSv1.1 are deprecated by all major browsers (2020).
+      // Sites still negotiating them fail PCI-DSS and many corporate
+      // proxies block them.
+      return `is_external = 0 AND url LIKE 'https://%'
+              AND EXISTS (
+                SELECT 1 FROM host_certs hc
+                 WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
+                   AND hc.protocol IS NOT NULL
+                   AND hc.protocol IN ('TLSv1', 'TLSv1.1', 'SSLv3', 'SSLv2')
+              )`;
+    case 'issues:ssl-signature-weak':
+      // SHA-1 / MD5 signature algorithms are cryptographically broken
+      // for cert chains. Browsers stopped accepting SHA-1 in 2017 but
+      // self-signed / internal certs sometimes still use it.
+      return `is_external = 0 AND url LIKE 'https://%'
+              AND EXISTS (
+                SELECT 1 FROM host_certs hc
+                 WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
+                   AND hc.signature_algorithm IS NOT NULL
+                   AND (
+                     LOWER(hc.signature_algorithm) LIKE '%sha1%'
+                     OR LOWER(hc.signature_algorithm) LIKE '%md5%'
+                   )
+              )`;
+    case 'issues:hsts-no-preload':
+      // HSTS preload (https://hstspreload.org) requires the `preload`
+      // directive be present in the header. Pages with HSTS-but-no-
+      // preload aren't eligible for the preload list and therefore can
+      // still be MITM'd on first visit.
+      return `is_external = 0 AND url LIKE 'https://%'
+              AND content_kind = 'html'
+              AND hsts IS NOT NULL AND hsts != ''
+              AND LOWER(hsts) NOT LIKE '%preload%'`;
+    case 'issues:hsts-max-age-short':
+      // HSTS preload submission requires `max-age >= 31536000` (1 year).
+      // Lower values protect the user's *current* session but never
+      // graduate the host onto the preload list, leaving it exposed.
+      // We extract the digits with SQLite string ops — if no max-age
+      // value is found at all, the regex fallback (`0`) trips the check.
+      return `is_external = 0 AND url LIKE 'https://%'
+              AND content_kind = 'html'
+              AND hsts IS NOT NULL AND hsts != ''
+              AND CAST(
+                TRIM(
+                  SUBSTR(
+                    LOWER(hsts),
+                    INSTR(LOWER(hsts), 'max-age=') + 8,
+                    CASE
+                      WHEN INSTR(SUBSTR(LOWER(hsts), INSTR(LOWER(hsts), 'max-age=') + 8), ';') > 0
+                        THEN INSTR(SUBSTR(LOWER(hsts), INSTR(LOWER(hsts), 'max-age=') + 8), ';') - 1
+                      ELSE LENGTH(hsts)
+                    END
+                  )
+                ) AS INTEGER
+              ) < 31536000`;
+    case 'issues:hsts-no-includesubdomains':
+      // Without `includeSubDomains`, an attacker can MITM a forgotten
+      // subdomain (`http://old.example.com`) and bypass HSTS for the apex.
+      return `is_external = 0 AND url LIKE 'https://%'
+              AND content_kind = 'html'
+              AND hsts IS NOT NULL AND hsts != ''
+              AND LOWER(hsts) NOT LIKE '%includesubdomains%'`;
+    case 'issues:anchor-text-too-long':
+      // Outgoing links with anchor text > 100 chars usually indicate
+      // either a screen-reader unfriendly "fluff anchor" or an entire
+      // sentence that should be a paragraph + a focused link.
+      return `is_external = 0 AND content_kind = 'html'
+              AND EXISTS (
+                SELECT 1 FROM links l
+                 WHERE l.from_url_id = urls.id
+                   AND l.anchor IS NOT NULL
+                   AND LENGTH(l.anchor) > 100
+              )`;
+    case 'issues:anchor-text-generic':
+      // Anchor phrases that carry no SEO value or accessibility context.
+      // Google's webmaster guidelines flag these explicitly because they
+      // give no signal about the destination.
+      return `is_external = 0 AND content_kind = 'html'
+              AND EXISTS (
+                SELECT 1 FROM links l
+                 WHERE l.from_url_id = urls.id
+                   AND l.anchor IS NOT NULL
+                   AND LOWER(TRIM(l.anchor)) IN (
+                     'click here', 'click', 'here', 'read more', 'more',
+                     'learn more', 'see more', 'continue reading', 'continue',
+                     'this link', 'link', 'go', 'buraya', 'tıkla', 'devamı',
+                     'devamını oku', 'daha fazla'
+                   )
+              )`;
+    case 'issues:form-input-unlabeled':
+      // Pages with at least one form input that has no accessible name
+      // (no <label>, no aria-label, no title). WCAG 1.3.1 / 4.1.2 fail.
+      return `is_external = 0 AND content_kind = 'html'
+              AND form_input_unlabeled > 0`;
+    case 'issues:images-no-lazy-loading':
+      // Pages with ≥5 images but lazy-loading adoption < 50%. The 5-image
+      // floor avoids flagging hero-only pages where lazy-loading the LCP
+      // image would actually hurt performance.
+      return `is_external = 0 AND content_kind = 'html'
+              AND images_count >= 5
+              AND (images_lazy * 2) < images_count`;
+    case 'issues:image-broken-src':
+      // Pages referencing at least one internal image whose HEAD probe
+      // returned a 4xx/5xx status. Uses the existing `probe_status`
+      // column from the post-crawl image-size pass — no extra crawl cost.
+      return `is_external = 0 AND content_kind = 'html'
+              AND EXISTS (
+                SELECT 1 FROM image_usages iu
+                  JOIN images i ON i.id = iu.image_id
+                 WHERE iu.from_url_id = urls.id
+                   AND i.probe_status IS NOT NULL
+                   AND i.probe_status >= 400
+                   AND i.probe_status < 600
+              )`;
+    case 'issues:target-blank-no-noopener':
+      // `<a target="_blank">` without `rel="noopener"` allows the new
+      // tab to access `window.opener` — a reverse-tabnabbing vector
+      // OWASP / Mozilla flag explicitly. `rel="noreferrer"` also
+      // implies noopener so we accept either.
+      return `is_external = 0 AND content_kind = 'html'
+              AND EXISTS (
+                SELECT 1 FROM links l
+                 WHERE l.from_url_id = urls.id
+                   AND LOWER(COALESCE(l.target, '')) = '_blank'
+                   AND (
+                     l.rel IS NULL
+                     OR (
+                       LOWER(l.rel) NOT LIKE '%noopener%'
+                       AND LOWER(l.rel) NOT LIKE '%noreferrer%'
+                     )
+                   )
+              )`;
+    case 'issues:page-empty':
+      // 2xx HTML pages with effectively no body content. Sometimes a 404
+      // template renders 200 OK with a blank page, sometimes a publishing
+      // workflow leaves an unfinished draft accessible. Either way it's
+      // wasted crawl budget and a thin-content signal.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code BETWEEN 200 AND 299
+              AND word_count IS NOT NULL
+              AND word_count < 30`;
+    case 'issues:og-image-not-absolute':
+      // OpenGraph requires absolute URLs for og:image. Relative paths
+      // simply don't render in Facebook / LinkedIn share cards.
+      return `is_external = 0 AND content_kind = 'html'
+              AND og_image IS NOT NULL AND og_image != ''
+              AND og_image NOT LIKE 'http://%'
+              AND og_image NOT LIKE 'https://%'`;
+    case 'issues:twitter-image-not-absolute':
+      // Twitter (X) similarly requires absolute URLs for twitter:image.
+      return `is_external = 0 AND content_kind = 'html'
+              AND twitter_image IS NOT NULL AND twitter_image != ''
+              AND twitter_image NOT LIKE 'http://%'
+              AND twitter_image NOT LIKE 'https://%'`;
+    case 'issues:canonical-not-absolute':
+      // Google recommends absolute canonical URLs (rfc 5988). Relative
+      // canonicals work but are easy to break with subdirectory moves
+      // and confuse crawlers running the page in detached/AMP contexts.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical != ''
+              AND canonical NOT LIKE 'http://%'
+              AND canonical NOT LIKE 'https://%'`;
+    case 'issues:description-equals-title':
+      // Meta description duplicates the title verbatim — lazy SEO that
+      // wastes the second SERP signal a page gets to influence CTR.
+      return `is_external = 0 AND content_kind = 'html'
+              AND title IS NOT NULL AND title != ''
+              AND meta_description IS NOT NULL AND meta_description != ''
+              AND TRIM(LOWER(title)) = TRIM(LOWER(meta_description))`;
+    case 'issues:title-single-word':
+      // Single-token titles ("Home", "Blog", "Products") are almost
+      // always too generic to rank — and split between this filter and
+      // `title-placeholder` so users can review separately.
+      return `is_external = 0 AND content_kind = 'html'
+              AND title IS NOT NULL AND title != ''
+              AND TRIM(title) NOT LIKE '% %'`;
+    case 'issues:external-links-too-many':
+      // Pages linking to >100 external destinations look like link
+      // farms / scraper SERPs to crawlers and are routinely demoted.
+      return `is_external = 0 AND content_kind = 'html'
+              AND EXISTS (
+                SELECT 1 FROM (
+                  SELECT from_url_id, COUNT(*) AS c
+                    FROM links
+                   WHERE is_internal = 0
+                   GROUP BY from_url_id
+                  HAVING c > 100
+                ) e
+                WHERE e.from_url_id = urls.id
+              )`;
+    case 'issues:outlinks-zero':
+      // Indexable HTML pages with zero outlinks are dead-end leaves —
+      // bad for crawl flow, internal-link equity distribution, and the
+      // user's path through the site.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code BETWEEN 200 AND 299
+              AND indexability = 'indexable'
+              AND outlinks = 0`;
     default:
       return null;
   }

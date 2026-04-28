@@ -128,16 +128,95 @@ export function formatFetchError(err: unknown): string {
   }
   const chain = parts.join(' -> ');
   // Friendly hints for the most common packaged-app failure modes.
-  if (/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|CERT_HAS_EXPIRED/.test(chain)) {
+  if (/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|CERT_HAS_EXPIRED|DEPTH_ZERO_SELF_SIGNED_CERT|UNABLE_TO_VERIFY_LEAF_SIGNATURE/.test(chain)) {
     return `${chain}  (TLS certificate rejected — likely corporate proxy or antivirus HTTPS inspection; set NODE_EXTRA_CA_CERTS to your CA bundle)`;
   }
-  if (/UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT|ECONNREFUSED/.test(chain)) {
-    return `${chain}  (cannot reach host — firewall, corporate proxy, or site is offline; try setting HTTPS_PROXY if behind a proxy)`;
+  if (/UND_ERR_HEADERS_TIMEOUT/.test(chain)) {
+    return `${chain}  (server accepted the connection but never sent response headers within 10s — typical of WAF / bot challenge / Cloudflare; try a browser-like User-Agent in Settings)`;
+  }
+  if (/UND_ERR_BODY_TIMEOUT/.test(chain)) {
+    return `${chain}  (server stopped sending the response body — slow upstream, drip-throttling, or WAF; raising Timeout (ms) in Settings may help)`;
+  }
+  if (/UND_ERR_SOCKET|ECONNRESET|EPIPE/.test(chain)) {
+    return `${chain}  (connection reset by remote — often antivirus / firewall TLS inspection or anti-bot drop; whitelist FreeCrawl in your security software)`;
+  }
+  if (/UND_ERR_CONNECT_TIMEOUT|ETIMEDOUT/.test(chain)) {
+    return `${chain}  (TCP connect timed out — firewall, corporate proxy blocking outbound, or host is offline; try setting HTTPS_PROXY if behind a proxy)`;
+  }
+  if (/ECONNREFUSED/.test(chain)) {
+    return `${chain}  (host actively refused the connection — port closed, service down, or local firewall blocking outbound)`;
   }
   if (/ENOTFOUND|EAI_AGAIN/.test(chain)) {
-    return `${chain}  (DNS lookup failed — check internet connection / DNS)`;
+    return `${chain}  (DNS lookup failed — check internet connection / DNS or your /etc/hosts override)`;
+  }
+  if (/EPROTO|ERR_SSL_|TLSV1_ALERT|HANDSHAKE_FAILURE|WRONG_VERSION_NUMBER/.test(chain)) {
+    return `${chain}  (TLS handshake failed — origin uses an outdated cipher suite or HTTPS inspection corrupted the handshake)`;
+  }
+  if (/NGHTTP2_|HTTP2_|GOAWAY|PROTOCOL_ERROR/.test(chain)) {
+    return `${chain}  (HTTP/2 protocol error — origin closed the stream; antivirus or proxy may be tampering with HTTP/2 frames)`;
+  }
+  if (/AbortError|aborted|UND_ERR_ABORTED/.test(chain)) {
+    return `${chain}  (request was aborted — typically the per-request Timeout (ms) elapsed before headers were received; raise Timeout in Settings if the site is slow)`;
   }
   return chain;
+}
+
+/**
+ * One-shot snapshot of network-relevant environment used during diagnostic
+ * logging at crawl start. Anything here is harmless to log (no creds, no
+ * file paths beyond the proxy URL the user themselves configured).
+ */
+export function collectNetworkDiagnostics(opts: { proxyOverride?: string } = {}): {
+  proxyUrl: string | null;
+  proxySource: 'config' | 'env' | 'none';
+  caBundleSet: boolean;
+  noProxy: string | null;
+  tlsRejectUnauthorized: boolean;
+  electronVersion: string | null;
+  undiciVersion: string | null;
+} {
+  const envProxy =
+    process.env['HTTPS_PROXY'] ??
+    process.env['https_proxy'] ??
+    process.env['HTTP_PROXY'] ??
+    process.env['http_proxy'] ??
+    null;
+  const overrideProxy = opts.proxyOverride && opts.proxyOverride.trim() ? opts.proxyOverride.trim() : null;
+  const proxyUrl = overrideProxy ?? envProxy ?? null;
+  const proxySource: 'config' | 'env' | 'none' = overrideProxy
+    ? 'config'
+    : envProxy
+      ? 'env'
+      : 'none';
+  const electronVersion = (process.versions as Record<string, string>)['electron'] ?? null;
+  const undiciVersion = (process.versions as Record<string, string>)['undici'] ?? null;
+  return {
+    proxyUrl: proxyUrl ? redactProxyCreds(proxyUrl) : null,
+    proxySource,
+    caBundleSet: !!process.env['NODE_EXTRA_CA_CERTS'],
+    noProxy: process.env['NO_PROXY'] ?? process.env['no_proxy'] ?? null,
+    tlsRejectUnauthorized: process.env['NODE_TLS_REJECT_UNAUTHORIZED'] !== '0',
+    electronVersion,
+    undiciVersion,
+  };
+}
+
+/**
+ * Scrub `user:pass@` credentials out of a proxy URL before logging — even
+ * if the user configured them themselves they don't want them appearing in
+ * the in-app log window.
+ */
+function redactProxyCreds(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.username || u.password) {
+      u.username = '***';
+      u.password = '';
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
 }
 
 /**

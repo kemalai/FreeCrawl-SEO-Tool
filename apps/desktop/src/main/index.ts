@@ -39,6 +39,11 @@ import {
   type TopUrlsInput,
   type TopUrlsRow,
   type ExternalDomainHealthRow,
+  type AnalyticsCoverageRow,
+  type LinkPositionRow,
+  type ImageWeightRow,
+  type BucketHistogramRow,
+  type ServerHeaderRow,
   type SettingsExportInput,
   type SettingsExportResult,
   type SettingsImportResult,
@@ -56,6 +61,10 @@ import {
   type UrlDetailInput,
   type UrlSourceInput,
   type UrlSourceResult,
+  type UrlPageImagesInput,
+  type UrlPageImagesResult,
+  type UrlCertInfoInput,
+  type UrlCertInfoResult,
   type UrlsQueryInput,
   type UrlsQueryResult,
 } from '@freecrawl/shared-types';
@@ -385,7 +394,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.logsOpenWindow, () => openLogsWindow());
 
   ipcMain.handle(IPC.robotsTest, (_e, input: RobotsTestInput) =>
-    testUrlAgainstRobots(input.url, input.userAgent),
+    testUrlAgainstRobots(input.url, input.userAgent, input.customRobots),
   );
 
   ipcMain.handle(
@@ -464,6 +473,37 @@ function registerIpc(): void {
     IPC.reportsExternalDomainHealth,
     (_e, limit: number | undefined): ExternalDomainHealthRow[] =>
       getDb().externalDomainHealth(limit ?? 100),
+  );
+
+  ipcMain.handle(
+    IPC.reportsAnalyticsCoverage,
+    (): AnalyticsCoverageRow[] => getDb().analyticsCoverage(),
+  );
+
+  ipcMain.handle(
+    IPC.reportsLinkPositions,
+    (): LinkPositionRow[] => getDb().linkPositionBreakdown(),
+  );
+
+  ipcMain.handle(
+    IPC.reportsImageWeightPerPage,
+    (_e, limit: number | undefined): ImageWeightRow[] =>
+      getDb().imageWeightPerPage(limit ?? 25),
+  );
+
+  ipcMain.handle(
+    IPC.reportsInlinksHistogram,
+    (): BucketHistogramRow[] => getDb().inlinksHistogram(),
+  );
+
+  ipcMain.handle(
+    IPC.reportsWordCountHistogram,
+    (): BucketHistogramRow[] => getDb().wordCountHistogram(),
+  );
+
+  ipcMain.handle(
+    IPC.reportsServerHeaders,
+    (): ServerHeaderRow[] => getDb().serverHeaderBreakdown(),
   );
 
   ipcMain.handle(
@@ -619,9 +659,17 @@ function registerIpc(): void {
       logger.log('error', 'crawler', msg);
       mainWindow?.webContents.send(IPC.crawlError, msg);
     });
+    crawler.on('warn', (msg: string) => {
+      if (activeCrawler !== crawler) return;
+      logger.log('warn', 'crawler', msg);
+    });
     crawler.on('info', (msg: string) => {
       if (activeCrawler !== crawler) return;
       logger.log('info', 'crawler', msg);
+    });
+    crawler.on('debug', (msg: string) => {
+      if (activeCrawler !== crawler) return;
+      logger.log('debug', 'crawler', msg);
     });
 
     void crawler.start();
@@ -953,6 +1001,37 @@ function registerIpc(): void {
         truncated: r.truncated,
         capturedAt: r.capturedAt,
       };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.urlPageImages,
+    (_e, input: UrlPageImagesInput): UrlPageImagesResult => {
+      const rows = getDb().pageImagesDetailed(input.id, input.limit ?? 5000);
+      return { rows };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.urlCertInfo,
+    (_e, input: UrlCertInfoInput): UrlCertInfoResult => {
+      const r = getDb().getHostCertForUrl(input.id);
+      if (!r) {
+        return {
+          host: null,
+          validFrom: null,
+          validTo: null,
+          daysUntilExpiry: null,
+          issuer: null,
+          subject: null,
+          signatureAlgorithm: null,
+          protocol: null,
+          probeStatus: -1,
+          probeError: null,
+          probedAt: null,
+        };
+      }
+      return r;
     },
   );
 

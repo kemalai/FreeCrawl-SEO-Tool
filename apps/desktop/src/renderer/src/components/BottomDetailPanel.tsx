@@ -6,25 +6,39 @@ import type {
   LinkPathType,
   LinkPosition,
   LinkType,
+  UrlCertInfoResult,
   UrlDetail,
+  UrlPageImageRow,
   UrlSourceResult,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
 type SubTab =
   | 'url-details'
+  | 'outline'
   | 'inlinks'
   | 'outlinks'
+  | 'images'
+  | 'resources'
+  | 'extracted-data'
   | 'serp-snippet'
   | 'http-headers'
+  | 'cookies'
+  | 'structured-data'
   | 'view-source';
 
 const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'url-details', label: 'URL Details' },
+  { key: 'outline', label: 'Outline' },
   { key: 'inlinks', label: 'Inlinks' },
   { key: 'outlinks', label: 'Outlinks' },
+  { key: 'images', label: 'Images' },
+  { key: 'resources', label: 'Resources' },
+  { key: 'extracted-data', label: 'Extracted Data' },
   { key: 'serp-snippet', label: 'SERP Snippet' },
   { key: 'http-headers', label: 'HTTP Headers' },
+  { key: 'cookies', label: 'Cookies' },
+  { key: 'structured-data', label: 'Structured Data' },
   { key: 'view-source', label: 'View Source' },
 ];
 
@@ -143,8 +157,24 @@ export function BottomDetailPanel() {
             )}
           />
         )}
+        {detail && subTab === 'outline' && <OutlineView row={detail.row} />}
+        {detail && subTab === 'images' && (
+          <ImagesView urlId={selectedUrlId} row={detail.row} />
+        )}
+        {detail && subTab === 'resources' && (
+          <ResourcesView urlId={selectedUrlId} row={detail.row} />
+        )}
+        {detail && subTab === 'extracted-data' && (
+          <ExtractedDataView row={detail.row} />
+        )}
         {detail && subTab === 'serp-snippet' && <SerpSnippet row={detail.row} />}
         {detail && subTab === 'http-headers' && <HttpHeadersView headers={detail.headers} />}
+        {detail && subTab === 'cookies' && (
+          <CookiesView row={detail.row} headers={detail.headers} />
+        )}
+        {detail && subTab === 'structured-data' && (
+          <StructuredDataView urlId={selectedUrlId} row={detail.row} />
+        )}
         {detail && subTab === 'view-source' && (
           <ViewSourceView urlId={selectedUrlId} pageUrl={detail.row.url} />
         )}
@@ -385,6 +415,38 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
         ? measurePixelWidth(row.metaDescription, 13)
         : null;
 
+  // Lazy-load TLS cert info for HTTPS URLs only. The lookup is cheap
+  // (single primary-key fetch on `host_certs`) but skipped entirely for
+  // HTTP URLs so we don't pay an IPC round-trip on every selection.
+  const [cert, setCert] = useState<UrlCertInfoResult | null>(null);
+  useEffect(() => {
+    if (!row.url.startsWith('https://')) {
+      setCert(null);
+      return;
+    }
+    let cancelled = false;
+    void window.freecrawl
+      .urlCertInfo({ id: row.id })
+      .then((r) => {
+        if (!cancelled) setCert(r);
+      })
+      .catch(() => {
+        /* ignore — cert info is best-effort */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [row.id, row.url]);
+
+  const certExpiryLabel =
+    cert && cert.daysUntilExpiry !== null
+      ? cert.daysUntilExpiry < 0
+        ? `EXPIRED (${Math.abs(cert.daysUntilExpiry)} days ago)`
+        : cert.daysUntilExpiry <= 30
+          ? `Expires in ${cert.daysUntilExpiry} days (renew soon)`
+          : `Expires in ${cert.daysUntilExpiry} days`
+      : null;
+
   const fields: [string, string | number | null | undefined][] = [
     ['Address', row.url],
     ['Status Code', row.statusCode],
@@ -397,6 +459,7 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Response Time (ms)', row.responseTimeMs],
     ['TTFB (ms)', row.ttfbMs],
     ['HTTP Protocol', row.httpProtocol],
+    ['Server', row.serverHeader],
     ['Query String Length', row.queryStringLength > 0 ? row.queryStringLength : null],
     [
       'Render-Blocking (head)',
@@ -439,6 +502,13 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Charset', row.charset],
     ['Meta Refresh', row.metaRefresh],
     ['Meta Refresh URL', row.metaRefreshUrl],
+    ['TLS Protocol', cert?.protocol ?? null],
+    ['TLS Cert Issuer', cert?.issuer ?? null],
+    ['TLS Cert Subject', cert?.subject ?? null],
+    ['TLS Cert Signature Alg', cert?.signatureAlgorithm ?? null],
+    ['TLS Cert Valid From', cert?.validFrom ?? null],
+    ['TLS Cert Valid To', cert?.validTo ?? null],
+    ['TLS Cert Status', certExpiryLabel],
     ['Strict-Transport-Security', row.hsts],
     ['X-Frame-Options', row.xFrameOptions],
     ['X-Content-Type-Options', row.xContentTypeOptions],
@@ -446,6 +516,7 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Referrer-Policy', row.referrerPolicy],
     ['Permissions-Policy', row.permissionsPolicy],
     ['Content-Encoding', row.contentEncoding],
+    ['Analytics Tags', summarizeAnalyticsTrackers(row.analyticsTrackers)],
     ['Schema Types', row.schemaTypes],
     ['JSON-LD Blocks', row.schemaBlockCount],
     ['Invalid JSON-LD Blocks', row.schemaInvalidCount > 0 ? row.schemaInvalidCount : null],
@@ -468,6 +539,19 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['RSS / Atom Feed', row.feedUrl],
     ['Title Tag Count', row.titleCount > 1 ? row.titleCount : null],
     ['Empty-Alt Images', row.imagesEmptyAlt > 0 ? row.imagesEmptyAlt : null],
+    [
+      'Lazy-Loaded Images',
+      row.imagesCount > 0
+        ? `${row.imagesLazy} / ${row.imagesCount} (${Math.round(
+            (row.imagesLazy / row.imagesCount) * 100,
+          )}%)`
+        : null,
+    ],
+    ['Form Inputs', row.formInputCount > 0 ? row.formInputCount : null],
+    [
+      'Form Inputs Without Label',
+      row.formInputUnlabeled > 0 ? row.formInputUnlabeled : null,
+    ],
     ['Empty Anchor Links', row.emptyAnchorCount > 0 ? row.emptyAnchorCount : null],
     ['Mixed Content (subresources)', row.mixedContentCount > 0 ? row.mixedContentCount : null],
     [
@@ -1094,4 +1178,1013 @@ function summarizeHreflangs(json: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+interface AnalyticsTrackerEntry {
+  name: string;
+  id: string | null;
+}
+
+function parseAnalyticsTrackers(json: string | null): AnalyticsTrackerEntry[] {
+  if (!json) return [];
+  try {
+    const arr = JSON.parse(json) as AnalyticsTrackerEntry[];
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (t) => t && typeof t.name === 'string' && t.name.length > 0,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function summarizeAnalyticsTrackers(json: string | null): string | null {
+  const list = parseAnalyticsTrackers(json);
+  if (list.length === 0) return null;
+  return list.map((t) => (t.id ? `${t.name} (${t.id})` : t.name)).join(' · ');
+}
+
+interface ParsedCookie {
+  name: string;
+  domain: string | null;
+  path: string | null;
+  expires: string | null;
+  maxAge: string | null;
+  secure: boolean;
+  httpOnly: boolean;
+  sameSite: string | null;
+}
+
+/**
+ * Parse a single Set-Cookie header into its name + security attributes.
+ * The cookie value itself is intentionally discarded — we only show what
+ * matters for an SEO/security audit (name + flags + scope).
+ */
+function parseSetCookieHeader(raw: string): ParsedCookie | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const segments = trimmed.split(';').map((s) => s.trim());
+  const first = segments[0] ?? '';
+  const eq = first.indexOf('=');
+  const name = eq >= 0 ? first.slice(0, eq).trim() : first;
+  if (!name) return null;
+  let domain: string | null = null;
+  let path: string | null = null;
+  let expires: string | null = null;
+  let maxAge: string | null = null;
+  let secure = false;
+  let httpOnly = false;
+  let sameSite: string | null = null;
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i] ?? '';
+    if (!seg) continue;
+    const lower = seg.toLowerCase();
+    if (lower === 'secure') secure = true;
+    else if (lower === 'httponly') httpOnly = true;
+    else if (lower.startsWith('domain=')) domain = seg.slice(7).trim() || null;
+    else if (lower.startsWith('path=')) path = seg.slice(5).trim() || null;
+    else if (lower.startsWith('expires=')) expires = seg.slice(8).trim() || null;
+    else if (lower.startsWith('max-age=')) maxAge = seg.slice(8).trim() || null;
+    else if (lower.startsWith('samesite=')) sameSite = seg.slice(9).trim() || null;
+  }
+  return { name, domain, path, expires, maxAge, secure, httpOnly, sameSite };
+}
+
+/**
+ * Same comma-handling logic as `extractSetCookies` in the core package, but
+ * client-side because the renderer can't import from `@freecrawl/core`
+ * (Node-only).
+ */
+function splitJoinedSetCookie(joined: string): string[] {
+  const out: string[] = [];
+  let buf = '';
+  for (let i = 0; i < joined.length; i++) {
+    const ch = joined[i];
+    if (ch === ',') {
+      let j = i + 1;
+      while (j < joined.length && joined[j] === ' ') j++;
+      const rest = joined.slice(j);
+      if (/^[!#$%&'*+\-.^_`|~A-Za-z0-9]+\s*=/.test(rest)) {
+        if (buf.trim()) out.push(buf.trim());
+        buf = '';
+        continue;
+      }
+    }
+    buf += ch ?? '';
+  }
+  if (buf.trim()) out.push(buf.trim());
+  return out;
+}
+
+function CookiesView({
+  row,
+  headers,
+}: {
+  row: CrawlUrlRow;
+  headers: { name: string; value: string }[];
+}) {
+  const cookies: ParsedCookie[] = [];
+  for (const h of headers) {
+    if (h.name.toLowerCase() !== 'set-cookie') continue;
+    for (const raw of splitJoinedSetCookie(h.value)) {
+      const parsed = parseSetCookieHeader(raw);
+      if (parsed) cookies.push(parsed);
+    }
+  }
+
+  if (cookies.length === 0) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        This page did not set any cookies (no <span className="font-mono">Set-Cookie</span> response headers).
+        <div className="mt-2 text-[10px] text-surface-600">
+          Note: only first-party cookies set by the page itself are listed here.
+          Cookies set by third-party scripts (analytics, ads) are set in the
+          browser at runtime and are not visible to a static crawler.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-3">
+      <div className="mb-2 flex flex-wrap gap-3 text-[11px] text-surface-400">
+        <span>
+          <span className="font-medium text-surface-200">{cookies.length}</span> cookies set
+        </span>
+        {row.cookiesInsecure > 0 && (
+          <span className="text-amber-400">
+            {row.cookiesInsecure} missing <code>Secure</code>
+          </span>
+        )}
+        {row.cookiesNoHttpOnly > 0 && (
+          <span className="text-amber-400">
+            {row.cookiesNoHttpOnly} missing <code>HttpOnly</code>
+          </span>
+        )}
+        {row.cookiesNoSameSite > 0 && (
+          <span className="text-amber-400">
+            {row.cookiesNoSameSite} missing <code>SameSite</code>
+          </span>
+        )}
+      </div>
+      <table className="w-full text-[11px]">
+        <thead className="sticky top-0 bg-surface-900">
+          <tr className="text-surface-400">
+            <th className="py-1 pr-3 text-left font-medium">Name</th>
+            <th className="py-1 pr-3 text-left font-medium">Domain</th>
+            <th className="py-1 pr-3 text-left font-medium">Path</th>
+            <th className="py-1 pr-3 text-left font-medium">Expires</th>
+            <th className="py-1 pr-3 text-center font-medium">Secure</th>
+            <th className="py-1 pr-3 text-center font-medium">HttpOnly</th>
+            <th className="py-1 text-left font-medium">SameSite</th>
+          </tr>
+        </thead>
+        <tbody>
+          {cookies.map((c, idx) => (
+            <tr
+              key={`${c.name}-${idx}`}
+              className="border-b border-surface-900 last:border-0"
+            >
+              <td className="py-1.5 pr-3 align-top font-mono text-surface-100">{c.name}</td>
+              <td className="py-1.5 pr-3 align-top font-mono text-surface-300">
+                {c.domain ?? <span className="text-surface-700">—</span>}
+              </td>
+              <td className="py-1.5 pr-3 align-top font-mono text-surface-300">
+                {c.path ?? <span className="text-surface-700">/</span>}
+              </td>
+              <td className="py-1.5 pr-3 align-top font-mono text-surface-400">
+                {c.expires ?? (c.maxAge ? `Max-Age ${c.maxAge}` : <span className="text-surface-700">session</span>)}
+              </td>
+              <td className="py-1.5 pr-3 text-center align-top">
+                {c.secure ? (
+                  <span className="text-emerald-400">✓</span>
+                ) : (
+                  <span className="text-amber-400">✗</span>
+                )}
+              </td>
+              <td className="py-1.5 pr-3 text-center align-top">
+                {c.httpOnly ? (
+                  <span className="text-emerald-400">✓</span>
+                ) : (
+                  <span className="text-amber-400">✗</span>
+                )}
+              </td>
+              <td className="py-1.5 align-top font-mono text-surface-300">
+                {c.sameSite ?? <span className="text-amber-400">missing</span>}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+interface JsonLdBlock {
+  index: number;
+  raw: string;
+  parsed: unknown;
+  ok: boolean;
+}
+
+/**
+ * Pull every `<script type="application/ld+json">` block out of a raw HTML
+ * body. Used by the Structured Data sub-tab to surface the actual payload
+ * the page declares — supplements the per-URL `schema_types` summary with
+ * the underlying JSON the parser saw.
+ */
+function extractJsonLdBlocks(html: string): JsonLdBlock[] {
+  const blocks: JsonLdBlock[] = [];
+  const re =
+    /<script\b[^>]*\btype\s*=\s*['"]application\/ld\+json['"][^>]*>([\s\S]*?)<\/script>/gi;
+  let match: RegExpExecArray | null;
+  let i = 0;
+  while ((match = re.exec(html)) !== null) {
+    const raw = (match[1] ?? '').trim();
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      blocks.push({ index: i, raw, parsed, ok: true });
+    } catch {
+      blocks.push({ index: i, raw, parsed: null, ok: false });
+    }
+    i++;
+  }
+  return blocks;
+}
+
+function StructuredDataView({
+  urlId,
+  row,
+}: {
+  urlId: number | null;
+  row: CrawlUrlRow;
+}) {
+  const [src, setSrc] = useState<UrlSourceResult | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (urlId === null) {
+      setSrc(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void window.freecrawl
+      .urlSourceGet({ id: urlId })
+      .then((r) => {
+        if (!cancelled) setSrc(r);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [urlId]);
+
+  const types = (row.schemaTypes ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const blocks = src && src.body ? extractJsonLdBlocks(src.body) : [];
+  const hasAnyData =
+    types.length > 0 ||
+    row.schemaBlockCount > 0 ||
+    row.microdataCount > 0 ||
+    row.rdfaCount > 0 ||
+    blocks.length > 0;
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
+        <span>
+          <span className="font-medium text-surface-200">{row.schemaBlockCount}</span> JSON-LD
+          {row.schemaBlockCount === 1 ? ' block' : ' blocks'}
+        </span>
+        {row.schemaInvalidCount > 0 && (
+          <span className="text-amber-400">{row.schemaInvalidCount} invalid</span>
+        )}
+        <span>
+          <span className="font-medium text-surface-200">{row.microdataCount}</span> microdata items
+        </span>
+        <span>
+          <span className="font-medium text-surface-200">{row.rdfaCount}</span> RDFa attrs
+        </span>
+      </div>
+
+      <div className="flex-1 overflow-auto p-3">
+        {!hasAnyData && (
+          <div className="text-[11px] text-surface-500">
+            No structured data declared on this page (no JSON-LD, microdata or RDFa).
+          </div>
+        )}
+
+        {types.length > 0 && (
+          <div className="mb-3">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">
+              Schema types
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {types.map((t) => (
+                <span
+                  key={t}
+                  className="rounded border border-surface-700 bg-surface-900 px-2 py-0.5 font-mono text-[11px] text-surface-200"
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {loading && blocks.length === 0 && (
+          <div className="text-[11px] text-surface-500">Loading source…</div>
+        )}
+
+        {blocks.length > 0 && (
+          <div className="space-y-3">
+            <div className="text-[10px] uppercase tracking-wide text-surface-500">
+              JSON-LD blocks ({blocks.length})
+            </div>
+            {blocks.map((b) => (
+              <div
+                key={b.index}
+                className="rounded border border-surface-800 bg-surface-900/40"
+              >
+                <div className="flex items-center gap-2 border-b border-surface-800 px-2 py-1 text-[10px] text-surface-400">
+                  <span className="font-mono">Block #{b.index + 1}</span>
+                  {b.ok ? (
+                    <span className="text-emerald-400">parsed OK</span>
+                  ) : (
+                    <span className="text-amber-400">parse failed</span>
+                  )}
+                </div>
+                <pre className="overflow-auto p-2 font-mono text-[10.5px] leading-[14px] text-surface-200">
+                  {b.ok
+                    ? JSON.stringify(b.parsed, null, 2)
+                    : b.raw}
+                </pre>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!loading && blocks.length === 0 && row.schemaBlockCount > 0 && (
+          <div className="mt-2 text-[10px] text-surface-600">
+            JSON-LD blocks were detected during crawl but the page body
+            snapshot is unavailable. Re-crawl with{' '}
+            <span className="font-mono">storeBodySnapshots</span> enabled to
+            view the raw payload.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ImagesView({
+  urlId,
+  row,
+}: {
+  urlId: number | null;
+  row: CrawlUrlRow;
+}) {
+  const [rows, setRows] = useState<UrlPageImageRow[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (urlId === null) {
+      setRows([]);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void window.freecrawl
+      .urlPageImages({ id: urlId })
+      .then((r) => {
+        if (!cancelled) setRows(r.rows);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [urlId]);
+
+  if (loading && rows.length === 0) {
+    return <div className="p-4 text-[11px] text-surface-500">Loading images…</div>;
+  }
+  if (rows.length === 0) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        No <code>&lt;img&gt;</code> tags discovered on this page.
+      </div>
+    );
+  }
+
+  const missingAlt = rows.filter((r) => r.alt === null).length;
+  const emptyAlt = rows.filter((r) => r.alt === '').length;
+  const externalCount = rows.filter((r) => !r.isInternal).length;
+  const LARGE_BYTES = 102_400;
+  const largeCount = rows.filter(
+    (r) => r.byteSize !== null && r.byteSize > LARGE_BYTES,
+  ).length;
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
+        <span>
+          <span className="font-medium text-surface-200">{rows.length}</span> images
+        </span>
+        {missingAlt > 0 && (
+          <span className="text-amber-400">{missingAlt} missing alt</span>
+        )}
+        {emptyAlt > 0 && (
+          <span className="text-surface-300">{emptyAlt} empty alt (decorative)</span>
+        )}
+        {externalCount > 0 && (
+          <span>
+            <span className="font-medium text-surface-200">{externalCount}</span> external
+          </span>
+        )}
+        {largeCount > 0 && (
+          <span className="text-amber-400">
+            {largeCount} &gt; 100&nbsp;KB
+          </span>
+        )}
+        {row.imagesCount > rows.length && (
+          <span className="text-surface-500">
+            (showing first {rows.length} of {row.imagesCount})
+          </span>
+        )}
+      </div>
+      <div className="flex-1 overflow-auto p-3">
+        <table className="w-full text-[11px]">
+          <thead className="sticky top-0 bg-surface-900">
+            <tr className="text-surface-400">
+              <th className="py-1 pr-3 text-left font-medium">Source</th>
+              <th className="py-1 pr-3 text-left font-medium">Alt</th>
+              <th className="py-1 pr-3 text-right font-medium">W</th>
+              <th className="py-1 pr-3 text-right font-medium">H</th>
+              <th className="py-1 pr-3 text-right font-medium">Size</th>
+              <th className="py-1 text-left font-medium">Scope</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr
+                key={`${r.src}-${i}`}
+                className="border-b border-surface-900 last:border-0"
+              >
+                <td className="break-all py-1.5 pr-3 align-top font-mono text-surface-100">
+                  <a
+                    href={r.src}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void window.open(r.src, '_blank');
+                    }}
+                    className="text-blue-300 hover:text-blue-200"
+                  >
+                    {r.src}
+                  </a>
+                </td>
+                <td className="py-1.5 pr-3 align-top text-surface-200">
+                  {r.alt === null ? (
+                    <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] uppercase text-amber-300">
+                      missing
+                    </span>
+                  ) : r.alt === '' ? (
+                    <span className="rounded bg-surface-800 px-1.5 py-0.5 text-[10px] uppercase text-surface-400">
+                      empty
+                    </span>
+                  ) : (
+                    r.alt
+                  )}
+                </td>
+                <td className="py-1.5 pr-3 text-right align-top font-mono text-surface-400">
+                  {r.width ?? '—'}
+                </td>
+                <td className="py-1.5 pr-3 text-right align-top font-mono text-surface-400">
+                  {r.height ?? '—'}
+                </td>
+                <td
+                  className={clsx(
+                    'py-1.5 pr-3 text-right align-top font-mono',
+                    r.byteSize !== null && r.byteSize > LARGE_BYTES
+                      ? 'text-amber-400'
+                      : 'text-surface-400',
+                  )}
+                >
+                  {r.byteSize === null ? '—' : formatBytesShort(r.byteSize)}
+                </td>
+                <td className="py-1.5 align-top text-surface-300">
+                  {r.isInternal ? 'internal' : 'external'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function formatBytesShort(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+interface ResourceEntry {
+  type: 'script' | 'stylesheet' | 'font' | 'image' | 'iframe' | 'preload';
+  url: string;
+  isExternal: boolean;
+  attrs: Record<string, string>;
+}
+
+/**
+ * Walk the body snapshot for `<script>`, `<link rel="stylesheet">`,
+ * `<link rel="preload" as="font|style|script">`, and `<iframe>` references
+ * — i.e. the resources the browser actually fetches when rendering the
+ * page. Doesn't follow CSS @import chains; that would require fetching
+ * each stylesheet which the View Source data alone can't do.
+ */
+function extractResources(html: string, pageUrl: string): ResourceEntry[] {
+  const out: ResourceEntry[] = [];
+  let pageHost = '';
+  try {
+    pageHost = new URL(pageUrl).host;
+  } catch {
+    /* ignore */
+  }
+
+  function pushRef(type: ResourceEntry['type'], rawUrl: string, attrs: Record<string, string>) {
+    if (!rawUrl) return;
+    if (rawUrl.startsWith('data:')) return;
+    let resolved = rawUrl;
+    let host = '';
+    try {
+      const u = new URL(rawUrl, pageUrl);
+      resolved = u.href;
+      host = u.host;
+    } catch {
+      return;
+    }
+    out.push({
+      type,
+      url: resolved,
+      isExternal: host !== '' && pageHost !== '' && host !== pageHost,
+      attrs,
+    });
+  }
+
+  function attrMap(tag: string): Record<string, string> {
+    const m: Record<string, string> = {};
+    const re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/g;
+    let mm: RegExpExecArray | null;
+    while ((mm = re.exec(tag)) !== null) {
+      const key = (mm[1] ?? '').toLowerCase();
+      const value = mm[3] ?? mm[4] ?? mm[5] ?? '';
+      m[key] = value;
+    }
+    return m;
+  }
+
+  const scriptRe = /<script\b([^>]*)>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = scriptRe.exec(html)) !== null) {
+    const tag = match[0];
+    const attrs = attrMap(tag);
+    if (attrs['src']) {
+      pushRef('script', attrs['src'], attrs);
+    }
+  }
+
+  const linkRe = /<link\b([^>]*)>/gi;
+  while ((match = linkRe.exec(html)) !== null) {
+    const tag = match[0];
+    const attrs = attrMap(tag);
+    const rel = (attrs['rel'] ?? '').toLowerCase();
+    const href = attrs['href'] ?? '';
+    if (!href) continue;
+    if (rel.includes('stylesheet')) {
+      pushRef('stylesheet', href, attrs);
+    } else if (rel.includes('preload')) {
+      const as = (attrs['as'] ?? '').toLowerCase();
+      if (as === 'font') pushRef('font', href, attrs);
+      else if (as === 'style') pushRef('stylesheet', href, attrs);
+      else if (as === 'script') pushRef('script', href, attrs);
+      else if (as === 'image') pushRef('image', href, attrs);
+      else pushRef('preload', href, attrs);
+    }
+  }
+
+  const iframeRe = /<iframe\b([^>]*)>/gi;
+  while ((match = iframeRe.exec(html)) !== null) {
+    const tag = match[0];
+    const attrs = attrMap(tag);
+    if (attrs['src']) pushRef('iframe', attrs['src'], attrs);
+  }
+
+  return out;
+}
+
+function ResourcesView({
+  urlId,
+  row,
+}: {
+  urlId: number | null;
+  row: CrawlUrlRow;
+}) {
+  const [src, setSrc] = useState<UrlSourceResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState<
+    'all' | 'script' | 'stylesheet' | 'font' | 'iframe' | 'external'
+  >('all');
+
+  useEffect(() => {
+    if (urlId === null) {
+      setSrc(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void window.freecrawl
+      .urlSourceGet({ id: urlId })
+      .then((r) => {
+        if (!cancelled) setSrc(r);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [urlId]);
+
+  if (loading && !src) {
+    return <div className="p-4 text-[11px] text-surface-500">Loading source…</div>;
+  }
+  if (!src || src.body === null) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        Resources view requires a stored HTML body snapshot.
+        <div className="mt-1 text-[10px] text-surface-600">
+          Re-crawl with the <span className="font-mono">storeBodySnapshots</span> setting enabled.
+        </div>
+      </div>
+    );
+  }
+
+  const resources = extractResources(src.body, row.url);
+  const filtered =
+    filter === 'all'
+      ? resources
+      : filter === 'external'
+        ? resources.filter((r) => r.isExternal)
+        : resources.filter((r) => r.type === filter);
+  const counts = {
+    all: resources.length,
+    script: resources.filter((r) => r.type === 'script').length,
+    stylesheet: resources.filter((r) => r.type === 'stylesheet').length,
+    font: resources.filter((r) => r.type === 'font').length,
+    iframe: resources.filter((r) => r.type === 'iframe').length,
+    external: resources.filter((r) => r.isExternal).length,
+  };
+
+  const FILTERS: { key: typeof filter; label: string; count: number }[] = [
+    { key: 'all', label: 'All', count: counts.all },
+    { key: 'script', label: 'Scripts', count: counts.script },
+    { key: 'stylesheet', label: 'Stylesheets', count: counts.stylesheet },
+    { key: 'font', label: 'Fonts', count: counts.font },
+    { key: 'iframe', label: 'Iframes', count: counts.iframe },
+    { key: 'external', label: 'External (3rd-party)', count: counts.external },
+  ];
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+        {FILTERS.map((f) => (
+          <button
+            key={f.key}
+            onClick={() => setFilter(f.key)}
+            className={clsx(
+              'rounded border px-2 py-0.5 text-[10.5px]',
+              filter === f.key
+                ? 'border-blue-600 bg-blue-900/40 text-blue-100'
+                : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+            )}
+          >
+            {f.label} <span className="text-surface-500">({f.count})</span>
+          </button>
+        ))}
+      </div>
+      <div className="flex-1 overflow-auto p-3">
+        {filtered.length === 0 ? (
+          <div className="text-[11px] text-surface-500">No resources match this filter.</div>
+        ) : (
+          <table className="w-full text-[11px]">
+            <thead className="sticky top-0 bg-surface-900">
+              <tr className="text-surface-400">
+                <th className="w-24 py-1 pr-3 text-left font-medium">Type</th>
+                <th className="py-1 pr-3 text-left font-medium">URL</th>
+                <th className="w-16 py-1 pr-3 text-center font-medium">3rd-party</th>
+                <th className="py-1 text-left font-medium">Hints</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((r, i) => {
+                const hints: string[] = [];
+                if (r.attrs['async'] !== undefined) hints.push('async');
+                if (r.attrs['defer'] !== undefined) hints.push('defer');
+                if (
+                  (r.attrs['type'] ?? '').toLowerCase() === 'module'
+                ) {
+                  hints.push('module');
+                }
+                if (r.attrs['crossorigin']) {
+                  hints.push(`crossorigin=${r.attrs['crossorigin'] || 'anonymous'}`);
+                }
+                if (r.attrs['integrity']) hints.push('SRI');
+                if ((r.attrs['media'] ?? '').toLowerCase() === 'print') {
+                  hints.push('print-only');
+                }
+                return (
+                  <tr
+                    key={`${r.url}-${i}`}
+                    className="border-b border-surface-900 last:border-0"
+                  >
+                    <td className="py-1.5 pr-3 align-top font-mono text-surface-300">
+                      {r.type}
+                    </td>
+                    <td className="break-all py-1.5 pr-3 align-top font-mono text-surface-100">
+                      <a
+                        href={r.url}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void window.open(r.url, '_blank');
+                        }}
+                        className="text-blue-300 hover:text-blue-200"
+                      >
+                        {r.url}
+                      </a>
+                    </td>
+                    <td className="py-1.5 pr-3 text-center align-top">
+                      {r.isExternal ? (
+                        <span className="text-amber-400">✓</span>
+                      ) : (
+                        <span className="text-surface-700">—</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 align-top font-mono text-[10px] text-surface-400">
+                      {hints.join(' · ')}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ExtractedDataView({ row }: { row: CrawlUrlRow }) {
+  const extraction = row.extractionResults
+    ? safeJsonParse(row.extractionResults)
+    : null;
+  const search = row.customSearchHits ? safeJsonParse(row.customSearchHits) : null;
+
+  const hasExtraction =
+    extraction !== null &&
+    typeof extraction === 'object' &&
+    Object.keys(extraction as Record<string, unknown>).length > 0;
+  const hasSearch =
+    search !== null &&
+    typeof search === 'object' &&
+    Object.keys(search as Record<string, unknown>).length > 0;
+
+  if (!hasExtraction && !hasSearch) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        No custom extraction rules or search terms have produced data for this page.
+        <div className="mt-2 text-[10px] text-surface-600">
+          Configure rules in <span className="font-mono">Settings → Extraction</span> or search
+          terms in <span className="font-mono">Settings → Custom Search</span>, then re-crawl.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col gap-3 overflow-auto p-3">
+      {hasExtraction && (
+        <section>
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-surface-500">
+            Custom Extraction
+          </div>
+          <table className="w-full text-[11px]">
+            <thead className="bg-surface-900">
+              <tr className="text-surface-400">
+                <th className="w-64 py-1 pr-3 text-left font-medium">Rule</th>
+                <th className="py-1 text-left font-medium">Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(extraction as Record<string, unknown>).map(([k, v]) => (
+                <tr key={k} className="border-b border-surface-900 last:border-0">
+                  <td className="py-1.5 pr-3 align-top font-mono text-surface-300">{k}</td>
+                  <td className="break-all py-1.5 align-top font-mono text-surface-100">
+                    {formatExtractedValue(v)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {hasSearch && (
+        <section>
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-surface-500">
+            Custom Search hits
+          </div>
+          <table className="w-full text-[11px]">
+            <thead className="bg-surface-900">
+              <tr className="text-surface-400">
+                <th className="w-64 py-1 pr-3 text-left font-medium">Term</th>
+                <th className="py-1 text-right font-medium">Hits</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(search as Record<string, unknown>).map(([term, count]) => (
+                <tr key={term} className="border-b border-surface-900 last:border-0">
+                  <td className="py-1.5 pr-3 align-top font-mono text-surface-100">{term}</td>
+                  <td className="py-1.5 text-right align-top font-mono text-surface-200">
+                    {Number(count).toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function safeJsonParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+function formatExtractedValue(v: unknown): ReactNode {
+  if (v === null || v === undefined) {
+    return <span className="text-surface-700">—</span>;
+  }
+  if (Array.isArray(v)) {
+    return (
+      <pre className="whitespace-pre-wrap break-all">
+        {JSON.stringify(v, null, 2)}
+      </pre>
+    );
+  }
+  if (typeof v === 'object') {
+    return (
+      <pre className="whitespace-pre-wrap break-all">
+        {JSON.stringify(v, null, 2)}
+      </pre>
+    );
+  }
+  return String(v);
+}
+
+interface HeadingEntry {
+  level: number;
+  text: string;
+}
+
+function parseHeadings(json: string | null): HeadingEntry[] {
+  if (!json) return [];
+  try {
+    const arr = JSON.parse(json) as HeadingEntry[];
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (h) =>
+        h &&
+        typeof h.level === 'number' &&
+        h.level >= 1 &&
+        h.level <= 6 &&
+        typeof h.text === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
+function OutlineView({ row }: { row: CrawlUrlRow }) {
+  const outline = parseHeadings(row.headings);
+
+  if (outline.length === 0) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        This page has no detected headings (no <code>&lt;h1&gt;</code>–
+        <code>&lt;h6&gt;</code> elements). Pages without headings are
+        harder for screen readers to navigate and may rank poorly for
+        long-form queries.
+      </div>
+    );
+  }
+
+  // Skip-detection: a heading skips a level when its level is more than
+  // one greater than the previous heading's level (h1 → h3 etc.). The
+  // very first heading isn't checked because the spec doesn't require
+  // a strict h1 start (<main>-scoped outlines are valid).
+  let prevLevel: number | null = null;
+  const annotated = outline.map((h) => {
+    const skipped =
+      prevLevel !== null && h.level > prevLevel + 1
+        ? `Skipped: previous was h${prevLevel}`
+        : null;
+    prevLevel = h.level;
+    return { ...h, skipped };
+  });
+
+  const counts = { h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0 } as Record<
+    string,
+    number
+  >;
+  for (const h of outline) counts[`h${h.level}`] = (counts[`h${h.level}`] ?? 0) + 1;
+  const skippedCount = annotated.filter((h) => h.skipped).length;
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
+        <span>
+          <span className="font-medium text-surface-200">{outline.length}</span> headings
+        </span>
+        {(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const).map((k) =>
+          counts[k] && counts[k] > 0 ? (
+            <span key={k}>
+              <span className="font-mono uppercase">{k}</span> ×{counts[k]}
+            </span>
+          ) : null,
+        )}
+        {skippedCount > 0 && (
+          <span className="text-amber-400">
+            {skippedCount} skipped level{skippedCount === 1 ? '' : 's'}
+          </span>
+        )}
+        {outline.length === 200 && (
+          <span className="text-surface-500">(capped at 200)</span>
+        )}
+      </div>
+      <div className="flex-1 overflow-auto p-3">
+        <ol className="space-y-1 text-[11px]">
+          {annotated.map((h, i) => (
+            <li
+              key={i}
+              className={clsx(
+                'flex items-start gap-2 rounded border px-2 py-1',
+                h.skipped
+                  ? 'border-amber-700/40 bg-amber-900/15'
+                  : 'border-surface-800 bg-surface-900/40',
+              )}
+              style={{ marginLeft: (h.level - 1) * 18 }}
+            >
+              <span
+                className={clsx(
+                  'inline-flex h-5 min-w-[26px] items-center justify-center rounded font-mono text-[10px]',
+                  h.level === 1 && 'bg-blue-700/40 text-blue-100',
+                  h.level === 2 && 'bg-emerald-700/40 text-emerald-100',
+                  h.level === 3 && 'bg-cyan-700/40 text-cyan-100',
+                  h.level === 4 && 'bg-purple-700/40 text-purple-100',
+                  h.level === 5 && 'bg-pink-700/40 text-pink-100',
+                  h.level === 6 && 'bg-surface-700 text-surface-200',
+                )}
+              >
+                H{h.level}
+              </span>
+              <span className="flex-1 break-words text-surface-100">
+                {h.text || (
+                  <span className="italic text-surface-600">(empty heading)</span>
+                )}
+                {h.skipped && (
+                  <span className="ml-2 text-[10px] text-amber-400">
+                    ⚠ {h.skipped}
+                  </span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </div>
+  );
 }
