@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.3] — 2026-04-28
+
+### Added
+- **Diagnostic popup dialogs** — when a crawl fails for an environment-specific reason (DNS port refused, DNS resolver crashed / `EDESTRUCTION`, TLS certificate inspection by antivirus / proxy, unreachable seed URL), a native modal opens with a clear explanation, step-by-step fix (`services.msc` → DNS Client restart, switch to 1.1.1.1, set `NODE_EXTRA_CA_CERTS`, …), an "Open Logs" button, and a "Don't show this again" checkbox that persists per-category. Site-specific failures (404 / WAF / timeout) stay in the log panel only.
+- **Help → Reset Diagnostic Warnings** — re-enables every "Don't show again" checkbox the user previously dismissed; reports how many warnings were re-enabled.
+
+### Fixed
+- **DNS-layer failures misattributed to HTTP errors** — `formatFetchError` now recognises Node DNS error patterns (`queryA / queryAAAA / queryMx / …`) and surfaces DNS-specific hints. `ECONNREFUSED queryA` is no longer misread as "host refused connection" — it correctly identifies the local DNS resolver / VPN / Pi-hole / firewall as the culprit and recommends switching DNS to 1.1.1.1 / 8.8.8.8.
+- **`EDESTRUCTION` errors had no diagnostic hint** — now mapped to "Windows DNS resolver crashed mid-query — restart the DNS Client service".
+
 ## [0.2.2] — 2026-04-28
 
 ### Added
