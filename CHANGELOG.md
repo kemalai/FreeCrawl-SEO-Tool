@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.5] — 2026-04-29
+
+### Added
+- **macOS `.dmg` installer in every release** — release workflow is now a `[windows-latest, macos-latest]` matrix; one tag push fans out into both jobs and uploads `.exe` (NSIS, x64) and `.dmg` (Apple Silicon arm64 + Intel x64) to the same GitHub release. macOS DMG is currently unsigned — first launch shows a Gatekeeper warning, the user right-clicks → Open once and the app runs normally.
+- **2 new Reports** — **URL Length Histogram** (6 buckets: ≤75 / 76–115 / 116–200 / 201–500 / 501–2048 / >2048; thresholds match SERP-snippet comfort zones) and **Word Count per Directory** (avg word count + page count grouped at depth 1–4; spots thin-content site sections). Reports menu now lists 18 reports.
+- **1 new Report** — **Sitemap Orphans (Top 1000)** lists each URL declared in `<urlset>` but never reached by the crawl, alongside `<lastmod>` and source sitemap so the user can decide stale-vs-genuinely-orphaned. Reports menu now lists 19 reports.
+- **7 new issue filters** — **Internal Link → Redirect** (page links to an internal 3xx target — wastes crawl budget), **H1 = Title** (lazy CMS copy-paste), **Description = H1** (same lazy pattern, different copy direction), **Dead External Domain** (page links to an external domain whose crawled pages are ≥80% broken across ≥3 attempts), **Duplicate URL (post-norm)** (URL collides with another after lowercase + query-strip + trailing-slash strip), **Canonical Chain (Multi-hop)** (Page A canonical → B, B canonical → C — two-level EXISTS subquery catches deeper chains too), **Slow-Loading Image** (>200 KB image on a page that hasn't applied lazy-loading to every image — LCP killer on mobile).
+
+### Changed
+- **CI release pipeline** — single `build` job replaced by a strategy matrix; both Windows and macOS runners install deps, build shared packages, run their platform's `electron-builder` target, upload artifacts, and append to the same release via `softprops/action-gh-release`. Public-repo runners are free across all OSes so this carries no cost.
+
 ## [0.2.4] — 2026-04-28
 
 ### Added

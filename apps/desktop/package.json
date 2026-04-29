@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/desktop",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "FreeCrawl SEO \u00e2\u20ac\u201d desktop application",
   "main": "./out/main/index.js",
