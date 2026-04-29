@@ -10,8 +10,33 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  # Each platform is its own job because electron-builder needs the
+  # native toolchain (NSIS for .exe, hdiutil for .dmg, etc.) of the
+  # runner OS — cross-compiling is not supported. The matrix wires both
+  # jobs to the same release tag; whichever finishes first creates the
+  # release, the other appends its artifacts via softprops/action-gh-release
+  # which handles the duplicate-tag case idempotently.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            build_script: build:win
+            artifact_name: windows-installer
+            artifact_paths: |
+              apps/desktop/release/*.exe
+              apps/desktop/release/*.exe.blockmap
+              apps/desktop/release/latest.yml
+          - os: macos-latest
+            build_script: build:mac
+            artifact_name: macos-installer
+            artifact_paths: |
+              apps/desktop/release/*.dmg
+              apps/desktop/release/*.dmg.blockmap
+              apps/desktop/release/*.zip
+              apps/desktop/release/latest-mac.yml
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,27 +51,26 @@ jobs:
       - name: Build shared packages
         run: npx tsc -b
 
-      - name: Build Windows installer
-        run: npm --workspace apps/desktop run build:win
+      - name: Build installer
+        run: npm --workspace apps/desktop run ${{ matrix.build_script }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Disable mac code-signing — we don't have an Apple Developer
+          # cert in CI yet. Users will see a Gatekeeper warning on first
+          # launch and must right-click → Open the .dmg's app once.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
-          path: |
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.exe.blockmap
-            apps/desktop/release/latest.yml
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_paths }}
+          if-no-files-found: warn
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.exe.blockmap
-            apps/desktop/release/latest.yml
+          files: ${{ matrix.artifact_paths }}
           generate_release_notes: true
           draft: false
           prerelease: false

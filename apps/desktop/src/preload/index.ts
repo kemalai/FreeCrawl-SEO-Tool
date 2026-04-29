@@ -41,6 +41,9 @@ import {
   type ImageWeightRow,
   type BucketHistogramRow,
   type ServerHeaderRow,
+  type WordCountPerDirectoryInput,
+  type WordCountPerDirectoryRow,
+  type SitemapOrphanRow,
   type SettingsExportInput,
   type SettingsExportResult,
   type SettingsImportResult,
@@ -168,6 +171,14 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.reportsInlinksHistogram),
   reportsWordCountHistogram: (): Promise<BucketHistogramRow[]> =>
     ipcRenderer.invoke(IPC.reportsWordCountHistogram),
+  reportsUrlLengthHistogram: (): Promise<BucketHistogramRow[]> =>
+    ipcRenderer.invoke(IPC.reportsUrlLengthHistogram),
+  reportsWordCountPerDirectory: (
+    input: WordCountPerDirectoryInput,
+  ): Promise<WordCountPerDirectoryRow[]> =>
+    ipcRenderer.invoke(IPC.reportsWordCountPerDirectory, input),
+  reportsSitemapOrphans: (limit?: number): Promise<SitemapOrphanRow[]> =>
+    ipcRenderer.invoke(IPC.reportsSitemapOrphans, limit),
   reportsServerHeaders: (): Promise<ServerHeaderRow[]> =>
     ipcRenderer.invoke(IPC.reportsServerHeaders),
   prefsExportSettings: (input: SettingsExportInput): Promise<SettingsExportResult> =>

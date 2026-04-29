@@ -81,6 +81,9 @@ export const IPC = {
   reportsImageWeightPerPage: 'reports:image-weight-per-page',
   reportsInlinksHistogram: 'reports:inlinks-histogram',
   reportsWordCountHistogram: 'reports:word-count-histogram',
+  reportsUrlLengthHistogram: 'reports:url-length-histogram',
+  reportsWordCountPerDirectory: 'reports:word-count-per-directory',
+  reportsSitemapOrphans: 'reports:sitemap-orphans',
   reportsServerHeaders: 'reports:server-headers',
   prefsExportSettings: 'prefs:export-settings',
   prefsImportSettings: 'prefs:import-settings',
@@ -465,6 +468,37 @@ export interface BucketHistogramRow {
   count: number;
 }
 
+/**
+ * One row in the Word Count per Directory report. Aggregated across
+ * indexable HTML pages, grouped at the configured top-level path depth.
+ * Sorted by `avgWordCount` desc so thin-content sections surface at the
+ * bottom and long-form content clusters at the top.
+ */
+export interface WordCountPerDirectoryRow {
+  directory: string;
+  avgWordCount: number;
+  pageCount: number;
+}
+
+export interface WordCountPerDirectoryInput {
+  depth: number;
+  limit: number;
+}
+
+/**
+ * One row in the Sitemap Orphans report. A "sitemap orphan" is a URL
+ * declared in `<urlset>` (or any nested sitemap-index entry) that the
+ * crawl never reached — typically because no internal page linked to
+ * it, or because include/exclude / scope rules filtered it out. Each
+ * row carries the `<lastmod>` value (when present) so the user can
+ * tell whether the entry is genuinely orphaned or merely stale.
+ */
+export interface SitemapOrphanRow {
+  url: string;
+  lastmod: string | null;
+  sourceSitemap: string | null;
+}
+
 /** One row in the Server Stack report — `Server` response-header rollup. */
 export interface ServerHeaderRow {
   server: string;
@@ -610,6 +644,11 @@ export interface FreeCrawlApi {
   reportsImageWeightPerPage(limit?: number): Promise<ImageWeightRow[]>;
   reportsInlinksHistogram(): Promise<BucketHistogramRow[]>;
   reportsWordCountHistogram(): Promise<BucketHistogramRow[]>;
+  reportsUrlLengthHistogram(): Promise<BucketHistogramRow[]>;
+  reportsWordCountPerDirectory(
+    input: WordCountPerDirectoryInput,
+  ): Promise<WordCountPerDirectoryRow[]>;
+  reportsSitemapOrphans(limit?: number): Promise<SitemapOrphanRow[]>;
   reportsServerHeaders(): Promise<ServerHeaderRow[]>;
   prefsExportSettings(input: SettingsExportInput): Promise<SettingsExportResult>;
   prefsImportSettings(): Promise<SettingsImportResult>;

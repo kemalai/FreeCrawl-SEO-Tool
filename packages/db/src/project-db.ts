@@ -2227,6 +2227,119 @@ export class ProjectDb {
          AND indexability = 'indexable'
          AND outlinks = 0`,
       ),
+      internalLinkToRedirect: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM links l
+             JOIN urls t ON l.to_url = t.url
+            WHERE l.from_url_id = urls.id
+              AND l.is_internal = 1
+              AND t.status_code >= 300 AND t.status_code < 400
+         )`,
+      ),
+      h1EqualsTitle: countWhere(
+        `${html} AND title IS NOT NULL AND title != ''
+         AND h1 IS NOT NULL AND h1 != ''
+         AND TRIM(LOWER(title)) = TRIM(LOWER(h1))`,
+      ),
+      deadExternalDomain: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM links l
+             JOIN urls eu ON l.to_url = eu.url
+            WHERE l.from_url_id = urls.id
+              AND l.is_internal = 0
+              AND eu.is_external = 1
+              AND LOWER(
+                SUBSTR(
+                  eu.url,
+                  INSTR(eu.url, '://') + 3,
+                  CASE
+                    WHEN INSTR(SUBSTR(eu.url, INSTR(eu.url, '://') + 3), '/') > 0
+                      THEN INSTR(SUBSTR(eu.url, INSTR(eu.url, '://') + 3), '/') - 1
+                    ELSE LENGTH(eu.url)
+                  END
+                )
+              ) IN (
+                SELECT host_grouped FROM (
+                  SELECT
+                    LOWER(
+                      SUBSTR(
+                        url,
+                        INSTR(url, '://') + 3,
+                        CASE
+                          WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
+                            THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
+                          ELSE LENGTH(url)
+                        END
+                      )
+                    ) AS host_grouped,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
+                  FROM urls
+                  WHERE is_external = 1 AND status_code IS NOT NULL
+                  GROUP BY host_grouped
+                  HAVING total >= 3 AND CAST(errors AS REAL) / total >= 0.8
+                )
+              )
+         )`,
+      ),
+      duplicateUrlPostNorm: countWhere(
+        `is_external = 0 AND EXISTS (
+           SELECT 1 FROM urls u2
+            WHERE u2.id <> urls.id
+              AND u2.is_external = 0
+              AND RTRIM(
+                    LOWER(
+                      CASE
+                        WHEN INSTR(u2.url, '?') > 0
+                          THEN SUBSTR(u2.url, 1, INSTR(u2.url, '?') - 1)
+                        ELSE u2.url
+                      END
+                    ),
+                    '/'
+                  ) =
+                  RTRIM(
+                    LOWER(
+                      CASE
+                        WHEN INSTR(urls.url, '?') > 0
+                          THEN SUBSTR(urls.url, 1, INSTR(urls.url, '?') - 1)
+                        ELSE urls.url
+                      END
+                    ),
+                    '/'
+                  )
+         )`,
+      ),
+      canonicalChainMultiHop: countWhere(
+        `${html} AND canonical IS NOT NULL AND canonical != ''
+         AND canonical != url
+         AND EXISTS (
+           SELECT 1 FROM urls c2
+            WHERE c2.url = urls.canonical
+              AND c2.canonical IS NOT NULL
+              AND c2.canonical != ''
+              AND c2.canonical != c2.url
+              AND c2.canonical != urls.canonical
+         )`,
+      ),
+      imageSlowLoading: countWhere(
+        // ≥1 image > 200 KB AND the page is missing lazy-loading on at
+        // least one image (images_lazy < images_count). The size join
+        // is on the per-image probed `byte_size`; lazy adoption stays
+        // page-level so we don't need a per-image `loading` column.
+        `${html} AND images_count > 0 AND images_lazy < images_count
+         AND EXISTS (
+           SELECT 1 FROM image_usages iu
+             JOIN images i ON iu.image_id = i.id
+            WHERE iu.from_url_id = urls.id
+              AND i.byte_size IS NOT NULL
+              AND i.byte_size > 204800
+         )`,
+      ),
+      descriptionEqualsH1: countWhere(
+        `${html} AND meta_description IS NOT NULL AND meta_description != ''
+         AND h1 IS NOT NULL AND h1 != ''
+         AND TRIM(LOWER(meta_description)) = TRIM(LOWER(h1))`,
+      ),
     };
   }
 
@@ -3058,6 +3171,120 @@ export class ProjectDb {
           ) as { c: number }
       ).c,
     }));
+  }
+
+  /**
+   * URL-length histogram across internal URLs of every kind. Buckets
+   * follow the de-facto SEO advisory thresholds: ≤75 is "comfortable in
+   * SERP snippets", 76–115 is "tolerable", 116+ slides past mobile-card
+   * truncation; 200+ starts triggering RFC-7230 server limits on shared
+   * hosting. The `> 2048` bucket aligns with Chrome's hard URL cap so
+   * users can spot URLs that browsers would already truncate.
+   */
+  urlLengthHistogram(): { label: string; count: number }[] {
+    const buckets: { label: string; min: number; max: number }[] = [
+      { label: '≤ 75', min: 0, max: 75 },
+      { label: '76–115', min: 76, max: 115 },
+      { label: '116–200', min: 116, max: 200 },
+      { label: '201–500', min: 201, max: 500 },
+      { label: '501–2048', min: 501, max: 2048 },
+      { label: '> 2048', min: 2049, max: Number.MAX_SAFE_INTEGER },
+    ];
+    return buckets.map((b) => ({
+      label: b.label,
+      count: (
+        this.db
+          .prepare(
+            b.max === Number.MAX_SAFE_INTEGER
+              ? `SELECT COUNT(*) AS c FROM urls
+                 WHERE is_external = 0 AND LENGTH(url) >= ?`
+              : `SELECT COUNT(*) AS c FROM urls
+                 WHERE is_external = 0 AND LENGTH(url) >= ? AND LENGTH(url) <= ?`,
+          )
+          .get(
+            ...(b.max === Number.MAX_SAFE_INTEGER ? [b.min] : [b.min, b.max]),
+          ) as { c: number }
+      ).c,
+    }));
+  }
+
+  /**
+   * Average word count per top-level directory. Uses the same client-side
+   * URL parsing strategy as `getPagesPerDirectory` (no SQL substring
+   * acrobatics) — for 100K URLs this stays well under 100 ms. Returns
+   * directories sorted by average word count descending so the user can
+   * spot which sections of the site carry deep content vs which are
+   * thin-content stubs that hurt rankings.
+   */
+  wordCountPerDirectory(
+    opts: { depth?: number; limit?: number } = {},
+  ): { directory: string; avgWordCount: number; pageCount: number }[] {
+    const targetDepth = Math.max(1, Math.min(10, opts.depth ?? 1));
+    const limit = Math.max(1, Math.min(2000, opts.limit ?? 500));
+    const rows = this.db
+      .prepare(
+        `SELECT url, word_count FROM urls
+          WHERE is_external = 0 AND content_kind = 'html'
+            AND status_code BETWEEN 200 AND 299
+            AND word_count IS NOT NULL`,
+      )
+      .all() as { url: string; word_count: number }[];
+    const acc = new Map<string, { sum: number; n: number }>();
+    for (const r of rows) {
+      try {
+        const u = new URL(r.url);
+        const segments = u.pathname.split('/').filter((s) => s.length > 0);
+        const taken = segments.slice(0, targetDepth);
+        const dir = taken.length > 0 ? '/' + taken.join('/') : '/';
+        const cur = acc.get(dir);
+        if (cur) {
+          cur.sum += r.word_count;
+          cur.n += 1;
+        } else {
+          acc.set(dir, { sum: r.word_count, n: 1 });
+        }
+      } catch {
+        // skip unparseable URL
+      }
+    }
+    return [...acc.entries()]
+      .map(([directory, v]) => ({
+        directory,
+        avgWordCount: v.n > 0 ? Math.round(v.sum / v.n) : 0,
+        pageCount: v.n,
+      }))
+      .sort(
+        (a, b) =>
+          b.avgWordCount - a.avgWordCount || a.directory.localeCompare(b.directory),
+      )
+      .slice(0, limit);
+  }
+
+  /**
+   * URLs declared in the sitemap but never reached during the crawl —
+   * the canonical "orphan" definition. Surfaces sitemap URLs that the
+   * spider couldn't link-follow to (because no internal page linked to
+   * them, or they were filtered out by include/exclude / scope rules).
+   * Each row carries its `<lastmod>` and the source sitemap URL so the
+   * SEO can decide whether the entry is stale or genuinely orphaned.
+   */
+  sitemapOrphans(
+    limit = 1000,
+  ): { url: string; lastmod: string | null; sourceSitemap: string | null }[] {
+    const cap = Math.max(1, Math.min(10_000, limit));
+    return this.db
+      .prepare(
+        `SELECT s.url AS url, s.lastmod AS lastmod, s.source_sitemap AS sourceSitemap
+           FROM sitemap_urls s
+          WHERE NOT EXISTS (SELECT 1 FROM urls u WHERE u.url = s.url)
+          ORDER BY s.lastmod IS NULL, s.lastmod DESC, s.url
+          LIMIT ?`,
+      )
+      .all(cap) as {
+      url: string;
+      lastmod: string | null;
+      sourceSitemap: string | null;
+    }[];
   }
 
   /**
@@ -4246,6 +4473,153 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               AND status_code BETWEEN 200 AND 299
               AND indexability = 'indexable'
               AND outlinks = 0`;
+    case 'issues:internal-link-to-redirect':
+      // A page links to ≥1 internal URL whose status is 3xx. Each hop
+      // burns crawl budget and weakens link equity — best-practice is
+      // to update every link to the redirect's final destination.
+      return `is_external = 0 AND content_kind = 'html'
+              AND EXISTS (
+                SELECT 1 FROM links l
+                  JOIN urls t ON l.to_url = t.url
+                 WHERE l.from_url_id = urls.id
+                   AND l.is_internal = 1
+                   AND t.status_code >= 300 AND t.status_code < 400
+              )`;
+    case 'issues:h1-equals-title':
+      // Title and H1 are *almost* always supposed to differ —
+      // duplicating one as the other wastes the second relevance
+      // signal Google reads from a page. Common when the CMS
+      // auto-fills both from the same field.
+      return `is_external = 0 AND content_kind = 'html'
+              AND title IS NOT NULL AND title != ''
+              AND h1 IS NOT NULL AND h1 != ''
+              AND TRIM(LOWER(title)) = TRIM(LOWER(h1))`;
+    case 'issues:dead-external-domain':
+      // Page links to an external domain whose own crawled pages are
+      // mostly broken: ≥3 attempts (so a single 404 doesn't poison a
+      // whole site) AND ≥80% error rate. Both thresholds match the
+      // External Domain Health report's "BAD" classification so the
+      // sidebar count and the report agree on what counts as dead.
+      // The host extraction is inlined below; SQLite's substring
+      // arithmetic is verbose but stays in the query planner so a
+      // 100K-URL crawl resolves this in a single pass.
+      return `is_external = 0 AND content_kind = 'html'
+              AND EXISTS (
+                SELECT 1 FROM links l
+                  JOIN urls eu ON l.to_url = eu.url
+                 WHERE l.from_url_id = urls.id
+                   AND l.is_internal = 0
+                   AND eu.is_external = 1
+                   AND LOWER(
+                     SUBSTR(
+                       eu.url,
+                       INSTR(eu.url, '://') + 3,
+                       CASE
+                         WHEN INSTR(SUBSTR(eu.url, INSTR(eu.url, '://') + 3), '/') > 0
+                           THEN INSTR(SUBSTR(eu.url, INSTR(eu.url, '://') + 3), '/') - 1
+                         ELSE LENGTH(eu.url)
+                       END
+                     )
+                   ) IN (
+                     SELECT host_grouped FROM (
+                       SELECT
+                         LOWER(
+                           SUBSTR(
+                             url,
+                             INSTR(url, '://') + 3,
+                             CASE
+                               WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
+                                 THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
+                               ELSE LENGTH(url)
+                             END
+                           )
+                         ) AS host_grouped,
+                         COUNT(*) AS total,
+                         SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
+                       FROM urls
+                       WHERE is_external = 1 AND status_code IS NOT NULL
+                       GROUP BY host_grouped
+                       HAVING total >= 3 AND CAST(errors AS REAL) / total >= 0.8
+                     )
+                   )
+              )`;
+    case 'issues:duplicate-url-post-norm':
+      // Two distinct URL rows that collapse to the same value once
+      // common normalisations are applied: lowercase the host, strip a
+      // trailing slash, drop the query string. We don't strip the
+      // fragment because we already have a separate "Fragment in URL"
+      // issue and a fragment-only difference is rare in real corpora.
+      // EXISTS pattern matches at least one OTHER row with the same
+      // normalised key; current row excluded by `urls.id <> u2.id`.
+      return `is_external = 0
+              AND EXISTS (
+                SELECT 1 FROM urls u2
+                 WHERE u2.id <> urls.id
+                   AND u2.is_external = 0
+                   AND RTRIM(
+                         LOWER(
+                           CASE
+                             WHEN INSTR(u2.url, '?') > 0
+                               THEN SUBSTR(u2.url, 1, INSTR(u2.url, '?') - 1)
+                             ELSE u2.url
+                           END
+                         ),
+                         '/'
+                       ) =
+                       RTRIM(
+                         LOWER(
+                           CASE
+                             WHEN INSTR(urls.url, '?') > 0
+                               THEN SUBSTR(urls.url, 1, INSTR(urls.url, '?') - 1)
+                             ELSE urls.url
+                           END
+                         ),
+                         '/'
+                       )
+              )`;
+    case 'issues:canonical-chain-multi-hop':
+      // Page has a canonical, AND that canonical's target is also a
+      // crawled URL with its own *different* canonical. Two-hop
+      // detection is enough for the bulk of misconfigurations — deeper
+      // chains cascade through this filter too because the second hop
+      // would also surface as a multi-hop chain on its own row.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical != ''
+              AND canonical != url
+              AND EXISTS (
+                SELECT 1 FROM urls c2
+                 WHERE c2.url = urls.canonical
+                   AND c2.canonical IS NOT NULL
+                   AND c2.canonical != ''
+                   AND c2.canonical != c2.url
+                   AND c2.canonical != urls.canonical
+              )`;
+    case 'issues:image-slow-loading':
+      // Page loads at least one image > 200 KB AND the page hasn't
+      // applied lazy-loading to every image. Big un-lazy images are
+      // LCP killers on mobile and waste data budget on every reload.
+      // 200 KB matches the existing "Large Image" threshold so the
+      // user sees the same set spanning two complementary issues.
+      // Lazy adoption is tracked per-page (images_lazy / images_count)
+      // because the parser doesn't store a per-image `loading` flag.
+      return `is_external = 0 AND content_kind = 'html'
+              AND images_count > 0 AND images_lazy < images_count
+              AND EXISTS (
+                SELECT 1 FROM image_usages iu
+                  JOIN images i ON iu.image_id = i.id
+                 WHERE iu.from_url_id = urls.id
+                   AND i.byte_size IS NOT NULL
+                   AND i.byte_size > 204800
+              )`;
+    case 'issues:description-equals-h1':
+      // Meta description verbatim duplicates the H1 — same lazy
+      // copy-paste pattern as `description-equals-title` but coming
+      // from a different copy direction (CMS auto-fills meta from H1
+      // when title is intentionally different).
+      return `is_external = 0 AND content_kind = 'html'
+              AND meta_description IS NOT NULL AND meta_description != ''
+              AND h1 IS NOT NULL AND h1 != ''
+              AND TRIM(LOWER(meta_description)) = TRIM(LOWER(h1))`;
     default:
       return null;
   }

@@ -13,6 +13,8 @@ import type {
   ImageWeightRow,
   BucketHistogramRow,
   ServerHeaderRow,
+  WordCountPerDirectoryRow,
+  SitemapOrphanRow,
 } from '@freecrawl/shared-types';
 
 interface Props {
@@ -36,6 +38,9 @@ type ReportKind =
   | 'image-weight'
   | 'inlinks-histogram'
   | 'word-count-histogram'
+  | 'url-length-histogram'
+  | 'word-count-per-dir'
+  | 'sitemap-orphans'
   | 'server-headers';
 
 interface ReportRow {
@@ -68,6 +73,9 @@ const REPORT_LABELS: Record<ReportKind, string> = {
   'image-weight': 'Image Weight per Page (Top 25)',
   'inlinks-histogram': 'Inlinks Histogram',
   'word-count-histogram': 'Word Count Histogram',
+  'url-length-histogram': 'URL Length Histogram',
+  'word-count-per-dir': 'Word Count per Directory',
+  'sitemap-orphans': 'Sitemap Orphans (Top 1000)',
   'server-headers': 'Server Stack (Server Header)',
 };
 
@@ -87,6 +95,9 @@ const KEY_LABELS: Record<ReportKind, string> = {
   'image-weight': 'URL',
   'inlinks-histogram': 'Bucket',
   'word-count-histogram': 'Bucket',
+  'url-length-histogram': 'Bucket',
+  'word-count-per-dir': 'Directory',
+  'sitemap-orphans': 'URL',
   'server-headers': 'Server',
 };
 
@@ -106,6 +117,9 @@ const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
   'image-weight': null,
   'inlinks-histogram': null,
   'word-count-histogram': null,
+  'url-length-histogram': null,
+  'word-count-per-dir': null,
+  'sitemap-orphans': null,
   'server-headers': null,
 };
 
@@ -130,6 +144,9 @@ const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
   },
   'inlinks-histogram': (v) => (v ?? 0).toLocaleString(),
   'word-count-histogram': (v) => (v ?? 0).toLocaleString(),
+  'url-length-histogram': (v) => (v ?? 0).toLocaleString(),
+  'word-count-per-dir': (v) => (v ?? 0).toLocaleString(),
+  'sitemap-orphans': (v) => (v ?? 0).toLocaleString(),
   'server-headers': (v) => (v ?? 0).toLocaleString(),
 };
 
@@ -234,6 +251,47 @@ export function ReportsDialog({ open, onClose }: Props) {
           const r = await window.freecrawl.reportsWordCountHistogram();
           if (!cancelled)
             setRows(r.map((x: BucketHistogramRow) => ({ key: x.label, count: x.count })));
+        } else if (kind === 'url-length-histogram') {
+          const r = await window.freecrawl.reportsUrlLengthHistogram();
+          if (!cancelled)
+            setRows(r.map((x: BucketHistogramRow) => ({ key: x.label, count: x.count })));
+        } else if (kind === 'word-count-per-dir') {
+          const r = await window.freecrawl.reportsWordCountPerDirectory({
+            depth,
+            limit: 1000,
+          });
+          if (!cancelled)
+            setRows(
+              r.map((x: WordCountPerDirectoryRow) => ({
+                key: x.directory,
+                // Bar metric is the avg word count so the deepest-content
+                // directories visually spike; secondary value shows page
+                // count so the user can spot single-page outliers.
+                count: x.avgWordCount,
+                valueLabel: `${x.avgWordCount.toLocaleString()} avg · ${x.pageCount.toLocaleString()} page${
+                  x.pageCount === 1 ? '' : 's'
+                }`,
+              })),
+            );
+        } else if (kind === 'sitemap-orphans') {
+          const r = await window.freecrawl.reportsSitemapOrphans(1000);
+          if (!cancelled)
+            setRows(
+              r.map((x: SitemapOrphanRow) => ({
+                key: x.url,
+                // Constant bar (1) keeps every row visually equal — there
+                // is no metric to scale against; the meaning is "this URL
+                // is in the sitemap but never crawled". Lastmod + source
+                // sitemap go to the secondary value column.
+                count: 1,
+                valueLabel: [
+                  x.lastmod ? `lastmod ${x.lastmod}` : null,
+                  x.sourceSitemap ? `from ${x.sourceSitemap}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || '—',
+              })),
+            );
         } else if (kind === 'server-headers') {
           const r = await window.freecrawl.reportsServerHeaders();
           if (!cancelled)
@@ -322,10 +380,13 @@ export function ReportsDialog({ open, onClose }: Props) {
               <option value="image-weight">Image Weight per Page (Top 25)</option>
               <option value="inlinks-histogram">Inlinks Histogram</option>
               <option value="word-count-histogram">Word Count Histogram</option>
+              <option value="url-length-histogram">URL Length Histogram</option>
+              <option value="word-count-per-dir">Word Count per Directory</option>
+              <option value="sitemap-orphans">Sitemap Orphans (Top 1000)</option>
               <option value="server-headers">Server Stack</option>
             </select>
           </label>
-          {kind === 'pages-per-dir' && (
+          {(kind === 'pages-per-dir' || kind === 'word-count-per-dir') && (
             <label className="flex items-center gap-1.5">
               <span className="text-surface-400">Group at depth</span>
               <select

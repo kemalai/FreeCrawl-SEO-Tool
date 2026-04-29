@@ -150,6 +150,13 @@ export type UrlCategory =
   | 'issues:title-single-word'
   | 'issues:external-links-too-many'
   | 'issues:outlinks-zero'
+  | 'issues:internal-link-to-redirect'
+  | 'issues:h1-equals-title'
+  | 'issues:dead-external-domain'
+  | 'issues:duplicate-url-post-norm'
+  | 'issues:canonical-chain-multi-hop'
+  | 'issues:image-slow-loading'
+  | 'issues:description-equals-h1'
 
 export type Indexability =
   | 'indexable'
@@ -805,6 +812,50 @@ export interface OverviewCounts {
     externalLinksTooMany: number;
     /** Indexable HTML pages with zero outlinks (link dead-end / orphan leaf). */
     outlinksZero: number;
+    /**
+     * Pages with at least one internal link pointing to a 3xx redirect.
+     * Wastes crawl budget and dilutes link equity — best practice is to
+     * update the link to point directly at the final URL.
+     */
+    internalLinkToRedirect: number;
+    /**
+     * Pages where the H1 text equals the title text (case-insensitive,
+     * trimmed). Often a CMS-default rather than an intentional SEO
+     * decision — wastes the second on-page signal.
+     */
+    h1EqualsTitle: number;
+    /**
+     * Pages with at least one outgoing link to an external domain whose
+     * crawled pages are mostly broken (≥3 attempts AND ≥80% error rate).
+     * Hurts user experience + signals abandonment to crawlers.
+     */
+    deadExternalDomain: number;
+    /**
+     * Pages whose URL collides with another page after applying the
+     * configured URL normalisation (lowercase host, trailing-slash
+     * harmonisation, query-strip). Highlights canonicalisation gaps that
+     * waste crawl budget and split link equity.
+     */
+    duplicateUrlPostNorm: number;
+    /**
+     * Pages whose canonical points to another canonicalised page,
+     * forming a chain of length ≥ 2. Search engines may or may not
+     * follow the chain — best practice is to point every page directly
+     * at the final canonical.
+     */
+    canonicalChainMultiHop: number;
+    /**
+     * Pages that load at least one image larger than 200 KB without
+     * `loading="lazy"` — the slowest-loading category for any page that
+     * reaches LCP from a non-optimised hero image.
+     */
+    imageSlowLoading: number;
+    /**
+     * Meta description text equals the H1 text (case-insensitive,
+     * trimmed) — duplicates a content signal across two channels and
+     * usually means the description was never customised for SERP CTR.
+     */
+    descriptionEqualsH1: number;
   };
 }
 

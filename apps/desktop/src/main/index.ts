@@ -44,6 +44,9 @@ import {
   type ImageWeightRow,
   type BucketHistogramRow,
   type ServerHeaderRow,
+  type WordCountPerDirectoryInput,
+  type WordCountPerDirectoryRow,
+  type SitemapOrphanRow,
   type SettingsExportInput,
   type SettingsExportResult,
   type SettingsImportResult,
@@ -738,6 +741,23 @@ function registerIpc(): void {
   ipcMain.handle(
     IPC.reportsWordCountHistogram,
     (): BucketHistogramRow[] => getDb().wordCountHistogram(),
+  );
+
+  ipcMain.handle(
+    IPC.reportsUrlLengthHistogram,
+    (): BucketHistogramRow[] => getDb().urlLengthHistogram(),
+  );
+
+  ipcMain.handle(
+    IPC.reportsWordCountPerDirectory,
+    (_e, input: WordCountPerDirectoryInput): WordCountPerDirectoryRow[] =>
+      getDb().wordCountPerDirectory({ depth: input.depth, limit: input.limit }),
+  );
+
+  ipcMain.handle(
+    IPC.reportsSitemapOrphans,
+    (_e, limit?: number): SitemapOrphanRow[] =>
+      getDb().sitemapOrphans(limit ?? 1000),
   );
 
   ipcMain.handle(
