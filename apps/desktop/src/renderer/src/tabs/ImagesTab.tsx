@@ -9,7 +9,9 @@ const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
 const ROW_NUM_WIDTH = 56;
 const STATUS_BAR_HEIGHT = 22;
-const POLL_MS = 3000;
+// I-4 — Crawl-aware polling cadence (see BrokenLinksTab for rationale).
+const POLL_MS_RUNNING = 3000;
+const POLL_MS_IDLE = 30_000;
 const PAGE_SIZE = 5000;
 
 type SortKey = 'src' | 'alt' | 'width' | 'height' | 'occurrences';
@@ -17,6 +19,7 @@ type SortKey = 'src' | 'alt' | 'width' | 'height' | 'occurrences';
 export function ImagesTab() {
   const activeCategory = useAppStore((s) => s.activeCategory);
   const dataVersion = useAppStore((s) => s.dataVersion);
+  const progress = useAppStore((s) => s.progress);
   const [rows, setRows] = useState<ImageRow[]>([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
@@ -42,12 +45,13 @@ export function ImagesTab() {
       setTotal(res.total);
     };
     void load();
-    const id = setInterval(load, POLL_MS);
+    const cadence = progress?.running ? POLL_MS_RUNNING : POLL_MS_IDLE;
+    const id = setInterval(load, cadence);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [search, missingAltOnly, dataVersion]);
+  }, [search, missingAltOnly, dataVersion, progress?.running]);
 
   const sorted = useMemo(() => {
     const copy = [...rows];

@@ -7,7 +7,15 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/main/index.ts') },
+        // Two entry points: the main process bootstrap, and the
+        // read-only DB worker that runs in a `worker_threads.Worker`.
+        // Both compile into `out/main/`; the Worker constructor in
+        // `db-reader-pool.ts` resolves the worker file relative to
+        // `__dirname` so it picks up the same bundled module.
+        input: {
+          index: resolve(__dirname, 'src/main/index.ts'),
+          'db-reader-worker': resolve(__dirname, 'src/main/db-reader-worker.ts'),
+        },
       },
     },
   },

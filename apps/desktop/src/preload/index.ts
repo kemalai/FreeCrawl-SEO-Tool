@@ -179,6 +179,11 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.reportsWordCountPerDirectory, input),
   reportsSitemapOrphans: (limit?: number): Promise<SitemapOrphanRow[]> =>
     ipcRenderer.invoke(IPC.reportsSitemapOrphans, limit),
+  // Fire-and-forget — `send` not `invoke` because we don't need a
+  // response and we want this to be cheap (≤ 1 ms per call, no wait).
+  reportRendererLag: (lagMs: number) => {
+    ipcRenderer.send(IPC.rendererLagReport, lagMs);
+  },
   reportsServerHeaders: (): Promise<ServerHeaderRow[]> =>
     ipcRenderer.invoke(IPC.reportsServerHeaders),
   prefsExportSettings: (input: SettingsExportInput): Promise<SettingsExportResult> =>

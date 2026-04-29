@@ -85,6 +85,7 @@ import {
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
 import * as logger from './logger.js';
+import { dbReaderPool, callReaderOrFallback } from './db-reader-pool.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -300,6 +301,18 @@ function getDb(): ProjectDb {
     // Fresh start on every app launch — clear any data carried over from
     // the previous session. Explicit Save Project will be added later.
     db.reset();
+    // Spawn the read-only worker pointed at the same file. Migrations
+    // already ran above (the writer owns them) so the worker just
+    // attaches to the WAL and starts serving SELECTs concurrently.
+    try {
+      dbReaderPool.init(defaultPath);
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `db-reader pool init failed: ${err instanceof Error ? err.message : String(err)} — falling back to main-thread queries.`,
+      );
+    }
   }
   return db;
 }
@@ -324,6 +337,18 @@ function openProjectAtPath(filePath: string): void {
   }
   db = new ProjectDb(filePath);
   currentProjectPath = filePath;
+  // Re-point the read-only worker at the new file. `swap` cancels any
+  // in-flight requests with `reader-swapped`; the next IPC call will
+  // hit the freshly opened worker.
+  try {
+    dbReaderPool.swap(filePath);
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `db-reader pool swap failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   pushRecentProject(filePath);
   rebuildMenu();
   if (mainWindow) {
@@ -628,6 +653,17 @@ function openLogsWindow(): void {
 function registerIpc(): void {
   ipcMain.handle(IPC.appVersion, () => app.getVersion());
 
+  // Renderer → main heartbeat carrying live input-lag (ms). Forwarded
+  // to the active crawler so it can adaptively shrink its concurrency
+  // when the renderer's main thread is starved. `ipcMain.on` (not
+  // `handle`) because the renderer uses `send`-no-wait — this stays
+  // off the synchronous IPC reply path entirely.
+  ipcMain.on(IPC.rendererLagReport, (_e, lagMs: number) => {
+    if (typeof lagMs === 'number' && Number.isFinite(lagMs)) {
+      activeCrawler?.reportRendererLag(lagMs);
+    }
+  });
+
   ipcMain.handle(IPC.logsGetAll, () => logger.getAll());
   ipcMain.handle(IPC.logsClear, () => {
     logger.clearAll();
@@ -679,23 +715,39 @@ function registerIpc(): void {
     },
   );
 
+  // Reports — every one of these is a SELECT-aggregate that benefits
+  // from running off the main thread. Each handler routes through the
+  // reader pool with a main-thread fallback so a worker crash doesn't
+  // brick the Reports dialog.
   ipcMain.handle(
     IPC.reportsPagesPerDirectory,
     (_e, input: PagesPerDirectoryInput) =>
-      getDb().getPagesPerDirectory({ depth: input.depth, limit: input.limit }),
+      callReaderOrFallback(
+        'getPagesPerDirectory',
+        [{ depth: input.depth, limit: input.limit }],
+        () => getDb().getPagesPerDirectory({ depth: input.depth, limit: input.limit }),
+      ),
   );
 
-  ipcMain.handle(IPC.reportsStatusCodeHistogram, () => getDb().getStatusCodeHistogram());
+  ipcMain.handle(IPC.reportsStatusCodeHistogram, () =>
+    callReaderOrFallback('getStatusCodeHistogram', [], () =>
+      getDb().getStatusCodeHistogram(),
+    ),
+  );
 
-  ipcMain.handle(IPC.reportsDepthHistogram, () => getDb().getDepthHistogram());
+  ipcMain.handle(IPC.reportsDepthHistogram, () =>
+    callReaderOrFallback('getDepthHistogram', [], () => getDb().getDepthHistogram()),
+  );
 
   ipcMain.handle(IPC.reportsResponseTimeHistogram, () =>
-    getDb().getResponseTimeHistogram(),
+    callReaderOrFallback('getResponseTimeHistogram', [], () =>
+      getDb().getResponseTimeHistogram(),
+    ),
   );
 
   ipcMain.handle(
     IPC.reportsTopUrls,
-    (_e, input: TopUrlsInput): TopUrlsRow[] => {
+    (_e, input: TopUrlsInput): Promise<TopUrlsRow[]> => {
       const limit = Math.min(500, Math.max(1, input.limit ?? 25));
       const column =
         input.metric === 'response-time'
@@ -707,62 +759,89 @@ function registerIpc(): void {
               : input.metric === 'depth'
                 ? 'depth'
                 : 'content_length';
-      return getDb().topUrlsBy(column, limit);
+      return callReaderOrFallback<TopUrlsRow[]>(
+        'topUrlsBy',
+        [column, limit],
+        () => getDb().topUrlsBy(column, limit),
+      );
     },
   );
 
   ipcMain.handle(
     IPC.reportsExternalDomainHealth,
-    (_e, limit: number | undefined): ExternalDomainHealthRow[] =>
-      getDb().externalDomainHealth(limit ?? 100),
+    (_e, limit: number | undefined): Promise<ExternalDomainHealthRow[]> =>
+      callReaderOrFallback<ExternalDomainHealthRow[]>(
+        'externalDomainHealth',
+        [limit ?? 100],
+        () => getDb().externalDomainHealth(limit ?? 100),
+      ),
   );
 
-  ipcMain.handle(
-    IPC.reportsAnalyticsCoverage,
-    (): AnalyticsCoverageRow[] => getDb().analyticsCoverage(),
+  ipcMain.handle(IPC.reportsAnalyticsCoverage, () =>
+    callReaderOrFallback<AnalyticsCoverageRow[]>('analyticsCoverage', [], () =>
+      getDb().analyticsCoverage(),
+    ),
   );
 
-  ipcMain.handle(
-    IPC.reportsLinkPositions,
-    (): LinkPositionRow[] => getDb().linkPositionBreakdown(),
+  ipcMain.handle(IPC.reportsLinkPositions, () =>
+    callReaderOrFallback<LinkPositionRow[]>('linkPositionBreakdown', [], () =>
+      getDb().linkPositionBreakdown(),
+    ),
   );
 
   ipcMain.handle(
     IPC.reportsImageWeightPerPage,
-    (_e, limit: number | undefined): ImageWeightRow[] =>
-      getDb().imageWeightPerPage(limit ?? 25),
+    (_e, limit: number | undefined): Promise<ImageWeightRow[]> =>
+      callReaderOrFallback<ImageWeightRow[]>(
+        'imageWeightPerPage',
+        [limit ?? 25],
+        () => getDb().imageWeightPerPage(limit ?? 25),
+      ),
   );
 
-  ipcMain.handle(
-    IPC.reportsInlinksHistogram,
-    (): BucketHistogramRow[] => getDb().inlinksHistogram(),
+  ipcMain.handle(IPC.reportsInlinksHistogram, () =>
+    callReaderOrFallback<BucketHistogramRow[]>('inlinksHistogram', [], () =>
+      getDb().inlinksHistogram(),
+    ),
   );
 
-  ipcMain.handle(
-    IPC.reportsWordCountHistogram,
-    (): BucketHistogramRow[] => getDb().wordCountHistogram(),
+  ipcMain.handle(IPC.reportsWordCountHistogram, () =>
+    callReaderOrFallback<BucketHistogramRow[]>('wordCountHistogram', [], () =>
+      getDb().wordCountHistogram(),
+    ),
   );
 
-  ipcMain.handle(
-    IPC.reportsUrlLengthHistogram,
-    (): BucketHistogramRow[] => getDb().urlLengthHistogram(),
+  ipcMain.handle(IPC.reportsUrlLengthHistogram, () =>
+    callReaderOrFallback<BucketHistogramRow[]>('urlLengthHistogram', [], () =>
+      getDb().urlLengthHistogram(),
+    ),
   );
 
   ipcMain.handle(
     IPC.reportsWordCountPerDirectory,
-    (_e, input: WordCountPerDirectoryInput): WordCountPerDirectoryRow[] =>
-      getDb().wordCountPerDirectory({ depth: input.depth, limit: input.limit }),
+    (_e, input: WordCountPerDirectoryInput): Promise<WordCountPerDirectoryRow[]> =>
+      callReaderOrFallback<WordCountPerDirectoryRow[]>(
+        'wordCountPerDirectory',
+        [{ depth: input.depth, limit: input.limit }],
+        () =>
+          getDb().wordCountPerDirectory({ depth: input.depth, limit: input.limit }),
+      ),
   );
 
   ipcMain.handle(
     IPC.reportsSitemapOrphans,
-    (_e, limit?: number): SitemapOrphanRow[] =>
-      getDb().sitemapOrphans(limit ?? 1000),
+    (_e, limit?: number): Promise<SitemapOrphanRow[]> =>
+      callReaderOrFallback<SitemapOrphanRow[]>(
+        'sitemapOrphans',
+        [limit ?? 1000],
+        () => getDb().sitemapOrphans(limit ?? 1000),
+      ),
   );
 
-  ipcMain.handle(
-    IPC.reportsServerHeaders,
-    (): ServerHeaderRow[] => getDb().serverHeaderBreakdown(),
+  ipcMain.handle(IPC.reportsServerHeaders, () =>
+    callReaderOrFallback<ServerHeaderRow[]>('serverHeaderBreakdown', [], () =>
+      getDb().serverHeaderBreakdown(),
+    ),
   );
 
   ipcMain.handle(
@@ -1094,44 +1173,85 @@ function registerIpc(): void {
     };
   });
 
-  ipcMain.handle(IPC.urlsQuery, (_e, input: UrlsQueryInput): UrlsQueryResult => {
-    return getDb().queryUrls({
-      limit: input.limit,
-      offset: input.offset,
-      category: input.category ?? 'all',
-      search: input.search,
-      sortBy: input.sortBy as string | undefined,
-      sortDir: input.sortDir,
-      filter: input.filter,
+  // `setImmediate`-yield wrapper for read-heavy IPC handlers. Yielding
+  // before running the SQL gives the Node event loop one tick to drain
+  // pending IPC and crawler callbacks first — without this, two
+  // simultaneous renderer queries (e.g. table chunk + sidebar refresh)
+  // run back-to-back and freeze input for the duration of both. With
+  // this wrapper they interleave with the crawler's per-URL DB writes
+  // and any other queued IPC, keeping click → response under one frame
+  // even on a saturated main thread. Cost per call: < 1 ms.
+  const yieldThenRun = <T>(fn: () => T): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      setImmediate(() => {
+        try {
+          resolve(fn());
+        } catch (err) {
+          reject(err as Error);
+        }
+      });
     });
+
+  ipcMain.handle(IPC.urlsQuery, async (_e, input: UrlsQueryInput): Promise<UrlsQueryResult> => {
+    const args: Parameters<typeof ProjectDb.prototype.queryUrls> = [
+      {
+        limit: input.limit,
+        offset: input.offset,
+        category: input.category ?? 'all',
+        search: input.search,
+        sortBy: input.sortBy as string | undefined,
+        sortDir: input.sortDir,
+        filter: input.filter,
+      },
+    ];
+    // Reader worker first (off-thread); on any failure (worker
+    // crashed, swap in flight, timeout) fall back to the main-thread
+    // ProjectDb so the UI never blocks on infrastructure trouble.
+    return callReaderOrFallback<UrlsQueryResult>('queryUrls', args, () =>
+      getDb().queryUrls(args[0]),
+    );
   });
 
-  ipcMain.handle(IPC.overviewGet, (): OverviewCounts => {
-    return getDb().getOverviewCounts();
-  });
+  ipcMain.handle(IPC.overviewGet, async (): Promise<OverviewCounts> =>
+    callReaderOrFallback<OverviewCounts>('getOverviewCounts', [], () =>
+      getDb().getOverviewCountsAsync(),
+    ),
+  );
 
   ipcMain.handle(
     IPC.imagesQuery,
-    (_e, input: ImagesQueryInput): ImagesQueryResult => {
-      return getDb().queryImages({
-        limit: input.limit,
-        offset: input.offset,
-        search: input.search,
-        missingAltOnly: input.missingAltOnly,
-        internalOnly: input.internalOnly,
-      });
+    async (_e, input: ImagesQueryInput): Promise<ImagesQueryResult> => {
+      const args: Parameters<typeof ProjectDb.prototype.queryImages> = [
+        {
+          limit: input.limit,
+          offset: input.offset,
+          search: input.search,
+          missingAltOnly: input.missingAltOnly,
+          internalOnly: input.internalOnly,
+        },
+      ];
+      return callReaderOrFallback<ImagesQueryResult>('queryImages', args, () =>
+        getDb().queryImages(args[0]),
+      );
     },
   );
 
   ipcMain.handle(
     IPC.brokenLinksQuery,
-    (_e, input: BrokenLinksQueryInput): BrokenLinksQueryResult => {
-      return getDb().queryBrokenLinks({
-        limit: input.limit,
-        offset: input.offset,
-        internal: input.internal,
-        search: input.search,
-      });
+    async (_e, input: BrokenLinksQueryInput): Promise<BrokenLinksQueryResult> => {
+      const args: Parameters<typeof ProjectDb.prototype.queryBrokenLinks> = [
+        {
+          limit: input.limit,
+          offset: input.offset,
+          internal: input.internal,
+          search: input.search,
+        },
+      ];
+      return callReaderOrFallback<BrokenLinksQueryResult>(
+        'queryBrokenLinks',
+        args,
+        () => getDb().queryBrokenLinks(args[0]),
+      );
     },
   );
 
@@ -1269,9 +1389,13 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.urlDetailGet, (_e, input: UrlDetailInput): UrlDetail | null => {
-    return getDb().getUrlDetail(input.id, input.linkLimit ?? 500);
-  });
+  ipcMain.handle(IPC.urlDetailGet, async (_e, input: UrlDetailInput): Promise<UrlDetail | null> =>
+    callReaderOrFallback<UrlDetail | null>(
+      'getUrlDetail',
+      [input.id, input.linkLimit ?? 500],
+      () => getDb().getUrlDetail(input.id, input.linkLimit ?? 500),
+    ),
+  );
 
   ipcMain.handle(
     IPC.urlSourceGet,
@@ -1320,9 +1444,9 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.summaryGet, (): CrawlSummary => {
-    return getDb().getSummary();
-  });
+  ipcMain.handle(IPC.summaryGet, (): Promise<CrawlSummary> =>
+    callReaderOrFallback<CrawlSummary>('getSummary', [], () => getDb().getSummary()),
+  );
 
   ipcMain.handle(
     IPC.exportCsv,
@@ -1725,6 +1849,11 @@ void app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   activeCrawler?.stop();
+  // Terminate the read-only worker BEFORE closing the writer connection.
+  // Order matters on Windows: SQLite holds a file lock per connection
+  // and the writer's WAL checkpoint at close-time can stall if a
+  // reader is still mid-query.
+  void dbReaderPool.terminate();
   db?.close();
   db = null;
   flushPrefs();

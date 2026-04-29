@@ -9,12 +9,18 @@ const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
 const ROW_NUM_WIDTH = 56;
 const STATUS_BAR_HEIGHT = 22;
-const POLL_MS = 3000;
+// I-4 — Crawl-aware polling cadence. Live during a crawl, idle when
+// just viewing existing project data. The 30 s idle poll exists only
+// to catch external invalidations (Open Project, Bulk Export); the
+// crawler's per-50-URL push refetch handles the live case.
+const POLL_MS_RUNNING = 3000;
+const POLL_MS_IDLE = 30_000;
 const PAGE_SIZE = 5000;
 
 export function BrokenLinksTab() {
   const activeCategory = useAppStore((s) => s.activeCategory);
   const dataVersion = useAppStore((s) => s.dataVersion);
+  const progress = useAppStore((s) => s.progress);
   const [rows, setRows] = useState<BrokenLinkRow[]>([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
@@ -43,12 +49,13 @@ export function BrokenLinksTab() {
       setTotal(res.total);
     };
     void load();
-    const id = setInterval(load, POLL_MS);
+    const cadence = progress?.running ? POLL_MS_RUNNING : POLL_MS_IDLE;
+    const id = setInterval(load, cadence);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [search, internal, dataVersion]);
+  }, [search, internal, dataVersion, progress?.running]);
 
   const virtualizer = useVirtualizer({
     count: rows.length,

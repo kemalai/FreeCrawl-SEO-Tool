@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import clsx from 'clsx';
 import type { OverviewCounts, UrlCategory } from '@freecrawl/shared-types';
@@ -16,6 +16,7 @@ export function OverviewSidebar() {
   const overview = useAppStore((s) => s.overview);
   const setOverview = useAppStore((s) => s.setOverview);
   const dataVersion = useAppStore((s) => s.dataVersion);
+  const progress = useAppStore((s) => s.progress);
   const activeCategory = useAppStore((s) => s.activeCategory);
   const navigateToCategory = useAppStore((s) => s.navigateToCategory);
   const [expanded, setExpanded] = useState<Set<string>>(
@@ -58,15 +59,52 @@ export function OverviewSidebar() {
         inFlight = false;
       }
     };
-    void load();
-    // 3000 ms cadence — at 100 URL/s that's 300 new rows between
-    // refreshes, perceptually still "live" without slamming the DB.
-    const id = setInterval(load, 3000);
+    // Wrap in requestIdleCallback so the 70+ issue-counter aggregate
+    // only fires when the renderer's event loop is idle. The tick still
+    // runs at 3 s cadence (the interval itself), but each individual
+    // tick yields to user input — the difference between "click → 200
+    // ms freeze" and "click → instant" while crawl is running.
+    interface RequestIdleCallback {
+      (cb: () => void, opts?: { timeout: number }): number;
+    }
+    const w = window as Window & { requestIdleCallback?: RequestIdleCallback };
+    const scheduleLoad = (): void => {
+      if (typeof w.requestIdleCallback === 'function') {
+        w.requestIdleCallback(() => void load(), { timeout: 4000 });
+      } else {
+        void load();
+      }
+    };
+    scheduleLoad();
+    // I-4 — Crawl-aware cadence. While the crawler is running we want
+    // sub-5-second freshness so the sidebar feels live; idle (no
+    // crawl, viewing existing project data) we slow to 30 s because
+    // the data isn't changing and burning a 130-counter aggregate
+    // every 3 s for nothing wastes battery and disk on laptops.
+    // The crawler's `progress` event also bumps `progress.crawled`
+    // which triggers a separate progress-driven refetch below, so
+    // this interval is just a safety net.
+    const intervalMs = progress?.running ? 3000 : 30_000;
+    const id = setInterval(scheduleLoad, intervalMs);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [dataVersion, setOverview]);
+  }, [dataVersion, setOverview, progress?.running]);
+
+  // Progress-driven refetch. When the crawler reports a meaningful
+  // change (every 50 URLs crawled) we trigger an immediate sidebar
+  // refresh — push semantics on top of the polling safety-net above.
+  // `lastRefetchAt` ref prevents the same crawled-bucket from firing
+  // twice if React re-renders for an unrelated reason.
+  const lastRefetchAtRef = useRef(0);
+  useEffect(() => {
+    if (!progress?.running) return;
+    const bucket = Math.floor((progress.crawled ?? 0) / 50);
+    if (bucket === lastRefetchAtRef.current) return;
+    lastRefetchAtRef.current = bucket;
+    void window.freecrawl.overviewGet().then((o) => setOverview(o));
+  }, [progress?.crawled, progress?.running, setOverview]);
 
   const toggle = (k: string) => {
     setExpanded((prev) => {
@@ -786,6 +824,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.twitterImageNotAbsolute,
               category: 'issues:twitter-image-not-absolute',
             },
+            {
+              key: 'issues-og-image-too-large',
+              label: 'OG Image >5MB',
+              count: o.issues.ogImageTooLarge,
+              category: 'issues:og-image-too-large',
+            },
+            {
+              key: 'issues-twitter-image-too-large',
+              label: 'Twitter Image >5MB',
+              count: o.issues.twitterImageTooLarge,
+              category: 'issues:twitter-image-too-large',
+            },
           ],
         },
         {
@@ -941,6 +991,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Render-Blocking Head (>5)',
               count: o.issues.renderBlocking,
               category: 'issues:render-blocking',
+            },
+            {
+              key: 'issues-render-blocking-critical',
+              label: 'Render-Blocking Head (>20, critical)',
+              count: o.issues.renderBlockingCritical,
+              category: 'issues:render-blocking-critical',
+            },
+            {
+              key: 'issues-text-code-ratio-low',
+              label: 'Low Text/Code Ratio (<10%)',
+              count: o.issues.textCodeRatioLow,
+              category: 'issues:text-code-ratio-low',
             },
             {
               key: 'issues-keepalive-disabled',
@@ -1187,6 +1249,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Dead External Domain',
               count: o.issues.deadExternalDomain,
               category: 'issues:dead-external-domain',
+            },
+            {
+              key: 'issues-js-only-navigation',
+              label: 'JS-Only Navigation',
+              count: o.issues.jsOnlyNavigation,
+              category: 'issues:js-only-navigation',
             },
           ],
         },

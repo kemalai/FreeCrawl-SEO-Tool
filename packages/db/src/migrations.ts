@@ -831,6 +831,60 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 40,
+    name: 'add_js_only_links_count',
+    // Wave 2 / item 1 — Per-page count of `<a>` elements that are NOT
+    // crawlable: no href + onclick, href="javascript:…", or href="#"
+    // with onclick. Powers the "JS-Only Navigation" issue filter.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'js_only_links_count')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN js_only_links_count INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+    },
+  },
+  {
+    version: 41,
+    name: 'add_text_code_ratio',
+    // Wave 2 / item 4 — Per-page text/code ratio = visible-text bytes
+    // divided by total HTML bytes, expressed as integer percent
+    // (0–100). Powers the "Low Text/Code Ratio (<10%)" issue filter.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'text_code_ratio')) {
+        db.exec('ALTER TABLE urls ADD COLUMN text_code_ratio INTEGER');
+      }
+    },
+  },
+  {
+    version: 42,
+    name: 'add_urls_issues_materialized',
+    // I-3 — Materialised issue table. Lets the sidebar count counters
+    // that would otherwise need O(n²) correlated subqueries (dead
+    // external domain, duplicate URL post-norm, canonical chain
+    // multi-hop, …) read with a single GROUP BY instead. Refilled
+    // once per crawl by `recomputeUrlsIssues()`.
+    //   - `url_id`     : FK-shaped (no constraint — ON DELETE handled
+    //                    by the recompute pass that TRUNCATEs first)
+    //   - `issue_key`  : the 'issues:*' UrlCategory string
+    //   PRIMARY KEY ensures idempotent INSERT-OR-IGNORE on incremental
+    //   updates. Index on `issue_key` powers the count-grouping query.
+    up: `
+      CREATE TABLE IF NOT EXISTS urls_issues (
+        url_id    INTEGER NOT NULL,
+        issue_key TEXT    NOT NULL,
+        PRIMARY KEY (url_id, issue_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_urls_issues_key ON urls_issues(issue_key);
+    `,
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

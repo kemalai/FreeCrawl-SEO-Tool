@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.2.6] — 2026-04-29
+
+### Added
+- **Read-only worker thread pool** — every read-heavy IPC handler (`urlsQuery`, `overviewGet`, `imagesQuery`, `urlDetailGet`, `brokenLinksQuery`, `summaryGet`, all 14 reports*) now runs on a dedicated `node:worker_threads` Worker that holds its own read-only SQLite connection against the same WAL file. Crawler writes on the main thread no longer contend with UI SELECTs. Auto-restart up to 3× per minute on worker crash; transparent fallback to the main-thread DB if the worker is unhealthy.
+- **Materialised issue counters** (`urls_issues` table, migration v42) — heavy O(n²) issue counters (Dead External Domain, Duplicate URL post-norm, Canonical Chain Multi-hop) are now materialised once per crawl by `recomputeUrlsIssues` and read via a single `GROUP BY` instead of correlated subqueries on every sidebar tick. Periodic recompute every 30 s during crawl + final pass on done.
+- **Live performance meter in the status bar** — FPS, JS heap (MB), and main-thread input lag (ms) update at 10 Hz with colour-coded thresholds. Lag is also piped back to the crawler so it can self-throttle.
+- **Adaptive crawler concurrency** — when renderer input lag exceeds 200 ms, `Crawler.reportRendererLag()` shrinks `maxConcurrency` by 1 (floor 1); when lag drops below 30 ms it grows back toward the user-configured ceiling. 2-second cooldown prevents oscillation. Runs autonomously — low-end machines stay responsive without the user having to tune any setting.
+- **3-tier resilient DNS resolver** (kept from 0.2.4) extended with hot-swappable hooks for crawl-scoped diagnostics in the Logs panel.
+- **2 new HTML signals + 5 new issue filters** — `js_only_links_count` (JS-Only Navigation), `text_code_ratio` (Low Text/Code Ratio <10%), Render-Blocking Head >20 (critical tier), OG/Twitter Image >5MB (HEAD-probe based). Migrations v40, v41.
+- **3 new Reports** — URL Length Histogram, Word Count per Directory, Sitemap Orphans (Top 1000). Reports menu now lists 19 reports.
+- **macOS .dmg in every release** — workflow matrix `[windows-latest, macos-latest]` produces both `.exe` (x64) and `.dmg` (Apple Silicon arm64 + Intel x64) on every tag push.
+
+### Changed
+- **DB write coalescing** — per-URL fan-out (URL row + headers + body snapshot + 50–500 links + 5–50 images) is now wrapped in a single `runInTransaction` block. Each `BEGIN…COMMIT` is one fsync; previously a single page produced 5–10 fsyncs. On low-end SSDs with antivirus realtime-scan this halves per-page latency.
+- **Cooperative `setImmediate` yield in the crawler hot loop** — `fetchAndProcess` yields to the Node event loop before each URL so renderer IPC, lag heartbeats, and progress listeners interleave with crawler work instead of waiting for batches.
+- **IPC handler `setImmediate` wrapper** — read-heavy handlers yield once before running their SQL; combined with the worker pool this keeps click → response under one frame even on a saturated main thread.
+- **Crawl-aware UI polling** — Overview Sidebar / Broken Links / Images tab polling intervals are 3 s during a running crawl, 30 s when idle. Sidebar additionally refetches on every 50-URL crawl-progress bucket (push-style invalidation).
+- **`requestIdleCallback` wrapping** for sidebar + lazy-row loaders so SQL only fires when the renderer's main thread has idle slack.
+- **Progress event throttling** — crawler caps progress emit to 5 Hz (200 ms) with trailing emit, dropping IPC volume from ~200 msg/s to 5 msg/s during high-throughput crawls.
+- **Statement cache** — the 130+ `SELECT COUNT(*) WHERE …` clauses in `getOverviewCounts` are now compiled once per process and re-executed; SQLite parser cost amortised across ticks.
+- **Logs window** — fixed `cannot start a transaction within a transaction` error caused by nested BEGIN inside the per-URL coalesce block (`setUrlHeaders` / `insertLinks` / `insertImages` now respect the outer transaction).
+- **Reader pool node:sqlite compatibility** — fixed `TypeError: The "options" argument must be an object` on Node 24 by switching the writer connection to single-arg form and only passing `{ readOnly: true }` for the worker.
+
+### Fixed
+- **UI kasma during 2k+ URL crawls** — combination of write coalescing, worker thread reads, statement cache, materialised counters, and cooperative yield brings sidebar tick from ~150 ms → <5 ms and renderer Lag from 200 ms → <30 ms (p99) on commodity hardware.
+- **Sidebar issue counters showing 0** for Dead External Domain / Duplicate URL post-norm / Canonical Chain Multi-hop — replaced placeholder zeros with materialised counts.
+
 ## [0.2.5] — 2026-04-29
 
 ### Added

@@ -1,18 +1,65 @@
+import clsx from 'clsx';
 import { useAppStore } from '../store.js';
+import { usePerfMeter } from '../hooks/usePerfMeter.js';
 
-function Stat({ label, value }: { label: string; value: string | number }) {
+function Stat({
+  label,
+  value,
+  valueClassName,
+  title,
+}: {
+  label: string;
+  value: string | number;
+  valueClassName?: string;
+  title?: string;
+}) {
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex items-center gap-1.5" title={title}>
       <span className="text-surface-500">{label}</span>
-      <span className="font-mono font-medium text-surface-100">{value}</span>
+      <span
+        className={clsx(
+          'font-mono font-medium',
+          valueClassName ?? 'text-surface-100',
+        )}
+      >
+        {value}
+      </span>
     </div>
   );
+}
+
+/** Map FPS to a Tailwind text colour so the user can spot kasma at a glance. */
+function fpsClass(fps: number): string {
+  if (fps >= 50) return 'text-emerald-300';
+  if (fps >= 30) return 'text-amber-300';
+  return 'text-red-300';
+}
+
+/** Same idea for renderer heap — the Electron renderer is comfortable
+ * up to ~500 MB; over 1 GB is almost always a listener / cache leak. */
+function heapClass(heapMb: number | null): string {
+  if (heapMb === null) return 'text-surface-100';
+  if (heapMb >= 1024) return 'text-red-300';
+  if (heapMb >= 500) return 'text-amber-300';
+  return 'text-surface-100';
+}
+
+/** Input lag colour. The same numbers a user "feels":
+ *   < 16 ms = one frame at 60 Hz (input feels instant)
+ *   16–50 ms = a couple of frames late (subtle drag stutter)
+ *   > 50 ms = clearly laggy clicks / drags
+ */
+function lagClass(lagMs: number): string {
+  if (lagMs < 16) return 'text-emerald-300';
+  if (lagMs < 50) return 'text-amber-300';
+  return 'text-red-300';
 }
 
 export function StatsBar() {
   const progress = useAppStore((s) => s.progress);
   const error = useAppStore((s) => s.error);
   const setError = useAppStore((s) => s.setError);
+  const perf = usePerfMeter();
 
   const elapsed = progress?.elapsedMs ?? 0;
   const elapsedStr = formatElapsed(elapsed);
@@ -26,6 +73,39 @@ export function StatsBar() {
       <Stat label="URL/s" value={progress?.urlsPerSecond?.toFixed(1) ?? '0.0'} />
       <Stat label="Avg resp" value={`${progress?.avgResponseTimeMs ?? 0}ms`} />
       <Stat label="Elapsed" value={elapsedStr} />
+      <Stat
+        label="FPS"
+        value={perf.fps}
+        valueClassName={fpsClass(perf.fps)}
+        title={
+          perf.fps >= 50
+            ? 'Renderer is smooth (≥ 50 fps)'
+            : perf.fps >= 30
+              ? 'Renderer is degraded (30–49 fps) — likely competing with crawl IPC'
+              : 'Renderer is stalled (< 30 fps) — main thread starved; pause crawl or close Logs window'
+        }
+      />
+      {perf.heapMb !== null && (
+        <Stat
+          label="Heap"
+          value={`${perf.heapMb} MB`}
+          valueClassName={heapClass(perf.heapMb)}
+          title="Renderer JS heap. >500 MB = warm, >1 GB = likely a listener / cache leak"
+        />
+      )}
+      <Stat
+        label="Lag"
+        value={`${perf.inputLagMs}ms`}
+        valueClassName={lagClass(perf.inputLagMs)}
+        title={
+          perf.inputLagMs < 16
+            ? 'Main thread is responsive — input feels instant'
+            : perf.inputLagMs < 50
+              ? 'Main thread is contended — light click stutter'
+              : 'Main thread is busy — IPC backed up; most likely sidebar SQL or table chunk fetch competing with the crawler'
+        }
+      />
+
       <div className="ml-auto flex items-center gap-2">
         {progress?.running ? (
           progress.paused ? (

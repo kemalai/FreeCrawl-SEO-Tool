@@ -11,7 +11,7 @@ import type {
   DiscoveredLink,
   Indexability,
 } from '@freecrawl/shared-types';
-import type { ProjectDb } from '@freecrawl/db';
+import { type ProjectDb, EXPENSIVE_ISSUE_DEFINITIONS } from '@freecrawl/db';
 import {
   normalizeUrl,
   isSameHost,
@@ -91,6 +91,36 @@ export class Crawler extends EventEmitter {
   private memoryMonitorTimer: NodeJS.Timeout | null = null;
   private robots: RobotsChecker | null = null;
   private progressTimer: NodeJS.Timeout | null = null;
+  /** Periodic post-crawl-style recompute of expensive issue counters
+   * while the crawl is still running, so the sidebar number is < 30 s
+   * stale instead of "0 until crawl ends". 30 s cadence picked
+   * conservatively — the recompute wraps in `runInTransaction` and is
+   * not free on a 100k-URL DB. */
+  private issueRecomputeTimer: NodeJS.Timeout | null = null;
+  private static readonly ISSUE_RECOMPUTE_INTERVAL_MS = 30_000;
+  private startIssueRecomputeTimer(): void {
+    if (this.issueRecomputeTimer) return;
+    this.issueRecomputeTimer = setInterval(() => {
+      if (this.stopped || !this.running || this.paused) return;
+      try {
+        this.db.recomputeUrlsIssues(EXPENSIVE_ISSUE_DEFINITIONS);
+      } catch (err) {
+        // Recompute is best-effort — a transient SQLITE_BUSY here is
+        // not worth interrupting the crawl. Surface it as debug so
+        // someone watching logs can spot pathological cases.
+        this.emit(
+          'debug',
+          `issue counter recompute failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }, Crawler.ISSUE_RECOMPUTE_INTERVAL_MS);
+  }
+  private stopIssueRecomputeTimer(): void {
+    if (this.issueRecomputeTimer) {
+      clearInterval(this.issueRecomputeTimer);
+      this.issueRecomputeTimer = null;
+    }
+  }
   /**
    * Aborts any in-flight sitemap discovery on stop(). Without this, a
    * 21k-URL sitemap continues parsing in the background after Stop and
@@ -265,6 +295,16 @@ export class Crawler extends EventEmitter {
 
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
 
+    // I-3 — Periodic materialised issue recompute while the crawl is
+    // running. The post-crawl pass at the end will run a final clean
+    // recompute; this keeps the sidebar's expensive issue counters
+    // (dead external domain, duplicate URL post-norm, canonical chain
+    // multi-hop) populated mid-crawl too. 30 s cadence is a deliberate
+    // floor — these definitions execute multi-second self-joins on
+    // large crawls and we don't want to hold the DB write lock more
+    // than the crawler itself does.
+    this.startIssueRecomputeTimer();
+
     // Hydrate in-memory state from the DB so resume starts from the right
     // point; then queue whatever work is still pending.
     this.hydrateFromDb();
@@ -282,6 +322,7 @@ export class Crawler extends EventEmitter {
     } finally {
       if (this.progressTimer) clearInterval(this.progressTimer);
       this.progressTimer = null;
+      this.stopIssueRecomputeTimer();
     }
 
     // Post-crawl heavy lifting. Each step is a synchronous SQL pass
@@ -303,6 +344,9 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.emit('info', 'Clustering duplicates…');
     this.runDuplicateClustering();
+    await yieldToEventLoop();
+    this.emit('info', 'Materialising issue counters…');
+    this.db.recomputeUrlsIssues(EXPENSIVE_ISSUE_DEFINITIONS);
     await yieldToEventLoop();
     await this.runImageSizeProbes();
     await yieldToEventLoop();
@@ -626,6 +670,7 @@ export class Crawler extends EventEmitter {
     this.startMemoryMonitor();
 
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
+    this.startIssueRecomputeTimer();
 
     for (const u of urls) {
       this.enqueue({ url: u, depth: 0 });
@@ -637,6 +682,7 @@ export class Crawler extends EventEmitter {
     } finally {
       if (this.progressTimer) clearInterval(this.progressTimer);
       this.progressTimer = null;
+      this.stopIssueRecomputeTimer();
     }
 
     // Same yielding strategy as spider mode — see the comment block
@@ -650,6 +696,8 @@ export class Crawler extends EventEmitter {
     this.db.recomputeHreflangAnalysis();
     await yieldToEventLoop();
     this.runDuplicateClustering();
+    await yieldToEventLoop();
+    this.db.recomputeUrlsIssues(EXPENSIVE_ISSUE_DEFINITIONS);
     await yieldToEventLoop();
     await this.runImageSizeProbes();
     await yieldToEventLoop();
@@ -1106,6 +1154,16 @@ export class Crawler extends EventEmitter {
   private async fetchAndProcess(item: QueueItem): Promise<void> {
     if (this.stopped) return;
 
+    // I-1 — Cooperative yield BEFORE we start work on this URL. The
+    // crawler runs in the same Node event loop as Electron's IPC
+    // dispatcher; without an explicit yield, two adjacent fetches
+    // (each landing several DB writes) run back-to-back and any UI
+    // input mesajı that arrived in between waits for both to finish.
+    // `setImmediate` adds at most one event-loop tick (< 1 ms on a
+    // healthy system) and lets renderer-side IPC, lag heartbeats,
+    // and progress event listeners run between URLs.
+    await new Promise<void>((r) => setImmediate(r));
+
     const t0 = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
@@ -1478,27 +1536,38 @@ export class Crawler extends EventEmitter {
         headings:
           parsed.headings.length > 0 ? JSON.stringify(parsed.headings) : null,
         serverHeader,
+        jsOnlyLinksCount: parsed.jsOnlyLinksCount,
+        textCodeRatio: parsed.textCodeRatio,
       });
-      if (urlId) this.db.setUrlHeaders(urlId, allHeaders);
-      // Body snapshot — drives the View Source detail tab. Only HTML
-      // pages get stored (we already gated entry above on `kind === 'html'`).
-      // Capped per `bodySnapshotMaxBytes` so a single page can't blow up
-      // the project file.
-      if (urlId && this.config.storeBodySnapshots) {
-        try {
-          this.db.setUrlSource(
-            urlId,
-            body,
-            this.config.bodySnapshotMaxBytes > 0
-              ? this.config.bodySnapshotMaxBytes
-              : 1_048_576,
-          );
-        } catch {
-          // Best-effort — a snapshot failure must not break the crawl.
+      // Coalesce the per-URL write fan-out (headers + body snapshot +
+      // 50–500 links + 5–50 images) into a single SQLite transaction.
+      // Each `BEGIN…COMMIT` triggers an fsync on `synchronous=NORMAL`,
+      // and on low-end SSDs with antivirus realtime-scan each fsync can
+      // cost 30–80 ms. Without this wrapper a single page produces
+      // 5–10 fsyncs; with it, exactly one — the difference between a
+      // smooth UI and the kasma the user reported.
+      this.db.runInTransaction(() => {
+        if (urlId) this.db.setUrlHeaders(urlId, allHeaders);
+        // Body snapshot — drives the View Source detail tab. Only HTML
+        // pages get stored (we already gated entry above on
+        // `kind === 'html'`). Capped per `bodySnapshotMaxBytes` so a
+        // single page can't blow up the project file.
+        if (urlId && this.config.storeBodySnapshots) {
+          try {
+            this.db.setUrlSource(
+              urlId,
+              body,
+              this.config.bodySnapshotMaxBytes > 0
+                ? this.config.bodySnapshotMaxBytes
+                : 1_048_576,
+            );
+          } catch {
+            // Best-effort — a snapshot failure must not break the crawl.
+          }
         }
-      }
-      this.db.insertLinks(urlId, storableLinks, item.depth);
-      this.db.insertImages(urlId, parsed.images);
+        this.db.insertLinks(urlId, storableLinks, item.depth);
+        this.db.insertImages(urlId, parsed.images);
+      });
       for (const link of storableLinks) {
         if (!link.isInternal) this.enqueueExternal(link.toUrl);
       }
@@ -1638,7 +1707,79 @@ export class Crawler extends EventEmitter {
     throw lastError ?? new Error('retry loop exhausted');
   }
 
+  /**
+   * Adaptive concurrency state. We start at the user-configured ceiling
+   * and shrink when the renderer's input lag spikes — typically because
+   * SQLite is locked by a heavy SELECT or because the OS is paging.
+   * Caller (the desktop main process) feeds lag samples via
+   * `reportRendererLag()`; we adjust at most once per ADAPT_COOLDOWN_MS
+   * so a single GC pause doesn't oscillate the queue.
+   *
+   * Targets:
+   *   lag > 200 ms  → shrink concurrency by 1, floor 1
+   *   lag < 30 ms   → grow concurrency by 1, ceiling = configured max
+   */
+  private currentConcurrency = 0;
+  private lastAdaptTs = 0;
+  private static readonly ADAPT_COOLDOWN_MS = 2_000;
+  /** Public so the desktop main process can pipe in renderer Lag reports. */
+  reportRendererLag(lagMs: number): void {
+    if (!this.running || this.paused) return;
+    const now = Date.now();
+    if (now - this.lastAdaptTs < Crawler.ADAPT_COOLDOWN_MS) return;
+    const ceiling = Math.max(1, Math.min(200, this.config.maxConcurrency));
+    if (this.currentConcurrency === 0) this.currentConcurrency = ceiling;
+    let next = this.currentConcurrency;
+    if (lagMs > 200) {
+      next = Math.max(1, this.currentConcurrency - 1);
+    } else if (lagMs < 30) {
+      next = Math.min(ceiling, this.currentConcurrency + 1);
+    }
+    if (next !== this.currentConcurrency) {
+      this.currentConcurrency = next;
+      this.queue.concurrency = next;
+      this.lastAdaptTs = now;
+      this.emit(
+        'debug',
+        `adaptive concurrency → ${next} (lag ${lagMs} ms, ceiling ${ceiling})`,
+      );
+    }
+  }
+
+  private lastProgressEmitTs = 0;
+  private progressTrailingTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Minimum gap between two progress events. 200 ms = 5 Hz, which is
+   * dense enough that the user reads the URL/s + Crawled counters as
+   * "live" but sparse enough that 200 URL/s of work isn't generating
+   * 200 IPC messages/sec to the renderer (which then re-renders the
+   * sidebar + status bar tree at the same rate). */
+  private static readonly PROGRESS_THROTTLE_MS = 200;
+
   private emitProgress(): void {
+    const now = Date.now();
+    const elapsedSinceLast = now - this.lastProgressEmitTs;
+    if (elapsedSinceLast < Crawler.PROGRESS_THROTTLE_MS) {
+      // Schedule a trailing emit so the final state-change still
+      // surfaces. Multiple calls within the throttle window collapse
+      // into the same trailing timer.
+      if (this.progressTrailingTimer === null) {
+        const wait = Crawler.PROGRESS_THROTTLE_MS - elapsedSinceLast;
+        this.progressTrailingTimer = setTimeout(() => {
+          this.progressTrailingTimer = null;
+          this.emitProgressNow();
+        }, wait);
+      }
+      return;
+    }
+    this.emitProgressNow();
+  }
+
+  private emitProgressNow(): void {
+    this.lastProgressEmitTs = Date.now();
+    if (this.progressTrailingTimer !== null) {
+      clearTimeout(this.progressTrailingTimer);
+      this.progressTrailingTimer = null;
+    }
     const elapsedMs = Date.now() - this.startedAt;
     const urlsPerSecond = elapsedMs > 0 ? (this.crawled / elapsedMs) * 1000 : 0;
     const avgResponseTimeMs =

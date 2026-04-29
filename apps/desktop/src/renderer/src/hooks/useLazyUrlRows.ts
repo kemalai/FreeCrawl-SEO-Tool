@@ -8,7 +8,12 @@ const MAX_CACHED_CHUNKS = 8;
 // query + per-chunk fetch every tick. At 100 URL/s the user still sees
 // ~75 new rows per tick (continuous flow), while leaving 3× more main-
 // thread headroom than the previous 250 ms cadence.
-const LIVE_REFRESH_MS = 750;
+// Cadence for the live-tail tick. 1500 ms strikes the balance between
+// "feels fresh" and "doesn't pin SQLite". At 750 ms a 2k+ row crawl was
+// burning ~30% of one core in COUNT + chunk fetches, blocking input IPC
+// for the duration. The user sees the same effect: numbers tick at half
+// speed but the window stops kasma'ing.
+const LIVE_REFRESH_MS = 1500;
 
 export interface LazyRowsOpts {
   category: UrlCategory;
@@ -141,8 +146,30 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
         inFlight = false;
       }
     };
-    void tick();
-    const id = setInterval(tick, LIVE_REFRESH_MS);
+    // Wrap the tick in requestIdleCallback so the live-tail SQL only
+    // fires when the renderer's event loop has idle slack. If the user
+    // is dragging / clicking / typing, the tick is deferred until the
+    // input handler frame finishes — eliminates the "click → kasma"
+    // pattern even when the underlying SQL is fast. Falls back to a
+    // direct call when the browser doesn't expose `requestIdleCallback`
+    // (older Chromium builds; Electron 41 ships modern Chromium so this
+    // branch is mostly defensive).
+    interface RequestIdleCallback {
+      (cb: () => void, opts?: { timeout: number }): number;
+    }
+    const w = window as Window & { requestIdleCallback?: RequestIdleCallback };
+    const scheduleTick = (): void => {
+      if (typeof w.requestIdleCallback === 'function') {
+        // 2 s timeout guarantees the tick eventually runs even if the
+        // main thread is permanently busy — better stale data than no
+        // data at all.
+        w.requestIdleCallback(() => void tick(), { timeout: 2000 });
+      } else {
+        void tick();
+      }
+    };
+    scheduleTick();
+    const id = setInterval(scheduleTick, LIVE_REFRESH_MS);
     return () => {
       cancelled = true;
       clearInterval(id);

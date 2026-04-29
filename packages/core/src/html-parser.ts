@@ -106,6 +106,22 @@ export interface ParsedPage {
   feedUrl: string | null;
   /** Number of internal hyperlinks with no usable anchor text or image alt. */
   emptyAnchorCount: number;
+  /**
+   * Number of `<a>` elements that look clickable but are NOT crawlable —
+   * either no `href` at all (with `onclick`), `href="javascript:…"`, or
+   * `href="#"` paired with an `onclick`. Search engines can't follow
+   * these so any navigation that depends on them is invisible to crawl.
+   * Excludes `href="#"` without `onclick` (legitimate scroll anchors)
+   * and `href="#section-id"` (in-page jumps — crawlable as the same URL).
+   */
+  jsOnlyLinksCount: number;
+  /**
+   * Visible-text bytes divided by total HTML bytes, expressed as an
+   * integer percent (0–100). Low ratio (typically <10%) suggests heavy
+   * JavaScript / template scaffolding with little crawlable content;
+   * high ratio (>30%) is content-rich. Null on non-HTML or empty pages.
+   */
+  textCodeRatio: number | null;
   /** Number of `<img>` with explicit `alt=""` (decorative — distinct from missing alt). */
   imagesEmptyAlt: number;
   /**
@@ -533,7 +549,53 @@ export function parseHtml(
   const hasNoindex = metaRobots !== null && metaRobots.includes('noindex');
   const hasNofollow = metaRobots !== null && metaRobots.includes('nofollow');
 
+  // Text/code ratio — visible body text bytes divided by raw HTML bytes,
+  // rounded to integer percent. Cheap to compute right next to the body
+  // text-length pass below. We strip <script>/<style>/<noscript> contents
+  // out of the visible-text count because their inner text isn't user-
+  // facing content (and would inflate the ratio on JS-heavy SPAs that
+  // ship a 200 KB script tag with no markup). Null when the body is
+  // empty or the HTML body byte count is zero.
+  const totalHtmlBytes = Buffer.byteLength(html, 'utf8');
+  let textCodeRatio: number | null = null;
+  if (totalHtmlBytes > 0) {
+    const $body = $('body').clone();
+    $body.find('script, style, noscript').remove();
+    const visibleText = $body.text().replace(/\s+/g, ' ').trim();
+    const visibleBytes = Buffer.byteLength(visibleText, 'utf8');
+    textCodeRatio = Math.min(100, Math.round((visibleBytes / totalHtmlBytes) * 100));
+  }
+
   let emptyAnchorCount = 0;
+  // JS-only / non-crawlable anchors. Three patterns count toward this
+  // number — see the field doc on `parseHtml` return for the rationale:
+  //   1. `<a onclick="…">`               (no href at all)
+  //   2. `<a href="javascript:…">`       (href is a JS URI scheme)
+  //   3. `<a href="#" onclick="…">`      (placeholder href + JS handler)
+  // We scan ALL `<a>` (not just `a[href]`) because pattern 1 has no href.
+  let jsOnlyLinksCount = 0;
+  $('a').each((_, el) => {
+    const $el = $(el);
+    const rawHref = $el.attr('href');
+    const onclick = $el.attr('onclick');
+    if (rawHref === undefined) {
+      if (onclick && onclick.trim() !== '') jsOnlyLinksCount++;
+      return;
+    }
+    const href = rawHref.trim();
+    // RFC 3986 — `javascript:` scheme is the canonical JS-only marker.
+    // Lowercased before match to handle `JavaScript:` casing in the wild.
+    if (/^javascript:/i.test(href)) {
+      jsOnlyLinksCount++;
+      return;
+    }
+    // `#` exactly = placeholder; only counts when an onclick is wired.
+    // `#section-id` (length > 1) is a legitimate in-page jump — skip.
+    if (href === '#' && onclick && onclick.trim() !== '') {
+      jsOnlyLinksCount++;
+    }
+  });
+
   const linkMap = new Map<string, DiscoveredLink>();
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href');
@@ -674,6 +736,27 @@ export function parseHtml(
     });
   });
 
+  // OG / Twitter share-card images. They rarely appear inside `<img>`
+  // tags so the loop above misses them, but we want them in the probe
+  // pipeline so the size-validation issue filters can see whether
+  // Facebook/Twitter will refuse to render the card. We stub them as
+  // image rows with no alt/dimensions; the existing size-probe pass
+  // will fill `byte_size` automatically post-crawl.
+  for (const ogish of [ogImage, twitterImage]) {
+    if (!ogish) continue;
+    const normalized = normalizeUrl(ogish, pageUrl, opts.urlRewrites);
+    if (!normalized) continue;
+    if (!/^https?:/.test(normalized)) continue;
+    if (imageMap.has(normalized)) continue;
+    imageMap.set(normalized, {
+      src: normalized,
+      alt: null,
+      width: null,
+      height: null,
+      isInternal: isSameHost(pageUrl, normalized, opts),
+    });
+  }
+
   return {
     title,
     titleCount,
@@ -719,6 +802,8 @@ export function parseHtml(
     manifestUrl,
     feedUrl,
     emptyAnchorCount,
+    jsOnlyLinksCount,
+    textCodeRatio,
     imagesEmptyAlt,
     imagesLazy,
     formInputCount,

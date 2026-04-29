@@ -85,6 +85,14 @@ export const IPC = {
   reportsWordCountPerDirectory: 'reports:word-count-per-directory',
   reportsSitemapOrphans: 'reports:sitemap-orphans',
   reportsServerHeaders: 'reports:server-headers',
+  /**
+   * Renderer → main heartbeat carrying the live input-lag estimate (ms).
+   * The crawler subscribes to this so it can adaptively shrink its
+   * concurrency when the renderer's main thread is starved — letting
+   * low-end machines stay responsive without the user having to tune
+   * `maxConcurrency` by hand.
+   */
+  rendererLagReport: 'renderer:lag-report',
   prefsExportSettings: 'prefs:export-settings',
   prefsImportSettings: 'prefs:import-settings',
 } as const;
@@ -650,6 +658,8 @@ export interface FreeCrawlApi {
   ): Promise<WordCountPerDirectoryRow[]>;
   reportsSitemapOrphans(limit?: number): Promise<SitemapOrphanRow[]>;
   reportsServerHeaders(): Promise<ServerHeaderRow[]>;
+  /** Heartbeat: renderer reports its latest input-lag sample (ms). */
+  reportRendererLag(lagMs: number): void;
   prefsExportSettings(input: SettingsExportInput): Promise<SettingsExportResult>;
   prefsImportSettings(): Promise<SettingsImportResult>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;

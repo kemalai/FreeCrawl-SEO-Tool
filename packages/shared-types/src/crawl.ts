@@ -157,6 +157,11 @@ export type UrlCategory =
   | 'issues:canonical-chain-multi-hop'
   | 'issues:image-slow-loading'
   | 'issues:description-equals-h1'
+  | 'issues:js-only-navigation'
+  | 'issues:text-code-ratio-low'
+  | 'issues:render-blocking-critical'
+  | 'issues:og-image-too-large'
+  | 'issues:twitter-image-too-large'
 
 export type Indexability =
   | 'indexable'
@@ -232,6 +237,18 @@ export interface CrawlUrlRow {
    * the server didn't send a `Server` header.
    */
   serverHeader: string | null;
+  /**
+   * Per-page count of `<a>` elements that look clickable but are NOT
+   * crawlable (no href + onclick, `href="javascript:…"`, or `href="#"`
+   * with onclick). Surfaces in the "JS-Only Navigation" issue filter.
+   */
+  jsOnlyLinksCount: number;
+  /**
+   * Visible-text bytes / total HTML bytes as integer percent (0–100).
+   * Low ratio (<10%) suggests heavy script/template scaffolding with
+   * little crawlable content. Null on non-HTML or empty pages.
+   */
+  textCodeRatio: number | null;
   redirectTarget: string | null;
   lang: string | null;
   viewport: string | null;
@@ -856,6 +873,37 @@ export interface OverviewCounts {
      * usually means the description was never customised for SERP CTR.
      */
     descriptionEqualsH1: number;
+    /**
+     * Pages with at least one `<a>` element that is clickable but not
+     * crawlable (no href + onclick, `href="javascript:…"`, or
+     * `href="#"` paired with onclick). Search-engine bots can't follow
+     * these — any navigation that depends on them is invisible.
+     */
+    jsOnlyNavigation: number;
+    /**
+     * Pages whose visible-text-to-HTML byte ratio is < 10% — heavy
+     * JavaScript / template scaffolding with little crawlable content.
+     */
+    textCodeRatioLow: number;
+    /**
+     * Pages with > 20 render-blocking head resources (escalated tier
+     * above the existing > 5 "Render-Blocking Head" issue) — almost
+     * always a third-party tag bloat that murders LCP.
+     */
+    renderBlockingCritical: number;
+    /**
+     * Pages whose `og:image` exceeds 5 MB — Facebook's documented hard
+     * cap is 8 MB and OG images > 5 MB are routinely silently dropped
+     * by share-card renderers. Determined via the post-crawl image
+     * HEAD probe `Content-Length`.
+     */
+    ogImageTooLarge: number;
+    /**
+     * Pages whose `twitter:image` exceeds 5 MB. Twitter's documented
+     * max is 5 MB for JPG/PNG and 15 MB for GIF — we use 5 MB as the
+     * conservative threshold that catches both card types' renderer.
+     */
+    twitterImageTooLarge: number;
   };
 }
 
