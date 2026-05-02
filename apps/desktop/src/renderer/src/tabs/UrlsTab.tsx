@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronsUpDown, Filter, X } from 'lucide-react';
+import { ChevronsUpDown, Download, Filter, X } from 'lucide-react';
 import clsx from 'clsx';
 import type { AdvancedFilter, CrawlUrlRow } from '@freecrawl/shared-types';
 import { useAppStore, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId, type ColumnSpec } from './columns.js';
 import { useLazyUrlRows } from '../hooks/useLazyUrlRows.js';
 import { AdvancedFilterDialog } from '../components/AdvancedFilterDialog.js';
+import { ErrorBoundary } from '../components/ErrorBoundary.js';
+import { ExportDialog } from '../components/ExportDialog.js';
 import { InfoTip } from '../components/InfoTip.js';
 
 const ROW_HEIGHT = 24;
@@ -36,6 +38,7 @@ export function UrlsTab() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [filter, setFilter] = useState<AdvancedFilter | null>(null);
   const [filterDialogOpen, setFilterDialogOpen] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
   // Three orthogonal selection layers:
   // - selectedIds: row-level selection driven by the Row-number column.
   //   Feeds the bulk context menu (Copy/Open/Re-Spider/Remove/Export).
@@ -515,12 +518,21 @@ export function UrlsTab() {
             <X className="h-3 w-3" />
           </button>
         )}
-        <div className="ml-auto text-[11px] text-surface-500">
-          <span className="font-mono text-surface-200">{lazy.total.toLocaleString()}</span> URLs
-          <span className="ml-2 text-surface-600">
-            ({lazy.loadedRows.toLocaleString()} loaded)
-          </span>
-        </div>
+        <button
+          type="button"
+          onClick={() => setExportDialogOpen(true)}
+          disabled={lazy.total === 0}
+          className={clsx(
+            'ml-auto inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition',
+            lazy.total === 0
+              ? 'cursor-not-allowed border-surface-800 text-surface-600'
+              : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+          )}
+          title={lazy.total === 0 ? 'No data to export' : 'Export this table'}
+        >
+          <Download className="h-3.5 w-3.5" />
+          <span>Export</span>
+        </button>
       </div>
 
       <div ref={scrollRef} className="relative flex-1 select-none overflow-auto">
@@ -753,7 +765,15 @@ export function UrlsTab() {
           </div>
         </div>
 
-        {lazy.total === 0 && (
+        {lazy.total === 0 && lazy.isLoading && (
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center"
+            style={{ top: HEADER_HEIGHT }}
+          >
+            <div className="text-xs text-surface-500">Loading…</div>
+          </div>
+        )}
+        {lazy.total === 0 && !lazy.isLoading && (
           <div
             className="pointer-events-none absolute inset-0 flex items-center justify-center"
             style={{ top: HEADER_HEIGHT }}
@@ -772,6 +792,15 @@ export function UrlsTab() {
         style={{ height: STATUS_BAR_HEIGHT }}
       >
         <span>
+          URLs:{' '}
+          <span className="font-mono tabular-nums text-surface-200">
+            {lazy.total.toLocaleString()}
+          </span>
+          <span className="ml-1 text-surface-600">
+            ({lazy.loadedRows.toLocaleString()} loaded)
+          </span>
+        </span>
+        <span>
           Selected Rows:{' '}
           <span className="font-mono tabular-nums text-surface-200">
             {selectedIds.size.toLocaleString()}
@@ -789,12 +818,6 @@ export function UrlsTab() {
             {selectedColumns.size.toLocaleString()}
           </span>
         </span>
-        <span>
-          Filter Total:{' '}
-          <span className="font-mono tabular-nums text-surface-200">
-            {lazy.total.toLocaleString()}
-          </span>
-        </span>
       </div>
 
       <AdvancedFilterDialog
@@ -803,6 +826,17 @@ export function UrlsTab() {
         onClose={() => setFilterDialogOpen(false)}
         onApply={(f) => setFilter(f)}
       />
+
+      <ErrorBoundary context="ExportDialog">
+        {exportDialogOpen && (
+          <ExportDialog
+            open={exportDialogOpen}
+            onClose={() => setExportDialogOpen(false)}
+            defaultTab={activeTab}
+            selectedIds={selectedIds.size > 0 ? [...selectedIds] : undefined}
+          />
+        )}
+      </ErrorBoundary>
     </div>
   );
 }

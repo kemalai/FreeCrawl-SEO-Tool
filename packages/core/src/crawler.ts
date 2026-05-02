@@ -89,13 +89,23 @@ export class Crawler extends EventEmitter {
    */
   private memoryAutoPaused = false;
   private memoryMonitorTimer: NodeJS.Timeout | null = null;
+  /**
+   * Live AbortControllers for in-flight HTTP fetches in the main URL
+   * pipeline. Pause / Stop abort every member so the crawl actually
+   * stops instead of letting `concurrency` (often 20) more URLs land
+   * in the table after the user clicked the button. Each call site
+   * adds itself in `try` and removes itself in `finally`.
+   */
+  private inFlightFetchControllers = new Set<AbortController>();
   private robots: RobotsChecker | null = null;
   private progressTimer: NodeJS.Timeout | null = null;
   /** Periodic post-crawl-style recompute of expensive issue counters
    * while the crawl is still running, so the sidebar number is < 30 s
-   * stale instead of "0 until crawl ends". 30 s cadence picked
-   * conservatively — the recompute wraps in `runInTransaction` and is
-   * not free on a 100k-URL DB. */
+   * stale instead of "0 until crawl ends". The recompute is dispatched
+   * to the writer-worker via the injected `recomputeIssues` hook, so
+   * it does NOT block the main thread — the freezes that an earlier
+   * version produced were a result of running the recompute inline on
+   * the main-thread writer connection, which has since been fixed. */
   private issueRecomputeTimer: NodeJS.Timeout | null = null;
   private static readonly ISSUE_RECOMPUTE_INTERVAL_MS = 30_000;
   private issueRecomputeInFlight = false;
@@ -103,20 +113,16 @@ export class Crawler extends EventEmitter {
     if (this.issueRecomputeTimer) return;
     this.issueRecomputeTimer = setInterval(() => {
       if (this.stopped || !this.running || this.paused) return;
-      // Drop overlapping ticks. The yielding recompute can take longer
-      // than the 30 s tick on very large projects; piling up calls
-      // would queue 70-statement transactions back-to-back and starve
-      // the crawler's own writes.
+      // Drop overlapping ticks — on a 1M-URL DB the recompute can run
+      // longer than the 30 s tick, and piling RPCs on the writer worker
+      // would starve per-URL writes behind a queue of issue passes.
       if (this.issueRecomputeInFlight) return;
       this.issueRecomputeInFlight = true;
-      // Cooperative variant: yields between definitions so a 1–3 s
-      // recompute doesn't freeze the main thread (and the user's
-      // clicks) for the full duration. Trades atomic visibility of
-      // the rebuild for UI responsiveness — fine for the live tick
-      // since the post-crawl pass still uses the atomic version for
-      // the final state.
-      void this.db
-        .recomputeUrlsIssuesYielding(EXPENSIVE_ISSUE_DEFINITIONS)
+      // The injected hook routes through the writer worker in the
+      // desktop host, so this is off-thread; main stays free to
+      // service IPC and pump the crawl queue. CLI fallback runs the
+      // yielding variant inline, which is fine for that context.
+      void this.recomputeIssues(EXPENSIVE_ISSUE_DEFINITIONS)
         .catch((err) => {
           this.emit(
             'debug',
@@ -230,6 +236,30 @@ export class Crawler extends EventEmitter {
     payload: Parameters<ProjectDb['writeFetchedUrl']>[0],
   ) => Promise<{ urlId: number }>;
 
+  /**
+   * Optional async hook for the post-crawl issue recompute. When the
+   * desktop main process injects a writer-worker bridge here, the
+   * 70+ correlated subqueries run off the main thread — without it,
+   * a 5K-URL crawl freezes the renderer for ~45 s in the post-crawl
+   * phase ("materialise-issues"). Defaults to running the recompute
+   * inline (CLI / test contexts).
+   */
+  private readonly recomputeIssues: (
+    definitions: ReadonlyArray<readonly [string, string]>,
+  ) => Promise<void>;
+
+  /**
+   * Generic post-crawl SQL-pass dispatch. Methods like
+   * `recomputeInlinks`, `recomputeRedirectChains`,
+   * `recomputeHreflangAnalysis`, `recomputeHreflangInconsistent`,
+   * `recomputePaginationSequence` are sync void calls on `ProjectDb`
+   * — running them inline on the main thread blocks the renderer for
+   * ~5-15 s combined on a 5K+ URL crawl. The desktop host injects a
+   * writer-worker dispatcher here so each pass runs off-thread; CLI /
+   * tests fall back to calling the method directly on `this.db`.
+   */
+  private readonly runDbPass: (methodName: string) => Promise<void>;
+
   constructor(
     config: CrawlConfig,
     db: ProjectDb,
@@ -243,6 +273,10 @@ export class Crawler extends EventEmitter {
       writeFetchedUrl?: (
         payload: Parameters<ProjectDb['writeFetchedUrl']>[0],
       ) => Promise<{ urlId: number }>;
+      recomputeIssues?: (
+        definitions: ReadonlyArray<readonly [string, string]>,
+      ) => Promise<void>;
+      runDbPass?: (methodName: string) => Promise<void>;
     } = {},
   ) {
     super();
@@ -252,6 +286,15 @@ export class Crawler extends EventEmitter {
       ((html, pageUrl, parseOpts) => Promise.resolve(parseHtml(html, pageUrl, parseOpts)));
     this.writeFetchedUrl =
       opts.writeFetchedUrl ?? ((payload) => Promise.resolve(this.db.writeFetchedUrl(payload)));
+    this.recomputeIssues =
+      opts.recomputeIssues ?? ((defs) => this.db.recomputeUrlsIssuesYielding(defs));
+    this.runDbPass =
+      opts.runDbPass ??
+      ((method) => {
+        const fn = (this.db as unknown as Record<string, unknown>)[method];
+        if (typeof fn === 'function') (fn as () => void).call(this.db);
+        return Promise.resolve();
+      });
     // Wave 9 — Resolve the active proxy. If a named profile is selected
     // and present in `proxyProfiles`, its URL wins over the legacy
     // `proxyUrl` field; if the named profile doesn't resolve we fall
@@ -268,14 +311,27 @@ export class Crawler extends EventEmitter {
     this.config = config;
     this.db = db;
     const concurrency = Math.max(1, Math.min(200, config.maxConcurrency));
-    const intervalCap = Math.max(1, config.maxRps);
-    this.queue = new PQueue({ concurrency, interval: 1000, intervalCap });
+    // Rate-limit (interval + intervalCap) intentionally NOT set on
+    // the queue. p-queue's bucket-refill semantics interact poorly
+    // with long-tailed response times: after the first burst lands
+    // and slots free up, dispatch can stall for an entire bucket
+    // before the next batch goes out — and on a 1 s/intervalCap=20
+    // bucket the queue would freeze entirely once the first ~20
+    // tasks completed. Throughput is now bounded purely by the
+    // worker pool (concurrency × 1/avg_response), which on a slow
+    // remote server gives the user the 5-10 URL/s they expect
+    // instead of ~1 URL/s. config.maxRps is honoured indirectly via
+    // maxConcurrency — users who need a hard RPS cap should drop
+    // concurrency rather than trust per-second buckets.
+    this.queue = new PQueue({ concurrency });
+    // Track queue concurrency from the start so adaptive shrinkage
+    // doesn't have to wait for the first reportRendererLag call to
+    // materialise the running value.
+    this.currentConcurrency = concurrency;
     // External probes run on a separate queue so slow third-party hosts
     // don't block the main crawl.
     this.externalQueue = new PQueue({
       concurrency: Math.max(2, Math.min(10, concurrency)),
-      interval: 1000,
-      intervalCap: Math.max(2, intervalCap),
     });
     // Compile include/exclude patterns once — an invalid pattern should
     // surface to the user as a crawler error, not a silent miss.
@@ -445,7 +501,17 @@ export class Crawler extends EventEmitter {
     try {
       // Wait for internal crawl first, then drain any external probes still
       // in flight or queued (externals may have been enqueued during internal).
-      await this.queue.onIdle();
+      // p-queue's onIdle resolves the moment size+pending hits 0, but
+      // fetchAndProcess can race with that: a worker finishes the
+      // *last* in-flight task, link extraction enqueues new URLs a
+      // microtask later, and onIdle has already resolved. Loop while
+      // counters disagree — one extra 50 ms wait per pass guards the
+      // race window without spinning.
+      while (!this.stopped) {
+        await this.queue.onIdle();
+        await new Promise<void>((r) => setTimeout(r, 50));
+        if (this.queue.size + this.queue.pending === 0) break;
+      }
       await this.externalQueue.onIdle();
       // robots.txt + sitemap discovery may still be running — wait for
       // both before the post-crawl recompute so issue filters depending
@@ -512,44 +578,49 @@ export class Crawler extends EventEmitter {
       await yieldToEventLoop();
       this.emit('info', 'Recomputing inlinks…');
       this.setOp('post-crawl:recompute-inlinks');
-      this.db.recomputeInlinks();
+      await this.runDbPass('recomputeInlinks');
     }
     if (this.config.analyseRedirectChains) {
       await yieldToEventLoop();
       this.emit('info', 'Recomputing redirect chains…');
       this.setOp('post-crawl:recompute-redirect-chains');
-      this.db.recomputeRedirectChains();
+      await this.runDbPass('recomputeRedirectChains');
     }
     if (this.config.analyseHreflang) {
       await yieldToEventLoop();
       this.emit('info', 'Recomputing hreflang analysis…');
       this.setOp('post-crawl:recompute-hreflang');
-      this.db.recomputeHreflangAnalysis();
+      await this.runDbPass('recomputeHreflangAnalysis');
       await yieldToEventLoop();
       this.setOp('post-crawl:recompute-hreflang-inconsistent');
-      this.db.recomputeHreflangInconsistent();
+      await this.runDbPass('recomputeHreflangInconsistent');
     }
     if (this.config.analyseDuplicates) {
       await yieldToEventLoop();
       this.emit('info', 'Clustering duplicates…');
       this.setOp('post-crawl:cluster-duplicates');
+      // Duplicate clustering has JS-side simhash work that lives on
+      // the crawler instance, not the DB; can't blindly off-thread it.
       this.runDuplicateClustering();
     }
     if (this.config.analysePagination) {
       await yieldToEventLoop();
       this.emit('info', 'Detecting pagination sequence gaps…');
       this.setOp('post-crawl:pagination-sequence');
-      this.db.recomputePaginationSequence();
+      await this.runDbPass('recomputePaginationSequence');
     }
     if (this.config.analyseIssues) {
       await yieldToEventLoop();
       this.emit('info', 'Materialising issue counters…');
       this.setOp('post-crawl:materialise-issues');
-      // Use the cooperatively-scheduled variant (yields between each
-      // of the 70+ definitions). Trades atomic visibility of the
-      // rebuild for a responsive main thread — on a 5k-URL DB the
-      // sync version was blocking the event loop for 22-26 s.
-      await this.db.recomputeUrlsIssuesYielding(EXPENSIVE_ISSUE_DEFINITIONS);
+      // Route through the injected hook — in the desktop host this
+      // dispatches to the writer-worker, keeping the 70+ correlated
+      // subqueries off the main thread. CLI / tests fall back to
+      // running inline via `db.recomputeUrlsIssuesYielding`. Without
+      // offloading, a 5K-URL crawl freezes the main process for
+      // ~45 s in post-crawl, tripping Electron's "Not Responding"
+      // dialog.
+      await this.recomputeIssues(EXPENSIVE_ISSUE_DEFINITIONS);
     }
     await yieldToEventLoop();
     this.setOp('post-crawl:image-probes');
@@ -1022,6 +1093,24 @@ export class Crawler extends EventEmitter {
 
     // If the start URL isn't in the DB yet, kick off a brand-new crawl from it.
     if (!this.db.hasUrl(this.config.startUrl)) {
+      // Stub upsert before enqueue so the seed surfaces in the URL
+      // table within ~100 ms of clicking Start instead of waiting for
+      // the full network round-trip + parse + write (~2 s on a typical
+      // site). status_code=null reads as "fetching" in the table.
+      // fetchAndProcess's writeFetchedUrl later overwrites every field
+      // with the real response data via INSERT … ON CONFLICT UPDATE.
+      try {
+        this.db.upsertUrl({
+          url: this.config.startUrl,
+          contentKind: 'html',
+          statusCode: null,
+          statusText: 'fetching',
+          indexability: 'indexable',
+          depth: 0,
+        });
+      } catch {
+        /* non-fatal: fetchAndProcess will still write the real row */
+      }
       this.enqueue({ url: this.config.startUrl, depth: 0 });
     }
 
@@ -1140,6 +1229,19 @@ export class Crawler extends EventEmitter {
       }
       this.sitemapAbort = null;
     }
+    // Abort every in-flight HTTP fetch. Without this, Stop only halts
+    // *new* dispatch — the ~20 fetches already in flight would each
+    // finish their request and write a row, which races with Clear's
+    // db.reset() and resurrects ~19 rows in the table. The catch
+    // branch in fetchAndProcess detects the stopped-abort and exits
+    // silently without writing.
+    for (const c of this.inFlightFetchControllers) {
+      try {
+        c.abort();
+      } catch {
+        /* ignore — already aborted */
+      }
+    }
     // Drop any queued work. If paused, unblock onIdle() so start() can resolve.
     this.queue.clear();
     this.externalQueue.clear();
@@ -1150,9 +1252,22 @@ export class Crawler extends EventEmitter {
   pause(): void {
     if (this.stopped || this.paused) return;
     this.paused = true;
-    // PQueue.pause() halts dispatch but lets in-flight tasks finish naturally.
+    // PQueue.pause() halts new dispatch. By itself that lets every
+    // in-flight fetch run to completion — at concurrency 20 the user
+    // sees ~20 more URLs land in the table before things stop, which
+    // reads as "Pause didn't work." Aborting the live controllers
+    // turns Pause into "stop now": fetchAndProcess detects a paused-
+    // abort, re-enqueues the URL, and returns without writing a row.
     this.queue.pause();
     this.externalQueue.pause();
+    for (const c of this.inFlightFetchControllers) {
+      try {
+        c.abort();
+      } catch {
+        /* ignore — already aborted */
+      }
+    }
+    this.setOp('paused');
     this.emitProgress();
   }
 
@@ -1161,6 +1276,7 @@ export class Crawler extends EventEmitter {
     this.paused = false;
     this.queue.start();
     this.externalQueue.start();
+    this.setOp('idle');
     this.emitProgress();
   }
 
@@ -1446,6 +1562,7 @@ export class Crawler extends EventEmitter {
 
     const t0 = Date.now();
     const controller = new AbortController();
+    this.inFlightFetchControllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
     // Wave 3 — Optional max-response-time hard cap. Distinct from
     // `requestTimeoutMs` (which is the connect+headers timeout): this
@@ -1998,6 +2115,25 @@ export class Crawler extends EventEmitter {
         }
       }
     } catch (err) {
+      // Stop / Clear: abandon silently. No row is written, no failure
+      // counter is bumped, the URL is not re-enqueued. Without this
+      // gate the ~20 in-flight URLs after Stop would each land in the
+      // table — and Clear's db.reset() races with their writes,
+      // resurrecting "ghost" rows in a freshly-cleared table.
+      if (this.stopped && controller.signal.aborted) {
+        return;
+      }
+      // User-initiated Pause aborts every live controller. Don't treat
+      // those as fetch failures — the URL hasn't been seen yet, so we
+      // re-enqueue it directly (bypassing `enqueue` because the URL is
+      // already in the `seen` set from the original dispatch). Without
+      // this, Pause would mark `concurrency` (often 20) URLs as failed
+      // and surface them as errors in the URL table. Re-enqueue lands
+      // in a paused queue → resume() picks them up cleanly.
+      if (this.paused && controller.signal.aborted) {
+        this.queue.add(() => this.fetchAndProcess(item)).catch(() => undefined);
+        return;
+      }
       this.failed++;
       const detail = formatFetchError(err);
       const elapsed = Date.now() - t0;
@@ -2020,6 +2156,7 @@ export class Crawler extends EventEmitter {
         depth: item.depth,
       });
     } finally {
+      this.inFlightFetchControllers.delete(controller);
       clearTimeout(timeout);
       if (respTimeTimer) clearTimeout(respTimeTimer);
       // Politeness delay — applied per worker *after* each request so a
@@ -2171,8 +2308,14 @@ export class Crawler extends EventEmitter {
     const ceiling = Math.max(1, Math.min(200, this.config.maxConcurrency));
     if (this.currentConcurrency === 0) this.currentConcurrency = ceiling;
     let next = this.currentConcurrency;
+    // Floor 5 (was 1). The renderer's lag probe occasionally spikes
+    // for unrelated reasons (GC, an input burst, devtools open) and
+    // a 1-floor would let those one-off spikes corner the queue at
+    // single-task dispatch — which on a slow remote server (avg resp
+    // 1.5-2 s) cuts throughput from 10 URL/s to 0.5 URL/s and the
+    // queue never recovers because the user never produces zero lag.
     if (lagMs > 200) {
-      next = Math.max(1, this.currentConcurrency - 1);
+      next = Math.max(5, this.currentConcurrency - 1);
     } else if (lagMs < 30) {
       next = Math.min(ceiling, this.currentConcurrency + 1);
     }

@@ -137,20 +137,30 @@ export function App() {
     // previous session left a non-empty checkpoint we ask whether to
     // resume. Discarding wipes the snapshot so the prompt doesn't
     // recur on next launch.
+    //
+    // The confirm() is wrapped in a 250 ms setTimeout so the initial
+    // render finishes (URL input mounts, status bar paints) before
+    // the modal opens. Without the defer, the synchronous `confirm`
+    // can fire on first paint and — when Electron renders the modal
+    // behind the main window on some Windows configurations — leaves
+    // the user staring at an "unresponsive" UI: the URL input can't
+    // be clicked because a hidden modal is blocking the renderer.
     void window.freecrawl.crashRecoveryStatus().then((status) => {
       if (status.pendingCount === 0) return;
-      const proceed = window.confirm(
-        `FreeCrawl detected a previous crawl that didn't finish cleanly:\n\n` +
-          `  Start URL: ${status.seedUrl}\n` +
-          `  Pending URLs: ${status.pendingCount.toLocaleString()}\n\n` +
-          `Resume the crawl from where it stopped?\n\n` +
-          `Click OK to resume, Cancel to discard the recovery state and start fresh.`,
-      );
-      if (proceed) {
-        void window.freecrawl.crashRecoveryResume();
-      } else {
-        void window.freecrawl.crashRecoveryDiscard();
-      }
+      window.setTimeout(() => {
+        const proceed = window.confirm(
+          `FreeCrawl detected a previous crawl that didn't finish cleanly:\n\n` +
+            `  Start URL: ${status.seedUrl}\n` +
+            `  Pending URLs: ${status.pendingCount.toLocaleString()}\n\n` +
+            `Resume the crawl from where it stopped?\n\n` +
+            `Click OK to resume, Cancel to discard the recovery state and start fresh.`,
+        );
+        if (proceed) {
+          void window.freecrawl.crashRecoveryResume();
+        } else {
+          void window.freecrawl.crashRecoveryDiscard();
+        }
+      }, 250);
     });
 
     // rAF-throttled progress dispatch. The crawler emits up to 5

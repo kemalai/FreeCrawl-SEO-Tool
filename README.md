@@ -215,6 +215,97 @@ npm --workspace apps/desktop run build:linux   # AppImage / .deb
 
 </details>
 
+<details>
+<summary><b>🤖 MCP server</b> — query your crawl from Claude / any MCP client</summary>
+
+<br />
+
+FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the active `.seoproject` to AI agents over stdio. Read-only — runs alongside the desktop app without contention (SQLite WAL).
+
+**Tools**: `get_summary`, `get_overview_counts`, `top_issues`, `query_urls`, `get_url_detail`, `list_projects`, `set_project`, `current_project`.
+
+**1. Build it once:**
+
+```bash
+npm run build:mcp
+```
+
+This produces `apps/mcp-server/dist/index.js`.
+
+**2. Register it with your MCP client.**
+
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+Edit your Claude Desktop config:
+
+| Platform | Path |
+| :--- | :--- |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+```json
+{
+  "mcpServers": {
+    "freecrawl": {
+      "command": "node",
+      "args": ["/absolute/path/to/FreeCrawl-SEO-Tool/apps/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The `freecrawl` server appears under the tool 🔌 icon.
+
+</details>
+
+<details>
+<summary><b>Claude Code (CLI)</b></summary>
+
+```bash
+claude mcp add freecrawl -- node /absolute/path/to/FreeCrawl-SEO-Tool/apps/mcp-server/dist/index.js
+```
+
+</details>
+
+<details>
+<summary><b>Other MCP clients</b></summary>
+
+Run the binary directly with stdio transport:
+
+```bash
+node apps/mcp-server/dist/index.js
+```
+
+The server speaks newline-delimited JSON-RPC 2.0 — point any MCP-compatible client at it.
+
+</details>
+
+**3. Try it.** Ask your agent things like:
+
+> *"Show the 10 URLs with the longest response time in my last crawl."*
+> *"What are the top 5 issue categories with the most affected pages?"*
+> *"List every URL with a missing meta description."*
+
+**Pointing at a non-default project:**
+
+By default the server reads `<userData>/projects/default.seoproject` (the same file the desktop app uses). Override with the `FREECRAWL_PROJECT` env var, or call the `set_project` tool mid-session:
+
+```json
+{
+  "mcpServers": {
+    "freecrawl": {
+      "command": "node",
+      "args": ["/path/to/apps/mcp-server/dist/index.js"],
+      "env": { "FREECRAWL_PROJECT": "/path/to/audit.seoproject" }
+    }
+  }
+}
+```
+
+</details>
+
 <br />
 
 ---

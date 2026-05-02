@@ -2,18 +2,27 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AdvancedFilter, CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
 
 const CHUNK_SIZE = 500;
-const MAX_CACHED_CHUNKS = 8;
-// Live-refresh cadence during an active crawl. 750 ms strikes a balance
-// between perceived "row streaming" smoothness and the cost of a COUNT
-// query + per-chunk fetch every tick. At 100 URL/s the user still sees
-// ~75 new rows per tick (continuous flow), while leaving 3× more main-
-// thread headroom than the previous 250 ms cadence.
-// Cadence for the live-tail tick. 1500 ms strikes the balance between
-// "feels fresh" and "doesn't pin SQLite". At 750 ms a 2k+ row crawl was
-// burning ~30% of one core in COUNT + chunk fetches, blocking input IPC
-// for the duration. The user sees the same effect: numbers tick at half
-// speed but the window stops kasma'ing.
-const LIVE_REFRESH_MS = 1500;
+// Doubled the cache (was 8) so a fast scroll across 4-5 chunks doesn't
+// thrash the reader pool: each chunk evicted = a re-fetch the next time
+// the user scrolls back to it. 16 × 500 = 8000 rows kept warm; at
+// ~2 KB/row that's ~16 MB heap, well within budget.
+const MAX_CACHED_CHUNKS = 16;
+// Number of chunks to pre-fetch ahead/behind the visible range. The
+// visible range is what the virtualizer asks for; pre-fetching the
+// neighbours hides "..." placeholders during fast scrolls because the
+// next chunk has usually already landed by the time the user reaches
+// it. 1 chunk = 500 rows of look-ahead each direction, cheap on the
+// reader pool.
+const PREFETCH_CHUNKS = 1;
+// Min gap between progress-driven ticks. Progress events arrive at
+// ~5 Hz from the crawler; without throttle the visible-chunk re-query
+// would fire that often too. 100 ms keeps the table feeling live
+// (10 refreshes/sec ceiling) without pinning the reader-pool.
+const TICK_THROTTLE_MS = 100;
+// Safety-net periodic tick for cases where progress events stop
+// arriving (crawl finished, manual DB edits, etc.). Long interval —
+// the progress-event path drives the in-crawl experience.
+const LIVE_REFRESH_MS = 5000;
 
 export interface LazyRowsOpts {
   category: UrlCategory;
@@ -31,6 +40,12 @@ export interface LazyRowsState {
   loadedRows: number;
   rowAt: (index: number) => CrawlUrlRow | null;
   ensureRange: (start: number, end: number) => void;
+  /** True between the moment a shape change is requested (tab/sort/filter
+   *  flip) and the moment the new data has fully landed. Lets the
+   *  consumer distinguish "0 URLs because the category genuinely has
+   *  none" from "0 URLs because we haven't fetched yet" — which the
+   *  empty-state UI cares about a lot. */
+  isLoading: boolean;
 }
 
 /**
@@ -49,6 +64,7 @@ export interface LazyRowsState {
 export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
   const [total, setTotal] = useState(0);
   const [version, setVersion] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
   const chunks = useRef(new Map<number, CrawlUrlRow[]>());
   const chunkOrder = useRef<number[]>([]);
   const fetching = useRef(new Set<number>());
@@ -88,20 +104,52 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     [opts.category, opts.search, opts.sortBy, opts.sortDir, opts.filter],
   );
 
-  // Shape change: rebuild from scratch. The virtualizer will call
-  // ensureRange again on its next measurement pass.
+  // Shape change (tab/sort/filter switch): clear immediately and load
+  // fresh data in parallel. Showing the previous tab's rows under the
+  // new tab's header is the wrong UX — "Internal" rows visible while
+  // "External" is selected makes the user mistrust what they see.
+  // Instead we set `isLoading=true` and let the consumer render a
+  // proper loading state until the new total + visible chunks land.
+  // The reader-pool has multiple workers now, so meta + visible-chunk
+  // queries run in parallel and typically resolve in ~50-150 ms.
   useEffect(() => {
     resetToken.current++;
     chunks.current.clear();
     chunkOrder.current = [];
     fetching.current.clear();
+    setIsLoading(true);
     setVersion((v) => v + 1);
     const token = resetToken.current;
     let cancelled = false;
-    void queryMeta().then(({ total: t }) => {
-      if (cancelled || token !== resetToken.current) return;
-      setTotal(t);
-    });
+
+    const load = async (): Promise<void> => {
+      const metaPromise = queryMeta();
+      const { first, last } = activeRange.current;
+      const chunkPromises: Promise<{ rows: CrawlUrlRow[]; total: number; idx: number }>[] = [];
+      for (let i = first; i <= last; i++) {
+        chunkPromises.push(queryChunk(i).then((r) => ({ ...r, idx: i })));
+      }
+      try {
+        const [{ total: t }, ...newChunks] = await Promise.all([metaPromise, ...chunkPromises]);
+        if (cancelled || token !== resetToken.current) return;
+        for (const ch of newChunks) {
+          chunks.current.set(ch.idx, ch.rows);
+          chunkOrder.current.push(ch.idx);
+        }
+        setTotal(t);
+        setVersion((v) => v + 1);
+      } catch {
+        if (cancelled || token !== resetToken.current) return;
+        // Leave chunks empty on error; the live tick / ensureRange
+        // will retry. Still need to flip loading off so the empty
+        // state can render an actual error/empty UI.
+      } finally {
+        if (!cancelled && token === resetToken.current) {
+          setIsLoading(false);
+        }
+      }
+    };
+    void load();
     return () => {
       cancelled = true;
     };
@@ -111,16 +159,26 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
   // Live tick: re-query only the visible chunks and patch them in place.
   // Never calls .clear(), so rowAt never returns null for a
   // previously-loaded index. The table streams rather than flashes.
-  // A leading tick fires immediately so the first rows surface without
-  // the LIVE_REFRESH_MS dead window after Start.
+  //
+  // Drive model: push, not poll. Each crawler progress event (≈ every
+  // time `crawled` advances, which lands at ~5 Hz on a healthy crawl)
+  // triggers an immediate visible-chunk re-query. The previous design
+  // polled every 1500 ms regardless of activity — newly-written rows
+  // could sit in the DB for up to that long before surfacing in the
+  // table. The push path closes that window to ~100 ms (the throttle
+  // floor that keeps the reader-pool from being hammered).
+  //
+  // A 5 s safety-net `setInterval` still fires for code paths that
+  // mutate the DB without going through a progress event (manual row
+  // delete, project re-open, etc.).
   useEffect(() => {
     let cancelled = false;
     let inFlight = false;
+    let lastTickTs = 0;
     const tick = async () => {
-      // Coalesce overlapping ticks — at 250 ms cadence a slow COUNT or
-      // chunk fetch can otherwise queue up multiple in-flight ticks.
       if (inFlight) return;
       inFlight = true;
+      lastTickTs = Date.now();
       const token = resetToken.current;
       try {
         try {
@@ -146,33 +204,47 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
         inFlight = false;
       }
     };
-    // Wrap the tick in requestIdleCallback so the live-tail SQL only
-    // fires when the renderer's event loop has idle slack. If the user
-    // is dragging / clicking / typing, the tick is deferred until the
-    // input handler frame finishes — eliminates the "click → kasma"
-    // pattern even when the underlying SQL is fast. Falls back to a
-    // direct call when the browser doesn't expose `requestIdleCallback`
-    // (older Chromium builds; Electron 41 ships modern Chromium so this
-    // branch is mostly defensive).
     interface RequestIdleCallback {
       (cb: () => void, opts?: { timeout: number }): number;
     }
     const w = window as Window & { requestIdleCallback?: RequestIdleCallback };
     const scheduleTick = (): void => {
       if (typeof w.requestIdleCallback === 'function') {
-        // 2 s timeout guarantees the tick eventually runs even if the
-        // main thread is permanently busy — better stale data than no
-        // data at all.
-        w.requestIdleCallback(() => void tick(), { timeout: 2000 });
+        // 300 ms timeout — short enough that the user perceives an
+        // event-driven refresh as instant; long enough that an
+        // in-progress click handler isn't preempted.
+        w.requestIdleCallback(() => void tick(), { timeout: 300 });
       } else {
         void tick();
       }
     };
-    scheduleTick();
+    // Leading tick fires directly (no idle wrap) so the first row
+    // surfaces as soon as the crawler has written one — without this,
+    // requestIdleCallback could defer the initial fetch up to 300 ms
+    // on a busy main thread right after Start.
+    void tick();
+
+    // Push: progress event drives the live-tail tick. We tick on every
+    // event where `crawled` changed, throttled to TICK_THROTTLE_MS so
+    // a 100 URL/s crawl doesn't force 100 SQL roundtrips per second.
+    // Direct call (no idle wrap) — progress events are sparse enough
+    // that input-handler interference is a non-concern, and pulling
+    // through requestIdleCallback was adding 50-300 ms before each
+    // newly-written URL surfaced in the table.
+    let lastCrawled = -1;
+    const offProgress = window.freecrawl?.onProgress?.((p) => {
+      if (p.crawled === lastCrawled) return;
+      lastCrawled = p.crawled;
+      if (Date.now() - lastTickTs < TICK_THROTTLE_MS) return;
+      void tick();
+    });
+
+    // Safety-net poll for crawl-idle DB mutations.
     const id = setInterval(scheduleTick, LIVE_REFRESH_MS);
     return () => {
       cancelled = true;
       clearInterval(id);
+      offProgress?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyStr]);
@@ -213,7 +285,13 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
       const first = Math.max(0, Math.floor(start / CHUNK_SIZE));
       const last = Math.max(0, Math.floor(end / CHUNK_SIZE));
       activeRange.current = { first, last };
-      for (let i = first; i <= last; i++) {
+      // Pre-fetch a window of neighbouring chunks so a fast scroll
+      // doesn't show "..." placeholders while the next chunk loads —
+      // by the time the virtualizer scrolls into the next chunk's
+      // range, its rows are usually already in the cache.
+      const fetchFrom = Math.max(0, first - PREFETCH_CHUNKS);
+      const fetchTo = last + PREFETCH_CHUNKS;
+      for (let i = fetchFrom; i <= fetchTo; i++) {
         if (!chunks.current.has(i)) void fetchChunk(i);
       }
     },
@@ -237,5 +315,5 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     [version],
   );
 
-  return { total, loadedRows, rowAt, ensureRange };
+  return { total, loadedRows, rowAt, ensureRange, isLoading };
 }

@@ -25,6 +25,8 @@ import {
   type ExportJsonResult,
   type ExportXmlInput,
   type ExportXmlResult,
+  type ExportTabularInput,
+  type ExportTabularResult,
   type DataDeleteByDomainInput,
   type DataDeleteByDomainResult,
   type CrashRecoveryStatus,
@@ -81,6 +83,7 @@ import {
   exportUrlsToCsv,
   exportUrlsToJson,
   exportUrlsToXml,
+  exportTabular,
   exportSitemap,
   exportHtmlReport,
   compareCrawls,
@@ -363,6 +366,64 @@ async function writeFetchedUrlViaPool(
       }) — falling back to main-thread writeFetchedUrl.`,
     );
     return getDb().writeFetchedUrl(payload);
+  }
+}
+
+/**
+ * Run the post-crawl issue recompute on the writer worker. This pass
+ * has 70+ correlated SQL subqueries against the urls table; on a
+ * 5K-URL crawl it takes ~45 s, and running it on the main thread
+ * freezes the renderer for that entire window (the "Not Responding"
+ * dialog). Routing through the writer worker keeps main free.
+ */
+async function recomputeIssuesViaPool(
+  definitions: ReadonlyArray<readonly [string, string]>,
+): Promise<void> {
+  if (!dbWriterPool.isReady()) {
+    return getDb().recomputeUrlsIssuesYielding(definitions);
+  }
+  try {
+    await dbWriterPool.call<void>('recomputeUrlsIssuesYielding', [definitions]);
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `recomputeUrlsIssuesYielding dispatch failed (${
+        err instanceof Error ? err.message : String(err)
+      }) — falling back to main-thread recompute.`,
+    );
+    await getDb().recomputeUrlsIssuesYielding(definitions);
+  }
+}
+
+/**
+ * Generic post-crawl pass dispatcher. Routes recomputeInlinks,
+ * recomputeRedirectChains, recomputeHreflangAnalysis,
+ * recomputeHreflangInconsistent, and recomputePaginationSequence
+ * through the writer worker so the main thread stays responsive to
+ * Stop/Pause clicks and IPC traffic during the post-crawl phase.
+ * Without this, those five sync SQL passes combined freeze main for
+ * 5–15 s on a 5K-URL crawl — exactly the window where users hit
+ * Stop/Pause and "nothing happens".
+ */
+async function runDbPassViaPool(method: string): Promise<void> {
+  if (!dbWriterPool.isReady()) {
+    const fn = (getDb() as unknown as Record<string, unknown>)[method];
+    if (typeof fn === 'function') (fn as () => void).call(getDb());
+    return;
+  }
+  try {
+    await dbWriterPool.call<void>(method, []);
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `${method} dispatch failed (${
+        err instanceof Error ? err.message : String(err)
+      }) — falling back to main-thread.`,
+    );
+    const fn = (getDb() as unknown as Record<string, unknown>)[method];
+    if (typeof fn === 'function') (fn as () => void).call(getDb());
   }
 }
 
@@ -1160,6 +1221,8 @@ function registerIpc(): void {
       setOp: (op: string) => freezeWatchdog.setMainOp(op),
       parseHtml: parseHtmlViaPool,
       writeFetchedUrl: writeFetchedUrlViaPool,
+      recomputeIssues: recomputeIssuesViaPool,
+      runDbPass: runDbPassViaPool,
     });
     activeCrawler = crawler;
     attachCrawlerListeners(crawler);
@@ -1178,11 +1241,29 @@ function registerIpc(): void {
     activeCrawler?.resume();
   });
 
-  ipcMain.handle(IPC.crawlClear, () => {
+  ipcMain.handle(IPC.crawlClear, async () => {
     activeCrawler?.stop();
     activeCrawler = null;
     const database = getDb();
-    database.reset();
+    // Route reset() through the writer pool so it sits behind any
+    // in-flight writeFetchedUrl RPCs in the worker's FIFO. Without
+    // this, the main process truncates the urls table while the
+    // writer worker is still draining the last batch of per-URL
+    // writes — those writes win the SQLite lock race and resurrect
+    // ~19 rows in the table after Clear. Going through the pool
+    // serialises naturally: every queued write completes, then reset
+    // runs against an already-stopped crawler.
+    if (dbWriterPool.isReady()) {
+      try {
+        await dbWriterPool.call('reset', []);
+      } catch {
+        // Worker terminated or RPC timed out — fall back to direct
+        // reset rather than leaving the table half-cleared.
+        database.reset();
+      }
+    } else {
+      database.reset();
+    }
     // Belt-and-braces: reset() above already includes a DELETE FROM
     // crawl_queue, but if anything (a late-firing checkpoint timer, a
     // half-finished post-crawl pass) writes to that table after the
@@ -1662,6 +1743,47 @@ function registerIpc(): void {
   );
 
   ipcMain.handle(
+    IPC.exportTabular,
+    async (_e, input: ExportTabularInput): Promise<ExportTabularResult> => {
+      const { format, sections, columns, selectedIds } = input;
+      let outputPath = input.filePath ?? '';
+      const isSelection = (selectedIds?.length ?? 0) > 0;
+      const multiSection = sections.length > 1;
+      if (!outputPath) {
+        if (format === 'csv' && multiSection) {
+          const res = await dialog.showOpenDialog(mainWindow!, {
+            properties: ['openDirectory', 'createDirectory'],
+            title: 'Choose folder for CSV export',
+          });
+          if (res.canceled || res.filePaths.length === 0) {
+            return { filePath: '', files: [], rowsWritten: 0 };
+          }
+          outputPath = res.filePaths[0]!;
+        } else {
+          const ext = format === 'xlsx' ? 'xlsx' : 'csv';
+          const filterName = format === 'xlsx' ? 'Excel Workbook' : 'CSV';
+          const baseName = isSelection ? 'freecrawl-selected' : 'freecrawl-export';
+          const res = await dialog.showSaveDialog(mainWindow!, {
+            defaultPath: `${baseName}.${ext}`,
+            filters: [{ name: filterName, extensions: [ext] }],
+          });
+          if (res.canceled || !res.filePath) {
+            return { filePath: '', files: [], rowsWritten: 0 };
+          }
+          outputPath = res.filePath;
+        }
+      }
+      const result = await exportTabular(getDb(), outputPath, {
+        format,
+        sections,
+        columns,
+        selectedIds,
+      });
+      return result;
+    },
+  );
+
+  ipcMain.handle(
     IPC.dataDeleteByDomain,
     async (
       _e,
@@ -1707,6 +1829,8 @@ function registerIpc(): void {
         setOp: (op: string) => freezeWatchdog.setMainOp(op),
         parseHtml: parseHtmlViaPool,
         writeFetchedUrl: writeFetchedUrlViaPool,
+      recomputeIssues: recomputeIssuesViaPool,
+      runDbPass: runDbPassViaPool,
       });
       activeCrawler = crawler;
       attachCrawlerListeners(crawler);

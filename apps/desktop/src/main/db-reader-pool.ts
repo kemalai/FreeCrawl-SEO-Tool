@@ -4,43 +4,48 @@ import { fileURLToPath } from 'node:url';
 import * as logger from './logger.js';
 
 /**
- * Pool of one worker_thread holding a read-only SQLite connection.
- * "Pool" is forward-compatible naming — for now we run a single worker
- * because SQLite's WAL allows arbitrary concurrent readers but adding a
- * second worker would just double our cache footprint without gaining
- * parallelism on a single physical disk.
+ * Pool of N worker_threads, each holding its own read-only SQLite
+ * connection. SQLite WAL mode allows arbitrary concurrent readers, so
+ * spreading queries across multiple workers gives genuine parallelism
+ * for UI reads — critical because:
+ *
+ *   - The OverviewSidebar refresh issues a 130-clause `getOverviewCounts`
+ *     every few seconds. On a single-worker pool this serialises every
+ *     other read behind it, freezing the URL table refresh and the
+ *     bottom panel's per-URL detail / inlinks queries until the heavy
+ *     pass completes.
+ *   - Pool now lets the heavy aggregate run on one worker while the
+ *     short, latency-sensitive queries (urlsQuery for the visible
+ *     chunks, urlDetail for the bottom panel) run on the others.
+ *
+ * Routing: round-robin with a "least busy" tie-break — for each call
+ * we pick the worker with the fewest pending requests, and on a tie
+ * fall back to a rotating cursor so two same-loaded workers don't
+ * always get the next call dropped on the same one.
  *
  * Lifecycle:
- *   - `init(dbPath)` spawns the worker, points it at the file.
- *   - `swap(newPath)` is called on Open Project — terminates the old
- *     worker and spawns a fresh one; in-flight requests are rejected
+ *   - `init(dbPath)` spawns all workers, points them at the file.
+ *   - `swap(newPath)` is called on Open Project — terminates every old
+ *     worker and spawns a fresh set; in-flight requests are rejected
  *     with `Error('reader-swapped')` so callers can retry safely.
  *   - `terminate()` on app quit. After terminate, all `call()` resolve
  *     with `Error('reader-terminated')`.
  *
  * Crash recovery:
- *   - If the worker exits unexpectedly (`exit` event with non-zero code
- *     while we still have a path) we auto-respawn up to MAX_RESTARTS
- *     within RESTART_WINDOW_MS. After the cap we surface the failure
- *     and stop trying — the user gets a clear log entry instead of a
- *     restart loop.
- *   - In-flight requests during a crash are rejected with
+ *   - If a worker exits unexpectedly, that one slot auto-respawns up to
+ *     MAX_RESTARTS within RESTART_WINDOW_MS. Other workers in the pool
+ *     keep serving traffic.
+ *   - In-flight requests on the crashed worker are rejected with
  *     `Error('reader-crashed')`. Callers fall back to the main-process
- *     ProjectDb (see `dbReaderCallOrFallback`) so the UI stays alive.
+ *     ProjectDb (see `callReaderOrFallback`) so the UI stays alive.
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// The worker is built alongside the main bundle as `db-reader-worker.js`
-// (electron-vite produces flat output in `out/main/`). In dev mode
-// electron-vite uses the same convention.
 const WORKER_PATH = path.join(__dirname, 'db-reader-worker.js');
 
 // 30 s default leaves headroom for SQLite read contention during the
-// post-crawl recompute phase (recomputeUrlsIssues holds a writer
-// transaction that can keep reader queries blocked behind earlier
-// queued requests for several seconds at a time on large crawls).
-// Genuine worker hangs are still surfaced — just with a slightly
-// longer detection window than before.
+// post-crawl recompute phase. Genuine worker hangs are still surfaced
+// — just with a slightly longer detection window than before.
 const REQUEST_TIMEOUT_MS = 30_000;
 // Heavy aggregate queries (the overview sidebar's 130-counter pass and
 // the post-crawl materialiser's counter fan-out) can run past the
@@ -54,7 +59,17 @@ const HEAVY_METHODS = new Set<string>([
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 60_000;
 
+// Reader pool size. Four workers gives the typical UI workload (one
+// long-running aggregate from the sidebar + visible-table chunk fetch
+// + bottom-panel detail + crawl-engine background reads) a free slot
+// for every concurrent request; bigger doesn't help because most UI
+// reads are short and a dedicated worker per query becomes pure
+// memory cost. Each worker keeps its own SQLite handle (~5 MB heap)
+// and prepared-statement cache (~10 MB on a populated DB).
+const POOL_SIZE = 4;
+
 interface PendingRequest {
+  workerIdx: number;
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -67,94 +82,143 @@ interface ResponseMessage {
   error?: string;
 }
 
+interface WorkerSlot {
+  worker: Worker | null;
+  pending: number;
+  restartTimes: number[];
+}
+
 class DbReaderPool {
-  private worker: Worker | null = null;
+  private slots: WorkerSlot[] = [];
   private dbPath: string | null = null;
   private freezeWatchdogSab: SharedArrayBuffer | null = null;
   private nextRequestId = 1;
   private pending = new Map<number, PendingRequest>();
-  private restartTimes: number[] = [];
+  private rrCursor = 0;
   private terminated = false;
 
-  /** Spawn (or respawn) the worker pointed at `dbPath`. Idempotent.
-   *
-   *   `freezeWatchdogSab` — if provided, the worker will tick its
-   *   own heartbeat + publish its current method into this shared
-   *   buffer so the freeze-watchdog thread can detect a stuck
-   *   reader. Pass `null` to disable diagnostics. */
+  /** Spawn (or respawn) the pool pointed at `dbPath`. Idempotent. */
   init(dbPath: string, freezeWatchdogSab: SharedArrayBuffer | null = null): void {
     if (this.terminated) {
       throw new Error('DbReaderPool: cannot init after terminate()');
     }
     this.freezeWatchdogSab = freezeWatchdogSab;
-    if (this.dbPath === dbPath && this.worker !== null) return;
+    if (this.dbPath === dbPath && this.slots.some((s) => s.worker !== null)) return;
     this.dbPath = dbPath;
-    this.spawn();
+    this.slots = Array.from({ length: POOL_SIZE }, () => ({
+      worker: null,
+      pending: 0,
+      restartTimes: [],
+    }));
+    for (let i = 0; i < POOL_SIZE; i++) this.spawn(i);
   }
 
-  /** Switch the worker to a different .seoproject file. */
+  /** Switch the pool to a different .seoproject file. */
   swap(newPath: string, freezeWatchdogSab: SharedArrayBuffer | null = null): void {
     if (freezeWatchdogSab !== null) this.freezeWatchdogSab = freezeWatchdogSab;
-    if (this.dbPath === newPath && this.worker !== null) return;
+    if (this.dbPath === newPath && this.slots.some((s) => s.worker !== null)) return;
     this.failPendingWith('reader-swapped');
     this.dbPath = newPath;
-    this.spawn();
+    if (this.slots.length === 0) {
+      this.slots = Array.from({ length: POOL_SIZE }, () => ({
+        worker: null,
+        pending: 0,
+        restartTimes: [],
+      }));
+    }
+    for (let i = 0; i < POOL_SIZE; i++) this.spawn(i);
   }
 
   /** Permanent shutdown — used on app quit. */
   async terminate(): Promise<void> {
     this.terminated = true;
     this.failPendingWith('reader-terminated');
-    if (this.worker) {
-      const w = this.worker;
-      this.worker = null;
-      try {
-        await w.terminate();
-      } catch {
-        /* already gone */
-      }
-    }
+    const workers = this.slots.map((s) => s.worker).filter((w): w is Worker => w !== null);
+    for (const slot of this.slots) slot.worker = null;
+    await Promise.all(
+      workers.map((w) =>
+        w.terminate().catch(() => undefined),
+      ),
+    );
   }
 
-  /** True while a worker is up and ready to receive requests. */
+  /** True while at least one worker is up and ready. */
   isReady(): boolean {
-    return this.worker !== null && !this.terminated;
+    return !this.terminated && this.slots.some((s) => s.worker !== null);
   }
 
   /**
-   * Dispatch a method call to the worker. Callers should use the typed
-   * wrapper `callReader<T>(method, args)` declared in the main process
-   * IPC layer. Resolves with the method's return value, rejects with
-   * an Error on worker error / timeout / crash.
+   * Dispatch a method call to the least-busy ready worker. Resolves
+   * with the method's return value, rejects with an Error on worker
+   * error / timeout / crash.
    */
   call<T>(method: string, args: unknown[] = []): Promise<T> {
     if (this.terminated) return Promise.reject(new Error('reader-terminated'));
-    if (!this.worker) return Promise.reject(new Error('reader-not-initialised'));
+    const slotIdx = this.pickSlot();
+    if (slotIdx < 0) return Promise.reject(new Error('reader-not-initialised'));
+    const slot = this.slots[slotIdx]!;
+    const worker = slot.worker;
+    if (!worker) return Promise.reject(new Error('reader-not-initialised'));
     const requestId = this.nextRequestId++;
     const timeoutMs = HEAVY_METHODS.has(method)
       ? HEAVY_REQUEST_TIMEOUT_MS
       : REQUEST_TIMEOUT_MS;
+    slot.pending++;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(requestId);
+        const p = this.pending.get(requestId);
+        if (p) {
+          this.pending.delete(requestId);
+          this.slots[p.workerIdx]!.pending = Math.max(
+            0,
+            this.slots[p.workerIdx]!.pending - 1,
+          );
+        }
         reject(new Error(`reader-timeout: ${method} > ${timeoutMs}ms`));
       }, timeoutMs);
       this.pending.set(requestId, {
+        workerIdx: slotIdx,
         resolve: resolve as (v: unknown) => void,
         reject,
         timer,
       });
-      this.worker!.postMessage({ requestId, method, args });
+      worker.postMessage({ requestId, method, args });
     });
   }
 
   // ── private ──────────────────────────────────────────────────────────────
 
-  private spawn(): void {
+  /**
+   * Pick the slot with the fewest pending requests. Ties are broken
+   * by a round-robin cursor so identically-loaded workers don't all
+   * receive their next call on the same slot.
+   */
+  private pickSlot(): number {
+    let best = -1;
+    let bestPending = Number.POSITIVE_INFINITY;
+    // Start the scan from the rotating cursor so RR is honoured on ties.
+    for (let i = 0; i < this.slots.length; i++) {
+      const idx = (this.rrCursor + i) % this.slots.length;
+      const s = this.slots[idx]!;
+      if (!s.worker) continue;
+      if (s.pending < bestPending) {
+        best = idx;
+        bestPending = s.pending;
+      }
+    }
+    if (best >= 0) {
+      this.rrCursor = (best + 1) % this.slots.length;
+    }
+    return best;
+  }
+
+  private spawn(slotIdx: number): void {
     if (!this.dbPath) return;
-    if (this.worker) {
-      const old = this.worker;
-      this.worker = null;
+    const slot = this.slots[slotIdx];
+    if (!slot) return;
+    if (slot.worker) {
+      const old = slot.worker;
+      slot.worker = null;
       void old.terminate().catch(() => undefined);
     }
     try {
@@ -166,18 +230,19 @@ class DbReaderPool {
       });
       w.on('message', (msg: ResponseMessage) => this.handleResponse(msg));
       w.on('error', (err) => {
-        logger.log('error', 'db-reader', `worker error: ${err.message}`);
+        logger.log('error', 'db-reader', `worker[${slotIdx}] error: ${err.message}`);
       });
-      w.on('exit', (code) => this.handleExit(code));
-      this.worker = w;
-      logger.log('info', 'db-reader', `worker spawned for ${this.dbPath}`);
+      w.on('exit', (code) => this.handleExit(slotIdx, code));
+      slot.worker = w;
+      slot.pending = 0;
+      logger.log('info', 'db-reader', `worker[${slotIdx}] spawned for ${this.dbPath}`);
     } catch (err) {
       logger.log(
         'error',
         'db-reader',
-        `worker spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+        `worker[${slotIdx}] spawn failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      this.worker = null;
+      slot.worker = null;
     }
   }
 
@@ -186,6 +251,8 @@ class DbReaderPool {
     if (!pending) return;
     this.pending.delete(msg.requestId);
     clearTimeout(pending.timer);
+    const slot = this.slots[pending.workerIdx];
+    if (slot) slot.pending = Math.max(0, slot.pending - 1);
     if (msg.ok) {
       pending.resolve(msg.result);
     } else {
@@ -193,31 +260,38 @@ class DbReaderPool {
     }
   }
 
-  private handleExit(code: number): void {
-    this.worker = null;
+  private handleExit(slotIdx: number, code: number): void {
+    const slot = this.slots[slotIdx];
+    if (!slot) return;
+    slot.worker = null;
     if (this.terminated) return;
+    // Reject only this slot's in-flight requests.
+    for (const [id, p] of this.pending) {
+      if (p.workerIdx === slotIdx) {
+        clearTimeout(p.timer);
+        p.reject(new Error('reader-crashed'));
+        this.pending.delete(id);
+      }
+    }
+    slot.pending = 0;
     if (code === 0) return;
-    this.failPendingWith('reader-crashed');
-    // Restart bookkeeping: drop entries older than the window so a
-    // long-lived process that crashes once a day doesn't permanently
-    // exhaust its restart budget.
     const now = Date.now();
-    this.restartTimes = this.restartTimes.filter((t) => now - t < RESTART_WINDOW_MS);
-    if (this.restartTimes.length >= MAX_RESTARTS) {
+    slot.restartTimes = slot.restartTimes.filter((t) => now - t < RESTART_WINDOW_MS);
+    if (slot.restartTimes.length >= MAX_RESTARTS) {
       logger.log(
         'error',
         'db-reader',
-        `worker crashed ${MAX_RESTARTS}× within ${RESTART_WINDOW_MS}ms — giving up. UI queries fall back to main-process DB.`,
+        `worker[${slotIdx}] crashed ${MAX_RESTARTS}× within ${RESTART_WINDOW_MS}ms — giving up on this slot.`,
       );
       return;
     }
-    this.restartTimes.push(now);
+    slot.restartTimes.push(now);
     logger.log(
       'warn',
       'db-reader',
-      `worker exited with code ${code}; respawning (${this.restartTimes.length}/${MAX_RESTARTS})`,
+      `worker[${slotIdx}] exited with code ${code}; respawning (${slot.restartTimes.length}/${MAX_RESTARTS})`,
     );
-    this.spawn();
+    this.spawn(slotIdx);
   }
 
   private failPendingWith(reason: string): void {
@@ -226,6 +300,7 @@ class DbReaderPool {
       p.reject(new Error(reason));
     }
     this.pending.clear();
+    for (const slot of this.slots) slot.pending = 0;
   }
 }
 
@@ -233,10 +308,10 @@ class DbReaderPool {
 export const dbReaderPool = new DbReaderPool();
 
 /**
- * Thin helper for IPC handlers: try the worker first, fall back to the
- * synchronous main-process DB on any worker error. The fallback path
- * keeps the UI working even if the worker is crashed/restarting, at
- * the cost of running on the main thread for that one query.
+ * Thin helper for IPC handlers: try the worker pool first, fall back
+ * to the synchronous main-process DB on any worker error. The fallback
+ * path keeps the UI working even if every worker is crashed/restarting,
+ * at the cost of running on the main thread for that one query.
  */
 export async function callReaderOrFallback<T>(
   method: string,

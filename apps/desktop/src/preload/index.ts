@@ -11,6 +11,8 @@ import {
   type ExportJsonResult,
   type ExportXmlInput,
   type ExportXmlResult,
+  type ExportTabularInput,
+  type ExportTabularResult,
   type DataDeleteByDomainInput,
   type DataDeleteByDomainResult,
   type CrashRecoveryStatus,
@@ -123,6 +125,8 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.exportJson, input),
   exportXml: (input: ExportXmlInput): Promise<ExportXmlResult> =>
     ipcRenderer.invoke(IPC.exportXml, input),
+  exportTabular: (input: ExportTabularInput): Promise<ExportTabularResult> =>
+    ipcRenderer.invoke(IPC.exportTabular, input),
   dataDeleteByDomain: (
     input: DataDeleteByDomainInput,
   ): Promise<DataDeleteByDomainResult> =>

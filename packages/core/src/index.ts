@@ -10,6 +10,12 @@ export {
 export { exportUrlsToCsv } from './csv-export.js';
 export { exportUrlsToJson, type JsonExportOptions } from './json-export.js';
 export { exportUrlsToXml } from './xml-export.js';
+export {
+  exportTabular,
+  type TabularExportOptions,
+  type TabularExportResult,
+  type TabularSection,
+} from './tabular-export.js';
 export { testUrlAgainstRobots, type RobotsTestResult } from './robots.js';
 export {
   exportSitemap,

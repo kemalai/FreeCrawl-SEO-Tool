@@ -3036,6 +3036,13 @@ export class ProjectDb {
     return row ? this.rowFromDb(row) : null;
   }
 
+  /** Resolve a URL string to its numeric id, or null if absent. Used by
+   *  the MCP server when a caller supplies a URL instead of an id. */
+  getUrlIdByUrl(url: string): number | null {
+    const row = this.stmtGetUrlId.get(url) as { id: number } | undefined;
+    return row ? row.id : null;
+  }
+
   getInlinks(url: string, limit: number): { rows: InlinkRow[]; total: number } {
     const total = (
       this.db.prepare('SELECT COUNT(*) AS c FROM links WHERE to_url = ?').get(url) as { c: number }

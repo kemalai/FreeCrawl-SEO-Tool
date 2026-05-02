@@ -5,6 +5,7 @@
     { "path": "./packages/db" },
     { "path": "./packages/core" },
     { "path": "./apps/desktop" },
-    { "path": "./apps/cli" }
+    { "path": "./apps/cli" },
+    { "path": "./apps/mcp-server" }
   ]
 }

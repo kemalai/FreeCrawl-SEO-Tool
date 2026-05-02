@@ -39,6 +39,9 @@ export const IPC = {
   exportCsv: 'export:csv',
   exportJson: 'export:json',
   exportXml: 'export:xml',
+  /** New unified tabular export with column selection + multi-tab support
+   * (CSV / XLSX). Backs the in-table "Export" button. */
+  exportTabular: 'export:tabular',
   /** GDPR-aligned per-domain delete. Wipes every row whose URL host
    * matches the given domain (and that domain's links/images/headers/
    * url_sources). Used by Settings → "Delete Domain Data". */
@@ -210,6 +213,38 @@ export interface ExportXmlInput {
 
 export interface ExportXmlResult {
   filePath: string;
+  rowsWritten: number;
+}
+
+/** One section / sheet of a tabular export — a single category fed into
+ * the workbook (xlsx) or split into its own file (csv). */
+export interface ExportTabularSection {
+  /** Display label — becomes the xlsx sheet name and the csv file suffix. */
+  label: string;
+  category: UrlCategory;
+}
+
+export interface ExportTabularInput {
+  format: 'csv' | 'xlsx';
+  /**
+   * One or more sections. With CSV + multiple sections, files are written
+   * into a folder the user picks; xlsx always produces a single workbook
+   * with one sheet per section.
+   */
+  sections: ExportTabularSection[];
+  /** Keys of `CrawlUrlRow` to emit, in order. */
+  columns: string[];
+  /** Optional pre-resolved output path (skip the dialog). */
+  filePath?: string;
+  /** When set, restrict every section to these row ids. */
+  selectedIds?: number[];
+}
+
+export interface ExportTabularResult {
+  /** Output file (xlsx + single-section csv) or folder (multi-section csv). */
+  filePath: string;
+  /** Files actually written. Multi-section CSV writes one file per section. */
+  files: string[];
   rowsWritten: number;
 }
 
@@ -676,6 +711,7 @@ export interface FreeCrawlApi {
   exportCsv(input: ExportCsvInput): Promise<ExportCsvResult>;
   exportJson(input: ExportJsonInput): Promise<ExportJsonResult>;
   exportXml(input: ExportXmlInput): Promise<ExportXmlResult>;
+  exportTabular(input: ExportTabularInput): Promise<ExportTabularResult>;
   dataDeleteByDomain(
     input: DataDeleteByDomainInput,
   ): Promise<DataDeleteByDomainResult>;

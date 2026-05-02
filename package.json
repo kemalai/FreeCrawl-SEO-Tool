@@ -1,6 +1,6 @@
 {
   "name": "freecrawl-seo",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "private": true,
   "description": "Open-source desktop SEO crawler â€” a free alternative to Screaming Frog",
   "license": "MIT",
@@ -18,6 +18,7 @@
     "build": "tsc -b && npm run build --workspace apps/desktop && npm run build --workspace apps/cli",
     "build:desktop": "npm run build --workspace apps/desktop",
     "build:cli": "npm run build --workspace apps/cli",
+    "build:mcp": "npm run build --workspace apps/mcp-server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,css,html}\"",
