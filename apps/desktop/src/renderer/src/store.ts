@@ -21,6 +21,7 @@ export type TabKey =
   | 'images'
   | 'canonicals'
   | 'directives'
+  | 'redirects'
   | 'links'
   | 'broken-links';
 
@@ -37,6 +38,7 @@ export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'images', label: 'Images' },
   { key: 'canonicals', label: 'Canonicals' },
   { key: 'directives', label: 'Directives' },
+  { key: 'redirects', label: 'Redirects' },
   { key: 'links', label: 'Links' },
   { key: 'broken-links', label: 'Broken Links' },
 ];
@@ -50,6 +52,11 @@ interface AppState {
   activeCategory: UrlCategory;
   error: string | null;
   selectedUrlId: number | null;
+  /** Multi-row selection in the main URLs table. Used by sub-tab views
+   * (Inlinks / Outlinks / Images / Resources) to aggregate data across
+   * every selected row instead of just the primary `selectedUrlId`. When
+   * the user has only one row selected this mirrors `[selectedUrlId]`. */
+  selectedUrlIds: number[];
   sidebarOpen: boolean;
   detailPanelOpen: boolean;
   settingsOpen: boolean;
@@ -64,6 +71,7 @@ interface AppState {
   navigateToCategory: (c: UrlCategory) => void;
   setError: (e: string | null) => void;
   setSelectedUrlId: (id: number | null) => void;
+  setSelectedUrlIds: (ids: number[]) => void;
   toggleSidebar: () => void;
   toggleDetailPanel: () => void;
   setSettingsOpen: (open: boolean) => void;
@@ -108,6 +116,7 @@ export const useAppStore = create<AppState>((set) => ({
   activeCategory: 'internal:html',
   error: null,
   selectedUrlId: null,
+  selectedUrlIds: [],
   sidebarOpen: true,
   detailPanelOpen: true,
   settingsOpen: false,
@@ -139,6 +148,7 @@ export const useAppStore = create<AppState>((set) => ({
   },
   setError: (e) => set({ error: e }),
   setSelectedUrlId: (id) => set({ selectedUrlId: id }),
+  setSelectedUrlIds: (ids) => set({ selectedUrlIds: ids }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleDetailPanel: () => set((s) => ({ detailPanelOpen: !s.detailPanelOpen })),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
@@ -165,6 +175,7 @@ export const useAppStore = create<AppState>((set) => ({
       overview: null,
       error: null,
       selectedUrlId: null,
+      selectedUrlIds: [],
     }),
 }));
 
@@ -192,6 +203,12 @@ function categoryForTab(tab: TabKey): UrlCategory {
       return 'all';
     case 'broken-links':
       return 'issues:broken-links-all';
+    case 'canonicals':
+      return 'tab:canonicals';
+    case 'directives':
+      return 'tab:directives';
+    case 'redirects':
+      return 'tab:redirects';
     default:
       return 'internal:html';
   }

@@ -23,6 +23,11 @@ import {
   type ExportCsvResult,
   type ExportJsonInput,
   type ExportJsonResult,
+  type ExportXmlInput,
+  type ExportXmlResult,
+  type DataDeleteByDomainInput,
+  type DataDeleteByDomainResult,
+  type CrashRecoveryStatus,
   type ExportHtmlReportInput,
   type ExportHtmlReportResult,
   type BulkExportFile,
@@ -75,6 +80,7 @@ import {
   Crawler,
   exportUrlsToCsv,
   exportUrlsToJson,
+  exportUrlsToXml,
   exportSitemap,
   exportHtmlReport,
   compareCrawls,
@@ -86,6 +92,11 @@ import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
 import * as logger from './logger.js';
 import { dbReaderPool, callReaderOrFallback } from './db-reader-pool.js';
+import { dbWriterPool } from './db-writer-pool.js';
+import { freezeWatchdog } from './freeze-watchdog.js';
+import { parserPool } from './parser-pool.js';
+import { parseHtml as inlineParseHtml } from '@freecrawl/core';
+import type { ProjectDb as ProjectDbType } from '@freecrawl/db';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -93,6 +104,15 @@ let mainWindow: BrowserWindow | null = null;
 let logsWindow: BrowserWindow | null = null;
 let db: ProjectDb | null = null;
 let activeCrawler: Crawler | null = null;
+/** Most-recent CrawlConfig — needed by the crash-recovery resume
+ * flow so we can re-create the Crawler with the same knobs the user
+ * had set, without re-prompting. Hydrated lazily from `project_meta`
+ * on first DB open. */
+let lastCrawlConfig: CrawlConfig | null = null;
+/** In-memory snapshot of the previous session's checkpoint, captured
+ * before `db.reset()` wipes it. Cleared once the user accepts or
+ * discards the recovery prompt. */
+let pendingRecoveryCheckpoint: { url: string; depth: number; seedUrl: string }[] = [];
 
 // UI preferences (column widths, panel sizes, etc.) live in a JSON file
 // under userData — separate from the crawl DB so "Clear" wipes crawl data
@@ -291,6 +311,61 @@ function maybeShowDiagnosticDialog(msg: string): void {
 /** Currently-open project file path (empty when using the default scratch DB). */
 let currentProjectPath = '';
 
+/**
+ * Dispatch HTML parsing to the worker pool when ready, otherwise
+ * fall back to the inline parser on the main thread. This wrapper is
+ * passed into every `new Crawler(...)` call so the same code path
+ * gets pool acceleration in the desktop app and stays simple in
+ * tests / headless contexts.
+ */
+async function parseHtmlViaPool(
+  html: string,
+  pageUrl: string,
+  opts: Parameters<typeof inlineParseHtml>[2],
+): Promise<ReturnType<typeof inlineParseHtml>> {
+  if (!parserPool.isReady()) {
+    return inlineParseHtml(html, pageUrl, opts);
+  }
+  try {
+    return await parserPool.parse(html, pageUrl, opts);
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `parser-pool dispatch failed (${
+        err instanceof Error ? err.message : String(err)
+      }) — using inline parseHtml as fallback.`,
+    );
+    return inlineParseHtml(html, pageUrl, opts);
+  }
+}
+
+/**
+ * Dispatch a per-URL write batch to the writer worker. Same fall-back
+ * pattern as the parser pool: when the worker is unhealthy we run
+ * the write on the main-thread `ProjectDb` instance so the crawl
+ * never silently drops data.
+ */
+async function writeFetchedUrlViaPool(
+  payload: Parameters<ProjectDbType['writeFetchedUrl']>[0],
+): Promise<{ urlId: number }> {
+  if (!dbWriterPool.isReady()) {
+    return getDb().writeFetchedUrl(payload);
+  }
+  try {
+    return await dbWriterPool.call<{ urlId: number }>('writeFetchedUrl', [payload]);
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `db-writer dispatch failed (${
+        err instanceof Error ? err.message : String(err)
+      }) — falling back to main-thread writeFetchedUrl.`,
+    );
+    return getDb().writeFetchedUrl(payload);
+  }
+}
+
 function getDb(): ProjectDb {
   if (!db) {
     const dataDir = join(app.getPath('userData'), 'projects');
@@ -298,6 +373,25 @@ function getDb(): ProjectDb {
     const defaultPath = join(dataDir, 'default.seoproject');
     db = new ProjectDb(defaultPath);
     currentProjectPath = '';
+    // Wave 6 — Snapshot the previous session's crash-recovery state
+    // BEFORE the reset wipes the project tables. We capture the
+    // checkpointed pending queue + the cached crawl config so the
+    // user can be offered a resume on app start. The DB tables go
+    // back to empty after `reset()`; the in-memory snapshot stays
+    // until the user accepts/discards the recovery prompt.
+    try {
+      const raw = db.getMeta('lastCrawlConfig');
+      if (raw) lastCrawlConfig = JSON.parse(raw) as CrawlConfig;
+    } catch {
+      /* malformed JSON or missing key — recovery just won't fire */
+    }
+    pendingRecoveryCheckpoint = (() => {
+      try {
+        return db.loadQueueCheckpoint();
+      } catch {
+        return [];
+      }
+    })();
     // Fresh start on every app launch — clear any data carried over from
     // the previous session. Explicit Save Project will be added later.
     db.reset();
@@ -305,12 +399,23 @@ function getDb(): ProjectDb {
     // already ran above (the writer owns them) so the worker just
     // attaches to the WAL and starts serving SELECTs concurrently.
     try {
-      dbReaderPool.init(defaultPath);
+      // Pass the freeze-watchdog SAB so the reader worker can publish
+      // its own heartbeat + current op into the same diagnostic file.
+      dbReaderPool.init(defaultPath, freezeWatchdog.sharedBuffer);
     } catch (err) {
       logger.log(
         'warn',
         'main',
         `db-reader pool init failed: ${err instanceof Error ? err.message : String(err)} — falling back to main-thread queries.`,
+      );
+    }
+    try {
+      dbWriterPool.init(defaultPath, freezeWatchdog.sharedBuffer);
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `db-writer pool init failed: ${err instanceof Error ? err.message : String(err)} — writes fall back to main thread.`,
       );
     }
   }
@@ -341,12 +446,21 @@ function openProjectAtPath(filePath: string): void {
   // in-flight requests with `reader-swapped`; the next IPC call will
   // hit the freshly opened worker.
   try {
-    dbReaderPool.swap(filePath);
+    dbReaderPool.swap(filePath, freezeWatchdog.sharedBuffer);
   } catch (err) {
     logger.log(
       'warn',
       'main',
       `db-reader pool swap failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  try {
+    dbWriterPool.swap(filePath, freezeWatchdog.sharedBuffer);
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `db-writer pool swap failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   pushRecentProject(filePath);
@@ -661,6 +775,9 @@ function registerIpc(): void {
   ipcMain.on(IPC.rendererLagReport, (_e, lagMs: number) => {
     if (typeof lagMs === 'number' && Number.isFinite(lagMs)) {
       activeCrawler?.reportRendererLag(lagMs);
+      // Forward the same sample to the freeze-watchdog so a frozen
+      // renderer surfaces in `debug.txt` even when no crawl is active.
+      freezeWatchdog.reportRendererLag(lagMs);
     }
   });
 
@@ -958,6 +1075,63 @@ function registerIpc(): void {
     schedulePrefsWrite();
   });
 
+  /** Wave 6 — Cached most-recent crawl config so the crash-recovery
+   * resume can re-create a Crawler without forcing the user to fill
+   * in the Start dialog again. Persisted across restarts via DB
+   * project_meta so it survives the very crash we're recovering from. */
+  function attachCrawlerListeners(crawler: Crawler): void {
+    crawler.on('progress', (p: CrawlProgress) => {
+      if (activeCrawler !== crawler) return;
+      mainWindow?.webContents.send(IPC.crawlProgress, p);
+      freezeWatchdog.updateCounters({
+        crawled: p.crawled,
+        discovered: p.discovered,
+        pending: p.pending,
+        failed: p.failed,
+      });
+    });
+    crawler.on('done', (summary: CrawlSummary) => {
+      if (activeCrawler !== crawler) return;
+      logger.log(
+        'info',
+        'crawler',
+        `Crawl done: total=${summary.total} avgResp=${summary.avgResponseTimeMs}ms totalBytes=${summary.totalBytes}`,
+      );
+      mainWindow?.webContents.send(IPC.crawlDone, summary);
+      activeCrawler = null;
+      freezeWatchdog.setMainOp('idle');
+      if (Notification.isSupported() && !mainWindow?.isFocused()) {
+        try {
+          new Notification({
+            title: 'FreeCrawl SEO Tool',
+            body: `Crawl finished: ${summary.total.toLocaleString()} URLs · avg ${Math.round(summary.avgResponseTimeMs)} ms`,
+            silent: false,
+          }).show();
+        } catch {
+          /* Linux without notification daemon — swallow */
+        }
+      }
+    });
+    crawler.on('error', (msg: string) => {
+      if (activeCrawler !== crawler) return;
+      logger.log('error', 'crawler', msg);
+      mainWindow?.webContents.send(IPC.crawlError, msg);
+      maybeShowDiagnosticDialog(msg);
+    });
+    crawler.on('warn', (msg: string) => {
+      if (activeCrawler !== crawler) return;
+      logger.log('warn', 'crawler', msg);
+    });
+    crawler.on('info', (msg: string) => {
+      if (activeCrawler !== crawler) return;
+      logger.log('info', 'crawler', msg);
+    });
+    crawler.on('debug', (msg: string) => {
+      if (activeCrawler !== crawler) return;
+      logger.log('debug', 'crawler', msg);
+    });
+  }
+
   ipcMain.handle(IPC.crawlStart, (_e, config: CrawlConfig) => {
     if (activeCrawler) {
       activeCrawler.stop();
@@ -973,69 +1147,22 @@ function registerIpc(): void {
     );
     const database = getDb();
     database.setMeta('lastStartUrl', config.startUrl);
-    const crawler = new Crawler(config, database);
+    // Persist the config so a crash-then-resume can rehydrate it
+    // without the user re-entering anything. Stored as JSON in
+    // `project_meta` since the table is keyed by string.
+    try {
+      database.setMeta('lastCrawlConfig', JSON.stringify(config));
+    } catch {
+      /* never fatal */
+    }
+    lastCrawlConfig = config;
+    const crawler = new Crawler(config, database, {
+      setOp: (op: string) => freezeWatchdog.setMainOp(op),
+      parseHtml: parseHtmlViaPool,
+      writeFetchedUrl: writeFetchedUrlViaPool,
+    });
     activeCrawler = crawler;
-
-    // Every event handler is gated by `activeCrawler === crawler`. A
-    // stopped crawler can still emit late events (e.g. an in-flight
-    // sitemap fetch resolving after Stop, or a queued done-event) — if
-    // we forwarded those to the UI they'd clobber the new crawl's state
-    // (the "pır pır" effect: rapid Running ↔ Done flicker).
-    crawler.on('progress', (p: CrawlProgress) => {
-      if (activeCrawler !== crawler) return;
-      mainWindow?.webContents.send(IPC.crawlProgress, p);
-    });
-    crawler.on('done', (summary: CrawlSummary) => {
-      if (activeCrawler !== crawler) return;
-      logger.log(
-        'info',
-        'crawler',
-        `Crawl done: total=${summary.total} avgResp=${summary.avgResponseTimeMs}ms totalBytes=${summary.totalBytes}`,
-      );
-      mainWindow?.webContents.send(IPC.crawlDone, summary);
-      activeCrawler = null;
-      // OS-level toast — only when the window isn't focused, so the
-      // user actually benefits (Electron suppresses the notification
-      // sound on focused windows on most platforms anyway, but we
-      // gate explicitly to avoid distracting users who're watching).
-      if (Notification.isSupported() && !mainWindow?.isFocused()) {
-        try {
-          new Notification({
-            title: 'FreeCrawl SEO Tool',
-            body: `Crawl finished: ${summary.total.toLocaleString()} URLs · avg ${Math.round(summary.avgResponseTimeMs)} ms`,
-            silent: false,
-          }).show();
-        } catch {
-          // Notification can throw on some Linux distros without a
-          // notification daemon. Swallow — the in-app done banner
-          // already surfaces completion.
-        }
-      }
-    });
-    crawler.on('error', (msg: string) => {
-      if (activeCrawler !== crawler) return;
-      logger.log('error', 'crawler', msg);
-      mainWindow?.webContents.send(IPC.crawlError, msg);
-      // Match against environment-specific failure patterns (DNS / TLS
-      // inspection / unreachable seed) and surface a modal popup the
-      // first time each category fires per crawl session. Site-specific
-      // 4xx/WAF/timeout errors are NOT promoted to popups — they belong
-      // in the log panel, not in the user's face.
-      maybeShowDiagnosticDialog(msg);
-    });
-    crawler.on('warn', (msg: string) => {
-      if (activeCrawler !== crawler) return;
-      logger.log('warn', 'crawler', msg);
-    });
-    crawler.on('info', (msg: string) => {
-      if (activeCrawler !== crawler) return;
-      logger.log('info', 'crawler', msg);
-    });
-    crawler.on('debug', (msg: string) => {
-      if (activeCrawler !== crawler) return;
-      logger.log('debug', 'crawler', msg);
-    });
-
+    attachCrawlerListeners(crawler);
     void crawler.start();
   });
 
@@ -1054,7 +1181,25 @@ function registerIpc(): void {
   ipcMain.handle(IPC.crawlClear, () => {
     activeCrawler?.stop();
     activeCrawler = null;
-    getDb().reset();
+    const database = getDb();
+    database.reset();
+    // Belt-and-braces: reset() above already includes a DELETE FROM
+    // crawl_queue, but if anything (a late-firing checkpoint timer, a
+    // half-finished post-crawl pass) writes to that table after the
+    // exec() returns, the user would see a stale recovery prompt next
+    // launch. An explicit second sweep here is cheap and guarantees
+    // the queue is empty when the IPC handler resolves.
+    try {
+      database.clearQueueCheckpoint();
+    } catch {
+      /* table missing on very old DBs — recovery just won't fire */
+    }
+    // The in-memory recovery snapshot is captured at app boot from the
+    // queue-on-disk; reset() now wipes that data, but the snapshot
+    // mirror still holds the pre-reset entries. Drop it so a stale
+    // dialog can't fire after Clear if the user cancelled the boot
+    // prompt earlier.
+    pendingRecoveryCheckpoint = [];
   });
 
   ipcMain.handle(IPC.crawlAddUrl, (_e, url: string): { accepted: boolean } => {
@@ -1493,6 +1638,106 @@ function registerIpc(): void {
     },
   );
 
+  ipcMain.handle(
+    IPC.exportXml,
+    async (_e, input: ExportXmlInput): Promise<ExportXmlResult> => {
+      let filePath = input.filePath;
+      const isSelection = (input.selectedIds?.length ?? 0) > 0;
+      if (!filePath) {
+        const res = await dialog.showSaveDialog(mainWindow!, {
+          defaultPath: isSelection ? 'freecrawl-selected.xml' : 'freecrawl-export.xml',
+          filters: [{ name: 'XML', extensions: ['xml'] }],
+        });
+        if (res.canceled || !res.filePath) {
+          return { filePath: '', rowsWritten: 0 };
+        }
+        filePath = res.filePath;
+      }
+      const { rowsWritten } = await exportUrlsToXml(getDb(), filePath, {
+        selectedIds: input.selectedIds,
+        category: input.category,
+      });
+      return { filePath, rowsWritten };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.dataDeleteByDomain,
+    async (
+      _e,
+      input: DataDeleteByDomainInput,
+    ): Promise<DataDeleteByDomainResult> => {
+      const { urlsDeleted, linksDeleted } = getDb().deleteByDomain(input.domain);
+      // Force-invalidate UI caches: row counts, sidebar issues, etc.
+      fireDataChanged();
+      return { urlsDeleted, linksDeleted };
+    },
+  );
+
+  // Wave 6 — Crash recovery handlers. The renderer asks `…Status` on
+  // mount; if `pendingCount > 0` it shows a confirmation dialog and
+  // routes the user's choice to `…Resume` or `…Discard`.
+  ipcMain.handle(
+    IPC.crashRecoveryStatus,
+    async (): Promise<CrashRecoveryStatus> => {
+      // Read from the in-memory snapshot we captured before
+      // `db.reset()` wiped the previous session's data.
+      if (pendingRecoveryCheckpoint.length === 0) {
+        return { pendingCount: 0, seedUrl: '' };
+      }
+      return {
+        pendingCount: pendingRecoveryCheckpoint.length,
+        seedUrl: pendingRecoveryCheckpoint[0]?.seedUrl ?? '',
+      };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.crashRecoveryResume,
+    async (): Promise<{ accepted: boolean }> => {
+      if (activeCrawler) return { accepted: false };
+      if (pendingRecoveryCheckpoint.length === 0) return { accepted: false };
+      const seedUrl = pendingRecoveryCheckpoint[0]?.seedUrl ?? '';
+      if (!seedUrl) return { accepted: false };
+      const cfg = lastCrawlConfig
+        ? { ...lastCrawlConfig, startUrl: seedUrl }
+        : null;
+      if (!cfg) return { accepted: false };
+      const crawler = new Crawler(cfg, getDb(), {
+        setOp: (op: string) => freezeWatchdog.setMainOp(op),
+        parseHtml: parseHtmlViaPool,
+        writeFetchedUrl: writeFetchedUrlViaPool,
+      });
+      activeCrawler = crawler;
+      attachCrawlerListeners(crawler);
+      const items = pendingRecoveryCheckpoint.map((c) => ({
+        url: c.url,
+        depth: c.depth,
+      }));
+      // Snapshot consumed — clear so a second click can't double-fire.
+      pendingRecoveryCheckpoint = [];
+      crawler.enqueueCheckpointed(items);
+      void crawler.start();
+      return { accepted: true };
+    },
+  );
+
+  ipcMain.handle(IPC.crashRecoveryDiscard, async (): Promise<void> => {
+    pendingRecoveryCheckpoint = [];
+    // Wipe the on-disk crawl_queue too — without this, anything that
+    // re-populates the queue between now and the next app launch would
+    // resurrect the recovery prompt the user just dismissed.
+    try {
+      getDb().clearQueueCheckpoint();
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `clearQueueCheckpoint failed on discard: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  });
+
   ipcMain.handle(IPC.exportBulk, async (): Promise<BulkExportResult> => {
     if (!mainWindow) {
       return { outputDir: '', files: [], errors: [] };
@@ -1836,11 +2081,36 @@ void app.whenReady().then(() => {
   } catch (err) {
     logger.log('warn', 'main', `Disk logging unavailable: ${(err as Error).message}`);
   }
+  // Boot the freeze-watchdog before anything else CPU-heavy. The
+  // worker writes to `<userData>/debug.txt` (separate from the
+  // regular structured log so users + dev can grep stalls without
+  // noise from normal app events).
+  try {
+    const debugPath = join(app.getPath('userData'), 'debug.txt');
+    freezeWatchdog.init(debugPath);
+  } catch (err) {
+    logger.log('warn', 'main', `freeze-watchdog init failed: ${(err as Error).message}`);
+  }
+  freezeWatchdog.setMainOp('boot');
+  // Spawn the parser worker pool so cheerio runs off the main thread.
+  // Falls back to inline parseHtml automatically when init fails on a
+  // constrained host (the pool's `parse()` rejects, the dispatch
+  // helper below catches and falls back).
+  try {
+    parserPool.init();
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `parser-pool init failed: ${(err as Error).message} — falling back to inline parseHtml.`,
+    );
+  }
   loadPrefs();
   rebuildMenu();
   registerIpc();
   createWindow();
   logger.log('info', 'main', `App ready — version ${app.getVersion()}`);
+  freezeWatchdog.setMainOp('idle');
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1849,11 +2119,15 @@ void app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   activeCrawler?.stop();
+  freezeWatchdog.setMainOp('shutdown');
+  void freezeWatchdog.terminate();
+  void parserPool.terminate();
   // Terminate the read-only worker BEFORE closing the writer connection.
   // Order matters on Windows: SQLite holds a file lock per connection
   // and the writer's WAL checkpoint at close-time can stall if a
   // reader is still mid-query.
   void dbReaderPool.terminate();
+  void dbWriterPool.terminate();
   db?.close();
   db = null;
   flushPrefs();

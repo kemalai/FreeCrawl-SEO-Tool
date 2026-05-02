@@ -35,7 +35,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // electron-vite uses the same convention.
 const WORKER_PATH = path.join(__dirname, 'db-reader-worker.js');
 
-const REQUEST_TIMEOUT_MS = 15_000;
+// 30 s default leaves headroom for SQLite read contention during the
+// post-crawl recompute phase (recomputeUrlsIssues holds a writer
+// transaction that can keep reader queries blocked behind earlier
+// queued requests for several seconds at a time on large crawls).
+// Genuine worker hangs are still surfaced — just with a slightly
+// longer detection window than before.
+const REQUEST_TIMEOUT_MS = 30_000;
+// Heavy aggregate queries (the overview sidebar's 130-counter pass and
+// the post-crawl materialiser's counter fan-out) can run past the
+// default budget on million-URL projects, so they get their own
+// bigger ceiling.
+const HEAVY_REQUEST_TIMEOUT_MS = 60_000;
+const HEAVY_METHODS = new Set<string>([
+  'getOverviewCounts',
+  'getOverviewCountsAsync',
+]);
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 60_000;
 
@@ -55,23 +70,31 @@ interface ResponseMessage {
 class DbReaderPool {
   private worker: Worker | null = null;
   private dbPath: string | null = null;
+  private freezeWatchdogSab: SharedArrayBuffer | null = null;
   private nextRequestId = 1;
   private pending = new Map<number, PendingRequest>();
   private restartTimes: number[] = [];
   private terminated = false;
 
-  /** Spawn (or respawn) the worker pointed at `dbPath`. Idempotent. */
-  init(dbPath: string): void {
+  /** Spawn (or respawn) the worker pointed at `dbPath`. Idempotent.
+   *
+   *   `freezeWatchdogSab` — if provided, the worker will tick its
+   *   own heartbeat + publish its current method into this shared
+   *   buffer so the freeze-watchdog thread can detect a stuck
+   *   reader. Pass `null` to disable diagnostics. */
+  init(dbPath: string, freezeWatchdogSab: SharedArrayBuffer | null = null): void {
     if (this.terminated) {
       throw new Error('DbReaderPool: cannot init after terminate()');
     }
+    this.freezeWatchdogSab = freezeWatchdogSab;
     if (this.dbPath === dbPath && this.worker !== null) return;
     this.dbPath = dbPath;
     this.spawn();
   }
 
   /** Switch the worker to a different .seoproject file. */
-  swap(newPath: string): void {
+  swap(newPath: string, freezeWatchdogSab: SharedArrayBuffer | null = null): void {
+    if (freezeWatchdogSab !== null) this.freezeWatchdogSab = freezeWatchdogSab;
     if (this.dbPath === newPath && this.worker !== null) return;
     this.failPendingWith('reader-swapped');
     this.dbPath = newPath;
@@ -108,11 +131,14 @@ class DbReaderPool {
     if (this.terminated) return Promise.reject(new Error('reader-terminated'));
     if (!this.worker) return Promise.reject(new Error('reader-not-initialised'));
     const requestId = this.nextRequestId++;
+    const timeoutMs = HEAVY_METHODS.has(method)
+      ? HEAVY_REQUEST_TIMEOUT_MS
+      : REQUEST_TIMEOUT_MS;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error(`reader-timeout: ${method} > ${REQUEST_TIMEOUT_MS}ms`));
-      }, REQUEST_TIMEOUT_MS);
+        reject(new Error(`reader-timeout: ${method} > ${timeoutMs}ms`));
+      }, timeoutMs);
       this.pending.set(requestId, {
         resolve: resolve as (v: unknown) => void,
         reject,
@@ -133,7 +159,10 @@ class DbReaderPool {
     }
     try {
       const w = new Worker(WORKER_PATH, {
-        workerData: { dbPath: this.dbPath },
+        workerData: {
+          dbPath: this.dbPath,
+          freezeWatchdogSab: this.freezeWatchdogSab,
+        },
       });
       w.on('message', (msg: ResponseMessage) => this.handleResponse(msg));
       w.on('error', (err) => {

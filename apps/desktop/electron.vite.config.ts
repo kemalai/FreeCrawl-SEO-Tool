@@ -7,14 +7,20 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        // Two entry points: the main process bootstrap, and the
-        // read-only DB worker that runs in a `worker_threads.Worker`.
-        // Both compile into `out/main/`; the Worker constructor in
-        // `db-reader-pool.ts` resolves the worker file relative to
-        // `__dirname` so it picks up the same bundled module.
+        // Five entry points: the main process bootstrap and four
+        // worker-thread bundles (DB reader, DB writer, HTML parser,
+        // freeze-watchdog). All compile into `out/main/`; each Worker
+        // constructor resolves its peer file relative to `__dirname`
+        // so they pick up the same bundle directory.
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
           'db-reader-worker': resolve(__dirname, 'src/main/db-reader-worker.ts'),
+          'db-writer-worker': resolve(__dirname, 'src/main/db-writer-worker.ts'),
+          'parser-worker': resolve(__dirname, 'src/main/parser-worker.ts'),
+          'freeze-watchdog-worker': resolve(
+            __dirname,
+            'src/main/freeze-watchdog-worker.ts',
+          ),
         },
       },
     },

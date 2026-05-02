@@ -98,27 +98,80 @@ export class Crawler extends EventEmitter {
    * not free on a 100k-URL DB. */
   private issueRecomputeTimer: NodeJS.Timeout | null = null;
   private static readonly ISSUE_RECOMPUTE_INTERVAL_MS = 30_000;
+  private issueRecomputeInFlight = false;
   private startIssueRecomputeTimer(): void {
     if (this.issueRecomputeTimer) return;
     this.issueRecomputeTimer = setInterval(() => {
       if (this.stopped || !this.running || this.paused) return;
-      try {
-        this.db.recomputeUrlsIssues(EXPENSIVE_ISSUE_DEFINITIONS);
-      } catch (err) {
-        // Recompute is best-effort — a transient SQLITE_BUSY here is
-        // not worth interrupting the crawl. Surface it as debug so
-        // someone watching logs can spot pathological cases.
-        this.emit(
-          'debug',
-          `issue counter recompute failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+      // Drop overlapping ticks. The yielding recompute can take longer
+      // than the 30 s tick on very large projects; piling up calls
+      // would queue 70-statement transactions back-to-back and starve
+      // the crawler's own writes.
+      if (this.issueRecomputeInFlight) return;
+      this.issueRecomputeInFlight = true;
+      // Cooperative variant: yields between definitions so a 1–3 s
+      // recompute doesn't freeze the main thread (and the user's
+      // clicks) for the full duration. Trades atomic visibility of
+      // the rebuild for UI responsiveness — fine for the live tick
+      // since the post-crawl pass still uses the atomic version for
+      // the final state.
+      void this.db
+        .recomputeUrlsIssuesYielding(EXPENSIVE_ISSUE_DEFINITIONS)
+        .catch((err) => {
+          this.emit(
+            'debug',
+            `issue counter recompute failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        })
+        .finally(() => {
+          this.issueRecomputeInFlight = false;
+        });
     }, Crawler.ISSUE_RECOMPUTE_INTERVAL_MS);
   }
   private stopIssueRecomputeTimer(): void {
     if (this.issueRecomputeTimer) {
       clearInterval(this.issueRecomputeTimer);
       this.issueRecomputeTimer = null;
+    }
+  }
+
+  /** Wave 6 — Periodic checkpoint of the in-memory pending queue
+   * (URLs already enqueued but not yet fetched). Survives process
+   * crashes / OS reboots / OOM so the next launch can offer to
+   * resume. We snapshot from `seen + pending`-tracked items rather
+   * than poking p-queue's internals; the pending closure is captured
+   * as a `Map<url, depth>` updated alongside `enqueue` / completion.
+   * 30 s cadence balances recovery-loss window vs DB write pressure
+   * — at 100 URL/s a 30 s window is at most 3000 dropped URLs that
+   * the user has to re-fetch (cheap; their DB rows already exist as
+   * link stubs so dedup catches duplicates). */
+  private queueCheckpointTimer: NodeJS.Timeout | null = null;
+  private static readonly QUEUE_CHECKPOINT_INTERVAL_MS = 30_000;
+  /** Pending queue snapshot used by the checkpoint timer. Mirrors
+   * what's in `this.queue` minus already-completed items. */
+  private pendingItems = new Map<string, number>();
+  private startQueueCheckpointTimer(): void {
+    if (this.queueCheckpointTimer) return;
+    this.queueCheckpointTimer = setInterval(() => {
+      if (this.stopped || !this.running) return;
+      try {
+        const items = Array.from(this.pendingItems.entries()).map(([url, depth]) => ({
+          url,
+          depth,
+        }));
+        this.db.checkpointQueue(items, this.config.startUrl);
+      } catch (err) {
+        this.emit(
+          'debug',
+          `queue checkpoint failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }, Crawler.QUEUE_CHECKPOINT_INTERVAL_MS);
+  }
+  private stopQueueCheckpointTimer(): void {
+    if (this.queueCheckpointTimer) {
+      clearInterval(this.queueCheckpointTimer);
+      this.queueCheckpointTimer = null;
     }
   }
   /**
@@ -141,9 +194,77 @@ export class Crawler extends EventEmitter {
     trailingSlash?: 'leave' | 'strip' | 'add';
   };
 
-  constructor(config: CrawlConfig, db: ProjectDb) {
+  /**
+   * Optional freeze-watchdog hook. The desktop main process injects a
+   * callback that publishes the current "what is the crawler doing
+   * right now" string into a SharedArrayBuffer the watchdog reads. We
+   * deliberately keep this opt-in (default no-op) so the headless CLI
+   * doesn't need to know about the watchdog at all.
+   */
+  private readonly setOp: (op: string) => void;
+
+  /**
+   * Optional async HTML parser. Defaults to the synchronous in-process
+   * `parseHtml` from `./html-parser.js` (used by the headless CLI
+   * which has no worker pool). The desktop main process injects an
+   * implementation that dispatches into a `worker_threads` pool so
+   * cheerio's CPU work runs off the main thread — that single change
+   * eliminates the 12-25 s "fetch" stalls observed on large mağaza /
+   * blog HTML pages.
+   */
+  private readonly parsePage: (
+    html: string,
+    pageUrl: string,
+    opts: Parameters<typeof parseHtml>[2],
+  ) => Promise<ReturnType<typeof parseHtml>>;
+
+  /**
+   * Optional async writer for the per-URL hot path. When present, the
+   * crawler ships the upsert + headers + body snapshot + links +
+   * images batch to a writer worker thread instead of running the
+   * SQLite transaction on its own thread. Defaults to a synchronous
+   * inline implementation that mirrors the legacy code path so the
+   * CLI keeps working without any worker plumbing.
+   */
+  private readonly writeFetchedUrl: (
+    payload: Parameters<ProjectDb['writeFetchedUrl']>[0],
+  ) => Promise<{ urlId: number }>;
+
+  constructor(
+    config: CrawlConfig,
+    db: ProjectDb,
+    opts: {
+      setOp?: (op: string) => void;
+      parseHtml?: (
+        html: string,
+        pageUrl: string,
+        opts: Parameters<typeof parseHtml>[2],
+      ) => Promise<ReturnType<typeof parseHtml>>;
+      writeFetchedUrl?: (
+        payload: Parameters<ProjectDb['writeFetchedUrl']>[0],
+      ) => Promise<{ urlId: number }>;
+    } = {},
+  ) {
     super();
-    initHttpClient({ proxyOverride: config.proxyUrl });
+    this.setOp = opts.setOp ?? ((): void => undefined);
+    this.parsePage =
+      opts.parseHtml ??
+      ((html, pageUrl, parseOpts) => Promise.resolve(parseHtml(html, pageUrl, parseOpts)));
+    this.writeFetchedUrl =
+      opts.writeFetchedUrl ?? ((payload) => Promise.resolve(this.db.writeFetchedUrl(payload)));
+    // Wave 9 — Resolve the active proxy. If a named profile is selected
+    // and present in `proxyProfiles`, its URL wins over the legacy
+    // `proxyUrl` field; if the named profile doesn't resolve we fall
+    // back to `proxyUrl`, then to env vars (handled inside initHttpClient).
+    const resolvedProxy = (() => {
+      const active = (config.proxyProfileActive ?? '').trim();
+      if (active) {
+        const hit = (config.proxyProfiles ?? []).find((p) => p.name === active);
+        if (hit && hit.url.trim()) return hit.url.trim();
+      }
+      return config.proxyUrl ?? '';
+    })();
+    initHttpClient({ proxyOverride: resolvedProxy });
     this.config = config;
     this.db = db;
     const concurrency = Math.max(1, Math.min(200, config.maxConcurrency));
@@ -214,6 +335,7 @@ export class Crawler extends EventEmitter {
     this.startedAt = Date.now();
     this.stopped = false;
     this.running = true;
+    this.setOp(`crawl:start:${this.config.startUrl}`);
 
     // Fire an immediate progress event so the UI can flip to "Running"
     // before we block on resolveStartUrl (which can spend several seconds
@@ -253,7 +375,17 @@ export class Crawler extends EventEmitter {
       this.running = false;
       this.emitProgress();
       // Without this the UI hangs in "Running" forever after a bad start URL.
-      if (!this.stopped) this.emit('done', this.db.getSummary());
+      if (!this.stopped) {
+      // Wave 6 — Clean completion clears the checkpoint so the next
+      // app launch doesn't offer to "resume" a crawl that already
+      // finished successfully.
+      try {
+        this.db.clearQueueCheckpoint();
+      } catch {
+        /* checkpoint table may not yet exist on very old DBs — ignore */
+      }
+      this.emit('done', this.db.getSummary());
+    }
       return;
     }
     this.emit(
@@ -304,6 +436,7 @@ export class Crawler extends EventEmitter {
     // large crawls and we don't want to hold the DB write lock more
     // than the crawler itself does.
     this.startIssueRecomputeTimer();
+    this.startQueueCheckpointTimer();
 
     // Hydrate in-memory state from the DB so resume starts from the right
     // point; then queue whatever work is still pending.
@@ -319,10 +452,49 @@ export class Crawler extends EventEmitter {
       // on `sitemap_urls` (Non-Indexable in Sitemap, Non-200 in Sitemap)
       // see the full set, and so the robots checker is settled.
       await Promise.all([robotsPromise, sitemapPromise]);
+      // Drain any internal-link "stubs": URLs discovered on a crawled
+      // page but never themselves crawled — typically because they
+      // were first found via a depth-N+1 path (rejected by maxDepth)
+      // before a shallower path could enqueue them, or because robots
+      // / scope filters had not loaded yet when the link was processed.
+      // Without this loop the user would see "second Start finds +N
+      // new URLs" even though the first crawl was supposed to be
+      // complete; running until `getPendingInternalLinks()` stops
+      // shrinking is what hydrateFromDb already does on resume —
+      // doing it here moves the work into the first crawl so a
+      // single Start finishes with everything reachable.
+      let lastPending = -1;
+      // Hard cap on iterations — with pathological filter sets the
+      // pending list could plateau without dropping to 0; the
+      // `lastPending === count` check stops us in that case, but a
+      // numeric ceiling guards against any bug that lets the count
+      // oscillate.
+      const excludeNofollow = !this.config.followNofollow;
+      this.setOp('post-crawl:drain-pending-stubs');
+      for (let pass = 0; pass < 20 && !this.stopped; pass++) {
+        // Honour `followNofollow` here too — without the filter the
+        // drain would happily crawl URLs that the live link-follow
+        // path explicitly skipped, ending up with a different result
+        // than a "no drain" first crawl would produce.
+        const pending = this.db.getPendingInternalLinks({ excludeNofollow });
+        if (pending.length === 0) break;
+        if (pending.length === lastPending) break;
+        lastPending = pending.length;
+        for (const p of pending) {
+          // Drop from `seen` first — these URLs were never actually
+          // crawled, just stubbed; enqueue's seen-check would reject
+          // them otherwise.
+          this.seen.delete(p.url);
+          this.enqueue({ url: p.url, depth: p.depth });
+        }
+        await this.queue.onIdle();
+        await this.externalQueue.onIdle();
+      }
     } finally {
       if (this.progressTimer) clearInterval(this.progressTimer);
       this.progressTimer = null;
       this.stopIssueRecomputeTimer();
+      this.stopQueueCheckpointTimer();
     }
 
     // Post-crawl heavy lifting. Each step is a synchronous SQL pass
@@ -332,24 +504,58 @@ export class Crawler extends EventEmitter {
     // (especially Logs) freezes visibly. Yielding to the event loop
     // between steps lets queued IPC mesajları (logs:batch, progress,
     // dataChanged) get serviced.
+    // Wave 6 — Per-pass crawl-analysis toggles. Each pass is gated
+    // by its config flag so users running tight time-budget audits
+    // can skip steps they don't need (e.g. duplicate clustering can
+    // be 5–10 s on a 100k-URL crawl).
+    if (this.config.analyseInlinks) {
+      await yieldToEventLoop();
+      this.emit('info', 'Recomputing inlinks…');
+      this.setOp('post-crawl:recompute-inlinks');
+      this.db.recomputeInlinks();
+    }
+    if (this.config.analyseRedirectChains) {
+      await yieldToEventLoop();
+      this.emit('info', 'Recomputing redirect chains…');
+      this.setOp('post-crawl:recompute-redirect-chains');
+      this.db.recomputeRedirectChains();
+    }
+    if (this.config.analyseHreflang) {
+      await yieldToEventLoop();
+      this.emit('info', 'Recomputing hreflang analysis…');
+      this.setOp('post-crawl:recompute-hreflang');
+      this.db.recomputeHreflangAnalysis();
+      await yieldToEventLoop();
+      this.setOp('post-crawl:recompute-hreflang-inconsistent');
+      this.db.recomputeHreflangInconsistent();
+    }
+    if (this.config.analyseDuplicates) {
+      await yieldToEventLoop();
+      this.emit('info', 'Clustering duplicates…');
+      this.setOp('post-crawl:cluster-duplicates');
+      this.runDuplicateClustering();
+    }
+    if (this.config.analysePagination) {
+      await yieldToEventLoop();
+      this.emit('info', 'Detecting pagination sequence gaps…');
+      this.setOp('post-crawl:pagination-sequence');
+      this.db.recomputePaginationSequence();
+    }
+    if (this.config.analyseIssues) {
+      await yieldToEventLoop();
+      this.emit('info', 'Materialising issue counters…');
+      this.setOp('post-crawl:materialise-issues');
+      // Use the cooperatively-scheduled variant (yields between each
+      // of the 70+ definitions). Trades atomic visibility of the
+      // rebuild for a responsive main thread — on a 5k-URL DB the
+      // sync version was blocking the event loop for 22-26 s.
+      await this.db.recomputeUrlsIssuesYielding(EXPENSIVE_ISSUE_DEFINITIONS);
+    }
     await yieldToEventLoop();
-    this.emit('info', 'Recomputing inlinks…');
-    this.db.recomputeInlinks();
-    await yieldToEventLoop();
-    this.emit('info', 'Recomputing redirect chains…');
-    this.db.recomputeRedirectChains();
-    await yieldToEventLoop();
-    this.emit('info', 'Recomputing hreflang analysis…');
-    this.db.recomputeHreflangAnalysis();
-    await yieldToEventLoop();
-    this.emit('info', 'Clustering duplicates…');
-    this.runDuplicateClustering();
-    await yieldToEventLoop();
-    this.emit('info', 'Materialising issue counters…');
-    this.db.recomputeUrlsIssues(EXPENSIVE_ISSUE_DEFINITIONS);
-    await yieldToEventLoop();
+    this.setOp('post-crawl:image-probes');
     await this.runImageSizeProbes();
     await yieldToEventLoop();
+    this.setOp('post-crawl:tls-probes');
     await this.runTlsCertProbes();
     this.running = false;
     this.stopMemoryMonitor();
@@ -358,6 +564,7 @@ export class Crawler extends EventEmitter {
     this.seen.clear();
     this.externalSeen.clear();
     this.emitProgress();
+    this.setOp('idle');
     // Suppress 'done' if a stop() ran during teardown — otherwise the
     // zombie crawler's done-event clobbers the new crawl's UI state.
     if (!this.stopped) {
@@ -476,7 +683,7 @@ export class Crawler extends EventEmitter {
           const res = await undiciFetch(entry.src, {
             method: 'HEAD',
             headers: defaultRequestHeaders(
-              userAgent,
+              this.resolveUserAgent(entry.src),
               this.config.acceptLanguage,
               this.config.customHeaders,
               this.config.auth,
@@ -643,7 +850,17 @@ export class Crawler extends EventEmitter {
       this.emit('error', 'List mode: urlList is empty (or no entries normalised to valid URLs).');
       this.running = false;
       this.emitProgress();
-      if (!this.stopped) this.emit('done', this.db.getSummary());
+      if (!this.stopped) {
+      // Wave 6 — Clean completion clears the checkpoint so the next
+      // app launch doesn't offer to "resume" a crawl that already
+      // finished successfully.
+      try {
+        this.db.clearQueueCheckpoint();
+      } catch {
+        /* checkpoint table may not yet exist on very old DBs — ignore */
+      }
+      this.emit('done', this.db.getSummary());
+    }
       return;
     }
 
@@ -671,6 +888,7 @@ export class Crawler extends EventEmitter {
 
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
     this.startIssueRecomputeTimer();
+    this.startQueueCheckpointTimer();
 
     for (const u of urls) {
       this.enqueue({ url: u, depth: 0 });
@@ -683,21 +901,40 @@ export class Crawler extends EventEmitter {
       if (this.progressTimer) clearInterval(this.progressTimer);
       this.progressTimer = null;
       this.stopIssueRecomputeTimer();
+      this.stopQueueCheckpointTimer();
     }
 
     // Same yielding strategy as spider mode — see the comment block
     // above the spider-mode recompute. SQL aggregates blocking the JS
     // thread starve IPC dispatch and freeze every other window.
-    await yieldToEventLoop();
-    this.db.recomputeInlinks();
-    await yieldToEventLoop();
-    this.db.recomputeRedirectChains();
-    await yieldToEventLoop();
-    this.db.recomputeHreflangAnalysis();
-    await yieldToEventLoop();
-    this.runDuplicateClustering();
-    await yieldToEventLoop();
-    this.db.recomputeUrlsIssues(EXPENSIVE_ISSUE_DEFINITIONS);
+    // Toggles match the spider-mode gates so a single config controls
+    // both modes' post-crawl pipeline.
+    if (this.config.analyseInlinks) {
+      await yieldToEventLoop();
+      this.db.recomputeInlinks();
+    }
+    if (this.config.analyseRedirectChains) {
+      await yieldToEventLoop();
+      this.db.recomputeRedirectChains();
+    }
+    if (this.config.analyseHreflang) {
+      await yieldToEventLoop();
+      this.db.recomputeHreflangAnalysis();
+      await yieldToEventLoop();
+      this.db.recomputeHreflangInconsistent();
+    }
+    if (this.config.analyseDuplicates) {
+      await yieldToEventLoop();
+      this.runDuplicateClustering();
+    }
+    if (this.config.analysePagination) {
+      await yieldToEventLoop();
+      this.db.recomputePaginationSequence();
+    }
+    if (this.config.analyseIssues) {
+      await yieldToEventLoop();
+      this.db.recomputeUrlsIssues(EXPENSIVE_ISSUE_DEFINITIONS);
+    }
     await yieldToEventLoop();
     await this.runImageSizeProbes();
     await yieldToEventLoop();
@@ -707,7 +944,17 @@ export class Crawler extends EventEmitter {
     this.seen.clear();
     this.externalSeen.clear();
     this.emitProgress();
-    if (!this.stopped) this.emit('done', this.db.getSummary());
+    if (!this.stopped) {
+      // Wave 6 — Clean completion clears the checkpoint so the next
+      // app launch doesn't offer to "resume" a crawl that already
+      // finished successfully.
+      try {
+        this.db.clearQueueCheckpoint();
+      } catch {
+        /* checkpoint table may not yet exist on very old DBs — ignore */
+      }
+      this.emit('done', this.db.getSummary());
+    }
   }
 
   /**
@@ -779,8 +1026,13 @@ export class Crawler extends EventEmitter {
     }
 
     // Re-queue any internal link targets that were discovered before the
-    // previous Stop but never actually fetched.
-    for (const pending of this.db.getPendingInternalLinks()) {
+    // previous Stop but never actually fetched. Honour `followNofollow`
+    // — without this filter, hitting Start a second time would crawl
+    // every nofollow link target that the previous crawl had correctly
+    // skipped, and the user would see "extra" URLs appear that the live
+    // link-follow path would never have touched.
+    const excludeNofollow = !this.config.followNofollow;
+    for (const pending of this.db.getPendingInternalLinks({ excludeNofollow })) {
       // Drop from `seen` so enqueue accepts it — these URLs are genuinely
       // unfinished work.
       this.seen.delete(pending.url);
@@ -817,7 +1069,7 @@ export class Crawler extends EventEmitter {
       undiciFetch(url, {
         method,
         headers: defaultRequestHeaders(
-          this.config.userAgent,
+          this.resolveUserAgent(url),
           this.config.acceptLanguage,
           this.config.customHeaders,
           this.config.auth,
@@ -868,7 +1120,16 @@ export class Crawler extends EventEmitter {
     this.stopped = true;
     this.running = false;
     this.paused = false;
+    this.setOp('idle');
     this.stopMemoryMonitor();
+    // Stop the periodic checkpoint timer immediately. Without this,
+    // the 30-second setInterval keeps firing until start()'s `finally`
+    // block tears it down — which on a stop-during-post-crawl can run
+    // after `db.reset()` (Clear button), repopulating crawl_queue from
+    // a stale `pendingItems` snapshot and resurrecting the recovery
+    // prompt on the next launch.
+    this.stopQueueCheckpointTimer();
+    this.stopIssueRecomputeTimer();
     // Cancel any in-flight sitemap discovery so its 'info' / 'done'
     // events don't leak into the next crawl.
     if (this.sitemapAbort) {
@@ -1100,6 +1361,19 @@ export class Crawler extends EventEmitter {
    *
    * Returns whether the URL was actually accepted into the queue.
    */
+  /** Wave 6 — Re-enqueue a checkpointed URL at its original depth.
+   * Called by the crash-recovery flow after restoring the saved
+   * pending list from `crawl_queue`. Bypasses the seen-set so the
+   * URL is fetched again even though a partial crawl may already
+   * have a row for it (the upsert handles dedup at the DB level).
+   */
+  enqueueCheckpointed(items: ReadonlyArray<{ url: string; depth: number }>): void {
+    for (const item of items) {
+      this.seen.delete(item.url);
+      this.enqueue({ url: item.url, depth: item.depth });
+    }
+  }
+
   enqueueManual(rawUrl: string): boolean {
     if (this.stopped || !this.running) return false;
     let url: string;
@@ -1138,6 +1412,7 @@ export class Crawler extends EventEmitter {
 
     this.seen.add(item.url);
     this.pending++;
+    this.pendingItems.set(item.url, item.depth);
     this.queue
       .add(() => this.fetchAndProcess(item))
       .catch((err: unknown) => {
@@ -1148,11 +1423,16 @@ export class Crawler extends EventEmitter {
       })
       .finally(() => {
         this.pending = Math.max(0, this.pending - 1);
+        // Drop from the checkpoint set whether we succeeded or failed —
+        // failures are recorded in the urls table and shouldn't be
+        // retried by a resumed crawl.
+        this.pendingItems.delete(item.url);
       });
   }
 
   private async fetchAndProcess(item: QueueItem): Promise<void> {
     if (this.stopped) return;
+    this.setOp(`crawl:fetch:${item.url}`);
 
     // I-1 — Cooperative yield BEFORE we start work on this URL. The
     // crawler runs in the same Node event loop as Electron's IPC
@@ -1167,6 +1447,18 @@ export class Crawler extends EventEmitter {
     const t0 = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
+    // Wave 3 — Optional max-response-time hard cap. Distinct from
+    // `requestTimeoutMs` (which is the connect+headers timeout): this
+    // is an upper bound on the *total* request lifetime including body
+    // download. Useful for capping individual slow pages without
+    // lowering the overall fetch timeout.
+    const respTimeTimer =
+      this.config.maxResponseTimeMs > 0
+        ? setTimeout(
+            () => controller.abort(),
+            this.config.maxResponseTimeMs,
+          )
+        : null;
 
     try {
       // Manual redirect handling — each hop becomes its own row so the
@@ -1177,6 +1469,40 @@ export class Crawler extends EventEmitter {
 
       const responseTimeMs = Date.now() - t0;
       this.totalResponseTimeMs += responseTimeMs;
+
+      // Wave 3 — Optional max file size filter. When the response's
+      // declared `Content-Length` exceeds the configured ceiling we
+      // discard the body and record a size-cap notice. The page row
+      // is still created so links to it aren't lost; only the body
+      // and downstream parsing are skipped.
+      if (this.config.maxFileSizeBytes > 0) {
+        const lenHeader = res.headers.get('content-length');
+        const declaredLen = lenHeader ? Number.parseInt(lenHeader, 10) : NaN;
+        if (Number.isFinite(declaredLen) && declaredLen > this.config.maxFileSizeBytes) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* ignore */
+          }
+          this.failed++;
+          this.emit(
+            'warn',
+            `Skipped ${item.url}: Content-Length ${declaredLen} > maxFileSizeBytes ${this.config.maxFileSizeBytes}`,
+          );
+          this.db.upsertUrl({
+            url: item.url,
+            contentKind: 'other',
+            statusCode: res.status,
+            statusText: 'size-cap-exceeded',
+            indexability: 'non-indexable:client-error',
+            indexabilityReason: `Body skipped — Content-Length ${declaredLen} exceeds maxFileSizeBytes`,
+            responseTimeMs,
+            depth: item.depth,
+            contentLength: declaredLen,
+          });
+          return;
+        }
+      }
       this.responseSamples++;
 
       const statusCode = res.status;
@@ -1258,7 +1584,42 @@ export class Crawler extends EventEmitter {
       // Cookie security analysis — Set-Cookie response headers, parsed
       // into per-cookie rows so we can count missing Secure / HttpOnly /
       // SameSite flags. Cookie values themselves are never stored.
-      const cookieSummary = analyseCookies(extractSetCookies(allHeaders));
+      // Wave 9 — Honour the cookie policy: `reject-all` skips analysis
+      // entirely (zeros for the missing-flag counters); `block-third-
+      // party` still records flag counts but only for cookies whose
+      // Domain attribute matches the page's registrable domain (or is
+      // absent — implicit first-party). `accept-all` keeps the legacy
+      // behaviour of analysing every Set-Cookie regardless of scope.
+      const cookieSummary = (() => {
+        if (this.config.cookiePolicy === 'reject-all') {
+          return {
+            count: 0,
+            insecureCount: 0,
+            noHttpOnlyCount: 0,
+            noSameSiteCount: 0,
+          };
+        }
+        const setCookies = extractSetCookies(allHeaders);
+        if (this.config.cookiePolicy === 'block-third-party') {
+          // First-party = same registrable domain (last two labels).
+          let pageRoot = '';
+          try {
+            pageRoot = new URL(item.url).hostname.split('.').slice(-2).join('.').toLowerCase();
+          } catch {
+            // fall through, no filter
+          }
+          if (pageRoot) {
+            const filtered = setCookies.filter((sc) => {
+              const m = /;\s*Domain=([^;]+)/i.exec(sc);
+              if (!m) return true; // no Domain attribute = implicit first-party
+              const domain = m[1]!.trim().toLowerCase().replace(/^\./, '');
+              return domain.endsWith(pageRoot);
+            });
+            return analyseCookies(filtered);
+          }
+        }
+        return analyseCookies(setCookies);
+      })();
 
       // TTFB on the successful attempt (excludes retry overhead). Falls
       // back to total response time if for any reason ttfbMs wasn't set
@@ -1383,7 +1744,12 @@ export class Crawler extends EventEmitter {
 
       const body = await res.text();
       const bodyLength = parseIntSafe(contentLengthHeader) ?? Buffer.byteLength(body, 'utf8');
-      const parsed = parseHtml(body, item.url, {
+      // Hand parsing to the worker pool when injected by the desktop
+      // host; the CLI's default is the inline `parseHtml`. The
+      // crawler doesn't care which one runs as long as the result
+      // shape matches.
+      this.setOp(`crawl:parse:${item.url}`);
+      const parsed = await this.parsePage(body, item.url, {
         includeSubdomains: this.config.scope === 'all-subdomains',
         cdnHosts: this.config.cdnHosts,
         customSearchTerms: this.config.customSearchTerms,
@@ -1434,139 +1800,134 @@ export class Crawler extends EventEmitter {
         : parsed.links.filter((l) => !l.rel?.includes('nofollow'));
 
       const imagesMissingAlt = parsed.images.filter((img) => img.alt === null).length;
-      const urlId = this.db.upsertUrl({
-        url: item.url,
-        contentKind: 'html',
-        statusCode,
-        statusText: null,
-        indexability,
-        indexabilityReason: reason,
-        title: parsed.title,
-        metaDescription: parsed.metaDescription,
-        h1: parsed.h1,
-        h1Count: parsed.h1Count,
-        h2Count: parsed.h2Count,
-        h3Count: parsed.h3Count,
-        h4Count: parsed.h4Count,
-        h5Count: parsed.h5Count,
-        h6Count: parsed.h6Count,
-        wordCount: parsed.wordCount,
-        canonical: parsed.canonical,
-        canonicalCount: parsed.canonicalCount,
-        canonicalHttp,
-        metaRobots: parsed.metaRobots,
-        xRobotsTag,
-        contentType,
-        contentLength: bodyLength,
-        responseTimeMs,
-        ttfbMs,
-        depth: item.depth,
-        outlinks: storableLinks.length,
-        imagesCount: parsed.images.length,
-        imagesMissingAlt,
-        lang: parsed.lang,
-        viewport: parsed.viewport,
-        ogTitle: parsed.ogTitle,
-        ogDescription: parsed.ogDescription,
-        ogImage: parsed.ogImage,
-        twitterCard: parsed.twitterCard,
-        twitterTitle: parsed.twitterTitle,
-        twitterDescription: parsed.twitterDescription,
-        twitterImage: parsed.twitterImage,
-        metaKeywords: parsed.metaKeywords,
-        metaAuthor: parsed.metaAuthor,
-        metaGenerator: parsed.metaGenerator,
-        themeColor: parsed.themeColor,
-        hsts,
-        xFrameOptions,
-        xContentTypeOptions,
-        contentEncoding,
-        csp,
-        referrerPolicy,
-        permissionsPolicy,
-        customSearchHits:
-          Object.keys(parsed.customSearchHits).length > 0
-            ? JSON.stringify(parsed.customSearchHits)
+      // Phase 1b — Build the entire per-URL write payload up front and
+      // ship it across the writer-worker boundary in one shot. The
+      // worker runs the upsert + headers + body snapshot + links +
+      // images inside a single SQLite transaction; the main thread
+      // never blocks on `.run()` for the duration of those writes.
+      // Falls back to an inline transaction in the no-worker (CLI)
+      // case via the default `writeFetchedUrl` injected in the
+      // constructor.
+      this.setOp(`crawl:write:${item.url}`);
+      const { urlId } = await this.writeFetchedUrl({
+        upsert: {
+          url: item.url,
+          contentKind: 'html',
+          statusCode,
+          statusText: null,
+          indexability,
+          indexabilityReason: reason,
+          title: parsed.title,
+          metaDescription: parsed.metaDescription,
+          h1: parsed.h1,
+          h1Count: parsed.h1Count,
+          h2Count: parsed.h2Count,
+          h3Count: parsed.h3Count,
+          h4Count: parsed.h4Count,
+          h5Count: parsed.h5Count,
+          h6Count: parsed.h6Count,
+          wordCount: parsed.wordCount,
+          canonical: parsed.canonical,
+          canonicalCount: parsed.canonicalCount,
+          canonicalHttp,
+          metaRobots: parsed.metaRobots,
+          xRobotsTag,
+          contentType,
+          contentLength: bodyLength,
+          responseTimeMs,
+          ttfbMs,
+          depth: item.depth,
+          outlinks: storableLinks.length,
+          imagesCount: parsed.images.length,
+          imagesMissingAlt,
+          lang: parsed.lang,
+          viewport: parsed.viewport,
+          ogTitle: parsed.ogTitle,
+          ogDescription: parsed.ogDescription,
+          ogImage: parsed.ogImage,
+          twitterCard: parsed.twitterCard,
+          twitterTitle: parsed.twitterTitle,
+          twitterDescription: parsed.twitterDescription,
+          twitterImage: parsed.twitterImage,
+          metaKeywords: parsed.metaKeywords,
+          metaAuthor: parsed.metaAuthor,
+          metaGenerator: parsed.metaGenerator,
+          themeColor: parsed.themeColor,
+          hsts,
+          xFrameOptions,
+          xContentTypeOptions,
+          contentEncoding,
+          csp,
+          referrerPolicy,
+          permissionsPolicy,
+          customSearchHits:
+            Object.keys(parsed.customSearchHits).length > 0
+              ? JSON.stringify(parsed.customSearchHits)
+              : null,
+          schemaTypes: parsed.schemaTypes.length > 0 ? parsed.schemaTypes.join(', ') : null,
+          schemaBlockCount: parsed.schemaBlockCount,
+          schemaInvalidCount: parsed.schemaInvalidCount,
+          paginationNext: parsed.paginationNext,
+          paginationPrev: parsed.paginationPrev,
+          hreflangs: parsed.hreflangs.length > 0 ? JSON.stringify(parsed.hreflangs) : null,
+          hreflangCount: parsed.hreflangs.length,
+          amphtml: parsed.amphtml,
+          favicon: parsed.favicon,
+          appleTouchIcon: parsed.appleTouchIcon,
+          manifestUrl: parsed.manifestUrl,
+          feedUrl: parsed.feedUrl,
+          mixedContentCount: parsed.mixedContentCount,
+          metaRefresh: parsed.metaRefresh,
+          metaRefreshUrl: parsed.metaRefreshUrl,
+          charset,
+          extractionResults: parsed.extractionResults
+            ? JSON.stringify(parsed.extractionResults)
             : null,
-        schemaTypes: parsed.schemaTypes.length > 0 ? parsed.schemaTypes.join(', ') : null,
-        schemaBlockCount: parsed.schemaBlockCount,
-        schemaInvalidCount: parsed.schemaInvalidCount,
-        paginationNext: parsed.paginationNext,
-        paginationPrev: parsed.paginationPrev,
-        hreflangs: parsed.hreflangs.length > 0 ? JSON.stringify(parsed.hreflangs) : null,
-        hreflangCount: parsed.hreflangs.length,
-        amphtml: parsed.amphtml,
-        favicon: parsed.favicon,
-        appleTouchIcon: parsed.appleTouchIcon,
-        manifestUrl: parsed.manifestUrl,
-        feedUrl: parsed.feedUrl,
-        mixedContentCount: parsed.mixedContentCount,
-        metaRefresh: parsed.metaRefresh,
-        metaRefreshUrl: parsed.metaRefreshUrl,
-        charset,
-        extractionResults: parsed.extractionResults
-          ? JSON.stringify(parsed.extractionResults)
-          : null,
-        simhash: parsed.simhash,
-        contentHash: parsed.contentHash,
-        titleCount: parsed.titleCount,
-        imagesEmptyAlt: parsed.imagesEmptyAlt,
-        emptyAnchorCount: parsed.emptyAnchorCount,
-        microdataCount: parsed.microdataCount,
-        rdfaCount: parsed.rdfaCount,
-        insecureFormActionCount: parsed.insecureFormActionCount,
-        missingSriCount: parsed.missingSriCount,
-        titlePixelWidth: estimatePixelWidth(parsed.title ?? ''),
-        metaPixelWidth: estimatePixelWidth(parsed.metaDescription ?? ''),
-        cookiesCount: cookieSummary.count,
-        cookiesInsecure: cookieSummary.insecureCount,
-        cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
-        cookiesNoSameSite: cookieSummary.noSameSiteCount,
-        httpProtocol,
-        queryStringLength,
-        keepAlive,
-        renderBlockingCount: parsed.renderBlockingCount,
-        analyticsTrackers:
-          parsed.analyticsTrackers.length > 0
-            ? JSON.stringify(parsed.analyticsTrackers)
-            : null,
-        formInputCount: parsed.formInputCount,
-        formInputUnlabeled: parsed.formInputUnlabeledCount,
-        imagesLazy: parsed.imagesLazy,
-        headings:
-          parsed.headings.length > 0 ? JSON.stringify(parsed.headings) : null,
-        serverHeader,
-        jsOnlyLinksCount: parsed.jsOnlyLinksCount,
-        textCodeRatio: parsed.textCodeRatio,
-      });
-      // Coalesce the per-URL write fan-out (headers + body snapshot +
-      // 50–500 links + 5–50 images) into a single SQLite transaction.
-      // Each `BEGIN…COMMIT` triggers an fsync on `synchronous=NORMAL`,
-      // and on low-end SSDs with antivirus realtime-scan each fsync can
-      // cost 30–80 ms. Without this wrapper a single page produces
-      // 5–10 fsyncs; with it, exactly one — the difference between a
-      // smooth UI and the kasma the user reported.
-      this.db.runInTransaction(() => {
-        if (urlId) this.db.setUrlHeaders(urlId, allHeaders);
-        // Body snapshot — drives the View Source detail tab. Only HTML
-        // pages get stored (we already gated entry above on
-        // `kind === 'html'`). Capped per `bodySnapshotMaxBytes` so a
-        // single page can't blow up the project file.
-        if (urlId && this.config.storeBodySnapshots) {
-          try {
-            this.db.setUrlSource(
-              urlId,
+          simhash: parsed.simhash,
+          contentHash: parsed.contentHash,
+          titleCount: parsed.titleCount,
+          imagesEmptyAlt: parsed.imagesEmptyAlt,
+          emptyAnchorCount: parsed.emptyAnchorCount,
+          microdataCount: parsed.microdataCount,
+          rdfaCount: parsed.rdfaCount,
+          insecureFormActionCount: parsed.insecureFormActionCount,
+          missingSriCount: parsed.missingSriCount,
+          titlePixelWidth: estimatePixelWidth(parsed.title ?? ''),
+          metaPixelWidth: estimatePixelWidth(parsed.metaDescription ?? ''),
+          cookiesCount: cookieSummary.count,
+          cookiesInsecure: cookieSummary.insecureCount,
+          cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
+          cookiesNoSameSite: cookieSummary.noSameSiteCount,
+          httpProtocol,
+          queryStringLength,
+          keepAlive,
+          renderBlockingCount: parsed.renderBlockingCount,
+          analyticsTrackers:
+            parsed.analyticsTrackers.length > 0
+              ? JSON.stringify(parsed.analyticsTrackers)
+              : null,
+          formInputCount: parsed.formInputCount,
+          formInputUnlabeled: parsed.formInputUnlabeledCount,
+          imagesLazy: parsed.imagesLazy,
+          headings:
+            parsed.headings.length > 0 ? JSON.stringify(parsed.headings) : null,
+          serverHeader,
+          jsOnlyLinksCount: parsed.jsOnlyLinksCount,
+          textCodeRatio: parsed.textCodeRatio,
+        },
+        headers: allHeaders,
+        storeBody: this.config.storeBodySnapshots
+          ? {
               body,
-              this.config.bodySnapshotMaxBytes > 0
-                ? this.config.bodySnapshotMaxBytes
-                : 1_048_576,
-            );
-          } catch {
-            // Best-effort — a snapshot failure must not break the crawl.
-          }
-        }
-        this.db.insertLinks(urlId, storableLinks, item.depth);
-        this.db.insertImages(urlId, parsed.images);
+              maxBytes:
+                this.config.bodySnapshotMaxBytes > 0
+                  ? this.config.bodySnapshotMaxBytes
+                  : 1_048_576,
+            }
+          : null,
+        links: storableLinks,
+        images: parsed.images,
+        fromDepth: item.depth,
       });
       for (const link of storableLinks) {
         if (!link.isInternal) this.enqueueExternal(link.toUrl);
@@ -1578,17 +1939,62 @@ export class Crawler extends EventEmitter {
       }
 
       if (this.config.scope === 'exact-url') {
-        // exact-url mode: do not follow any links
+        // exact-url / single-page mode: do not follow any links.
       } else {
         const nextDepth = item.depth + 1;
         for (const link of storableLinks) {
           const inScope = isInScope(this.config.startUrl, link.toUrl, this.config.scope);
           if (!inScope && !this.config.crawlExternal) continue;
-          // Belt-and-braces: when storeNofollowLinks=true we still respect
-          // nofollow for the *follow* decision — store the hint, don't
-          // recurse into it.
-          if (link.rel?.includes('nofollow')) continue;
+          // Wave 3 — nofollow follow toggle. By default nofollow links
+          // are stored (when `storeNofollowLinks` is on) but never
+          // recursed into. `followNofollow=true` opts out of the
+          // "respect nofollow" behaviour and treats them like any
+          // other link for the follow decision.
+          if (link.rel?.includes('nofollow') && !this.config.followNofollow) continue;
           this.enqueue({ url: link.toUrl, depth: nextDepth });
+        }
+        // Wave 3 — Pagination follow toggle. rel=next/prev are part of
+        // the standard discovery graph; the toggle exists to debug
+        // pagination-only loops without disabling all link follow.
+        if (this.config.followPaginationLinks) {
+          for (const target of [parsed.paginationNext, parsed.paginationPrev]) {
+            if (!target) continue;
+            const inScope = isInScope(this.config.startUrl, target, this.config.scope);
+            if (!inScope && !this.config.crawlExternal) continue;
+            this.enqueue({ url: target, depth: nextDepth });
+          }
+        }
+        // Wave 3 — Canonical follow toggle. When on, a 200 page that
+        // declares a canonical pointing to a different URL also
+        // enqueues that target. Default off — most crawls treat
+        // canonicals as a signal, not a navigation hint.
+        if (
+          this.config.followCanonicals &&
+          parsed.canonical &&
+          parsed.canonical !== item.url
+        ) {
+          const inScope = isInScope(
+            this.config.startUrl,
+            parsed.canonical,
+            this.config.scope,
+          );
+          if (inScope || this.config.crawlExternal) {
+            this.enqueue({ url: parsed.canonical, depth: nextDepth });
+          }
+        }
+        // Wave 3 — JS-style redirect follow. Currently covers
+        // `<meta http-equiv="refresh">` content URLs; window.location
+        // bodies aren't statically followable without a JS engine and
+        // are out of scope.
+        if (this.config.followJsRedirects && parsed.metaRefreshUrl) {
+          const inScope = isInScope(
+            this.config.startUrl,
+            parsed.metaRefreshUrl,
+            this.config.scope,
+          );
+          if (inScope || this.config.crawlExternal) {
+            this.enqueue({ url: parsed.metaRefreshUrl, depth: nextDepth });
+          }
         }
       }
     } catch (err) {
@@ -1615,6 +2021,7 @@ export class Crawler extends EventEmitter {
       });
     } finally {
       clearTimeout(timeout);
+      if (respTimeTimer) clearTimeout(respTimeTimer);
       // Politeness delay — applied per worker *after* each request so a
       // higher concurrency still honours a "one request every N ms per slot"
       // contract on top of the global RPS cap.
@@ -1629,6 +2036,40 @@ export class Crawler extends EventEmitter {
    * Retries are triggered by network errors, HTTP 429, and 5xx responses —
    * 3xx/4xx (except 429) are treated as final.
    */
+  /**
+   * Wave 9 — Resolve the User-Agent for a given URL. Walks the
+   * `perHostUserAgents` rule list in order, returning the first
+   * pattern whose host matches; falls back to the global
+   * `config.userAgent`. Pattern syntax:
+   *   - exact host         `m.example.com`
+   *   - leading wildcard   `*.example.com` matches any subdomain
+   *                        (does NOT match the apex `example.com`)
+   * Match is case-insensitive on the URL host.
+   */
+  private resolveUserAgent(url: string): string {
+    const rules = this.config.perHostUserAgents ?? [];
+    if (rules.length === 0) return this.config.userAgent;
+    let host = '';
+    try {
+      host = new URL(url).hostname.toLowerCase();
+    } catch {
+      return this.config.userAgent;
+    }
+    for (const rule of rules) {
+      const pat = rule.hostPattern.trim().toLowerCase();
+      if (!pat) continue;
+      if (pat.startsWith('*.')) {
+        const suffix = pat.slice(1); // ".example.com"
+        if (host.endsWith(suffix) && host.length > suffix.length) {
+          return rule.userAgent;
+        }
+      } else if (host === pat) {
+        return rule.userAgent;
+      }
+    }
+    return this.config.userAgent;
+  }
+
   private async fetchWithRetry(
     url: string,
     signal: AbortSignal,
@@ -1649,7 +2090,7 @@ export class Crawler extends EventEmitter {
         const res = await undiciFetch(url, {
           method: 'GET',
           headers: defaultRequestHeaders(
-            this.config.userAgent,
+            this.resolveUserAgent(url),
             this.config.acceptLanguage,
             this.config.customHeaders,
             this.config.auth,

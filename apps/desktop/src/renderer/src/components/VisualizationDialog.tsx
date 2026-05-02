@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, RefreshCw, Sparkles, Settings2, RotateCcw } from 'lucide-react';
+import { X, RefreshCw, Sparkles, Settings2, RotateCcw, Download } from 'lucide-react';
 import cytoscape, { type Core } from 'cytoscape';
 
 /**
@@ -41,6 +41,152 @@ function loadTuning(): VisTuning {
     // ignore
   }
   return DEFAULT_TUNING;
+}
+
+/**
+ * Trigger a download of `data` as `filename`. Anchor-click pattern
+ * works in Electron's renderer because chromium honours the
+ * `download` attribute and the in-app save flow doesn't need shell
+ * permissions for a Blob URL. URL is revoked after a short delay so
+ * Chromium has time to attach the download.
+ */
+function downloadBlob(data: Blob, filename: string): void {
+  const url = URL.createObjectURL(data);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, 5_000);
+}
+
+/**
+ * Export the current Cytoscape canvas as a high-DPI PNG. Cytoscape's
+ * `cy.png()` rasterises into the requested pixel dimensions (we use 2×
+ * the visible size for retina-quality print) and returns a base64 data
+ * URL which we convert to a Blob for the file download.
+ */
+function exportPng(cy: Core, filename = 'freecrawl-graph.png'): void {
+  const dataUrl = cy.png({
+    output: 'base64uri',
+    full: true, // include nodes outside the current viewport
+    bg: '#0a0a0f',
+    scale: 2,
+  });
+  // base64uri → Blob via fetch — cleaner than manual atob() decoding
+  // and supported in Chromium since forever.
+  void fetch(dataUrl)
+    .then((r) => r.blob())
+    .then((b) => downloadBlob(b, filename));
+}
+
+/**
+ * Export the current canvas as SVG. We don't pull in cytoscape-svg as
+ * a dependency — Cytoscape's `jpg`/`png` API has no native SVG output,
+ * so we emit a minimal hand-rolled SVG: `<circle>` per node + `<line>`
+ * per edge, using the runtime renderedPosition coordinates so the
+ * output matches what the user sees on screen.
+ *
+ * The result is editable in Illustrator / Inkscape / Figma — the
+ * primary use case for "give me an SVG of my graph".
+ */
+function exportSvg(cy: Core, filename = 'freecrawl-graph.svg'): void {
+  const bbox = cy.elements().boundingBox({});
+  const pad = 40;
+  const width = Math.ceil(bbox.w + pad * 2);
+  const height = Math.ceil(bbox.h + pad * 2);
+  const tx = -bbox.x1 + pad;
+  const ty = -bbox.y1 + pad;
+  const parts: string[] = [];
+  parts.push(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+  );
+  parts.push(`<rect width="100%" height="100%" fill="#0a0a0f"/>`);
+  // Edges first so they sit beneath nodes.
+  cy.edges().forEach((e) => {
+    const src = e.source().position();
+    const tgt = e.target().position();
+    const c = String((e.style('line-color') as unknown) ?? '#475569');
+    parts.push(
+      `<line x1="${(src.x + tx).toFixed(1)}" y1="${(src.y + ty).toFixed(1)}" x2="${(tgt.x + tx).toFixed(1)}" y2="${(tgt.y + ty).toFixed(1)}" stroke="${escapeXml(c)}" stroke-width="0.6" opacity="0.6"/>`,
+    );
+  });
+  cy.nodes().forEach((n) => {
+    const p = n.position();
+    const r = Number(n.style('width') ?? 12) / 2;
+    const fill = String((n.style('background-color') as unknown) ?? '#3b82f6');
+    parts.push(
+      `<circle cx="${(p.x + tx).toFixed(1)}" cy="${(p.y + ty).toFixed(1)}" r="${r.toFixed(1)}" fill="${escapeXml(fill)}" stroke="#0a0a0f" stroke-width="1"/>`,
+    );
+  });
+  parts.push(`</svg>`);
+  downloadBlob(new Blob([parts.join('\n')], { type: 'image/svg+xml' }), filename);
+}
+
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * Export the graph as a self-contained HTML file. Embeds Cytoscape
+ * from a CDN + the snapshot data inline; the user can open it
+ * directly in any browser, share via email/Slack, or attach to a
+ * client report. No FreeCrawl runtime needed for the recipient.
+ *
+ * Trade-off: the resulting file requires internet to load Cytoscape
+ * the first time (CDN fetch). We could inline the library too at the
+ * cost of ~250 KB per export, which is reasonable for a one-shot
+ * deliverable but adds 5–10× to file size on most graphs.
+ */
+function exportStandaloneHtml(
+  cy: Core,
+  filename = 'freecrawl-graph.html',
+): void {
+  const elements = cy.json() as { elements: unknown };
+  const dataJson = JSON.stringify(elements.elements ?? []);
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>FreeCrawl Graph</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0a0a0f; color: #e2e8f0; font-family: system-ui, sans-serif; }
+  #cy { position: absolute; inset: 0; }
+  #legend { position: absolute; top: 12px; left: 12px; padding: 8px 12px; background: rgba(15,23,42,0.85); border: 1px solid #334155; border-radius: 6px; font-size: 12px; }
+  #legend h1 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="cy"></div>
+<div id="legend">
+  <h1>FreeCrawl SEO — Site Graph</h1>
+  <div>Exported: ${new Date().toISOString()}</div>
+  <div>Nodes: ${cy.nodes().length} · Edges: ${cy.edges().length}</div>
+</div>
+<script src="https://unpkg.com/cytoscape@3/dist/cytoscape.min.js"></script>
+<script>
+  const elements = ${dataJson};
+  cytoscape({
+    container: document.getElementById('cy'),
+    elements: elements,
+    style: [
+      { selector: 'node', style: { 'background-color': 'data(color)', 'width': 'data(size)', 'height': 'data(size)', 'border-color': '#0a0a0f', 'border-width': 1, 'label': 'data(label)', 'color': '#cbd5e1', 'font-size': 9, 'text-valign': 'bottom', 'text-margin-y': 4 } },
+      { selector: 'edge', style: { 'width': 0.6, 'line-color': '#475569', 'opacity': 0.4, 'curve-style': 'bezier' } },
+    ],
+    layout: { name: 'preset' },
+  });
+</script>
+</body>
+</html>`;
+  downloadBlob(new Blob([html], { type: 'text/html' }), filename);
 }
 import type {
   AnchorTextRow,
@@ -117,6 +263,7 @@ export function VisualizationDialog({ open, onClose }: Props) {
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const [tuning, setTuning] = useState<VisTuning>(() => loadTuning());
   const [tunerOpen, setTunerOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
   function patchTuning(patch: Partial<VisTuning>) {
     setTuning((prev) => {
@@ -630,6 +777,55 @@ export function VisualizationDialog({ open, onClose }: Props) {
                   reload={() => loadGraph()}
                   close={() => setTunerOpen(false)}
                 />
+              )}
+            </div>
+            <div className="relative">
+              <button
+                className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] ${
+                  exportMenuOpen
+                    ? 'border-blue-500 bg-surface-800 text-blue-200'
+                    : 'border-surface-700 text-surface-200 hover:border-blue-500 hover:bg-surface-800'
+                }`}
+                onClick={() => setExportMenuOpen((v) => !v)}
+                title="Export graph"
+                aria-label="Export graph"
+              >
+                <Download className="h-3 w-3" />
+                Export
+              </button>
+              {exportMenuOpen && (
+                <div
+                  className="absolute right-0 top-full mt-1 z-10 min-w-[200px] rounded border border-surface-700 bg-surface-900 shadow-lg"
+                  onMouseLeave={() => setExportMenuOpen(false)}
+                >
+                  <button
+                    className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
+                    onClick={() => {
+                      if (cyRef.current) exportPng(cyRef.current);
+                      setExportMenuOpen(false);
+                    }}
+                  >
+                    PNG (high-DPI raster)
+                  </button>
+                  <button
+                    className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
+                    onClick={() => {
+                      if (cyRef.current) exportSvg(cyRef.current);
+                      setExportMenuOpen(false);
+                    }}
+                  >
+                    SVG (vector — Illustrator/Figma)
+                  </button>
+                  <button
+                    className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
+                    onClick={() => {
+                      if (cyRef.current) exportStandaloneHtml(cyRef.current);
+                      setExportMenuOpen(false);
+                    }}
+                  >
+                    Standalone HTML (shareable)
+                  </button>
+                </div>
               )}
             </div>
           </div>

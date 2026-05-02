@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import type {
   CrawlUrlRow,
@@ -42,23 +42,81 @@ const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'view-source', label: 'View Source' },
 ];
 
+// Maximum number of URLs we aggregate over in one go. Anything larger is
+// treated as a "too many" hint so the user can narrow the selection
+// before we burn N parallel reader-pool requests on it.
+const MULTI_DETAIL_LIMIT = 50;
+
+// Tabs that pivot on a single page (HTTP response, snippet, source, etc.)
+// — when the user has multi-selected rows we keep these scoped to the
+// primary URL and surface a banner so the scope is clear.
+const SINGLE_URL_ONLY_TABS: ReadonlySet<SubTab> = new Set([
+  'url-details',
+  'outline',
+  'extracted-data',
+  'serp-snippet',
+  'http-headers',
+  'cookies',
+  'structured-data',
+  'view-source',
+]);
+
 export function BottomDetailPanel() {
   const selectedUrlId = useAppStore((s) => s.selectedUrlId);
+  const selectedUrlIds = useAppStore((s) => s.selectedUrlIds);
   const [detail, setDetail] = useState<UrlDetail | null>(null);
+  const [details, setDetails] = useState<UrlDetail[]>([]);
   const [loading, setLoading] = useState(false);
   const [subTab, setSubTab] = useState<SubTab>('url-details');
 
+  // Effective scope: if the user has 2+ rows selected we aggregate; one
+  // row (or none) keeps the existing single-URL behaviour intact.
+  const effectiveIds = useMemo(() => {
+    if (selectedUrlIds.length > 1) return selectedUrlIds;
+    if (selectedUrlId !== null) return [selectedUrlId];
+    return [];
+  }, [selectedUrlId, selectedUrlIds]);
+
+  const isMulti = effectiveIds.length > 1;
+  const truncated = isMulti && effectiveIds.length > MULTI_DETAIL_LIMIT;
+  const fetchIds = useMemo(
+    () => (truncated ? effectiveIds.slice(0, MULTI_DETAIL_LIMIT) : effectiveIds),
+    [effectiveIds, truncated],
+  );
+
+  // Stable cache key so we don't re-fetch on every render of the same set.
+  const fetchKey = fetchIds.join(',');
+
   useEffect(() => {
-    if (selectedUrlId === null) {
+    if (fetchIds.length === 0) {
       setDetail(null);
+      setDetails([]);
       return;
     }
     let cancelled = false;
     const load = async () => {
       setLoading(true);
       try {
-        const d = await window.freecrawl.urlDetailGet({ id: selectedUrlId });
-        if (!cancelled) setDetail(d);
+        if (fetchIds.length === 1) {
+          const d = await window.freecrawl.urlDetailGet({ id: fetchIds[0]! });
+          if (!cancelled) {
+            setDetail(d);
+            setDetails(d ? [d] : []);
+          }
+        } else {
+          const results = await Promise.all(
+            fetchIds.map((id) => window.freecrawl.urlDetailGet({ id })),
+          );
+          if (!cancelled) {
+            const list = results.filter((r): r is UrlDetail => r !== null);
+            setDetails(list);
+            // The "primary" detail is the one matching `selectedUrlId`
+            // (last clicked); fall back to the first if it's missing.
+            const primary =
+              list.find((r) => r.row.id === selectedUrlId) ?? list[0] ?? null;
+            setDetail(primary);
+          }
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -67,7 +125,101 @@ export function BottomDetailPanel() {
     return () => {
       cancelled = true;
     };
-  }, [selectedUrlId]);
+    // selectedUrlId is intentionally excluded from deps — it only steers
+    // which entry of `details` becomes "primary" and we resolve that
+    // inside the load() body. fetchKey covers multi-set changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchKey]);
+
+  // When only the primary id changes (e.g. user clicked a different cell
+  // within the same multi-selection set), re-pick the primary detail
+  // without re-fetching the whole batch.
+  useEffect(() => {
+    if (!isMulti || details.length === 0) return;
+    const primary =
+      details.find((r) => r.row.id === selectedUrlId) ?? details[0] ?? null;
+    setDetail(primary);
+  }, [selectedUrlId, details, isMulti]);
+
+  // Aggregated link rows: each detail's inlinks/outlinks already carry
+  // their fromUrl / toUrl so concatenation is enough — the From / To
+  // columns in the table naturally distinguish which page each row
+  // belongs to.
+  const aggregatedInlinks = useMemo<string[][]>(() => {
+    if (details.length === 0) return [];
+    const rows: string[][] = [];
+    for (const d of details) {
+      for (const l of d.inlinks) {
+        rows.push(
+          buildLinkRow({
+            fromUrl: l.fromUrl,
+            toUrl: d.row.url,
+            toStatusCode: l.toStatusCode,
+            toSize: l.toSize,
+            type: l.type,
+            anchor: l.anchor,
+            altText: l.altText,
+            rel: l.rel,
+            target: l.target,
+            pathType: l.pathType,
+            linkPath: l.linkPath,
+            linkPosition: l.linkPosition,
+            linkOrigin: l.linkOrigin,
+          }),
+        );
+      }
+    }
+    return rows;
+  }, [details]);
+
+  const aggregatedOutlinks = useMemo<string[][]>(() => {
+    if (details.length === 0) return [];
+    const rows: string[][] = [];
+    for (const d of details) {
+      for (const l of d.outlinks) {
+        rows.push(
+          buildLinkRow({
+            fromUrl: d.row.url,
+            toUrl: l.toUrl,
+            toStatusCode: l.toStatusCode,
+            toSize: l.toSize,
+            type: l.type,
+            anchor: l.anchor,
+            altText: l.altText,
+            rel: l.rel,
+            target: l.target,
+            pathType: l.pathType,
+            linkPath: l.linkPath,
+            linkPosition: l.linkPosition,
+            linkOrigin: l.linkOrigin,
+          }),
+        );
+      }
+    }
+    return rows;
+  }, [details]);
+
+  const aggregatedInlinksTotal = useMemo(
+    () => details.reduce((n, d) => n + d.inlinksTotal, 0),
+    [details],
+  );
+  const aggregatedOutlinksTotal = useMemo(
+    () => details.reduce((n, d) => n + d.outlinksTotal, 0),
+    [details],
+  );
+
+  // For Images / Resources we collect (urlId, row) pairs so the dedicated
+  // multi-views can spread their fetches across the same set the user
+  // picked in the main table.
+  const multiPages = useMemo(
+    () => details.map((d) => ({ id: d.row.id, row: d.row })),
+    [details],
+  );
+
+  const inlinksCountLabel = isMulti ? aggregatedInlinksTotal : detail?.inlinksTotal;
+  const outlinksCountLabel = isMulti ? aggregatedOutlinksTotal : detail?.outlinksTotal;
+
+  const showSingleScopeBanner = isMulti && SINGLE_URL_ONLY_TABS.has(subTab);
 
   return (
     <div className="flex h-full flex-col bg-surface-950">
@@ -85,85 +237,144 @@ export function BottomDetailPanel() {
             title={t.disabled ? 'Coming soon' : undefined}
           >
             {t.label}
-            {t.key === 'inlinks' && detail && (
-              <span className="ml-1 text-surface-500">({detail.inlinksTotal})</span>
+            {t.key === 'inlinks' && inlinksCountLabel !== undefined && (
+              <span className="ml-1 text-surface-500">
+                ({inlinksCountLabel.toLocaleString()})
+              </span>
             )}
-            {t.key === 'outlinks' && detail && (
-              <span className="ml-1 text-surface-500">({detail.outlinksTotal})</span>
+            {t.key === 'outlinks' && outlinksCountLabel !== undefined && (
+              <span className="ml-1 text-surface-500">
+                ({outlinksCountLabel.toLocaleString()})
+              </span>
             )}
           </button>
         ))}
+        {isMulti && (
+          <div className="ml-auto px-3 text-[10.5px] text-surface-400">
+            <span className="font-mono text-accent-300">
+              {effectiveIds.length.toLocaleString()}
+            </span>{' '}
+            URLs selected
+            {truncated && (
+              <span className="ml-2 text-amber-400">
+                · aggregating first {MULTI_DETAIL_LIMIT}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
+      {showSingleScopeBanner && detail && (
+        <div className="shrink-0 border-b border-surface-800 bg-surface-900/40 px-3 py-1 text-[10.5px] text-surface-400">
+          This tab is per-page — showing data for{' '}
+          <span className="font-mono text-surface-200">{detail.row.url}</span>{' '}
+          (primary URL of the selection).
+        </div>
+      )}
+
       <div className="flex-1 overflow-auto">
-        {selectedUrlId === null && (
+        {effectiveIds.length === 0 && (
           <div className="flex h-full items-center justify-center text-xs text-surface-500">
             Select a URL from the table to see details.
           </div>
         )}
-        {selectedUrlId !== null && !detail && loading && (
+        {effectiveIds.length > 0 && !detail && loading && (
           <div className="p-4 text-xs text-surface-500">Loading…</div>
         )}
         {detail && subTab === 'url-details' && <NameValueView row={detail.row} />}
-        {detail && subTab === 'inlinks' && (
-          <LinksView
-            tableId="inlinks"
-            selectedUrlId={selectedUrlId}
-            total={detail.inlinksTotal}
-            shown={detail.inlinks.length}
-            columns={LINK_COLUMNS}
-            rows={detail.inlinks.map((l) =>
-              buildLinkRow({
-                fromUrl: l.fromUrl,
-                toUrl: detail.row.url,
-                toStatusCode: l.toStatusCode,
-                toSize: l.toSize,
-                type: l.type,
-                anchor: l.anchor,
-                altText: l.altText,
-                rel: l.rel,
-                target: l.target,
-                pathType: l.pathType,
-                linkPath: l.linkPath,
-                linkPosition: l.linkPosition,
-                linkOrigin: l.linkOrigin,
-              }),
-            )}
-          />
-        )}
-        {detail && subTab === 'outlinks' && (
-          <LinksView
-            tableId="outlinks"
-            selectedUrlId={selectedUrlId}
-            total={detail.outlinksTotal}
-            shown={detail.outlinks.length}
-            columns={LINK_COLUMNS}
-            rows={detail.outlinks.map((l) =>
-              buildLinkRow({
-                fromUrl: detail.row.url,
-                toUrl: l.toUrl,
-                toStatusCode: l.toStatusCode,
-                toSize: l.toSize,
-                type: l.type,
-                anchor: l.anchor,
-                altText: l.altText,
-                rel: l.rel,
-                target: l.target,
-                pathType: l.pathType,
-                linkPath: l.linkPath,
-                linkPosition: l.linkPosition,
-                linkOrigin: l.linkOrigin,
-              }),
-            )}
-          />
-        )}
+        {subTab === 'inlinks' &&
+          (isMulti ? (
+            details.length > 0 && (
+              <LinksView
+                tableId="inlinks-multi"
+                selectedUrlId={detail?.row.id ?? null}
+                total={aggregatedInlinksTotal}
+                shown={aggregatedInlinks.length}
+                columns={LINK_COLUMNS}
+                rows={aggregatedInlinks}
+              />
+            )
+          ) : (
+            detail && (
+              <LinksView
+                tableId="inlinks"
+                selectedUrlId={detail.row.id}
+                total={detail.inlinksTotal}
+                shown={detail.inlinks.length}
+                columns={LINK_COLUMNS}
+                rows={detail.inlinks.map((l) =>
+                  buildLinkRow({
+                    fromUrl: l.fromUrl,
+                    toUrl: detail.row.url,
+                    toStatusCode: l.toStatusCode,
+                    toSize: l.toSize,
+                    type: l.type,
+                    anchor: l.anchor,
+                    altText: l.altText,
+                    rel: l.rel,
+                    target: l.target,
+                    pathType: l.pathType,
+                    linkPath: l.linkPath,
+                    linkPosition: l.linkPosition,
+                    linkOrigin: l.linkOrigin,
+                  }),
+                )}
+              />
+            )
+          ))}
+        {subTab === 'outlinks' &&
+          (isMulti ? (
+            details.length > 0 && (
+              <LinksView
+                tableId="outlinks-multi"
+                selectedUrlId={detail?.row.id ?? null}
+                total={aggregatedOutlinksTotal}
+                shown={aggregatedOutlinks.length}
+                columns={LINK_COLUMNS}
+                rows={aggregatedOutlinks}
+              />
+            )
+          ) : (
+            detail && (
+              <LinksView
+                tableId="outlinks"
+                selectedUrlId={detail.row.id}
+                total={detail.outlinksTotal}
+                shown={detail.outlinks.length}
+                columns={LINK_COLUMNS}
+                rows={detail.outlinks.map((l) =>
+                  buildLinkRow({
+                    fromUrl: detail.row.url,
+                    toUrl: l.toUrl,
+                    toStatusCode: l.toStatusCode,
+                    toSize: l.toSize,
+                    type: l.type,
+                    anchor: l.anchor,
+                    altText: l.altText,
+                    rel: l.rel,
+                    target: l.target,
+                    pathType: l.pathType,
+                    linkPath: l.linkPath,
+                    linkPosition: l.linkPosition,
+                    linkOrigin: l.linkOrigin,
+                  }),
+                )}
+              />
+            )
+          ))}
         {detail && subTab === 'outline' && <OutlineView row={detail.row} />}
-        {detail && subTab === 'images' && (
-          <ImagesView urlId={selectedUrlId} row={detail.row} />
-        )}
-        {detail && subTab === 'resources' && (
-          <ResourcesView urlId={selectedUrlId} row={detail.row} />
-        )}
+        {subTab === 'images' &&
+          (isMulti ? (
+            <MultiImagesView pages={multiPages} />
+          ) : (
+            detail && <ImagesView urlId={detail.row.id} row={detail.row} />
+          ))}
+        {subTab === 'resources' &&
+          (isMulti ? (
+            <MultiResourcesView pages={multiPages} />
+          ) : (
+            detail && <ResourcesView urlId={detail.row.id} row={detail.row} />
+          ))}
         {detail && subTab === 'extracted-data' && (
           <ExtractedDataView row={detail.row} />
         )}
@@ -173,10 +384,10 @@ export function BottomDetailPanel() {
           <CookiesView row={detail.row} headers={detail.headers} />
         )}
         {detail && subTab === 'structured-data' && (
-          <StructuredDataView urlId={selectedUrlId} row={detail.row} />
+          <StructuredDataView urlId={detail.row.id} row={detail.row} />
         )}
         {detail && subTab === 'view-source' && (
-          <ViewSourceView urlId={selectedUrlId} pageUrl={detail.row.url} />
+          <ViewSourceView urlId={detail.row.id} pageUrl={detail.row.url} />
         )}
       </div>
     </div>
@@ -735,11 +946,27 @@ function LinksView({
     | { kind: 'column'; aC: number; c: number; additive: boolean; base: Set<string> }
     | null
   >(null);
+  // Right-click context-menu position. Null = menu hidden. The menu is a
+  // small in-page popover (not the native Electron menu) so we can wire
+  // it up without round-tripping through IPC for every click.
+  const [menu, setMenu] = useState<
+    | { x: number; y: number; row: number; col: number }
+    | null
+  >(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // `selected` and `rows` change every render; keep the latest in refs
+  // so the document-level keydown listener can read them without being
+  // re-attached on every state change.
+  const selectedRef = useRef(selected);
+  const rowsRef = useRef(rows);
+  selectedRef.current = selected;
+  rowsRef.current = rows;
 
   // Reset selection when the detail target or table switches — otherwise
   // stale cells from a previous URL would remain highlighted.
   useEffect(() => {
     setSelected(new Set());
+    setMenu(null);
     anchor.current = null;
     dragRef.current = null;
   }, [selectedUrlId, tableId]);
@@ -754,6 +981,48 @@ function LinksView({
     document.addEventListener('mouseup', onUp);
     return () => document.removeEventListener('mouseup', onUp);
   }, []);
+
+  // Ctrl/Cmd+C: copy the current cell selection to the clipboard as TSV.
+  // Listening at the document level means the user doesn't have to focus
+  // the table first — pressing the shortcut while there's at least one
+  // selected cell in this LinksView is enough.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key !== 'c' && e.key !== 'C') return;
+      const sel = selectedRef.current;
+      if (sel.size === 0) return;
+      // Don't override copy when the user is in an input/textarea — they
+      // probably want the input's selection, not ours.
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) {
+        return;
+      }
+      e.preventDefault();
+      void copyCellsToClipboard(sel, rowsRef.current);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Close the context menu on outside click / scroll / escape so it
+  // doesn't get left dangling when the user clicks elsewhere.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenu(null);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('scroll', close, true);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('scroll', close, true);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menu]);
 
   const getWidth = (c: LinksColumn): number => colWidths[c.id] ?? c.width;
   const totalWidth = columns.reduce((n, c) => n + getWidth(c), 0);
@@ -929,8 +1198,12 @@ function LinksView({
     applyColumnDrag(c);
   };
 
+  const menuClickedCell =
+    menu !== null ? rows[menu.row]?.[menu.col] ?? '' : '';
+  const menuClickedIsUrl = isUrlLike(menuClickedCell);
+
   return (
-    <div className="flex h-full select-none flex-col">
+    <div ref={rootRef} className="relative flex h-full select-none flex-col">
       <div className="shrink-0 px-3 pt-2 text-[11px] text-surface-500">
         Showing <span className="font-mono text-surface-200">{shown.toLocaleString()}</span> of{' '}
         <span className="font-mono text-surface-200">{total.toLocaleString()}</span>
@@ -1013,6 +1286,18 @@ function LinksView({
                       onMouseEnter={() => {
                         if (dragRef.current?.kind === 'cell') applyCellDrag(ri, ci);
                       }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        // If this cell wasn't already in the selection,
+                        // promote it so the menu's "Copy" scope matches
+                        // the right-clicked cell — matches main-table
+                        // behaviour.
+                        if (!selected.has(cellKey(ri, ci))) {
+                          setSelected(new Set([cellKey(ri, ci)]));
+                          anchor.current = { r: ri, c: ci };
+                        }
+                        setMenu({ x: e.clientX, y: e.clientY, row: ri, col: ci });
+                      }}
                       title={cell}
                     >
                       <span className="block truncate">
@@ -1027,8 +1312,237 @@ function LinksView({
           </div>
         </div>
       )}
+      {menu && (
+        <CellContextMenu
+          x={menu.x}
+          y={menu.y}
+          selectionSize={selected.size}
+          clickedValue={menuClickedCell}
+          clickedIsUrl={menuClickedIsUrl}
+          urlCountInSelection={collectUrlsFromSelection(selected, rows).length}
+          onCopy={() => {
+            void copyCellsToClipboard(selected, rows);
+            setMenu(null);
+          }}
+          onCopyValue={() => {
+            void navigator.clipboard.writeText(menuClickedCell);
+            setMenu(null);
+          }}
+          onCopyUrls={() => {
+            const urls = collectUrlsFromSelection(selected, rows);
+            if (urls.length > 0) {
+              void writeTextToClipboard(urls.join('\n'));
+            }
+            setMenu(null);
+          }}
+          onOpen={() => {
+            void window.open(menuClickedCell, '_blank');
+            setMenu(null);
+          }}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
+}
+
+/**
+ * In-page context menu for the Inlinks/Outlinks tables. Lives inside the
+ * LinksView so it can read the same `selected` set without prop-drilling
+ * an entire menu component.
+ */
+function CellContextMenu({
+  x,
+  y,
+  selectionSize,
+  clickedValue,
+  clickedIsUrl,
+  urlCountInSelection,
+  onCopy,
+  onCopyValue,
+  onCopyUrls,
+  onOpen,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  selectionSize: number;
+  clickedValue: string;
+  clickedIsUrl: boolean;
+  urlCountInSelection: number;
+  onCopy: () => void;
+  onCopyValue: () => void;
+  onCopyUrls: () => void;
+  onOpen: () => void;
+  onClose: () => void;
+}) {
+  const items: { label: string; action: () => void; disabled?: boolean }[] = [
+    {
+      label:
+        selectionSize > 1
+          ? `Copy ${selectionSize.toLocaleString()} Cells`
+          : 'Copy Cell',
+      action: onCopy,
+      disabled: selectionSize === 0,
+    },
+  ];
+  if (clickedIsUrl) {
+    // When the right-clicked URL is part of a multi-cell selection
+    // that spans multiple URL-looking cells, "Copy URL" copies ALL of
+    // them (one per line). Single-cell selection collapses to the
+    // legacy "copy this one URL" behaviour.
+    if (urlCountInSelection > 1) {
+      items.push({
+        label: `Copy ${urlCountInSelection.toLocaleString()} URLs`,
+        action: onCopyUrls,
+      });
+    } else {
+      items.push({ label: 'Copy URL', action: onCopyValue });
+    }
+    items.push({ label: 'Open in Browser', action: onOpen });
+  } else if (clickedValue) {
+    items.push({ label: 'Copy Value', action: onCopyValue });
+  }
+
+  return (
+    <div
+      className="fixed z-50 min-w-[180px] rounded border border-surface-700 bg-surface-900 py-1 text-[11px] shadow-lg"
+      style={{ left: x, top: y }}
+      onMouseDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
+    >
+      {items.map((it, i) => (
+        <button
+          key={i}
+          type="button"
+          disabled={it.disabled}
+          onClick={() => !it.disabled && it.action()}
+          className={clsx(
+            'block w-full px-3 py-1 text-left',
+            it.disabled
+              ? 'cursor-not-allowed text-surface-600'
+              : 'text-surface-200 hover:bg-accent-500/30 hover:text-surface-50',
+          )}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function isUrlLike(s: string): boolean {
+  return /^https?:\/\//i.test(s.trim());
+}
+
+/**
+ * Pull every URL-looking cell value out of the current selection,
+ * de-duplicate while preserving first-seen order (row → column), and
+ * return them as an array. Used by the right-click "Copy N URLs"
+ * action so a multi-cell selection in the From / To columns produces
+ * one URL per line on the clipboard.
+ */
+function collectUrlsFromSelection(
+  selected: Set<string>,
+  rows: string[][],
+): string[] {
+  if (selected.size === 0) return [];
+  const keys = [...selected].sort((a, b) => {
+    const [ra, ca] = a.split(':').map((n) => Number(n));
+    const [rb, cb] = b.split(':').map((n) => Number(n));
+    return (ra ?? 0) - (rb ?? 0) || (ca ?? 0) - (cb ?? 0);
+  });
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const k of keys) {
+    const [rs, cs] = k.split(':');
+    const r = Number(rs);
+    const c = Number(cs);
+    if (!Number.isFinite(r) || !Number.isFinite(c)) continue;
+    const value = rows[r]?.[c] ?? '';
+    if (isUrlLike(value) && !seen.has(value)) {
+      seen.add(value);
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Write `text` to the OS clipboard with the same fallback chain as
+ * `copyCellsToClipboard` — async API first, hidden textarea +
+ * execCommand if the API is unavailable or permission-denied.
+ */
+async function writeTextToClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+    } finally {
+      document.body.removeChild(ta);
+    }
+  }
+}
+
+/**
+ * Build a TSV string from the selected cells of a 2-D table and write it
+ * to the OS clipboard. Cells are grouped by row (preserving the row
+ * order shown in the UI) and within a row by ascending column index, so
+ * paste-ing into a spreadsheet drops cells into matching grid positions.
+ */
+async function copyCellsToClipboard(
+  selected: Set<string>,
+  rows: string[][],
+): Promise<void> {
+  if (selected.size === 0) return;
+  // Group selected cells by row index → list of column indexes.
+  const byRow = new Map<number, number[]>();
+  for (const k of selected) {
+    const [rs, cs] = k.split(':');
+    const r = Number(rs);
+    const c = Number(cs);
+    if (!Number.isFinite(r) || !Number.isFinite(c)) continue;
+    const list = byRow.get(r);
+    if (list) list.push(c);
+    else byRow.set(r, [c]);
+  }
+  const sortedRows = [...byRow.keys()].sort((a, b) => a - b);
+  const lines: string[] = [];
+  for (const r of sortedRows) {
+    const row = rows[r];
+    if (!row) continue;
+    const cols = (byRow.get(r) ?? []).sort((a, b) => a - b);
+    lines.push(cols.map((c) => row[c] ?? '').join('\t'));
+  }
+  const text = lines.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // Clipboard API can fail (e.g. when window not focused); fall back
+    // to a hidden textarea + execCommand which works in Electron even
+    // when the clipboard permission is unset.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+    } finally {
+      document.body.removeChild(ta);
+    }
+  }
 }
 
 function SerpSnippet({ row }: { row: CrawlUrlRow }) {
@@ -1944,6 +2458,349 @@ function ResourcesView({
                   </tr>
                 );
               })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface MultiPage {
+  id: number;
+  row: CrawlUrlRow;
+}
+
+/**
+ * Multi-URL Images view — used when the user has 2+ rows selected in the
+ * main table. Fetches `<img>` references for each page in parallel and
+ * shows them in a single flat table with a leading Page column so the
+ * source URL of each image is unambiguous.
+ */
+function MultiImagesView({ pages }: { pages: MultiPage[] }) {
+  const [byPage, setByPage] = useState<Map<number, UrlPageImageRow[]>>(new Map());
+  const [loading, setLoading] = useState(false);
+  const key = pages.map((p) => p.id).join(',');
+
+  useEffect(() => {
+    if (pages.length === 0) {
+      setByPage(new Map());
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    const load = async () => {
+      const results = await Promise.all(
+        pages.map((p) =>
+          window.freecrawl
+            .urlPageImages({ id: p.id })
+            .then((r): [number, UrlPageImageRow[]] => [p.id, r.rows])
+            .catch((): [number, UrlPageImageRow[]] => [p.id, []]),
+        ),
+      );
+      if (cancelled) return;
+      setByPage(new Map(results));
+      setLoading(false);
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  if (loading && byPage.size === 0) {
+    return <div className="p-4 text-[11px] text-surface-500">Loading images…</div>;
+  }
+  let total = 0;
+  let missingAlt = 0;
+  let externalCount = 0;
+  let largeCount = 0;
+  const LARGE_BYTES = 102_400;
+  for (const rows of byPage.values()) {
+    total += rows.length;
+    for (const r of rows) {
+      if (r.alt === null) missingAlt++;
+      if (!r.isInternal) externalCount++;
+      if (r.byteSize !== null && r.byteSize > LARGE_BYTES) largeCount++;
+    }
+  }
+
+  if (total === 0) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        No <code>&lt;img&gt;</code> tags discovered across the {pages.length} selected pages.
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
+        <span>
+          <span className="font-medium text-surface-200">{total.toLocaleString()}</span>{' '}
+          images across <span className="font-medium text-surface-200">{pages.length}</span>{' '}
+          pages
+        </span>
+        {missingAlt > 0 && <span className="text-amber-400">{missingAlt} missing alt</span>}
+        {externalCount > 0 && (
+          <span>
+            <span className="font-medium text-surface-200">{externalCount}</span> external
+          </span>
+        )}
+        {largeCount > 0 && (
+          <span className="text-amber-400">{largeCount} &gt; 100&nbsp;KB</span>
+        )}
+      </div>
+      <div className="flex-1 overflow-auto p-3">
+        <table className="w-full text-[11px]">
+          <thead className="sticky top-0 bg-surface-900">
+            <tr className="text-surface-400">
+              <th className="py-1 pr-3 text-left font-medium">Page</th>
+              <th className="py-1 pr-3 text-left font-medium">Source</th>
+              <th className="py-1 pr-3 text-left font-medium">Alt</th>
+              <th className="py-1 pr-3 text-right font-medium">W</th>
+              <th className="py-1 pr-3 text-right font-medium">H</th>
+              <th className="py-1 pr-3 text-right font-medium">Size</th>
+              <th className="py-1 text-left font-medium">Scope</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pages.map((p) => {
+              const rows = byPage.get(p.id) ?? [];
+              return rows.map((r, i) => (
+                <tr
+                  key={`${p.id}-${r.src}-${i}`}
+                  className="border-b border-surface-900 last:border-0"
+                >
+                  <td
+                    className="break-all py-1.5 pr-3 align-top font-mono text-[10px] text-surface-400"
+                    title={p.row.url}
+                  >
+                    {p.row.url}
+                  </td>
+                  <td className="break-all py-1.5 pr-3 align-top font-mono text-surface-100">
+                    <a
+                      href={r.src}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        void window.open(r.src, '_blank');
+                      }}
+                      className="text-blue-300 hover:text-blue-200"
+                    >
+                      {r.src}
+                    </a>
+                  </td>
+                  <td className="py-1.5 pr-3 align-top text-surface-200">
+                    {r.alt === null ? (
+                      <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] uppercase text-amber-300">
+                        missing
+                      </span>
+                    ) : r.alt === '' ? (
+                      <span className="rounded bg-surface-800 px-1.5 py-0.5 text-[10px] uppercase text-surface-400">
+                        empty
+                      </span>
+                    ) : (
+                      r.alt
+                    )}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right align-top font-mono text-surface-400">
+                    {r.width ?? '—'}
+                  </td>
+                  <td className="py-1.5 pr-3 text-right align-top font-mono text-surface-400">
+                    {r.height ?? '—'}
+                  </td>
+                  <td
+                    className={clsx(
+                      'py-1.5 pr-3 text-right align-top font-mono',
+                      r.byteSize !== null && r.byteSize > LARGE_BYTES
+                        ? 'text-amber-400'
+                        : 'text-surface-400',
+                    )}
+                  >
+                    {r.byteSize === null ? '—' : formatBytesShort(r.byteSize)}
+                  </td>
+                  <td className="py-1.5 align-top text-surface-300">
+                    {r.isInternal ? 'internal' : 'external'}
+                  </td>
+                </tr>
+              ));
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Multi-URL Resources view — fetches each page's stored body snapshot in
+ * parallel, runs the same `extractResources` parser per page, and merges
+ * everything into one flat table with a leading Page column.
+ */
+function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
+  const [byPage, setByPage] = useState<Map<number, ResourceEntry[]>>(new Map());
+  const [missingSnapshots, setMissingSnapshots] = useState<number>(0);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState<
+    'all' | 'script' | 'stylesheet' | 'font' | 'iframe' | 'external'
+  >('all');
+  const key = pages.map((p) => p.id).join(',');
+
+  useEffect(() => {
+    if (pages.length === 0) {
+      setByPage(new Map());
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    const load = async () => {
+      const results = await Promise.all(
+        pages.map((p) =>
+          window.freecrawl
+            .urlSourceGet({ id: p.id })
+            .then((r): [number, ResourceEntry[] | null] => {
+              if (!r || r.body === null) return [p.id, null];
+              return [p.id, extractResources(r.body, p.row.url)];
+            })
+            .catch((): [number, ResourceEntry[] | null] => [p.id, null]),
+        ),
+      );
+      if (cancelled) return;
+      const map = new Map<number, ResourceEntry[]>();
+      let missing = 0;
+      for (const [id, entries] of results) {
+        if (entries === null) missing++;
+        else map.set(id, entries);
+      }
+      setByPage(map);
+      setMissingSnapshots(missing);
+      setLoading(false);
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  if (loading && byPage.size === 0 && missingSnapshots === 0) {
+    return <div className="p-4 text-[11px] text-surface-500">Loading resources…</div>;
+  }
+
+  const allEntries: { page: MultiPage; entry: ResourceEntry }[] = [];
+  for (const p of pages) {
+    const list = byPage.get(p.id);
+    if (!list) continue;
+    for (const entry of list) allEntries.push({ page: p, entry });
+  }
+
+  const filtered =
+    filter === 'all'
+      ? allEntries
+      : filter === 'external'
+        ? allEntries.filter((x) => x.entry.isExternal)
+        : allEntries.filter((x) => x.entry.type === filter);
+  const counts = {
+    all: allEntries.length,
+    script: allEntries.filter((x) => x.entry.type === 'script').length,
+    stylesheet: allEntries.filter((x) => x.entry.type === 'stylesheet').length,
+    font: allEntries.filter((x) => x.entry.type === 'font').length,
+    iframe: allEntries.filter((x) => x.entry.type === 'iframe').length,
+    external: allEntries.filter((x) => x.entry.isExternal).length,
+  };
+  const FILTERS: { key: typeof filter; label: string; count: number }[] = [
+    { key: 'all', label: 'All', count: counts.all },
+    { key: 'script', label: 'Scripts', count: counts.script },
+    { key: 'stylesheet', label: 'Stylesheets', count: counts.stylesheet },
+    { key: 'font', label: 'Fonts', count: counts.font },
+    { key: 'iframe', label: 'Iframes', count: counts.iframe },
+    { key: 'external', label: 'External (3rd-party)', count: counts.external },
+  ];
+
+  if (allEntries.length === 0 && missingSnapshots === pages.length) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        Resources view requires a stored HTML body snapshot for each page.
+        <div className="mt-1 text-[10px] text-surface-600">
+          Re-crawl with the <span className="font-mono">storeBodySnapshots</span> setting enabled.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+        {FILTERS.map((f) => (
+          <button
+            key={f.key}
+            onClick={() => setFilter(f.key)}
+            className={clsx(
+              'rounded border px-2 py-0.5 text-[10.5px]',
+              filter === f.key
+                ? 'border-blue-600 bg-blue-900/40 text-blue-100'
+                : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+            )}
+          >
+            {f.label} <span className="text-surface-500">({f.count})</span>
+          </button>
+        ))}
+        {missingSnapshots > 0 && (
+          <span className="ml-2 text-[10px] text-amber-400">
+            {missingSnapshots} of {pages.length} pages have no stored body
+          </span>
+        )}
+      </div>
+      <div className="flex-1 overflow-auto p-3">
+        {filtered.length === 0 ? (
+          <div className="text-[11px] text-surface-500">No resources match this filter.</div>
+        ) : (
+          <table className="w-full text-[11px]">
+            <thead className="sticky top-0 bg-surface-900">
+              <tr className="text-surface-400">
+                <th className="py-1 pr-3 text-left font-medium">Page</th>
+                <th className="w-24 py-1 pr-3 text-left font-medium">Type</th>
+                <th className="py-1 pr-3 text-left font-medium">URL</th>
+                <th className="w-16 py-1 pr-3 text-center font-medium">3rd-party</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(({ page, entry }, i) => (
+                <tr
+                  key={`${page.id}-${entry.url}-${i}`}
+                  className="border-b border-surface-900 last:border-0"
+                >
+                  <td
+                    className="break-all py-1.5 pr-3 align-top font-mono text-[10px] text-surface-400"
+                    title={page.row.url}
+                  >
+                    {page.row.url}
+                  </td>
+                  <td className="py-1.5 pr-3 align-top font-mono text-surface-300">
+                    {entry.type}
+                  </td>
+                  <td className="break-all py-1.5 pr-3 align-top font-mono text-surface-100">
+                    <a
+                      href={entry.url}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        void window.open(entry.url, '_blank');
+                      }}
+                      className="text-blue-300 hover:text-blue-200"
+                    >
+                      {entry.url}
+                    </a>
+                  </td>
+                  <td className="py-1.5 pr-3 text-center align-top">
+                    {entry.isExternal ? (
+                      <span className="text-amber-400">✓</span>
+                    ) : (
+                      <span className="text-surface-700">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}

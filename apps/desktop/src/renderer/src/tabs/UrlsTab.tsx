@@ -30,6 +30,7 @@ export function UrlsTab() {
   const activeCategory = useAppStore((s) => s.activeCategory);
   const selectedUrlId = useAppStore((s) => s.selectedUrlId);
   const setSelectedUrlId = useAppStore((s) => s.setSelectedUrlId);
+  const setSelectedUrlIds = useAppStore((s) => s.setSelectedUrlIds);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<keyof CrawlUrlRow | undefined>(undefined);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -107,6 +108,24 @@ export function UrlsTab() {
     document.addEventListener('mouseup', onUp);
     return () => document.removeEventListener('mouseup', onUp);
   }, []);
+
+  // Mirror the multi-selection into the store so the bottom detail
+  // panel can aggregate sub-tabs (Inlinks / Outlinks / Images / Resources)
+  // across every selected URL instead of only the primary `selectedUrlId`.
+  // Two sources contribute distinct URL ids:
+  //   1. selectedIds — explicit Row-number column picks.
+  //   2. selectedCells — keyed `${urlId}:${colIdx}`, so each entry's URL
+  //      counts toward multi-aggregation even when the user picked a
+  //      single value cell instead of the whole row.
+  useEffect(() => {
+    const ids = new Set<number>(selectedIds);
+    for (const k of selectedCells) {
+      const [idStr] = k.split(':');
+      const id = Number(idStr);
+      if (Number.isFinite(id)) ids.add(id);
+    }
+    setSelectedUrlIds([...ids]);
+  }, [selectedIds, selectedCells, setSelectedUrlIds]);
 
   const getWidth = useCallback(
     (c: ColumnSpec): number => columnWidths[columnId(c)] ?? c.size,

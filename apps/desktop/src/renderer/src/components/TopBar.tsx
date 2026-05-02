@@ -15,10 +15,23 @@ const SCOPE_OPTIONS: { value: CrawlScope; label: string; hint: string }[] = [
 export function TopBar() {
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
-  const progress = useAppStore((s) => s.progress);
+  // Scalar subscriptions instead of the full `progress` object — TopBar
+  // only needs a handful of fields, and Zustand bails out of the
+  // re-render when the SCALAR values are unchanged. With the full
+  // object subscription a new reference on every emitProgress() pinned
+  // this component to the renderer's hot path.
+  const running = useAppStore((s) => s.progress?.running === true);
+  const paused = useAppStore((s) => s.progress?.paused === true);
+  const progressDiscovered = useAppStore((s) => s.progress?.discovered ?? 0);
+  const progressCrawled = useAppStore((s) => s.progress?.crawled ?? 0);
   const setProgress = useAppStore((s) => s.setProgress);
-  const summary = useAppStore((s) => s.summary);
-  const overview = useAppStore((s) => s.overview);
+  const summaryTotal = useAppStore((s) => s.summary?.total ?? 0);
+  const overviewInternalTotal = useAppStore(
+    (s) => s.overview?.summary.totalInternalUrls ?? 0,
+  );
+  const overviewExternalTotal = useAppStore(
+    (s) => s.overview?.summary.totalExternalUrls ?? 0,
+  );
   const reset = useAppStore((s) => s.reset);
   const setError = useAppStore((s) => s.setError);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
@@ -27,24 +40,15 @@ export function TopBar() {
   const [scopeOpen, setScopeOpen] = useState(false);
   const [recentOpen, setRecentOpen] = useState(false);
 
-  const running = progress?.running === true;
-  const paused = progress?.paused === true;
-  // Clear is enabled whenever there's anything to wipe. We check four
-  // signals because each one alone is incomplete:
-  //   - `progress.discovered/crawled` covers a fresh run
-  //   - `summary.total` covers post-`done` state (progress may have
-  //     been wiped to its idle baseline by then)
-  //   - `overview.summary.totalInternalUrls` covers projects opened
-  //     from disk via File → Open Recent (no progress event ever
-  //     fired for those rows)
-  //   - `paused` is a "running" sub-state where the table already has
-  //     rows that the user might want to dump
+  // Clear is enabled whenever there's anything to wipe. Four signals
+  // because each one alone is incomplete (fresh run vs. post-`done`
+  // state vs. project opened from disk vs. paused crawl with rows).
   const hasData =
-    (progress?.discovered ?? 0) > 0 ||
-    (progress?.crawled ?? 0) > 0 ||
-    (summary?.total ?? 0) > 0 ||
-    (overview?.summary.totalInternalUrls ?? 0) > 0 ||
-    (overview?.summary.totalExternalUrls ?? 0) > 0;
+    progressDiscovered > 0 ||
+    progressCrawled > 0 ||
+    summaryTotal > 0 ||
+    overviewInternalTotal > 0 ||
+    overviewExternalTotal > 0;
   const activeScope = SCOPE_OPTIONS.find((o) => o.value === config.scope)!;
 
   async function start() {

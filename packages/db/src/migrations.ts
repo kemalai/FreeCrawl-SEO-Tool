@@ -885,6 +885,64 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_urls_issues_key ON urls_issues(issue_key);
     `,
   },
+  {
+    version: 43,
+    name: 'add_pagination_sequence_break',
+    // Wave 2.5 — Per-page boolean flag set by `recomputePaginationSequence()`
+    // when this URL is part of a paginated cluster (its `pagination_next`
+    // or `pagination_prev` resolved to another crawled URL with the same
+    // template) AND the cluster's numeric ordinals have a gap (e.g.
+    // ?page=1 → ?page=2 → ?page=4 misses 3). Powers the
+    // "Pagination Sequence Break" issue filter.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'pagination_sequence_break')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN pagination_sequence_break INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+    },
+  },
+  {
+    version: 44,
+    name: 'add_crawl_queue_checkpoint',
+    // Wave 6 — Periodic checkpoint of pending queue items so an
+    // unexpected exit (process crash, OS reboot, OOM kill) can resume
+    // the crawl on next launch. Three columns:
+    //   - `url`      : the URL that was waiting to be fetched
+    //   - `depth`    : its enqueue depth so the resumed crawl respects
+    //                  `maxDepth` correctly
+    //   - `seed_url` : discriminates stale checkpoints when the user
+    //                  has changed start URL between crashes; the
+    //                  resume prompt only fires if seeds match.
+    up: `
+      CREATE TABLE IF NOT EXISTS crawl_queue (
+        url       TEXT PRIMARY KEY,
+        depth     INTEGER NOT NULL DEFAULT 0,
+        seed_url  TEXT NOT NULL DEFAULT ''
+      );
+    `,
+  },
+  {
+    version: 45,
+    name: 'add_hreflang_inconsistent_lang',
+    // Wave 6 — Boolean per-URL flag set by `recomputeHreflangInconsistent()`
+    // when the page's hreflang JSON contains the same `lang` value with
+    // two different target URLs. Powers the
+    // "Hreflang Inconsistent Lang" issue filter.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'hreflang_inconsistent_lang')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN hreflang_inconsistent_lang INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

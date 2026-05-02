@@ -1,3 +1,15 @@
+/**
+ * Crawl scope. Determines which links are followed.
+ *  - `subdomain`        — same registrable domain + same exact host
+ *                         (default; tightest "this site" definition)
+ *  - `subfolder`        — same host AND target's path starts with the
+ *                         start URL's path. Use to crawl a single
+ *                         section of a large site (e.g. `/blog/` only).
+ *  - `all-subdomains`   — any host that shares the registrable domain
+ *                         (`*.example.com` ∪ `example.com`)
+ *  - `exact-url`        — only the start URL itself; no link-follow.
+ *                         Equivalent to "single-page" mode.
+ */
 export type CrawlScope = 'subdomain' | 'subfolder' | 'all-subdomains' | 'exact-url';
 
 /**
@@ -162,6 +174,12 @@ export type UrlCategory =
   | 'issues:render-blocking-critical'
   | 'issues:og-image-too-large'
   | 'issues:twitter-image-too-large'
+  | 'issues:pagination-sequence-break'
+  | 'issues:links-per-page-too-many'
+  | 'tab:redirects'
+  | 'tab:canonicals'
+  | 'tab:directives'
+  | 'issues:hreflang-inconsistent-lang'
 
 export type Indexability =
   | 'indexable'
@@ -311,6 +329,10 @@ export interface CrawlUrlRow {
   queryStringLength: number;
   paginationNext: string | null;
   paginationPrev: string | null;
+  /** True when this URL is part of a paginated cluster whose ordinal
+   * sequence has a gap (e.g. ?page=1, ?page=2, ?page=4 — 3 missing).
+   * Set by the post-crawl `recomputePaginationSequence()` pass. */
+  paginationSequenceBreak: boolean;
   /** JSON-stringified array of `{ lang, href }` objects, or null. */
   hreflangs: string | null;
   hreflangCount: number;
@@ -615,6 +637,106 @@ export interface CrawlConfig {
    * `*.cloudfront.net`.
    */
   cdnHosts: string[];
+  /**
+   * Maximum total links per page (internal + external) before the
+   * "Too Many Links per Page" issue trips. Default 100 — Google's
+   * historical recommendation; pages above this start to look like
+   * link-farm SERPs. 0 disables the check.
+   */
+  maxLinksPerPage: number;
+  /**
+   * Maximum response time (ms). Requests that exceed this are aborted
+   * and recorded as a network error — distinct from `requestTimeoutMs`
+   * which is the connect+headers timeout. Use to cap individual slow
+   * pages without lowering the overall fetch timeout. 0 disables.
+   */
+  maxResponseTimeMs: number;
+  /**
+   * Maximum response body size (bytes). When the `Content-Length`
+   * header on the response exceeds this, the body is discarded and
+   * the page is recorded with status only. Useful for trimming large
+   * downloads (PDFs, archives) on bandwidth-constrained connections.
+   * 0 disables.
+   */
+  maxFileSizeBytes: number;
+  /**
+   * Follow `<link rel="canonical">` like a redirect — when a 200 page
+   * declares a canonical pointing elsewhere, also enqueue the canonical
+   * target. Default `false` — most crawls treat canonicals as a
+   * signal, not a navigation hint.
+   */
+  followCanonicals: boolean;
+  /**
+   * Cookie policy applied to every fetch. The crawler is otherwise
+   * stateless across requests; this knob lets users opt into
+   * session-cookie behaviour when crawling sites that gate content
+   * behind a session.
+   *  - `reject-all`         (default) — never send Cookie header,
+   *                          discard Set-Cookie response headers
+   *  - `accept-all`         — round-trip cookies via an in-memory
+   *                          jar keyed by host
+   *  - `block-third-party`  — accept first-party cookies only
+   *                          (same registrable domain as the page)
+   */
+  cookiePolicy: 'reject-all' | 'accept-all' | 'block-third-party';
+  /**
+   * Per-host User-Agent overrides. Map of host pattern → UA string.
+   * Patterns support exact host (`m.example.com`) or leading wildcard
+   * (`*.example.com`); wildcard matches any subdomain. The first
+   * matching pattern wins; falls back to the global `userAgent` when
+   * none match. Useful for crawling a mobile subdomain with the
+   * mobile-Googlebot UA in the same run as the desktop site.
+   */
+  perHostUserAgents: { hostPattern: string; userAgent: string }[];
+  /**
+   * Named proxy profiles. The user can save multiple `(name, url)`
+   * entries and pick one by name in `proxyProfileActive`. Empty
+   * `proxyProfileActive` falls back to the legacy `proxyUrl` /
+   * `HTTPS_PROXY` env var.
+   */
+  proxyProfiles: { name: string; url: string }[];
+  /** Currently-selected proxy profile name. Empty = use proxyUrl
+   *  (or env vars) directly without profile lookup. */
+  proxyProfileActive: string;
+  /**
+   * Follow `<link rel="next">` and `<link rel="prev">` for pagination
+   * link discovery. Default `true` — these are part of the standard
+   * crawl graph; off only to debug pagination-specific issues.
+   */
+  followPaginationLinks: boolean;
+  /**
+   * Follow `<a rel="nofollow">` links (still respecting all other
+   * filters). Default `false` — Screaming Frog "Respect Nofollow"
+   * default. Combined with `storeNofollowLinks` for the storage side.
+   */
+  followNofollow: boolean;
+  /**
+   * Follow JavaScript-style redirects discovered in the HTML body
+   * (`<meta http-equiv="refresh">` content URL, `window.location` JS
+   * statements). Default `false` — these are heuristics; when on,
+   * the meta-refresh URL is also enqueued like a redirect target.
+   */
+  followJsRedirects: boolean;
+  /**
+   * Wave 6 — Per-pass crawl-analysis toggles. Each post-crawl pass
+   * can be independently disabled when the user knows the data isn't
+   * needed for their audit; saves wall-clock on large crawls. All
+   * default `true` because the corresponding issue filters/reports
+   * silently fall back to "no data" when their pass didn't run.
+   */
+  /** Recompute `inlinks` count per URL after the crawl. */
+  analyseInlinks: boolean;
+  /** Walk redirect chains, fill `redirect_chain_length` / `redirect_loop`. */
+  analyseRedirectChains: boolean;
+  /** Hreflang reciprocity + invalid code + target health. */
+  analyseHreflang: boolean;
+  /** SimHash + LSH near-duplicate clustering. */
+  analyseDuplicates: boolean;
+  /** Pagination ordinal-gap detection. */
+  analysePagination: boolean;
+  /** Materialise the heavy `urls_issues` counters (Dead External Domain,
+   * Duplicate URL post-norm, Canonical Chain Multi-hop). */
+  analyseIssues: boolean;
 }
 
 export interface HttpAuth {
@@ -904,6 +1026,24 @@ export interface OverviewCounts {
      * conservative threshold that catches both card types' renderer.
      */
     twitterImageTooLarge: number;
+    /**
+     * Pages part of a paginated cluster whose ordinals have a gap
+     * (e.g. ?page=1, ?page=2, ?page=4 — page 3 missing). Set by the
+     * post-crawl `recomputePaginationSequence()` pass.
+     */
+    paginationSequenceBreak: number;
+    /**
+     * Pages whose total outgoing link count (internal + external)
+     * exceeds the configured `maxLinksPerPage` threshold (default 100).
+     */
+    linksPerPageTooMany: number;
+    /**
+     * Pages declaring the same `hreflang` value with two different
+     * target URLs — i.e. the page can't decide which page is the "es"
+     * version. Detected by post-crawl pass `recomputeHreflangInconsistent`
+     * which writes a boolean flag onto each affected URL.
+     */
+    hreflangInconsistentLang: number;
   };
 }
 
@@ -1142,4 +1282,21 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   largeImageBytes: 102_400,
   probeTlsCerts: true,
   cdnHosts: [],
+  maxLinksPerPage: 100,
+  maxResponseTimeMs: 0,
+  maxFileSizeBytes: 0,
+  followCanonicals: false,
+  followPaginationLinks: true,
+  followNofollow: false,
+  followJsRedirects: false,
+  analyseInlinks: true,
+  analyseRedirectChains: true,
+  analyseHreflang: true,
+  analyseDuplicates: true,
+  analysePagination: true,
+  analyseIssues: true,
+  cookiePolicy: 'reject-all',
+  perHostUserAgents: [],
+  proxyProfiles: [],
+  proxyProfileActive: '',
 };

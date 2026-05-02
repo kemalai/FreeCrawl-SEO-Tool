@@ -9,6 +9,11 @@ import {
   type ExportCsvResult,
   type ExportJsonInput,
   type ExportJsonResult,
+  type ExportXmlInput,
+  type ExportXmlResult,
+  type DataDeleteByDomainInput,
+  type DataDeleteByDomainResult,
+  type CrashRecoveryStatus,
   type ExportHtmlReportInput,
   type ExportHtmlReportResult,
   type BulkExportResult,
@@ -116,6 +121,18 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.exportCsv, input),
   exportJson: (input: ExportJsonInput): Promise<ExportJsonResult> =>
     ipcRenderer.invoke(IPC.exportJson, input),
+  exportXml: (input: ExportXmlInput): Promise<ExportXmlResult> =>
+    ipcRenderer.invoke(IPC.exportXml, input),
+  dataDeleteByDomain: (
+    input: DataDeleteByDomainInput,
+  ): Promise<DataDeleteByDomainResult> =>
+    ipcRenderer.invoke(IPC.dataDeleteByDomain, input),
+  crashRecoveryStatus: (): Promise<CrashRecoveryStatus> =>
+    ipcRenderer.invoke(IPC.crashRecoveryStatus),
+  crashRecoveryResume: (): Promise<{ accepted: boolean }> =>
+    ipcRenderer.invoke(IPC.crashRecoveryResume),
+  crashRecoveryDiscard: (): Promise<void> =>
+    ipcRenderer.invoke(IPC.crashRecoveryDiscard),
   exportHtmlReport: (input: ExportHtmlReportInput): Promise<ExportHtmlReportResult> =>
     ipcRenderer.invoke(IPC.exportHtmlReport, input),
   exportBulk: (): Promise<BulkExportResult> => ipcRenderer.invoke(IPC.exportBulk),

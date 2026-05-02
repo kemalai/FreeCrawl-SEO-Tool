@@ -1,5 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { ProjectDb } from '@freecrawl/db';
+import { FreezeWatchdogSharedState } from './freeze-watchdog-shared.js';
 
 /**
  * Read-only SQLite worker.
@@ -29,6 +30,7 @@ if (!parentPort) {
 
 interface InitData {
   dbPath: string;
+  freezeWatchdogSab?: SharedArrayBuffer | null;
 }
 
 const init = workerData as InitData;
@@ -37,6 +39,22 @@ if (!init?.dbPath) {
 }
 
 const db = new ProjectDb(init.dbPath, { readOnly: true });
+
+// Freeze-watchdog plumbing. The reader thread publishes a heartbeat
+// every 250 ms and updates `readerOp` to the currently-dispatching
+// method name so the watchdog can spot a stuck SQLite query and
+// surface "[STALL:READER ... op=getUrlDetail]" in debug.txt.
+const watchdog = init.freezeWatchdogSab
+  ? new FreezeWatchdogSharedState(init.freezeWatchdogSab)
+  : null;
+let watchdogHeartbeatTimer: NodeJS.Timeout | null = null;
+if (watchdog) {
+  watchdog.tickReaderHeartbeat();
+  watchdog.setReaderOp('idle');
+  watchdogHeartbeatTimer = setInterval(() => {
+    watchdog.tickReaderHeartbeat();
+  }, 250);
+}
 
 interface RequestMessage {
   requestId: number;
@@ -81,6 +99,7 @@ const ALLOWED_METHODS = new Set<string>([
 parentPort.on('message', async (msg: RequestMessage) => {
   if (!msg || typeof msg.requestId !== 'number') return;
   const { requestId, method, args } = msg;
+  watchdog?.setReaderOp(method);
   try {
     if (!ALLOWED_METHODS.has(method)) {
       throw new Error(`db-reader-worker: method '${method}' is not whitelisted`);
@@ -99,6 +118,8 @@ parentPort.on('message', async (msg: RequestMessage) => {
       ok: false,
       error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
     });
+  } finally {
+    watchdog?.setReaderOp('idle');
   }
 });
 
@@ -107,6 +128,7 @@ parentPort.on('message', async (msg: RequestMessage) => {
 // file handle (which on Windows would block the project from being
 // reopened until full process exit).
 parentPort.on('close', () => {
+  if (watchdogHeartbeatTimer) clearInterval(watchdogHeartbeatTimer);
   try {
     db.close();
   } catch {

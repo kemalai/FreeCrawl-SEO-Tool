@@ -10,6 +10,7 @@ import {
   Cpu,
   Copy,
   Code2,
+  Cookie,
   Webhook,
   Plus,
   Trash2,
@@ -17,6 +18,9 @@ import {
   Network,
   Sparkles,
   Gauge,
+  FileText,
+  AlertTriangle,
+  Wrench,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -87,6 +91,33 @@ interface FormState {
   proxyUrl: string;
   excludeExtensionsText: string;
   maxRedirects: string;
+  // Wave 8 additions
+  // crawl analysis (per-pass post-crawl toggles, Wave 6)
+  analyseInlinks: boolean;
+  analyseRedirectChains: boolean;
+  analyseHreflang: boolean;
+  analyseDuplicates: boolean;
+  analysePagination: boolean;
+  analyseIssues: boolean;
+  // content (body snapshot)
+  storeBodySnapshots: boolean;
+  bodySnapshotMaxBytes: string;
+  // advanced (Wave 3 caps + URL/query thresholds)
+  maxLinksPerPage: string;
+  maxResponseTimeMs: string;
+  maxFileSizeBytes: string;
+  maxUrlLength: string;
+  maxQueryStringLength: string;
+  maxFolderDepth: string;
+  followCanonicals: boolean;
+  followPaginationLinks: boolean;
+  followNofollow: boolean;
+  followJsRedirects: boolean;
+  // Wave 9 — Cookies / per-host UA / proxy profiles
+  cookiePolicy: 'reject-all' | 'accept-all' | 'block-third-party';
+  perHostUserAgents: { hostPattern: string; userAgent: string }[];
+  proxyProfiles: { name: string; url: string }[];
+  proxyProfileActive: string;
 }
 
 type SectionKey =
@@ -96,6 +127,7 @@ type SectionKey =
   | 'speed'
   | 'requests'
   | 'filters'
+  | 'content'
   | 'custom-search'
   | 'custom-extraction'
   | 'url-rewriting'
@@ -103,7 +135,12 @@ type SectionKey =
   | 'auth'
   | 'network'
   | 'hardware'
-  | 'webhook';
+  | 'webhook'
+  | 'crawl-analysis'
+  | 'issues'
+  | 'advanced'
+  | 'cookies'
+  | 'per-host-ua';
 
 interface SectionDef {
   key: SectionKey;
@@ -201,6 +238,45 @@ const SECTIONS: SectionDef[] = [
     icon: Webhook,
     keywords: 'webhook notify slack discord zapier post crawl complete',
   },
+  {
+    key: 'content',
+    label: 'Content',
+    icon: FileText,
+    keywords:
+      'content body source snapshot store html size cap thin word count text view source',
+  },
+  {
+    key: 'crawl-analysis',
+    label: 'Crawl Analysis',
+    icon: ListChecks,
+    keywords:
+      'analysis post crawl inlinks redirect hreflang duplicate pagination issues materialise pass toggle',
+  },
+  {
+    key: 'issues',
+    label: 'Issues',
+    icon: AlertTriangle,
+    keywords: 'issues check filter enable disable severity false positive',
+  },
+  {
+    key: 'advanced',
+    label: 'Advanced',
+    icon: Wrench,
+    keywords:
+      'advanced max links per page response time file size url length query folder depth follow canonical pagination nofollow js redirect',
+  },
+  {
+    key: 'cookies',
+    label: 'Cookies',
+    icon: Cookie,
+    keywords: 'cookie session reject accept block third party set-cookie policy',
+  },
+  {
+    key: 'per-host-ua',
+    label: 'Per-Host UA',
+    icon: Send,
+    keywords: 'per host user agent subdomain mobile desktop pattern wildcard',
+  },
 ];
 
 function configToForm(c: CrawlConfig): FormState {
@@ -243,6 +319,28 @@ function configToForm(c: CrawlConfig): FormState {
     proxyUrl: c.proxyUrl ?? '',
     excludeExtensionsText: (c.excludeExtensions ?? []).join(', '),
     maxRedirects: String(c.maxRedirects ?? 10),
+    analyseInlinks: c.analyseInlinks ?? true,
+    analyseRedirectChains: c.analyseRedirectChains ?? true,
+    analyseHreflang: c.analyseHreflang ?? true,
+    analyseDuplicates: c.analyseDuplicates ?? true,
+    analysePagination: c.analysePagination ?? true,
+    analyseIssues: c.analyseIssues ?? true,
+    storeBodySnapshots: c.storeBodySnapshots ?? true,
+    bodySnapshotMaxBytes: String(c.bodySnapshotMaxBytes ?? 1_048_576),
+    maxLinksPerPage: String(c.maxLinksPerPage ?? 100),
+    maxResponseTimeMs: String(c.maxResponseTimeMs ?? 0),
+    maxFileSizeBytes: String(c.maxFileSizeBytes ?? 0),
+    maxUrlLength: String(c.maxUrlLength ?? 2048),
+    maxQueryStringLength: String(c.maxQueryStringLength ?? 0),
+    maxFolderDepth: String(c.maxFolderDepth ?? 0),
+    followCanonicals: c.followCanonicals ?? false,
+    followPaginationLinks: c.followPaginationLinks ?? true,
+    followNofollow: c.followNofollow ?? false,
+    followJsRedirects: c.followJsRedirects ?? false,
+    cookiePolicy: c.cookiePolicy ?? 'reject-all',
+    perHostUserAgents: (c.perHostUserAgents ?? []).map((r) => ({ ...r })),
+    proxyProfiles: (c.proxyProfiles ?? []).map((p) => ({ ...p })),
+    proxyProfileActive: c.proxyProfileActive ?? '',
   };
 }
 
@@ -371,6 +469,47 @@ export function SettingsDialog({ open, onClose }: Props) {
         .map((s) => s.trim().toLowerCase().replace(/^\./, ''))
         .filter(Boolean),
       maxRedirects: Math.max(0, num(form.maxRedirects, config.maxRedirects)),
+      analyseInlinks: form.analyseInlinks,
+      analyseRedirectChains: form.analyseRedirectChains,
+      analyseHreflang: form.analyseHreflang,
+      analyseDuplicates: form.analyseDuplicates,
+      analysePagination: form.analysePagination,
+      analyseIssues: form.analyseIssues,
+      storeBodySnapshots: form.storeBodySnapshots,
+      bodySnapshotMaxBytes: Math.max(
+        0,
+        num(form.bodySnapshotMaxBytes, config.bodySnapshotMaxBytes),
+      ),
+      maxLinksPerPage: Math.max(0, num(form.maxLinksPerPage, config.maxLinksPerPage)),
+      maxResponseTimeMs: Math.max(
+        0,
+        num(form.maxResponseTimeMs, config.maxResponseTimeMs),
+      ),
+      maxFileSizeBytes: Math.max(
+        0,
+        num(form.maxFileSizeBytes, config.maxFileSizeBytes),
+      ),
+      maxUrlLength: Math.max(0, num(form.maxUrlLength, config.maxUrlLength)),
+      maxQueryStringLength: Math.max(
+        0,
+        num(form.maxQueryStringLength, config.maxQueryStringLength),
+      ),
+      maxFolderDepth: Math.max(0, num(form.maxFolderDepth, config.maxFolderDepth)),
+      followCanonicals: form.followCanonicals,
+      followPaginationLinks: form.followPaginationLinks,
+      followNofollow: form.followNofollow,
+      followJsRedirects: form.followJsRedirects,
+      cookiePolicy: form.cookiePolicy,
+      perHostUserAgents: form.perHostUserAgents
+        .map((r) => ({
+          hostPattern: r.hostPattern.trim(),
+          userAgent: r.userAgent.trim(),
+        }))
+        .filter((r) => r.hostPattern && r.userAgent),
+      proxyProfiles: form.proxyProfiles
+        .map((p) => ({ name: p.name.trim(), url: p.url.trim() }))
+        .filter((p) => p.name && p.url),
+      proxyProfileActive: form.proxyProfileActive.trim(),
     });
     onClose();
   }
@@ -510,6 +649,22 @@ export function SettingsDialog({ open, onClose }: Props) {
               )}
               {active === 'webhook' && (
                 <WebhookPanel form={form} update={update} />
+              )}
+              {active === 'content' && (
+                <ContentPanel form={form} update={update} />
+              )}
+              {active === 'crawl-analysis' && (
+                <CrawlAnalysisPanel form={form} update={update} />
+              )}
+              {active === 'issues' && <IssuesPanel />}
+              {active === 'advanced' && (
+                <AdvancedPanel form={form} update={update} />
+              )}
+              {active === 'cookies' && (
+                <CookiesPanel form={form} update={update} />
+              )}
+              {active === 'per-host-ua' && (
+                <PerHostUaPanel form={form} update={update} />
               )}
             </div>
           </div>
@@ -1416,6 +1571,88 @@ function NetworkPanel({ form, update }: PanelProps) {
       </div>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          Saved Proxy Profiles
+        </div>
+        <p className="mb-2 text-[10px] text-surface-500">
+          Save multiple `(name, URL)` pairs and switch between them via
+          the dropdown below. The active profile overrides the Proxy URL
+          field and the HTTPS_PROXY env var. Empty selection falls back
+          to the Proxy URL above.
+        </p>
+        <label className="mb-3 flex flex-col gap-1">
+          <FieldLabel
+            label="Active profile"
+            info="Picks one of the saved profiles by name. Empty = use the Proxy URL field above (or env vars when that's also empty)."
+          />
+          <select
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+            value={form.proxyProfileActive}
+            onChange={(e) => update('proxyProfileActive', e.target.value)}
+          >
+            <option value="">— none (use Proxy URL above) —</option>
+            {form.proxyProfiles.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="space-y-2">
+          {form.proxyProfiles.length === 0 && (
+            <div className="rounded border border-dashed border-surface-700 px-3 py-3 text-center text-[11px] text-surface-500">
+              No saved profiles — add one below.
+            </div>
+          )}
+          {form.proxyProfiles.map((p, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                className="w-32 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                placeholder="Office"
+                value={p.name}
+                onChange={(e) => {
+                  const next = [...form.proxyProfiles];
+                  next[i] = { ...p, name: e.target.value };
+                  update('proxyProfiles', next);
+                }}
+              />
+              <input
+                className="flex-1 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                placeholder="http://proxy.corp:8080"
+                value={p.url}
+                onChange={(e) => {
+                  const next = [...form.proxyProfiles];
+                  next[i] = { ...p, url: e.target.value };
+                  update('proxyProfiles', next);
+                }}
+              />
+              <button
+                className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:border-red-500 hover:text-red-300"
+                onClick={() => {
+                  const next = form.proxyProfiles.filter((_, j) => j !== i);
+                  update('proxyProfiles', next);
+                  if (form.proxyProfileActive === p.name) {
+                    update('proxyProfileActive', '');
+                  }
+                }}
+                aria-label="Remove profile"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          className="mt-2 flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
+          onClick={() =>
+            update('proxyProfiles', [...form.proxyProfiles, { name: '', url: '' }])
+          }
+        >
+          <Plus className="h-3 w-3" /> Add proxy profile
+        </button>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <Text
           label="Exclude extensions (comma-separated)"
           value={form.excludeExtensionsText}
@@ -1565,6 +1802,323 @@ function HardwarePanel({ form, update }: PanelProps) {
           For raw CPU concurrency, see <strong>Max Concurrency</strong> in the
           Crawler section.
         </p>
+      </div>
+    </>
+  );
+}
+
+function ContentPanel({ form, update }: PanelProps) {
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        How crawled HTML is stored on disk. Disable body snapshots to keep
+        the project file small when you don't need the View Source detail
+        tab; tighten the cap for sites with adversarially-large pages.
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          Body Snapshots
+        </div>
+        <Bool
+          label="Store raw HTML body per page"
+          checked={form.storeBodySnapshots}
+          onChange={(v) => update('storeBodySnapshots', v)}
+          info="Drives the View Source detail tab. ~30–200 KB on disk per HTML page; turn off if you only need metadata and not full source viewing."
+          example="On for SEO audits where View Source matters; off for 1M-URL crawls where disk is tight."
+        />
+        <div className="mt-3">
+          <Num
+            label="Body cap per page (bytes) — 0 = unbounded"
+            value={form.bodySnapshotMaxBytes}
+            onChange={(v) => update('bodySnapshotMaxBytes', v)}
+            info="Bodies over this are truncated and flagged. 1 MB covers the 99.9th percentile of HTML pages without letting one adversarial 50 MB page bloat the project file."
+            example="1048576 (1 MB) default; 524288 (512 KB) on tight disks; 0 to disable truncation entirely."
+          />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function CrawlAnalysisPanel({ form, update }: PanelProps) {
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Per-pass post-crawl analysis toggles. Each pass runs after the
+        HTTP fetch phase finishes and feeds different issue filters. Skip
+        passes you don't need to shave wall-clock on large crawls; the
+        related issue counters quietly read as 0 until the pass runs.
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3 space-y-2">
+        <Bool
+          label="Recompute inlinks"
+          checked={form.analyseInlinks}
+          onChange={(v) => update('analyseInlinks', v)}
+          info="Counts how many internal pages link to each URL. Drives the Most-Linked URLs report and the per-row Inlinks column."
+        />
+        <Bool
+          label="Recompute redirect chains"
+          checked={form.analyseRedirectChains}
+          onChange={(v) => update('analyseRedirectChains', v)}
+          info="Walks 3xx redirect chains, fills `redirect_chain_length` / `redirect_loop`. Drives the 'Long Chain' and 'Redirect Loop' issues + the Redirects tab."
+        />
+        <Bool
+          label="Hreflang reciprocity + inconsistent lang"
+          checked={form.analyseHreflang}
+          onChange={(v) => update('analyseHreflang', v)}
+          info="Page A→B declared but B→A absent flags 'Reciprocity Missing'; same lang on two hrefs flags 'Inconsistent Lang'."
+        />
+        <Bool
+          label="Near-duplicate clustering"
+          checked={form.analyseDuplicates}
+          onChange={(v) => update('analyseDuplicates', v)}
+          info="64-bit SimHash + LSH bucketing + Union-Find clustering on body shingles. Most expensive pass — typical 5–10 s on a 100k crawl."
+        />
+        <Bool
+          label="Pagination ordinal-gap detection"
+          checked={form.analysePagination}
+          onChange={(v) => update('analysePagination', v)}
+          info="?page=1 / ?page=2 / ?page=4 → flags 'Sequence Break' on every member of the broken cluster."
+        />
+        <Bool
+          label="Materialise heavy issue counters"
+          checked={form.analyseIssues}
+          onChange={(v) => update('analyseIssues', v)}
+          info="Pre-computes Dead External Domain, Duplicate URL post-norm, Canonical Chain Multi-hop. Without this the sidebar shows 0 for those three."
+        />
+      </div>
+    </>
+  );
+}
+
+function IssuesPanel() {
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Per-issue check on/off toggles.
+      </p>
+      <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
+        <strong>Coming in V2.</strong> Today every issue check runs
+        unconditionally and surfaces in the sidebar. The plan is to let
+        you silence specific checks per-project (e.g. disable
+        "Description = Title" on a CMS that's known to do it
+        intentionally). Until that ships, hide rows you don't care about
+        by collapsing the sidebar group, or filter them out via the
+        Advanced filter on each tab.
+      </div>
+    </>
+  );
+}
+
+function AdvancedPanel({ form, update }: PanelProps) {
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Lower-level caps and link-follow toggles. Defaults are tuned for
+        typical SEO audits — only touch these if you know why.
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          Link & Response Caps
+        </div>
+        <Num
+          label="Max links per page (issue threshold)"
+          value={form.maxLinksPerPage}
+          onChange={(v) => update('maxLinksPerPage', v)}
+          info="Pages with > this many outgoing links (internal + external) trip the 'Total Links per Page' issue. Google's historic recommendation is 100; mega-menus/hub-pages routinely blow past this."
+          example="100 default; 50 for tight on-page link discipline; 0 to disable the issue."
+        />
+        <Num
+          label="Max response time (ms) — 0 = disabled"
+          value={form.maxResponseTimeMs}
+          onChange={(v) => update('maxResponseTimeMs', v)}
+          info="Aborts requests whose total lifetime (connect + headers + body) exceeds this. Distinct from `requestTimeoutMs` which is the headers timeout. Useful for capping individual slow pages without lowering the overall fetch timeout."
+          example="60000 (1 minute) for huge resources; 0 to rely solely on the fetch timeout."
+        />
+        <Num
+          label="Max file size (bytes) — 0 = disabled"
+          value={form.maxFileSizeBytes}
+          onChange={(v) => update('maxFileSizeBytes', v)}
+          info="Skips body parsing for pages whose Content-Length header exceeds this. The page row is still created so links to it aren't lost; only body parsing and source snapshot capture are skipped."
+          example="10485760 (10 MB) on bandwidth-tight crawls; 0 to download anything."
+        />
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          URL Structure Thresholds
+        </div>
+        <Num
+          label="Max URL length (chars)"
+          value={form.maxUrlLength}
+          onChange={(v) => update('maxUrlLength', v)}
+          info="Trips the 'URL Too Long' issue when LENGTH(url) > this. RFC 7230 doesn't mandate a max but most servers + middleboxes fail above ~2 KB; Chrome itself caps at ~32 KB."
+          example="2048 default (RFC-suggested practical ceiling)."
+        />
+        <Num
+          label="Max query string length (chars) — 0 = disabled"
+          value={form.maxQueryStringLength}
+          onChange={(v) => update('maxQueryStringLength', v)}
+          info="Trips 'Long Query String' when LENGTH(query) > this. Typical session-id sprawl + UTM tracking hits 100+ chars; over 200 starts to look like a bug."
+          example="100 default for most audits; 0 to disable the check."
+        />
+        <Num
+          label="Max folder depth — 0 = disabled"
+          value={form.maxFolderDepth}
+          onChange={(v) => update('maxFolderDepth', v)}
+          info="Trips 'Folder Depth Too Deep' when the URL path's `/`-segment count exceeds this. Useful for spotting over-nested URL structures that bury content from crawlers."
+          example="4 default; 6 on documentation sites with deep TOC trees; 0 to disable."
+        />
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3 space-y-2">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          Link Follow Behaviour
+        </div>
+        <Bool
+          label="Follow canonical targets"
+          checked={form.followCanonicals}
+          onChange={(v) => update('followCanonicals', v)}
+          info="When on, a 200 page declaring a canonical pointing elsewhere also enqueues that target. Default off — most crawls treat canonicals as a signal, not a navigation hint."
+        />
+        <Bool
+          label="Follow rel=next / rel=prev"
+          checked={form.followPaginationLinks}
+          onChange={(v) => update('followPaginationLinks', v)}
+          info="When on (default), pagination_next + pagination_prev URLs are post-fetch enqueued. Off only to debug pagination-only loops without disabling all link follow."
+        />
+        <Bool
+          label="Follow nofollow links (override 'respect nofollow')"
+          checked={form.followNofollow}
+          onChange={(v) => update('followNofollow', v)}
+          info="When on, rel=nofollow links are recursed into like any other link. Default off — Screaming Frog 'Respect Nofollow' default."
+        />
+        <Bool
+          label="Follow JS / meta-refresh redirects"
+          checked={form.followJsRedirects}
+          onChange={(v) => update('followJsRedirects', v)}
+          info="When on, `<meta http-equiv='refresh'>` content URLs are enqueued like a redirect target. window.location body redirects are heuristic-only and currently out of scope."
+        />
+      </div>
+    </>
+  );
+}
+
+function CookiesPanel({ form, update }: PanelProps) {
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Cookie policy applied to every fetch. The crawler is otherwise
+        stateless across requests; this setting controls whether
+        Set-Cookie response headers are recorded for the cookie-flag
+        issue checks (Missing Secure / HttpOnly / SameSite).
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <label className="flex flex-col gap-1">
+          <FieldLabel
+            label="Cookie policy"
+            info="Reject-all = ignore Set-Cookie entirely (zero counts on cookie-flag issues). Block-third-party = analyse only first-party cookies (Domain attribute matches the page's registrable domain). Accept-all = analyse every Set-Cookie regardless of scope."
+            example="Reject-all for stateless audits; Block-third-party to focus on the site's own cookie hygiene; Accept-all to also see ad/analytics tracker cookies."
+          />
+          <select
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+            value={form.cookiePolicy}
+            onChange={(e) =>
+              update(
+                'cookiePolicy',
+                e.target.value as 'reject-all' | 'accept-all' | 'block-third-party',
+              )
+            }
+          >
+            <option value="reject-all">Reject all (default — stateless)</option>
+            <option value="accept-all">Accept all</option>
+            <option value="block-third-party">Block third-party</option>
+          </select>
+        </label>
+        <p className="mt-2 text-[10px] text-surface-500">
+          Cookie values themselves are <strong>never</strong> stored in
+          the project file regardless of this setting — only the security
+          flag (Secure / HttpOnly / SameSite) counts are kept.
+        </p>
+      </div>
+    </>
+  );
+}
+
+function PerHostUaPanel({ form, update }: PanelProps) {
+  const rules = form.perHostUserAgents;
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        Override the User-Agent on a per-host basis. Useful when crawling
+        a mobile subdomain with the mobile-Googlebot UA in the same run
+        as the desktop site, or when a CDN serves a different page based
+        on the requester's UA. The first matching pattern wins; the
+        global User-Agent (Requests tab) is the fallback.
+      </p>
+      <div className="mb-3 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <p className="mb-2 text-[10px] text-surface-500">
+          Pattern syntax: exact host (<code>m.example.com</code>) or
+          leading wildcard (<code>*.example.com</code>) — the wildcard
+          form matches any subdomain but <em>not</em> the apex.
+        </p>
+        <div className="space-y-2">
+          {rules.length === 0 && (
+            <div className="rounded border border-dashed border-surface-700 px-3 py-4 text-center text-[11px] text-surface-500">
+              No per-host overrides yet — add one below.
+            </div>
+          )}
+          {rules.map((r, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                className="flex-1 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                placeholder="*.m.example.com"
+                value={r.hostPattern}
+                onChange={(e) => {
+                  const next = [...rules];
+                  next[i] = { ...r, hostPattern: e.target.value };
+                  update('perHostUserAgents', next);
+                }}
+              />
+              <input
+                className="flex-[2] rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                placeholder="Mozilla/5.0 (iPhone; …)"
+                value={r.userAgent}
+                onChange={(e) => {
+                  const next = [...rules];
+                  next[i] = { ...r, userAgent: e.target.value };
+                  update('perHostUserAgents', next);
+                }}
+              />
+              <button
+                className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:border-red-500 hover:text-red-300"
+                onClick={() => {
+                  const next = rules.filter((_, j) => j !== i);
+                  update('perHostUserAgents', next);
+                }}
+                title="Remove"
+                aria-label="Remove rule"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          className="mt-3 flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
+          onClick={() =>
+            update('perHostUserAgents', [
+              ...rules,
+              { hostPattern: '', userAgent: '' },
+            ])
+          }
+        >
+          <Plus className="h-3 w-3" /> Add per-host UA rule
+        </button>
       </div>
     </>
   );

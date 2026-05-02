@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import clsx from 'clsx';
 import type { OverviewCounts, UrlCategory } from '@freecrawl/shared-types';
@@ -16,7 +16,13 @@ export function OverviewSidebar() {
   const overview = useAppStore((s) => s.overview);
   const setOverview = useAppStore((s) => s.setOverview);
   const dataVersion = useAppStore((s) => s.dataVersion);
-  const progress = useAppStore((s) => s.progress);
+  // Subscribe to scalar fields of `progress` rather than the whole
+  // object. Zustand re-renders this component only when these specific
+  // values change — so the 5/s progress events that don't move the
+  // crawled count (the in-flight pending fluctuates every poll) no
+  // longer trigger a full sidebar re-render.
+  const progressRunning = useAppStore((s) => s.progress?.running ?? false);
+  const progressCrawled = useAppStore((s) => s.progress?.crawled ?? 0);
   const activeCategory = useAppStore((s) => s.activeCategory);
   const navigateToCategory = useAppStore((s) => s.navigateToCategory);
   const [expanded, setExpanded] = useState<Set<string>>(
@@ -84,13 +90,13 @@ export function OverviewSidebar() {
     // The crawler's `progress` event also bumps `progress.crawled`
     // which triggers a separate progress-driven refetch below, so
     // this interval is just a safety net.
-    const intervalMs = progress?.running ? 3000 : 30_000;
+    const intervalMs = progressRunning ? 3000 : 30_000;
     const id = setInterval(scheduleLoad, intervalMs);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [dataVersion, setOverview, progress?.running]);
+  }, [dataVersion, setOverview, progressRunning]);
 
   // Progress-driven refetch. When the crawler reports a meaningful
   // change (every 50 URLs crawled) we trigger an immediate sidebar
@@ -99,12 +105,12 @@ export function OverviewSidebar() {
   // twice if React re-renders for an unrelated reason.
   const lastRefetchAtRef = useRef(0);
   useEffect(() => {
-    if (!progress?.running) return;
-    const bucket = Math.floor((progress.crawled ?? 0) / 50);
+    if (!progressRunning) return;
+    const bucket = Math.floor(progressCrawled / 50);
     if (bucket === lastRefetchAtRef.current) return;
     lastRefetchAtRef.current = bucket;
     void window.freecrawl.overviewGet().then((o) => setOverview(o));
-  }, [progress?.crawled, progress?.running, setOverview]);
+  }, [progressCrawled, progressRunning, setOverview]);
 
   const toggle = (k: string) => {
     setExpanded((prev) => {
@@ -115,7 +121,9 @@ export function OverviewSidebar() {
     });
   };
 
-  const tree = buildTree(overview);
+  // The tree itself only depends on `overview`. Memoising it skips the
+  // 150-node object construction on every progress-driven render.
+  const tree = useMemo(() => buildTree(overview), [overview]);
   const totalForPercent = overview?.summary.totalInternalUrls ?? 0;
 
   return (
@@ -149,7 +157,7 @@ export function OverviewSidebar() {
   );
 }
 
-function TreeNode({
+const TreeNode = memo(function TreeNode({
   node,
   depth,
   expanded,
@@ -219,7 +227,7 @@ function TreeNode({
         ))}
     </>
   );
-}
+});
 
 function buildTree(o: OverviewCounts | null): Node[] {
   if (!o) return [];
@@ -1106,6 +1114,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.paginationBroken,
               category: 'issues:pagination-broken',
             },
+            {
+              key: 'issues-pagination-sequence-break',
+              label: 'Sequence Break (gap in numbering)',
+              count: o.issues.paginationSequenceBreak,
+              category: 'issues:pagination-sequence-break',
+            },
           ],
         },
         {
@@ -1141,6 +1155,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Target Issues',
               count: o.issues.hreflangTargetIssues,
               category: 'issues:hreflang-target-issues',
+            },
+            {
+              key: 'issues-hreflang-inconsistent-lang',
+              label: 'Inconsistent Lang (same lang, two hrefs)',
+              count: o.issues.hreflangInconsistentLang,
+              category: 'issues:hreflang-inconsistent-lang',
             },
           ],
         },
@@ -1231,6 +1251,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'External Links > 100',
               count: o.issues.externalLinksTooMany,
               category: 'issues:external-links-too-many',
+            },
+            {
+              key: 'issues-links-per-page-too-many',
+              label: 'Total Links per Page > 100',
+              count: o.issues.linksPerPageTooMany,
+              category: 'issues:links-per-page-too-many',
             },
             {
               key: 'issues-outlinks-zero',

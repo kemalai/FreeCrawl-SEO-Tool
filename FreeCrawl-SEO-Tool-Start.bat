@@ -71,7 +71,7 @@ if not exist "packages\core\dist\index.js" set NEED_BUILD=1
 if "!NEED_BUILD!"=="1" goto DO_BUILD
 echo [OK] Paylasilan paketler hazir.
 echo.
-goto LAUNCH
+goto CHECK_DESKTOP_BUILD
 
 :DO_BUILD
 echo ------------------------------------------------------------
@@ -82,15 +82,47 @@ if errorlevel 1 goto ERR_BUILD
 echo [OK] Paketler hazir.
 echo.
 
+REM ---- 4b) Desktop uygulamasini production build et -------------------------
+REM Dev mod (electron-vite dev) ilk acilista 1700+ modulu on-demand transform
+REM ediyor ve 20-30 sn cold start suruyor. Production build'de tum moduller
+REM tek bir bundle'a derlenmis oldugu icin acilis 1-2 sn'ye iniyor.
+:CHECK_DESKTOP_BUILD
+set NEED_DESKTOP_BUILD=0
+if not exist "apps\desktop\out\main\index.js" set NEED_DESKTOP_BUILD=1
+if not exist "apps\desktop\out\preload\index.js" set NEED_DESKTOP_BUILD=1
+if not exist "apps\desktop\out\renderer\index.html" set NEED_DESKTOP_BUILD=1
+
+if "!NEED_DESKTOP_BUILD!"=="1" goto DO_DESKTOP_BUILD
+echo [OK] Desktop bundle hazir.
+echo.
+goto LAUNCH
+
+:DO_DESKTOP_BUILD
+echo ------------------------------------------------------------
+echo   Desktop uygulamasi build ediliyor (production)...
+echo   Bu islem yaklasik 10-15 sn surer ve sadece ilk calistirmada
+echo   (veya kod degisikligi sonrasi) yeniden yapilir.
+echo ------------------------------------------------------------
+call npm --workspace apps/desktop run build
+if errorlevel 1 goto ERR_BUILD
+echo [OK] Desktop bundle hazir.
+echo.
+
 REM ---- 5) Uygulamayi baslat -------------------------------------------------
 :LAUNCH
 echo ============================================================
-echo   FreeCrawl SEO Tool baslatiliyor (npm run dev)...
+echo   FreeCrawl SEO Tool baslatiliyor (production)...
 echo   Bu pencereyi KAPATMAYIN - uygulamanin yasam dongusu buna bagli.
 echo ============================================================
 echo.
 
-call npm run dev
+REM `node:sqlite` Node 24'te kararli ama hala "experimental" bayragi tasiyor
+REM ve modul yuklenirken ExperimentalWarning basiyor. NODE_NO_WARNINGS=1
+REM ile bu kozmetik uyariyi sustururuz; gercek hatalar (TypeError vs.)
+REM yine konsola yazilir.
+set NODE_NO_WARNINGS=1
+
+call npm --workspace apps/desktop run start
 
 echo.
 echo ------------------------------------------------------------

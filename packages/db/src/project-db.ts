@@ -464,6 +464,24 @@ export class ProjectDb {
       this.db.exec('PRAGMA synchronous = NORMAL');
       this.db.exec('PRAGMA foreign_keys = ON');
     }
+    // Two writer connections coexist on the same DB file in the desktop
+    // app: the main-process ProjectDb (used for sitemap ingest, post-
+    // crawl recomputes, the user-initiated mutations like deleteUrl)
+    // AND the db-writer worker thread (used for the per-URL hot path).
+    // SQLite serialises writes at the file level, so without
+    // `busy_timeout` whichever connection is "second" through the door
+    // gets SQLITE_BUSY thrown the instant the other one is mid-
+    // transaction — we saw this when the user clicked Start twice in
+    // quick succession ("Sitemap discovery skipped: database is
+    // locked"). 10 s is well over the worst-case writer hold time
+    // (post-crawl materialise-issues yielding transactions are <500 ms
+    // each) and adds zero overhead when there is no contention.
+    if (!readOnly) {
+      this.db.exec('PRAGMA busy_timeout = 10000');
+    } else {
+      // Even read-only connections benefit during a checkpoint storm.
+      this.db.exec('PRAGMA busy_timeout = 5000');
+    }
     this.db.exec('PRAGMA temp_store = MEMORY');
     this.db.exec(`PRAGMA cache_size = ${readOnly ? -32768 : -131072}`);
     // 30GB virtual address window for mmap-backed reads; OS only pages in
@@ -515,8 +533,121 @@ export class ProjectDb {
        DELETE FROM url_sources;
        DELETE FROM sitemap_urls;
        DELETE FROM urls;
-       DELETE FROM project_meta;`,
+       DELETE FROM project_meta;
+       DELETE FROM urls_issues;
+       DELETE FROM crawl_queue;`,
     );
+  }
+
+  /**
+   * GDPR-aligned per-domain wipe. Removes every URL row whose host
+   * (case-insensitive) matches `domain`, plus every dependent record
+   * keyed off those URLs (`links`, `headers`, `url_sources`,
+   * `urls_issues`, `image_usages` rows pointing at images that are now
+   * orphaned). Used by Settings → "Delete Domain Data" so a user can
+   * comply with a data-removal request without nuking the whole crawl.
+   *
+   * Domain match is exact-host (`example.com` matches `example.com` but
+   * not `sub.example.com`). For "all subdomains too" the caller can
+   * issue multiple deletes; we don't infer wildcard semantics here to
+   * avoid surprising over-broad wipes.
+   *
+   * Wrapped in `runInTransaction` so the wipe is atomic: either every
+   * dependent row goes away or nothing does.
+   */
+  deleteByDomain(domain: string): { urlsDeleted: number; linksDeleted: number } {
+    const target = domain.trim().toLowerCase();
+    if (!target) return { urlsDeleted: 0, linksDeleted: 0 };
+    return this.runInTransaction(() => {
+      // Snapshot the URL ids we'll delete so we can fan out into the
+      // dependent tables before the parent rows vanish.
+      const ids = (
+        this.db
+          .prepare(
+            `SELECT id FROM urls
+              WHERE LOWER(
+                SUBSTR(
+                  url,
+                  INSTR(url, '://') + 3,
+                  CASE
+                    WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
+                      THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
+                    ELSE LENGTH(url)
+                  END
+                )
+              ) = ?`,
+          )
+          .all(target) as { id: number }[]
+      ).map((r) => r.id);
+
+      if (ids.length === 0) return { urlsDeleted: 0, linksDeleted: 0 };
+
+      // SQLite parameter limit: chunk the IN-list at 500 ids per delete.
+      const CHUNK = 500;
+      let linksDeleted = 0;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const slice = ids.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => '?').join(',');
+        // Links can reference these urls as `from_url_id` (page → link
+        // catalogue) or by url string in `to_url`. Wipe both directions.
+        const linkRes = this.db
+          .prepare(`DELETE FROM links WHERE from_url_id IN (${placeholders})`)
+          .run(...slice);
+        linksDeleted += Number(linkRes.changes);
+        this.db
+          .prepare(`DELETE FROM headers WHERE url_id IN (${placeholders})`)
+          .run(...slice);
+        this.db
+          .prepare(`DELETE FROM url_sources WHERE url_id IN (${placeholders})`)
+          .run(...slice);
+        this.db
+          .prepare(`DELETE FROM image_usages WHERE from_url_id IN (${placeholders})`)
+          .run(...slice);
+        this.db
+          .prepare(`DELETE FROM urls_issues WHERE url_id IN (${placeholders})`)
+          .run(...slice);
+      }
+
+      // Wipe `to_url` references in `links` that pointed AT the deleted
+      // URLs by host string. This is a separate pass because `to_url`
+      // is a string column, not a foreign key.
+      this.db
+        .prepare(
+          `DELETE FROM links
+            WHERE LOWER(
+              SUBSTR(
+                to_url,
+                INSTR(to_url, '://') + 3,
+                CASE
+                  WHEN INSTR(SUBSTR(to_url, INSTR(to_url, '://') + 3), '/') > 0
+                    THEN INSTR(SUBSTR(to_url, INSTR(to_url, '://') + 3), '/') - 1
+                  ELSE LENGTH(to_url)
+                END
+              )
+            ) = ?`,
+        )
+        .run(target);
+
+      // Finally the parent URL rows.
+      let urlsDeleted = 0;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const slice = ids.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => '?').join(',');
+        const res = this.db
+          .prepare(`DELETE FROM urls WHERE id IN (${placeholders})`)
+          .run(...slice);
+        urlsDeleted += Number(res.changes);
+      }
+
+      // Orphaned image rows (no remaining `image_usages` referencing
+      // them) are cleaned in a follow-up sweep.
+      this.db.exec(
+        `DELETE FROM images
+          WHERE id NOT IN (SELECT DISTINCT image_id FROM image_usages)`,
+      );
+
+      return { urlsDeleted, linksDeleted };
+    });
   }
 
   /**
@@ -592,6 +723,47 @@ export class ProjectDb {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       )
       .run(key, value);
+  }
+
+  /**
+   * Atomic batch write for the per-URL hot path. Replaces the previous
+   * "upsertUrl then runInTransaction({ setHeaders, setSource,
+   * insertLinks, insertImages })" sequence with a single transaction
+   * that runs in one trip across the writer-worker boundary — half
+   * the IPC round-trips, one transaction commit instead of two
+   * sequential commits, and atomic visibility (a reader can never see
+   * a URL row without its links).
+   */
+  writeFetchedUrl(payload: {
+    upsert: UpsertUrlInput;
+    headers: ReadonlyArray<readonly [string, string]> | null;
+    storeBody: { body: string; maxBytes: number } | null;
+    links: DiscoveredLink[];
+    images: DiscoveredImage[];
+    fromDepth: number;
+  }): { urlId: number } {
+    return this.runInTransaction(() => {
+      const urlId = this.upsertUrl(payload.upsert);
+      if (urlId && payload.headers && payload.headers.length > 0) {
+        this.setUrlHeaders(urlId, payload.headers);
+      }
+      if (urlId && payload.storeBody) {
+        try {
+          this.setUrlSource(urlId, payload.storeBody.body, payload.storeBody.maxBytes);
+        } catch {
+          /* best-effort — a snapshot failure must not abort the whole batch */
+        }
+      }
+      if (urlId) {
+        if (payload.links.length > 0) {
+          this.insertLinks(urlId, payload.links, payload.fromDepth);
+        }
+        if (payload.images.length > 0) {
+          this.insertImages(urlId, payload.images);
+        }
+      }
+      return { urlId };
+    });
   }
 
   getAllUrls(): string[] {
@@ -712,7 +884,24 @@ export class ProjectDb {
       });
   }
 
-  getPendingInternalLinks(): { url: string; depth: number }[] {
+  /**
+   * Internal URLs the crawler discovered as link targets but never
+   * fetched (depth/queue/filter race), plus URLs explicitly marked for
+   * re-crawl (status_code nulled out).
+   *
+   *   `excludeNofollow` — when true, drops URLs whose ONLY incoming
+   *   internal links carry rel="nofollow". A URL referenced by both a
+   *   nofollow and a follow link still qualifies (the follow link is
+   *   what we'd crawl). Used when the active config has
+   *   `followNofollow: false` so the drain loop and resume path don't
+   *   silently crawl URLs the user explicitly asked to leave alone.
+   */
+  getPendingInternalLinks(
+    opts: { excludeNofollow?: boolean } = {},
+  ): { url: string; depth: number }[] {
+    const followFilter = opts.excludeNofollow
+      ? `AND (l.rel IS NULL OR l.rel NOT LIKE '%nofollow%')`
+      : '';
     const discovered = this.db
       .prepare(
         `SELECT l.to_url AS url, MIN(u.depth) + 1 AS depth
@@ -720,6 +909,7 @@ export class ProjectDb {
          JOIN urls u ON l.from_url_id = u.id
          WHERE l.is_internal = 1
            AND l.to_url NOT IN (SELECT url FROM urls)
+           ${followFilter}
          GROUP BY l.to_url`,
       )
       .all() as unknown as { url: string; depth: number }[];
@@ -967,6 +1157,45 @@ export class ProjectDb {
   }
 
   /**
+   * Cooperatively-scheduled recompute. Identical end-state to
+   * `recomputeUrlsIssues` but yields to the Node event loop between
+   * each definition's INSERT, so the main thread can service IPC and
+   * crawler callbacks instead of freezing for the full duration of
+   * the 70+ correlated subqueries.
+   *
+   * Tradeoff vs. the sync version: every INSERT runs in its own tiny
+   * transaction (a `DELETE` + N `INSERT`s) instead of one big atomic
+   * one. Readers may briefly see a partially-rebuilt table during the
+   * window. For the periodic in-crawl tick that drives sidebar
+   * counters this is acceptable — momentary undercount for live
+   * counters beats a 1–3 s UI freeze every 30 s. The post-crawl pass
+   * still uses the atomic sync version for the final committed state.
+   */
+  async recomputeUrlsIssuesYielding(
+    definitions: ReadonlyArray<readonly [string, string]>,
+  ): Promise<void> {
+    // Atomic truncate so getIssueCounts can never see "old + new" rows.
+    this.runInTransaction(() => {
+      this.db.exec('DELETE FROM urls_issues');
+    });
+    for (const [issueKey, where] of definitions) {
+      // One transaction per definition keeps the writer lock window
+      // short — other writes (the crawler's per-URL inserts) can
+      // interleave between definitions instead of waiting on the
+      // whole 70-statement block.
+      this.runInTransaction(() => {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO urls_issues (url_id, issue_key)
+               SELECT id, ? FROM urls WHERE ${where}`,
+          )
+          .run(issueKey);
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+
+  /**
    * Fast lookup of materialised issue counts. Single SELECT … GROUP BY
    * — replaces the 130-statement loop the sidebar used to run. Only
    * keys present in `urls_issues` appear; callers default missing
@@ -983,6 +1212,193 @@ export class ProjectDb {
     const out = new Map<string, number>();
     for (const r of rows) out.set(r.issue_key, r.c);
     return out;
+  }
+
+  /**
+   * Detect paginated URL clusters with missing ordinals and flag them.
+   *
+   * Algorithm:
+   *   1. Pull every internal HTML URL that participates in pagination
+   *      — has either `pagination_next` or `pagination_prev` non-null.
+   *   2. Extract a `(template, ordinal)` pair from each URL by stripping
+   *      the page-number token and recording its integer value. Three
+   *      patterns are recognised in priority order:
+   *        a. `?page=<n>` / `?p=<n>` / `?pg=<n>` query param
+   *        b. `/page/<n>/` or `/page/<n>` path segment
+   *        c. `/<n>` trailing path component (only when ≥ 2 — too
+   *           ambiguous otherwise; a literal `/2` could mean page 2
+   *           or product 2, but in practice paginated trailing-number
+   *           URLs always start at 2 because page 1 omits the number)
+   *      URLs that don't match any pattern are skipped — they have
+   *      pagination links but use an unknown URL scheme (cursor IDs,
+   *      hash-only, JS state) and gap detection isn't possible.
+   *   3. GROUP BY template, sort each group's ordinals ascending, and
+   *      flag every member of a group whose ordinals contain a gap
+   *      (`max - min + 1 != count` — accepts duplicates, requires
+   *      density). Groups of size 1 are skipped.
+   *   4. Bulk-update `urls.pagination_sequence_break` in a single
+   *      transaction. Default 0 already set by the schema; we only
+   *      need to write 1's.
+   *
+   * O(N) memory, O(N log N) time (per-template sort dominates).
+   */
+  recomputePaginationSequence(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT id, url
+           FROM urls
+          WHERE is_external = 0
+            AND content_kind = 'html'
+            AND (pagination_next IS NOT NULL OR pagination_prev IS NOT NULL)`,
+      )
+      .all() as { id: number; url: string }[];
+
+    interface ParsedPage {
+      id: number;
+      template: string;
+      ordinal: number;
+    }
+    const parsed: ParsedPage[] = [];
+    for (const r of rows) {
+      const ord = parsePaginationOrdinal(r.url);
+      if (ord) parsed.push({ id: r.id, template: ord.template, ordinal: ord.ordinal });
+    }
+
+    // Group by template + walk for gaps.
+    const groups = new Map<string, ParsedPage[]>();
+    for (const p of parsed) {
+      const arr = groups.get(p.template);
+      if (arr) arr.push(p);
+      else groups.set(p.template, [p]);
+    }
+
+    const flaggedIds: number[] = [];
+    for (const arr of groups.values()) {
+      if (arr.length < 2) continue;
+      const ordinals = arr.map((p) => p.ordinal).sort((a, b) => a - b);
+      const min = ordinals[0]!;
+      const max = ordinals[ordinals.length - 1]!;
+      const expected = max - min + 1;
+      const distinct = new Set(ordinals).size;
+      if (distinct < expected) {
+        // At least one ordinal is missing in the [min,max] range.
+        for (const p of arr) flaggedIds.push(p.id);
+      }
+    }
+
+    this.runInTransaction(() => {
+      this.db.exec('UPDATE urls SET pagination_sequence_break = 0 WHERE pagination_sequence_break = 1');
+      if (flaggedIds.length === 0) return;
+      const stmt = this.db.prepare(
+        'UPDATE urls SET pagination_sequence_break = 1 WHERE id = ?',
+      );
+      for (const id of flaggedIds) stmt.run(id);
+    });
+  }
+
+  /**
+   * Persist the in-flight queue snapshot. Called by the crawler on a
+   * fixed cadence (every 30 s by default) so a crash, OOM, or OS
+   * reboot only loses up to that window. The pass is idempotent:
+   * `INSERT OR IGNORE` against the URL primary key, then the matching
+   * `seed_url` to discriminate stale checkpoints from a different
+   * start URL the user may have queued earlier in the same project.
+   *
+   * Truncate-then-insert is intentional: the queue shrinks as URLs
+   * complete, and we don't want yesterday's pending entries lingering
+   * after a successful crawl finishes.
+   */
+  checkpointQueue(items: ReadonlyArray<{ url: string; depth: number }>, seedUrl: string): void {
+    this.runInTransaction(() => {
+      this.db.exec('DELETE FROM crawl_queue');
+      if (items.length === 0) return;
+      const stmt = this.db.prepare(
+        'INSERT OR IGNORE INTO crawl_queue (url, depth, seed_url) VALUES (?, ?, ?)',
+      );
+      const seed = seedUrl ?? '';
+      const CHUNK = 500;
+      // Multi-row VALUES inserts in chunks — single .run() per item is
+      // ~10× slower at 100k+ items.
+      for (let i = 0; i < items.length; i += CHUNK) {
+        const slice = items.slice(i, i + CHUNK);
+        for (const it of slice) stmt.run(it.url, it.depth, seed);
+      }
+    });
+  }
+
+  /** Read the pending queue snapshot back. Empty array when nothing
+   * was checkpointed (i.e. previous crawl exited cleanly). */
+  loadQueueCheckpoint(): { url: string; depth: number; seedUrl: string }[] {
+    return this.db
+      .prepare('SELECT url, depth, seed_url AS seedUrl FROM crawl_queue')
+      .all() as { url: string; depth: number; seedUrl: string }[];
+  }
+
+  /** Wipe the checkpoint — called after a successful clean crawl
+   * completion or when the user dismisses the resume prompt. */
+  clearQueueCheckpoint(): void {
+    this.db.exec('DELETE FROM crawl_queue');
+  }
+
+  /**
+   * Detect pages whose hreflang JSON contains the same `lang` token
+   * mapped to two different target URLs. Common cause: a CMS bug
+   * where the language switcher emits both `<link hreflang="es" href="…/es/page-a">`
+   * and `<link hreflang="es" href="…/es/page-b">` on the same page,
+   * which makes search engines unable to pick a canonical regional
+   * variant. Sets `urls.hreflang_inconsistent_lang = 1` for every
+   * affected page.
+   *
+   * Implementation: pull the JSON column for every page that has any
+   * hreflang entries; parse client-side; mark the row when any lang
+   * appears twice with non-equal hrefs. Truncate-then-mark wrapped in
+   * a transaction so the boolean is consistent.
+   */
+  recomputeHreflangInconsistent(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT id, hreflangs FROM urls
+          WHERE is_external = 0
+            AND content_kind = 'html'
+            AND hreflangs IS NOT NULL
+            AND hreflangs != ''
+            AND hreflangs != '[]'`,
+      )
+      .all() as { id: number; hreflangs: string }[];
+
+    const flagged: number[] = [];
+    for (const r of rows) {
+      let entries: { lang?: string; href?: string }[] = [];
+      try {
+        entries = JSON.parse(r.hreflangs) as { lang?: string; href?: string }[];
+      } catch {
+        continue;
+      }
+      const seen = new Map<string, string>();
+      let inconsistent = false;
+      for (const e of entries) {
+        if (!e.lang || !e.href) continue;
+        const key = e.lang.toLowerCase();
+        const prev = seen.get(key);
+        if (prev && prev !== e.href) {
+          inconsistent = true;
+          break;
+        }
+        if (!prev) seen.set(key, e.href);
+      }
+      if (inconsistent) flagged.push(r.id);
+    }
+
+    this.runInTransaction(() => {
+      this.db.exec(
+        'UPDATE urls SET hreflang_inconsistent_lang = 0 WHERE hreflang_inconsistent_lang = 1',
+      );
+      if (flagged.length === 0) return;
+      const stmt = this.db.prepare(
+        'UPDATE urls SET hreflang_inconsistent_lang = 1 WHERE id = ?',
+      );
+      for (const id of flagged) stmt.run(id);
+    });
   }
 
   recomputeInlinks(): void {
@@ -2511,6 +2927,13 @@ export class ProjectDb {
               AND i.byte_size > 5242880
          )`,
       ),
+      paginationSequenceBreak: countWhere(
+        `${html} AND pagination_sequence_break = 1`,
+      ),
+      linksPerPageTooMany: countWhere(`${html} AND outlinks > 100`),
+      hreflangInconsistentLang: countWhere(
+        `${html} AND hreflang_inconsistent_lang = 1`,
+      ),
     };
   }
 
@@ -3710,6 +4133,7 @@ export class ProjectDb {
     schemaInvalidCount: r.schema_invalid_count,
     paginationNext: r.pagination_next,
     paginationPrev: r.pagination_prev,
+    paginationSequenceBreak: (r as unknown as { pagination_sequence_break?: number }).pagination_sequence_break === 1,
     hreflangs: r.hreflangs,
     hreflangCount: r.hreflang_count,
     amphtml: r.amphtml,
@@ -3801,6 +4225,66 @@ function validSortColumn(sortBy: string | undefined): string {
   if (!sortBy) return 'id';
   const snake = toSnakeCase(sortBy);
   return VALID_SORT_COLUMNS.has(snake) ? snake : 'id';
+}
+
+/**
+ * Parse a paginated URL into a `(template, ordinal)` pair so the
+ * pagination-sequence pass can group same-pattern pages and detect
+ * missing numbers. Returns null when no recognised page-number token
+ * is found — those URLs are dropped from the analysis (we'd produce
+ * false positives if we tried to invent ordinals from arbitrary path
+ * components).
+ *
+ * Priority order matters: query params first because they're
+ * unambiguous; then `/page/N` because it's the most common SEO-safe
+ * pagination scheme; then trailing `/N` (≥ 2) because page-1 URLs
+ * conventionally omit the number, so a `/products/cars` is page 1 of
+ * `/products/cars/2`. Lower-bound 2 prevents false positives on
+ * `/foo/1` (which often means "category 1", not "page 1").
+ */
+function parsePaginationOrdinal(
+  rawUrl: string,
+): { template: string; ordinal: number } | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  // Pattern A — `?page=N` (and common synonyms).
+  for (const key of ['page', 'p', 'pg']) {
+    const v = url.searchParams.get(key);
+    if (v && /^\d+$/.test(v)) {
+      const n = Number.parseInt(v, 10);
+      if (n >= 1) {
+        const params = new URLSearchParams(url.search);
+        params.delete(key);
+        const cleanQuery = params.toString();
+        const template = `${url.origin}${url.pathname}?${key}=*${cleanQuery ? `&${cleanQuery}` : ''}`;
+        return { template, ordinal: n };
+      }
+    }
+  }
+  // Pattern B — `/page/N` or `/page/N/`.
+  const pageSegMatch = url.pathname.match(/(\/page\/)(\d+)(\/?)$/i);
+  if (pageSegMatch) {
+    const n = Number.parseInt(pageSegMatch[2]!, 10);
+    if (n >= 1) {
+      const stripped = url.pathname.replace(/\/page\/\d+\/?$/i, '');
+      const template = `${url.origin}${stripped}/page/*${pageSegMatch[3]}${url.search}`;
+      return { template, ordinal: n };
+    }
+  }
+  // Pattern C — trailing `/N`, only N ≥ 2 (page 1 omits the number).
+  const trailingMatch = url.pathname.match(/^(.+\/)(\d+)\/?$/);
+  if (trailingMatch) {
+    const n = Number.parseInt(trailingMatch[2]!, 10);
+    if (n >= 2) {
+      const template = `${url.origin}${trailingMatch[1]}*${url.search}`;
+      return { template, ordinal: n };
+    }
+  }
+  return null;
 }
 
 /**
@@ -4986,6 +5470,58 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                  WHERE i.src = urls.twitter_image
                    AND i.byte_size IS NOT NULL
                    AND i.byte_size > 5242880
+              )`;
+    case 'issues:pagination-sequence-break':
+      // Set post-crawl by `recomputePaginationSequence()` — see the
+      // implementation comment there for the gap-detection algorithm
+      // and the URL pattern recognisers that produce ordinals.
+      return `is_external = 0 AND content_kind = 'html'
+              AND pagination_sequence_break = 1`;
+    case 'issues:links-per-page-too-many':
+      // Total outgoing links (internal + external, deduplicated) > 100.
+      // Distinct from `external-links-too-many` which only counts the
+      // external bucket — this filter trips on internal-heavy pages too
+      // (mega-menus, sitemap-style hub pages) which Google's PageRank
+      // dilution makes equally problematic.
+      return `is_external = 0 AND content_kind = 'html'
+              AND outlinks > 100`;
+    case 'tab:redirects':
+      // Wave 4 — Redirects tab. Every internal URL whose status is 3xx
+      // is a redirect hop. Each hop already has its own row in the
+      // `urls` table (the crawler enqueues redirect targets so we
+      // capture full chains as discrete rows), so a simple status-class
+      // filter recovers the full set; the table's `redirect_target`,
+      // `redirect_chain_length`, `redirect_final_url`, and
+      // `redirect_loop` columns surface chain context per row.
+      return `is_external = 0
+              AND status_code >= 300 AND status_code < 400`;
+    case 'tab:canonicals':
+      // Wave 4 — Canonicals tab. Every HTML page that declares a
+      // canonical (HTML link tag OR HTTP `Link: rel=canonical` header).
+      // Self-referencing, cross-page, and mismatched canonicals all
+      // surface here; the per-row "Canonical" + "Canonical (HTTP)"
+      // columns let the user audit them visually.
+      return `is_external = 0 AND content_kind = 'html'
+              AND (
+                (canonical IS NOT NULL AND canonical != '')
+                OR (canonical_http IS NOT NULL AND canonical_http != '')
+              )`;
+    case 'issues:hreflang-inconsistent-lang':
+      // Set post-crawl by `recomputeHreflangInconsistent()` — same `lang`
+      // token mapped to two different hrefs on the same page.
+      return `is_external = 0 AND content_kind = 'html'
+              AND hreflang_inconsistent_lang = 1`;
+    case 'tab:directives':
+      // Wave 4 — Directives tab. Pages declaring any indexability
+      // directive: meta robots, X-Robots-Tag header, robots.txt block,
+      // or canonical-to-other (which acts as an indexability signal).
+      // The `Meta Robots`, `X-Robots-Tag`, and `Indexability Reason`
+      // columns make the active directives readable at a glance.
+      return `is_external = 0 AND content_kind = 'html'
+              AND (
+                (meta_robots IS NOT NULL AND meta_robots != '')
+                OR (x_robots_tag IS NOT NULL AND x_robots_tag != '')
+                OR indexability LIKE 'non-indexable%'
               )`;
     default:
       return null;

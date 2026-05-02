@@ -79,6 +79,10 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => send('export-json'),
         },
         {
+          label: 'Export Current View as XML…',
+          click: () => send('export-xml'),
+        },
+        {
           label: 'Generate XML Sitemap…',
           click: () => send('generate-sitemap'),
         },
@@ -180,6 +184,19 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: 'Reset Diagnostic Warnings',
           toolTip: 'Re-enable popup warnings you previously dismissed with "Don\'t show again"',
           click: () => handlers.onResetDiagnosticDialogs(),
+        },
+        { type: 'separator' },
+        {
+          label: 'Delete Domain Data…',
+          toolTip:
+            'GDPR-aligned per-domain wipe. Removes every URL row whose host matches the entered domain plus every dependent record (links, headers, images, source snapshots).',
+          click: () => send('delete-domain-data'),
+        },
+        {
+          label: 'Clear All Data…',
+          toolTip:
+            'Wipe the entire active project (URLs, links, images, headers, source snapshots, sitemaps). Cannot be undone — Save Project As… first if you want a backup.',
+          click: () => send('clear-all-data'),
         },
         { type: 'separator' },
         { label: 'About FreeCrawl SEO', click: () => send('about') },

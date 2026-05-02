@@ -38,6 +38,22 @@ export const IPC = {
   summaryGet: 'summary:get',
   exportCsv: 'export:csv',
   exportJson: 'export:json',
+  exportXml: 'export:xml',
+  /** GDPR-aligned per-domain delete. Wipes every row whose URL host
+   * matches the given domain (and that domain's links/images/headers/
+   * url_sources). Used by Settings → "Delete Domain Data". */
+  dataDeleteByDomain: 'data:delete-by-domain',
+  /** Wave 6 — Crash-recovery surface. Renderer asks the main process
+   * whether the previous session left a non-empty `crawl_queue` table;
+   * the response carries the seed URL + count so the user can be
+   * shown a clear "Resume crawl of X (240 pending)?" prompt. */
+  crashRecoveryStatus: 'crash:recovery-status',
+  /** Trigger a resume — main process re-creates the Crawler with the
+   * previously-saved start URL and enqueues the checkpointed pending
+   * items at their original depth before kicking off the queue. */
+  crashRecoveryResume: 'crash:recovery-resume',
+  /** Discard the checkpoint without resuming. */
+  crashRecoveryDiscard: 'crash:recovery-discard',
   exportHtmlReport: 'export:html-report',
   exportBulk: 'export:bulk',
   compareLoad: 'compare:load',
@@ -153,8 +169,11 @@ export type MenuEvent =
   | 'toggle-detail-panel'
   | 'export-csv'
   | 'export-json'
+  | 'export-xml'
   | 'export-html-report'
   | 'export-bulk'
+  | 'delete-domain-data'
+  | 'clear-all-data'
   | 'compare-with-project'
   | 'save-project-as'
   | 'open-visualization'
@@ -181,6 +200,38 @@ export interface ExportJsonInput {
 export interface ExportJsonResult {
   filePath: string;
   rowsWritten: number;
+}
+
+export interface ExportXmlInput {
+  filePath: string;
+  category?: UrlCategory;
+  selectedIds?: number[];
+}
+
+export interface ExportXmlResult {
+  filePath: string;
+  rowsWritten: number;
+}
+
+export interface DataDeleteByDomainInput {
+  /** Hostname to wipe — case-insensitive, no scheme/port. */
+  domain: string;
+}
+
+export interface CrashRecoveryStatus {
+  /** Number of URLs the previous session left pending. 0 = nothing
+   * to recover and the renderer skips the prompt. */
+  pendingCount: number;
+  /** The start URL the previous crawl was running against. */
+  seedUrl: string;
+}
+
+export interface DataDeleteByDomainResult {
+  /** Number of `urls` rows deleted. Cascade handles `links`, `images`,
+   *  `headers`, `url_sources`, `urls_issues`. */
+  urlsDeleted: number;
+  /** Number of associated `links` rows wiped (informational). */
+  linksDeleted: number;
 }
 
 export interface ExportHtmlReportInput {
@@ -624,6 +675,13 @@ export interface FreeCrawlApi {
   summaryGet(): Promise<CrawlSummary>;
   exportCsv(input: ExportCsvInput): Promise<ExportCsvResult>;
   exportJson(input: ExportJsonInput): Promise<ExportJsonResult>;
+  exportXml(input: ExportXmlInput): Promise<ExportXmlResult>;
+  dataDeleteByDomain(
+    input: DataDeleteByDomainInput,
+  ): Promise<DataDeleteByDomainResult>;
+  crashRecoveryStatus(): Promise<CrashRecoveryStatus>;
+  crashRecoveryResume(): Promise<{ accepted: boolean }>;
+  crashRecoveryDiscard(): Promise<void>;
   exportHtmlReport(input: ExportHtmlReportInput): Promise<ExportHtmlReportResult>;
   exportBulk(): Promise<BulkExportResult>;
   compareLoad(input: CompareLoadInput): Promise<CompareLoadResult>;

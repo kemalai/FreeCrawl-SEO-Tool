@@ -57,6 +57,30 @@ export function App() {
       const file = files[0];
       if (!file) return;
       const name = file.name.toLowerCase();
+      // Wave 5 — `.seoproject` drop opens the project. Electron exposes
+      // `file.path` (not part of the standard File API) when files come
+      // from the OS file system; we route to `projectOpen` which swaps
+      // the active DB and refreshes the UI.
+      if (name.endsWith('.seoproject')) {
+        e.preventDefault();
+        const fileWithPath = file as File & { path?: string };
+        const filePath = fileWithPath.path;
+        if (!filePath) {
+          setDropFlash(
+            `Couldn't read the dropped path for ${file.name}. Use File → Open Project instead.`,
+          );
+          setTimeout(() => setDropFlash(null), 4000);
+          return;
+        }
+        const result = await window.freecrawl.projectOpen(filePath);
+        if (result) {
+          setDropFlash(`Opened project: ${result.filePath}`);
+        } else {
+          setDropFlash(`Failed to open project: ${file.name}`);
+        }
+        setTimeout(() => setDropFlash(null), 4000);
+        return;
+      }
       if (!/\.(txt|csv|list)$/.test(name)) return;
       e.preventDefault();
       const text = await file.text();
@@ -109,7 +133,48 @@ export function App() {
   );
 
   useEffect(() => {
-    const off1 = window.freecrawl.onProgress(setProgress);
+    // Wave 6 — Crash-recovery prompt. Fires once on mount; if the
+    // previous session left a non-empty checkpoint we ask whether to
+    // resume. Discarding wipes the snapshot so the prompt doesn't
+    // recur on next launch.
+    void window.freecrawl.crashRecoveryStatus().then((status) => {
+      if (status.pendingCount === 0) return;
+      const proceed = window.confirm(
+        `FreeCrawl detected a previous crawl that didn't finish cleanly:\n\n` +
+          `  Start URL: ${status.seedUrl}\n` +
+          `  Pending URLs: ${status.pendingCount.toLocaleString()}\n\n` +
+          `Resume the crawl from where it stopped?\n\n` +
+          `Click OK to resume, Cancel to discard the recovery state and start fresh.`,
+      );
+      if (proceed) {
+        void window.freecrawl.crashRecoveryResume();
+      } else {
+        void window.freecrawl.crashRecoveryDiscard();
+      }
+    });
+
+    // rAF-throttled progress dispatch. The crawler emits up to 5
+    // progress events/sec and each one triggers a Zustand store
+    // update — TopBar, StatsBar and App.tsx all subscribe to the
+    // `progress` object reference, so every event fans out to a full
+    // React reconciliation. Coalescing into one update per animation
+    // frame caps the React work at 60 Hz worst-case (and at 5 Hz in
+    // the common case where the crawler's throttle dominates), so a
+    // user click never queues behind a stack of pending re-renders.
+    let pendingProgress: import('@freecrawl/shared-types').CrawlProgress | null = null;
+    let progressRafScheduled = false;
+    const off1 = window.freecrawl.onProgress((p) => {
+      pendingProgress = p;
+      if (progressRafScheduled) return;
+      progressRafScheduled = true;
+      requestAnimationFrame(() => {
+        progressRafScheduled = false;
+        if (pendingProgress) {
+          setProgress(pendingProgress);
+          pendingProgress = null;
+        }
+      });
+    });
     const off2 = window.freecrawl.onDone((s) => setSummary(s));
     const off3 = window.freecrawl.onError(setError);
     const offData = window.freecrawl.onDataChanged(() => bumpDataVersion());
@@ -133,6 +198,45 @@ export function App() {
         case 'export-json':
           void window.freecrawl.exportJson({ filePath: '', pretty: true });
           break;
+        case 'export-xml':
+          void window.freecrawl.exportXml({ filePath: '' });
+          break;
+        case 'delete-domain-data': {
+          const domain = window.prompt(
+            'GDPR Domain Wipe — enter the host to delete (case-insensitive, exact match).\n\nExamples: example.com  ·  blog.example.com\n\nThis cannot be undone. Save Project As… first to keep a backup.',
+            '',
+          );
+          if (!domain || !domain.trim()) break;
+          const target = domain.trim();
+          if (
+            !window.confirm(
+              `Delete every URL hosted on "${target}", along with its links, headers, images, and source snapshots?\n\nThis action cannot be undone.`,
+            )
+          ) {
+            break;
+          }
+          void window.freecrawl.dataDeleteByDomain({ domain: target }).then((res) => {
+            window.alert(
+              `Deleted ${res.urlsDeleted.toLocaleString()} URL row${
+                res.urlsDeleted === 1 ? '' : 's'
+              } from ${target} (and ${res.linksDeleted.toLocaleString()} associated link${
+                res.linksDeleted === 1 ? '' : 's'
+              }).`,
+            );
+          });
+          break;
+        }
+        case 'clear-all-data': {
+          if (
+            !window.confirm(
+              'Clear ALL data in the active project?\n\nEvery URL, link, image, header, source snapshot, sitemap, and issue will be wiped. This cannot be undone — Save Project As… first if you want a backup.',
+            )
+          ) {
+            break;
+          }
+          void window.freecrawl.crawlClear();
+          break;
+        }
         case 'open-robots-tester':
           setRobotsTesterOpen(true);
           break;
