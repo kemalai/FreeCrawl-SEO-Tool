@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.8] — 2026-05-03
+
+### Added
+- **In-table Export button + dialog** — every URL tab now has an "Export" button in the toolbar (replaces the inline URL counter; counter moved to the bottom status bar). Modal lets the user pick: which **tables** to include (defaults to the tab the button was clicked from, "Active" badge), which **columns** (per-tab union, all-checked by default, with All / None toggles), the **format** (CSV or Excel `.xlsx`), and "Selected rows only" when there's a row selection. CSV with multiple tables → folder picker, one file per table; xlsx → single workbook with one sheet per table. Disabled when the table is empty.
+- **Streaming-XLSX writer** in `@freecrawl/core` (`tabular-export.ts`) — hand-rolled multi-sheet workbook writer using `node:zlib` DEFLATE + manual ZIP central directory. Inline-string sheets, sanitised sheet names, numeric/boolean cells typed correctly. Zero new dependencies.
+- **`ErrorBoundary` component** wrapping the export dialog so a render error in the dialog tree no longer black-screens the renderer (the dialog ate the entire React root before; now you get a small inline notice + Dismiss button + a console stack).
+- **MCP server (`apps/mcp-server/`)** — new workspace exposing the active `.seoproject` over the Model Context Protocol (stdio JSON-RPC 2.0). Read-only `ProjectDb` connection coexists with the desktop app's writer (SQLite WAL, concurrent readers). Hand-rolled — no `@modelcontextprotocol/sdk` dependency. 8 tools: `get_summary`, `get_overview_counts`, `top_issues`, `query_urls` (category + search + sort + paginate, projectable fields), `get_url_detail` (id or URL, inlinks + outlinks + images), `list_projects`, `set_project`, `current_project`. Cross-platform `userData` resolver matches Electron's path semantics; `FREECRAWL_PROJECT` env var overrides. Claude Desktop / Claude Code / generic-client install snippets in the README.
+- **`getUrlIdByUrl(url)`** public method on `ProjectDb` — used by the MCP server to resolve a URL string to its row id.
+
+### Changed
+- **URL counter pill removed from the URL-table toolbar** — the live count moved into the bottom status bar (`URLs: N (M loaded)`) so the toolbar can host the new Export button without losing the information.
+- **Export dialog mounts only when open** — dialog hooks no longer run on every parent re-render of the URLs tab, eliminating a state-churn loop that was triggered by `selectedIds` array references changing on each crawler progress tick.
+- **README install section** gains an "MCP server" details block with build instructions, Claude Desktop config snippet, Claude Code CLI command, sample prompts, and `FREECRAWL_PROJECT` env override usage.
+
 ## [0.2.7] — 2026-05-02
 
 ### Added
