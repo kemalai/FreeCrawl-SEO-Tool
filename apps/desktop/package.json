@@ -1,8 +1,8 @@
 {
   "name": "@freecrawl/desktop",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
-  "description": "FreeCrawl SEO \u00e2\u20ac\u201d desktop application",
+  "description": "FreeCrawl SEO â€” desktop application",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

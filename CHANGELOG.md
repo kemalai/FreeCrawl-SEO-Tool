@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.2.7] — 2026-05-02
+
+### Added
+- **Multi-row aggregation in detail sub-tabs** — selecting multiple URLs in the main table (Row column, Shift/Ctrl-click, drag, or cell-multi-select) now aggregates Inlinks, Outlinks, Images, and Resources across the full selection. Up to 50 URLs aggregated in parallel; primary-URL banner shown for per-page tabs (URL Details / Headers / Cookies / Source / SERP).
+- **Right-click + Ctrl/Cmd+C in detail sub-tab tables** — Inlinks/Outlinks tables now ship a context menu (Copy N Cells, Copy URL / Copy N URLs for URL cells, Open in Browser) and a document-level keyboard listener. Selection is row-then-column TSV so cells paste cleanly into Excel / Sheets.
+- **Auto-drain pending link stubs at first-crawl end** — links discovered but never crawled (depth-race, queue cap, filter race) are picked up before the first crawl finishes; pressing Start a second time on the same project no longer surfaces "+1000 new URLs". Up to 20 drain passes with `excludeNofollow` honoured so nofollow targets aren't silently followed.
+- **Freeze-watchdog worker thread + `debug.txt`** — independent `worker_threads.Worker` polls a `SharedArrayBuffer` every 250 ms and writes stall events to `<userData>/debug.txt`. Tracks main process, db-reader worker, and renderer (via existing lag IPC); each stall logged with start gap, duration, end op, and live counters. The watchdog itself never blocks because it only reads atomically.
+- **HTML parser worker pool** (4–8 threads, sized to `cpus() − 2`, clamped `[2, 8]`) — `cheerio` parsing + link extraction now runs on dedicated worker threads per `fetchAndProcess` call. The 12–26 s "fetch" stalls observed on large category / store-listing pages drop to <100 ms because the main thread no longer holds the JS event loop during parse.
+- **DB writer worker thread** — every per-URL hot-path write (`upsertUrl` + headers + body snapshot + links + images) is shipped as a single `writeFetchedUrl` payload to a worker-thread SQLite connection. Main thread stops blocking on `.run()` for the duration of writes. Atomic visibility — readers can never see a URL row without its links.
+- **Atomic `writeFetchedUrl` batch method** in `ProjectDb` — replaces the legacy two-step "upsertUrl then runInTransaction" sequence with a single transaction. Halves the IPC round-trips per URL and one fsync instead of two.
+
+### Changed
+- **Production launcher in the start `.bat`** — `npm run dev` (electron-vite cold-start, ~25 s) replaced with `npm --workspace apps/desktop run start` against the production bundle (1–2 s). Auto-builds the desktop app on first launch and when `out/` is missing.
+- **Cooperative `recomputeUrlsIssuesYielding`** — the post-crawl materialise-issues phase now yields between each of the 70+ INSERT…SELECT definitions, dropping the 22-26 s main-thread block to a stream of <500 ms transactions with the UI staying responsive throughout.
+- **Periodic in-crawl issue recompute uses the yielding variant too** — the 30 s sidebar-counter tick no longer freezes the renderer mid-crawl. In-flight ticks dropped if a previous one is still running.
+- **`PRAGMA busy_timeout = 10000`** on the writer connection (5 s on read-only) — the new writer worker coexists cleanly with the main-process writer when both happen to want the SQLite lock at the same moment, instead of throwing `SQLITE_BUSY: database is locked` (seen when starting a new crawl while the previous one was mid-materialise).
+- **rAF-throttled progress dispatch in the renderer** — `setProgress` now coalesces multiple progress events arriving within a single animation frame into one React update. TopBar / StatsBar / OverviewSidebar moved to scalar Zustand selectors so a counter that didn't change skips the full re-render.
+- **`buildTree` + `TreeNode` memoised** in OverviewSidebar — 150-node tree no longer rebuilds + reconciles on every progress event.
+- **`getPendingInternalLinks({ excludeNofollow })`** — drain loop and `hydrateFromDb` now both filter out URLs reachable only via `rel="nofollow"` links when `followNofollow` is false, matching the live link-follow path.
+- **`Crawler.stop()` clears the queue-checkpoint and issue-recompute timers immediately** — Clear no longer races against a 30 s timer that re-populates `crawl_queue` after the wipe.
+- **`ProjectDb.reset()` now wipes `crawl_queue`** + the IPC `crashRecoveryDiscard` handler explicitly clears the on-disk queue when the user dismisses the recovery prompt — fixes a "Pending URLs: N" prompt that kept reappearing across launches even after Clear.
+- **Reader pool heavy-method timeout** raised to 60 s for `getOverviewCounts` (default 30 s for everything else) — eliminates `reader-timeout > 15000ms` warnings during materialise-issues phase contention.
+
+### Fixed
+- **Multi-row aggregation also reads cell selection** — picking 4 URLs via cell-clicks (Selected Cells: 4) now aggregates correctly; previously only Row-column picks (Selected Rows) were mirrored.
+- **First-launch 25 s freeze** — Vite dev cold-start replaced with prebuilt bundle (see Changed).
+- **Click-induced 3-4 s "Yanıt Vermiyor" stalls during crawls** — eliminated by the parser pool + writer worker + render-pressure reductions; debug.txt should now show no `[STALL:MAIN]` events on a typical 5 k-URL crawl.
+- **Recovery-prompt false positives after Clear** — see Changed.
+- **`Sitemap discovery skipped: database is locked`** when starting a crawl while the previous one is in post-crawl materialise — fixed by `busy_timeout` PRAGMA.
+- **`reader-timeout: queryUrls > 15000ms`** during post-crawl recompute — default reader timeout raised, materialise phase now yields cooperatively.
+
 ## [0.2.6] — 2026-04-29
 
 ### Added
