@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.1] — 2026-05-04
+
+### Fixed
+- **`Queue error: database is locked` / `External probe error: database is locked`** during crawl — root cause was two SQLite writer connections (main-thread `ProjectDb` + writer-worker `ProjectDb`) contending for the same file's writer lock. With `busy_timeout=10s` set on both, the periodic `recomputeUrlsIssuesYielding` pass (every 30 s, 70+ short transactions with `setImmediate` yields) could starve the main thread out of the lock window and surface as a visible error. Fixed by routing the crawler's high-frequency main-thread sync writes (`upsertUrl` for redirect / non-HTML / size-cap / network-fail rows, `updateExternalProbe`, `setUrlHeaders`, `setSitemapUrls`, `checkpointQueue`) through the same writer-worker pool that already serves `writeFetchedUrl`. Now the DB sees a single writer connection during a crawl — SQLite's lock contention is gone and serialisation happens at the worker's JS-level FIFO instead. New `dbCall<T>(method, args)` opt callback on `Crawler` (default = sync `this.db[method](...args)`, so CLI / tests are unchanged); desktop main injects a `dbCallViaPool` dispatcher with main-thread fallback.
+
 ## [0.3.0] — 2026-05-04
 
 ### Added
