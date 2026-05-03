@@ -161,18 +161,16 @@ export class Crawler extends EventEmitter {
     if (this.queueCheckpointTimer) return;
     this.queueCheckpointTimer = setInterval(() => {
       if (this.stopped || !this.running) return;
-      try {
-        const items = Array.from(this.pendingItems.entries()).map(([url, depth]) => ({
-          url,
-          depth,
-        }));
-        this.db.checkpointQueue(items, this.config.startUrl);
-      } catch (err) {
+      const items = Array.from(this.pendingItems.entries()).map(([url, depth]) => ({
+        url,
+        depth,
+      }));
+      void this.dbCall<void>('checkpointQueue', [items, this.config.startUrl]).catch((err) => {
         this.emit(
           'debug',
           `queue checkpoint failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-      }
+      });
     }, Crawler.QUEUE_CHECKPOINT_INTERVAL_MS);
   }
   private stopQueueCheckpointTimer(): void {
@@ -256,6 +254,26 @@ export class Crawler extends EventEmitter {
    */
   private readonly runDbPass: (methodName: string) => Promise<void>;
 
+  /**
+   * Generic single-method writer dispatcher with a typed return value.
+   * The desktop host routes this through the writer-worker pool so the
+   * crawler's per-URL hot-path writes (`upsertUrl` for redirects/non-
+   * HTML, `updateExternalProbe`, `setUrlHeaders`, `setSitemapUrls`,
+   * `checkpointQueue`) all share the SAME SQLite writer connection as
+   * `writeFetchedUrl`. Without this, the main-thread `ProjectDb` and
+   * the worker's `ProjectDb` are TWO writer connections fighting for
+   * the SQLite writer lock — even with a 10 s `busy_timeout` PRAGMA,
+   * a long-running pass on the worker (`recomputeUrlsIssuesYielding`)
+   * can starve the main thread out of the lock window and surface as
+   * `Queue error: database is locked` / `External probe error:
+   * database is locked`. Routing these high-frequency writes through
+   * the same worker eliminates the contention by serialising them
+   * through the worker's JS-level FIFO instead of SQLite's lock.
+   * Defaults to a sync wrapper around `this.db[method](...args)` so
+   * the CLI keeps working unchanged.
+   */
+  private readonly dbCall: <T>(method: string, args: unknown[]) => Promise<T>;
+
   constructor(
     config: CrawlConfig,
     db: ProjectDb,
@@ -273,6 +291,7 @@ export class Crawler extends EventEmitter {
         definitions: ReadonlyArray<readonly [string, string]>,
       ) => Promise<void>;
       runDbPass?: (methodName: string) => Promise<void>;
+      dbCall?: <T>(method: string, args: unknown[]) => Promise<T>;
     } = {},
   ) {
     super();
@@ -290,6 +309,15 @@ export class Crawler extends EventEmitter {
         const fn = (this.db as unknown as Record<string, unknown>)[method];
         if (typeof fn === 'function') (fn as () => void).call(this.db);
         return Promise.resolve();
+      });
+    this.dbCall =
+      opts.dbCall ??
+      (<T>(method: string, args: unknown[]) => {
+        const fn = (this.db as unknown as Record<string, unknown>)[method];
+        if (typeof fn !== 'function') {
+          return Promise.reject(new Error(`unknown db method: ${method}`));
+        }
+        return Promise.resolve((fn as (...a: unknown[]) => T).apply(this.db, args));
       });
     // Wave 9 — Resolve the active proxy. If a named profile is selected
     // and present in `proxyProfiles`, its URL wins over the legacy
@@ -1067,7 +1095,7 @@ export class Crawler extends EventEmitter {
           maxDepth: 3,
         });
         if (this.stopped) return;
-        this.db.setSitemapUrls(result.entries);
+        await this.dbCall<void>('setSitemapUrls', [result.entries]);
         if (result.entries.length > 0) {
           this.emit(
             'info',
@@ -1189,18 +1217,24 @@ export class Crawler extends EventEmitter {
       } catch {
         /* ignore */
       }
-      this.db.updateExternalProbe(url, {
-        statusCode: res.status,
-        contentType: res.headers.get('content-type'),
-        contentLength: parseIntSafe(res.headers.get('content-length')),
-        responseTimeMs: Date.now() - t0,
-      });
+      await this.dbCall<void>('updateExternalProbe', [
+        url,
+        {
+          statusCode: res.status,
+          contentType: res.headers.get('content-type'),
+          contentLength: parseIntSafe(res.headers.get('content-length')),
+          responseTimeMs: Date.now() - t0,
+        },
+      ]);
     } catch (err) {
-      this.db.updateExternalProbe(url, {
-        statusCode: null,
-        statusText: formatFetchError(err),
-        responseTimeMs: Date.now() - t0,
-      });
+      await this.dbCall<void>('updateExternalProbe', [
+        url,
+        {
+          statusCode: null,
+          statusText: formatFetchError(err),
+          responseTimeMs: Date.now() - t0,
+        },
+      ]);
     } finally {
       clearTimeout(timeout);
     }
@@ -1607,17 +1641,19 @@ export class Crawler extends EventEmitter {
             'warn',
             `Skipped ${item.url}: Content-Length ${declaredLen} > maxFileSizeBytes ${this.config.maxFileSizeBytes}`,
           );
-          this.db.upsertUrl({
-            url: item.url,
-            contentKind: 'other',
-            statusCode: res.status,
-            statusText: 'size-cap-exceeded',
-            indexability: 'non-indexable:client-error',
-            indexabilityReason: `Body skipped — Content-Length ${declaredLen} exceeds maxFileSizeBytes`,
-            responseTimeMs,
-            depth: item.depth,
-            contentLength: declaredLen,
-          });
+          await this.dbCall<number>('upsertUrl', [
+            {
+              url: item.url,
+              contentKind: 'other',
+              statusCode: res.status,
+              statusText: 'size-cap-exceeded',
+              indexability: 'non-indexable:client-error',
+              indexabilityReason: `Body skipped — Content-Length ${declaredLen} exceeds maxFileSizeBytes`,
+              responseTimeMs,
+              depth: item.depth,
+              contentLength: declaredLen,
+            },
+          ]);
           return;
         }
       }
@@ -1774,42 +1810,44 @@ export class Crawler extends EventEmitter {
         const target = locationHeader
           ? normalizeUrl(locationHeader, item.url, this.urlRewrites)
           : null;
-        const redirectUrlId = this.db.upsertUrl({
-          url: item.url,
-          contentKind: kind,
-          statusCode,
-          statusText: null,
-          indexability: 'non-indexable:redirect',
-          indexabilityReason: target ? `Redirects to ${target}` : `HTTP ${statusCode}`,
-          contentType,
-          contentLength: parseIntSafe(contentLengthHeader),
-          xRobotsTag,
-          responseTimeMs,
-          ttfbMs,
-          depth: item.depth,
-          redirectTarget: target,
-          hsts,
-          xFrameOptions,
-          xContentTypeOptions,
-          contentEncoding,
-          csp,
-          referrerPolicy,
-          permissionsPolicy,
-          corsAllowOrigin,
-          corsAllowCredentials,
-          corsAllowMethods,
-          corsAllowHeaders,
-          canonicalHttp,
-          cookiesCount: cookieSummary.count,
-          cookiesInsecure: cookieSummary.insecureCount,
-          cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
-          cookiesNoSameSite: cookieSummary.noSameSiteCount,
-          httpProtocol,
-          queryStringLength,
-          keepAlive,
-          serverHeader,
-        });
-        if (redirectUrlId) this.db.setUrlHeaders(redirectUrlId, allHeaders);
+        const redirectUrlId = await this.dbCall<number>('upsertUrl', [
+          {
+            url: item.url,
+            contentKind: kind,
+            statusCode,
+            statusText: null,
+            indexability: 'non-indexable:redirect',
+            indexabilityReason: target ? `Redirects to ${target}` : `HTTP ${statusCode}`,
+            contentType,
+            contentLength: parseIntSafe(contentLengthHeader),
+            xRobotsTag,
+            responseTimeMs,
+            ttfbMs,
+            depth: item.depth,
+            redirectTarget: target,
+            hsts,
+            xFrameOptions,
+            xContentTypeOptions,
+            contentEncoding,
+            csp,
+            referrerPolicy,
+            permissionsPolicy,
+            corsAllowOrigin,
+            corsAllowCredentials,
+            corsAllowMethods,
+            corsAllowHeaders,
+            canonicalHttp,
+            cookiesCount: cookieSummary.count,
+            cookiesInsecure: cookieSummary.insecureCount,
+            cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
+            cookiesNoSameSite: cookieSummary.noSameSiteCount,
+            httpProtocol,
+            queryStringLength,
+            keepAlive,
+            serverHeader,
+          },
+        ]);
+        if (redirectUrlId) await this.dbCall<void>('setUrlHeaders', [redirectUrlId, allHeaders]);
         this.crawled++;
         if (this.config.followRedirects && target) {
           // Hard cap on hop count — if the queued item already exceeds
@@ -1848,41 +1886,43 @@ export class Crawler extends EventEmitter {
             : statusCode >= 400
               ? 'non-indexable:client-error'
               : 'indexable';
-        const nonHtmlUrlId = this.db.upsertUrl({
-          url: item.url,
-          contentKind: kind,
-          statusCode,
-          statusText: null,
-          indexability,
-          indexabilityReason: indexability === 'indexable' ? null : `HTTP ${statusCode}`,
-          contentType,
-          contentLength: parseIntSafe(contentLengthHeader),
-          xRobotsTag,
-          responseTimeMs,
-          ttfbMs,
-          depth: item.depth,
-          hsts,
-          xFrameOptions,
-          xContentTypeOptions,
-          contentEncoding,
-          csp,
-          referrerPolicy,
-          permissionsPolicy,
-          corsAllowOrigin,
-          corsAllowCredentials,
-          corsAllowMethods,
-          corsAllowHeaders,
-          canonicalHttp,
-          cookiesCount: cookieSummary.count,
-          cookiesInsecure: cookieSummary.insecureCount,
-          cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
-          cookiesNoSameSite: cookieSummary.noSameSiteCount,
-          httpProtocol,
-          queryStringLength,
-          keepAlive,
-          serverHeader,
-        });
-        if (nonHtmlUrlId) this.db.setUrlHeaders(nonHtmlUrlId, allHeaders);
+        const nonHtmlUrlId = await this.dbCall<number>('upsertUrl', [
+          {
+            url: item.url,
+            contentKind: kind,
+            statusCode,
+            statusText: null,
+            indexability,
+            indexabilityReason: indexability === 'indexable' ? null : `HTTP ${statusCode}`,
+            contentType,
+            contentLength: parseIntSafe(contentLengthHeader),
+            xRobotsTag,
+            responseTimeMs,
+            ttfbMs,
+            depth: item.depth,
+            hsts,
+            xFrameOptions,
+            xContentTypeOptions,
+            contentEncoding,
+            csp,
+            referrerPolicy,
+            permissionsPolicy,
+            corsAllowOrigin,
+            corsAllowCredentials,
+            corsAllowMethods,
+            corsAllowHeaders,
+            canonicalHttp,
+            cookiesCount: cookieSummary.count,
+            cookiesInsecure: cookieSummary.insecureCount,
+            cookiesNoHttpOnly: cookieSummary.noHttpOnlyCount,
+            cookiesNoSameSite: cookieSummary.noSameSiteCount,
+            httpProtocol,
+            queryStringLength,
+            keepAlive,
+            serverHeader,
+          },
+        ]);
+        if (nonHtmlUrlId) await this.dbCall<void>('setUrlHeaders', [nonHtmlUrlId, allHeaders]);
         this.crawled++;
         return;
       }
@@ -2180,16 +2220,18 @@ export class Crawler extends EventEmitter {
         isSeed ? 'error' : 'warn',
         `Fetch failed [${elapsed}ms] ${item.url}: ${detail}`,
       );
-      this.db.upsertUrl({
-        url: item.url,
-        contentKind: 'html',
-        statusCode: null,
-        statusText: detail,
-        indexability: 'non-indexable:client-error',
-        indexabilityReason: `Network error: ${detail}`,
-        responseTimeMs: elapsed,
-        depth: item.depth,
-      });
+      await this.dbCall<number>('upsertUrl', [
+        {
+          url: item.url,
+          contentKind: 'html',
+          statusCode: null,
+          statusText: detail,
+          indexability: 'non-indexable:client-error',
+          indexabilityReason: `Network error: ${detail}`,
+          responseTimeMs: elapsed,
+          depth: item.depth,
+        },
+      ]);
     } finally {
       this.inFlightFetchControllers.delete(controller);
       clearTimeout(timeout);

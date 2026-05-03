@@ -431,6 +431,42 @@ async function runDbPassViaPool(method: string): Promise<void> {
   }
 }
 
+/**
+ * Generic per-call writer dispatcher used by the crawler's hot-path
+ * sync writes (`upsertUrl` for redirects/non-HTML/network-fail rows,
+ * `updateExternalProbe`, `setUrlHeaders`, `setSitemapUrls`,
+ * `checkpointQueue`). Routing them through the writer worker keeps
+ * SQLite to a single writer connection during a crawl — `busy_timeout`
+ * is no longer load-bearing because there is nothing to contend with.
+ * Falls back to running on the main-thread `ProjectDb` when the worker
+ * is crashed/restarting so writes still happen.
+ */
+async function dbCallViaPool<T>(method: string, args: unknown[]): Promise<T> {
+  if (!dbWriterPool.isReady()) {
+    const fn = (getDb() as unknown as Record<string, unknown>)[method];
+    if (typeof fn !== 'function') {
+      throw new Error(`dbCallViaPool: unknown method ${method}`);
+    }
+    return (fn as (...a: unknown[]) => T).apply(getDb(), args);
+  }
+  try {
+    return await dbWriterPool.call<T>(method, args);
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `dbCall(${method}) fell back to main-thread: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    const fn = (getDb() as unknown as Record<string, unknown>)[method];
+    if (typeof fn !== 'function') {
+      throw new Error(`dbCallViaPool fallback: unknown method ${method}`);
+    }
+    return (fn as (...a: unknown[]) => T).apply(getDb(), args);
+  }
+}
+
 function getDb(): ProjectDb {
   if (!db) {
     const dataDir = join(app.getPath('userData'), 'projects');
@@ -1408,6 +1444,7 @@ function registerIpc(): void {
       writeFetchedUrl: writeFetchedUrlViaPool,
       recomputeIssues: recomputeIssuesViaPool,
       runDbPass: runDbPassViaPool,
+      dbCall: dbCallViaPool,
     });
     activeCrawler = crawler;
     attachCrawlerListeners(crawler);
@@ -2018,8 +2055,9 @@ function registerIpc(): void {
         setOp: (op: string) => freezeWatchdog.setMainOp(op),
         parseHtml: parseHtmlViaPool,
         writeFetchedUrl: writeFetchedUrlViaPool,
-      recomputeIssues: recomputeIssuesViaPool,
-      runDbPass: runDbPassViaPool,
+        recomputeIssues: recomputeIssuesViaPool,
+        runDbPass: runDbPassViaPool,
+        dbCall: dbCallViaPool,
       });
       activeCrawler = crawler;
       attachCrawlerListeners(crawler);
