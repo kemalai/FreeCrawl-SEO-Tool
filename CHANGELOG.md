@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.0] — 2026-05-04
+
+### Added
+- **Manual update check** — Help → "Check for Updates…" menu item. Fetches the latest GitHub Releases tag (`api.github.com/repos/kemalai/FreeCrawl-SEO-Tool/releases/latest`, 10 s timeout) and compares it against `app.getVersion()` with a hand-rolled `compareSemver` (no `semver` dependency). Three native dialogs: up-to-date / update available with first-600-char release-notes preview + "Open Release Page" button / network error fallback with "Open Releases Page" link. Pure on-demand — no background polling, no telemetry. `electron-updater`-based auto-install deferred to V2 (requires macOS notarisation + Windows code-signing first).
+
 ## [0.2.9] — 2026-05-04
 
 ### Added
