@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.9] — 2026-05-04
+
+### Added
+- **Readability scoring** (Flesch Reading Ease, Flesch–Kincaid Grade, Gunning Fog Index) — computed inline during HTML parse from the same body-text token stream that drives `wordCount`. Dictionary-free vowel-group syllable heuristic (Hemingway / textstat / Yoast convention). Returns `null` scores when the page has <50 words or 0 sentences so navigation-only landing pages don't show a meaningless 0.0 grade. New issue filters: **Hard to Read (Flesch <30)** and **Gunning Fog >17** under Sidebar → Issues → Content. Detail panel surfaces Sentence Count, Flesch with band ("very difficult" → "very easy"), F-K Grade, Fog Index, and Complex Words.
+- **CORS header audit** — captures `Access-Control-Allow-Origin / -Credentials / -Methods / -Headers` per URL (1 KB cap on `-Headers`). Two new issue filters: **CORS Wildcard + Credentials** (CRITICAL — `*` paired with credentials true; XSS-leveraged credential exfiltration vector) and **CORS Wildcard Origin** (informational — `*` without credentials). Detail panel renders all four headers; credentials value as human-readable true/false/missing.
+- **HTTP (not HTTPS) issue filter** — flags internal pages still served over plain HTTP. Excludes `localhost`, `127.0.0.1`, and `*.local` hosts so local-dev crawls don't trip the filter.
+- **Active vs passive mixed content split** — separate counts and issue filters for **Mixed Content Active (Blocked)** (script/iframe/object/embed/stylesheet over HTTP — browsers silently drop these) and **Mixed Content Passive (Warning)** (img/video/audio/source over HTTP — rendered with "Not Secure" UI). Legacy `mixed_content_count` kept as the total for back-compat. `<object data>` is now picked up alongside the rest of the audit list.
+- **URL rewriting suite** — three additions to the normalizer:
+  - **Query parameter whitelist** (`keepQueryParams`) — when non-empty, every query parameter not on the list is dropped (case-insensitive name match), replacing the default tracking-only strip behaviour.
+  - **Regex URL rewrites** (`urlRegexRewrites: [{pattern, replacement, flags?}]`) — compiled once in the crawler, applied in order to the fully-normalised URL string and re-parsed (invalid output drops the link). Used during link-follow, canonical, and redirect-target normalisation.
+  - **Live preview** in Settings → URL Rewriting — runs the unsaved configuration through `normalizeUrl` in main and surfaces the result + any regex compile errors before saving.
+- **Custom Search regex mode** — each line in `customSearchTerms` is dispatched on shape: `/pattern/flags` runs as a regex (allowed flags `imsuy`, `g` is always forced) via `text.match()`, anything else stays on the legacy lowercase-substring path. Invalid patterns are recorded as `-1` and surfaced as "invalid regex" in the Detail panel so typos are visible. No DB migration — the JSON shape is unchanged.
+- **Per-URL Duplicates sub-tab** in the Detail panel — `urlClusterMembers(urlId)` returns every other URL in the same near-duplicate cluster sorted by SimHash hamming distance ascending (closest matches first). Table shows Hamming / URL / Status / Indexability / Words / Inlinks / Title; URLs open in the system browser. Singleton URLs see a guidance message pointing to Crawl Analysis and the Hamming-threshold setting.
+- **Least-Linked URLs (Bottom 25) report** — counterpart to the existing Most-Linked report. Excludes `inlinks = 0` rows so it surfaces weakly-linked indexable pages, not orphans (orphan signal lives in dedicated filters). `topUrlsBy` gains a `direction: 'asc' | 'desc'` argument; `TopUrlsInput.direction` plumbed through the IPC.
+- **DB migration v46** — `flesch_reading_ease`, `flesch_kincaid_grade`, `gunning_fog_index`, `sentence_count`, `complex_word_count` columns.
+- **DB migration v47** — `cors_allow_origin`, `cors_allow_credentials` (-1 missing / 0 false / 1 true), `cors_allow_methods`, `cors_allow_headers` columns.
+- **DB migration v48** — `mixed_content_active`, `mixed_content_passive` columns alongside the legacy `mixed_content_count`.
+- **New IPC channels** — `url:rewrite-preview` and `urls:cluster-members`.
+- **README highlights table updated** — Analysis tile gains CORS audit, mixed-content split, readability, custom search regex; Desktop UI tile gains 13-sub-tab count, Duplicates view, URL rewriting; Export tile gains 20-report count, Export Dialog with XLSX, MCP server. Status note updated.
+
+### Changed
+- **`normalizeUrl` signature** — `UrlRewriteOptions` now accepts `keepQueryParams` and pre-compiled `regexRewrites`. The crawler compiles regex rules once in its constructor (`compileUrlRegexRewrites`) and bad patterns are reported via the `error` event up-front so per-link normalisation cost stays constant.
+- **Custom-search haystack lazy** — the lowercase pass for literal terms is computed only if at least one literal term exists, so a regex-only term list no longer pays for it.
+
 ## [0.2.8] — 2026-05-03
 
 ### Added
