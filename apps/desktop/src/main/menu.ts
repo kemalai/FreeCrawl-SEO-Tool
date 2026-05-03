@@ -21,6 +21,12 @@ export interface AppMenuHandlers {
   onResetDiagnosticDialogs: () => void;
   /** Reveal the on-disk logs directory in the OS file manager. */
   onOpenLogsFolder: () => void;
+  /**
+   * Manual update check — fetches the latest GitHub release, compares
+   * with `app.getVersion()`, and surfaces a native dialog (up-to-date /
+   * update available with "Open release page" button / network error).
+   */
+  onCheckForUpdates: () => void;
 }
 
 export function buildAppMenu(handlers: AppMenuHandlers): Menu {
@@ -197,6 +203,13 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           toolTip:
             'Wipe the entire active project (URLs, links, images, headers, source snapshots, sitemaps). Cannot be undone — Save Project As… first if you want a backup.',
           click: () => send('clear-all-data'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Check for Updates…',
+          toolTip:
+            'Fetch the latest GitHub release and compare it with your installed version. No background polling — runs only when you click.',
+          click: () => handlers.onCheckForUpdates(),
         },
         { type: 'separator' },
         { label: 'About FreeCrawl SEO', click: () => send('about') },

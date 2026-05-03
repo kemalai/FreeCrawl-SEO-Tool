@@ -579,6 +579,7 @@ function rebuildMenu(): void {
       recentProjects: getRecentProjects(),
       onResetDiagnosticDialogs: () => resetDiagnosticDialogs(),
       onOpenLogsFolder: () => openLogsFolder(),
+      onCheckForUpdates: () => void checkForUpdates(),
     }),
   );
 }
@@ -638,6 +639,159 @@ function resetDiagnosticDialogs(): void {
       noLink: true,
     });
   }
+}
+
+/**
+ * Compare two semver strings (X.Y.Z, optional `v` prefix). Returns
+ *   -1 if `a < b`,  0 if equal,  +1 if `a > b`.
+ * Pre-release suffixes are ignored — the user's installed build is
+ * compared against the release tag's release-line only. Sufficient for
+ * a "should I show an update prompt?" decision; full semver semantics
+ * would need a dependency we'd rather not pull in for one menu item.
+ */
+function compareSemver(a: string, b: string): number {
+  const norm = (s: string) =>
+    s
+      .trim()
+      .replace(/^v/, '')
+      .split('-')[0]!
+      .split('.')
+      .map((p) => parseInt(p, 10) || 0);
+  const pa = norm(a);
+  const pb = norm(b);
+  for (let i = 0; i < 3; i++) {
+    const av = pa[i] ?? 0;
+    const bv = pb[i] ?? 0;
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+  }
+  return 0;
+}
+
+interface GitHubLatestRelease {
+  tag_name?: string;
+  name?: string;
+  html_url?: string;
+  body?: string;
+  draft?: boolean;
+  prerelease?: boolean;
+  published_at?: string;
+}
+
+/**
+ * Manual update check. Hits the GitHub Releases API for the latest
+ * non-draft, non-prerelease tag, compares it with `app.getVersion()`,
+ * and surfaces a native dialog. Three outcomes:
+ *   - up-to-date           → "You're on the latest version (vX.Y.Z)"
+ *   - update available     → "v0.X.Y is available" + "Open release page" / "Later"
+ *   - network error / rate → "Couldn't check" with the underlying error
+ *
+ * No background polling — only runs when the user clicks the menu item.
+ * No `electron-updater` dependency, no auto-install (that would need
+ * macOS notarisation + Windows code-signing first).
+ */
+async function checkForUpdates(): Promise<void> {
+  const win = mainWindow;
+  if (!win) return;
+  const installed = app.getVersion();
+  const apiUrl =
+    'https://api.github.com/repos/kemalai/FreeCrawl-SEO-Tool/releases/latest';
+
+  let release: GitHubLatestRelease | null = null;
+  let fetchError: string | null = null;
+  try {
+    const ac = new AbortController();
+    const timeout = setTimeout(() => ac.abort(), 10_000);
+    try {
+      const res = await fetch(apiUrl, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': `FreeCrawl-SEO-Tool/${installed}`,
+        },
+        signal: ac.signal,
+      });
+      if (!res.ok) {
+        fetchError = `GitHub API returned ${res.status} ${res.statusText}`;
+      } else {
+        release = (await res.json()) as GitHubLatestRelease;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (err) {
+    fetchError =
+      err instanceof Error ? err.message : 'Unknown error contacting GitHub';
+  }
+
+  if (fetchError || !release || !release.tag_name) {
+    void dialog.showMessageBox(win, {
+      type: 'warning',
+      title: 'Update Check Failed',
+      message: "Couldn't reach the GitHub Releases API.",
+      detail:
+        (fetchError ?? 'No release tag in response.') +
+        '\n\nYou can browse releases manually at:\nhttps://github.com/kemalai/FreeCrawl-SEO-Tool/releases',
+      buttons: ['Open Releases Page', 'Close'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    }).then((r) => {
+      if (r.response === 0) {
+        void shell.openExternal(
+          'https://github.com/kemalai/FreeCrawl-SEO-Tool/releases',
+        );
+      }
+    });
+    return;
+  }
+
+  const latest = release.tag_name;
+  const cmp = compareSemver(installed, latest);
+  if (cmp >= 0) {
+    void dialog.showMessageBox(win, {
+      type: 'info',
+      title: 'Up to Date',
+      message: `You're on the latest version (v${installed}).`,
+      detail: release.published_at
+        ? `Latest GitHub release: ${latest}\nPublished: ${new Date(release.published_at).toLocaleString()}`
+        : `Latest GitHub release: ${latest}`,
+      buttons: ['OK'],
+      noLink: true,
+    });
+    return;
+  }
+
+  // Newer version available — show release notes preview + open page.
+  // Trim release body to keep the dialog readable; full notes are on the
+  // GitHub page the user opens.
+  const notes = (release.body ?? '').trim();
+  const notesPreview =
+    notes.length > 600 ? notes.slice(0, 600).trimEnd() + '\n…' : notes;
+  const detail =
+    `Installed: v${installed}\nLatest:    ${latest}\n\n` +
+    (notesPreview
+      ? `Release notes:\n${notesPreview}`
+      : 'See the release page for the changelog.');
+
+  void dialog
+    .showMessageBox(win, {
+      type: 'info',
+      title: 'Update Available',
+      message: `${latest} is available.`,
+      detail,
+      buttons: ['Open Release Page', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    })
+    .then((r) => {
+      if (r.response === 0) {
+        const url =
+          release?.html_url ??
+          'https://github.com/kemalai/FreeCrawl-SEO-Tool/releases/latest';
+        void shell.openExternal(url);
+      }
+    });
 }
 
 async function promptOpenProject(): Promise<void> {
