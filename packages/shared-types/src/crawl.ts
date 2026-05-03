@@ -171,6 +171,13 @@ export type UrlCategory =
   | 'issues:description-equals-h1'
   | 'issues:js-only-navigation'
   | 'issues:text-code-ratio-low'
+  | 'issues:flesch-very-difficult'
+  | 'issues:gunning-fog-very-high'
+  | 'issues:cors-wildcard-with-credentials'
+  | 'issues:cors-wildcard-origin'
+  | 'issues:http-not-https'
+  | 'issues:mixed-content-active'
+  | 'issues:mixed-content-passive'
   | 'issues:render-blocking-critical'
   | 'issues:og-image-too-large'
   | 'issues:twitter-image-too-large'
@@ -267,6 +274,30 @@ export interface CrawlUrlRow {
    * little crawlable content. Null on non-HTML or empty pages.
    */
   textCodeRatio: number | null;
+  /**
+   * Readability scores derived from the body text. All `null` when the
+   * page has too little prose (<50 words or zero sentences) for a
+   * stable score. Higher Flesch = easier to read; lower grade/Fog =
+   * easier to read.
+   */
+  fleschReadingEase: number | null;
+  fleschKincaidGrade: number | null;
+  gunningFogIndex: number | null;
+  /** Sentence count over body text. Used by all three formulas. */
+  sentenceCount: number;
+  /** Complex-word count (≥3 syllables, sans common suffixes). */
+  complexWordCount: number;
+  /**
+   * CORS response headers — captured raw for the audit/issue filters and
+   * rendered verbatim in the URL Details panel. `corsAllowCredentials`
+   * is a tri-state: -1 (header absent), 0 (`false`), 1 (`true`). The
+   * "wildcard origin + credentials true" combination is a known XSS-
+   * leveraged credential-theft vector, surfaced as a critical issue.
+   */
+  corsAllowOrigin: string | null;
+  corsAllowCredentials: number;
+  corsAllowMethods: string | null;
+  corsAllowHeaders: string | null;
   redirectTarget: string | null;
   lang: string | null;
   viewport: string | null;
@@ -345,6 +376,17 @@ export interface CrawlUrlRow {
   /** Resolved RSS / Atom `<link rel="alternate" type="application/rss+xml|atom+xml">` URL, else null. */
   feedUrl: string | null;
   mixedContentCount: number;
+  /**
+   * Active mixed content — script / iframe / object / embed / stylesheet
+   * served over HTTP from an HTTPS page. Browsers BLOCK these silently
+   * so the page is missing JS/CSS the user can't see in the rendered DOM.
+   */
+  mixedContentActive: number;
+  /**
+   * Passive mixed content — img / video / audio / source over HTTP from
+   * an HTTPS page. Rendered but the URL bar shows "Not Secure".
+   */
+  mixedContentPassive: number;
   /** Number of `<title>` elements (>1 is a duplicate-tag issue). */
   titleCount: number;
   /** Number of internal hyperlinks with no anchor text or alt — accessibility/SEO issue. */
@@ -508,6 +550,21 @@ export interface CrawlConfig {
    *  - `add`    — `…/foo` → `…/foo/`  (only when path has no trailing `.ext`)
    */
   trailingSlash: 'leave' | 'strip' | 'add';
+  /**
+   * Query-param whitelist. When non-empty, the normalizer drops every
+   * query parameter not on this list (case-insensitive). Empty list keeps
+   * the legacy behaviour (strip only utm_* / fbclid / gclid / mc_*).
+   */
+  keepQueryParams: string[];
+  /**
+   * Regex rewrites applied to the fully-normalized URL string in order.
+   * Each entry is `{pattern, replacement, flags?}` where `flags` defaults
+   * to `g`. The result is re-parsed as a URL — if the rewrite produces an
+   * invalid URL the link is dropped at normalization time, so authors
+   * should test patterns in the Settings → URL Rewriting preview field
+   * before saving.
+   */
+  urlRegexRewrites: Array<{ pattern: string; replacement: string; flags?: string }>;
   /**
    * Hardware / resource caps. All `0` means unlimited.
    *
@@ -851,6 +908,16 @@ export interface OverviewCounts {
     paginationBroken: number;
     hreflangXDefaultMissing: number;
     mixedContent: number;
+    /**
+     * Active mixed content (blocked by browser) — script/iframe/object/
+     * embed/stylesheet over HTTP. Critical: subresources silently miss.
+     */
+    mixedContentActive: number;
+    /**
+     * Passive mixed content (warned but rendered) — img/video/audio/source
+     * over HTTP. Lower-priority than active but still flags "Not Secure".
+     */
+    mixedContentPassive: number;
     faviconMissing: number;
     redirectLoop: number;
     redirectChainLong: number;
@@ -1007,6 +1074,40 @@ export interface OverviewCounts {
      * JavaScript / template scaffolding with little crawlable content.
      */
     textCodeRatioLow: number;
+    /**
+     * Pages with Flesch Reading Ease < 30 — academic / "very difficult"
+     * tier. Long sentences and dense vocabulary; SEO and user comprehension
+     * suffer below this score (Hemingway uses the same threshold).
+     */
+    fleschVeryDifficult: number;
+    /**
+     * Pages with Gunning Fog Index > 17 — beyond college-graduate reading
+     * level. Combined with low Flesch Reading Ease, indicates content that
+     * is unlikely to be understood by a general audience.
+     */
+    gunningFogVeryHigh: number;
+    /**
+     * Pages whose `Access-Control-Allow-Origin: *` is paired with
+     * `Access-Control-Allow-Credentials: true`. This combination is
+     * effectively impossible per the CORS spec (browsers reject it), but
+     * misconfigured servers do reach this state and any working XSS
+     * could exfiltrate cookies cross-origin. Surfaced as a critical
+     * security issue.
+     */
+    corsWildcardWithCredentials: number;
+    /**
+     * Pages with `Access-Control-Allow-Origin: *` (without credentials).
+     * Informational — not always wrong (public APIs do this) but worth
+     * reviewing on production HTML pages.
+     */
+    corsWildcardOrigin: number;
+    /**
+     * Internal URLs still served over plain HTTP. Modern Google rewards
+     * HTTPS and Chrome marks HTTP pages "Not Secure". Excludes localhost
+     * / 127.0.0.1 / .local hosts so local-dev crawls don't trip the
+     * filter.
+     */
+    httpNotHttps: number;
     /**
      * Pages with > 20 render-blocking head resources (escalated tier
      * above the existing > 5 "Render-Blocking Head" issue) — almost
@@ -1262,6 +1363,8 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   forceHttps: false,
   lowercasePath: false,
   trailingSlash: 'leave',
+  keepQueryParams: [],
+  urlRegexRewrites: [],
   memoryLimitMb: 0,
   maxQueueSize: 0,
   processPriority: 'normal',

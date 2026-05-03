@@ -7,6 +7,7 @@ import type {
   LinkPosition,
   LinkType,
   UrlCertInfoResult,
+  UrlClusterMember,
   UrlDetail,
   UrlPageImageRow,
   UrlSourceResult,
@@ -25,7 +26,8 @@ type SubTab =
   | 'http-headers'
   | 'cookies'
   | 'structured-data'
-  | 'view-source';
+  | 'view-source'
+  | 'duplicates';
 
 const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'url-details', label: 'URL Details' },
@@ -40,6 +42,7 @@ const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'cookies', label: 'Cookies' },
   { key: 'structured-data', label: 'Structured Data' },
   { key: 'view-source', label: 'View Source' },
+  { key: 'duplicates', label: 'Duplicates' },
 ];
 
 // Maximum number of URLs we aggregate over in one go. Anything larger is
@@ -59,6 +62,7 @@ const SINGLE_URL_ONLY_TABS: ReadonlySet<SubTab> = new Set([
   'cookies',
   'structured-data',
   'view-source',
+  'duplicates',
 ]);
 
 export function BottomDetailPanel() {
@@ -389,6 +393,9 @@ export function BottomDetailPanel() {
         {detail && subTab === 'view-source' && (
           <ViewSourceView urlId={detail.row.id} pageUrl={detail.row.url} />
         )}
+        {detail && subTab === 'duplicates' && (
+          <DuplicatesView urlId={detail.row.id} row={detail.row} />
+        )}
       </div>
     </div>
   );
@@ -530,6 +537,113 @@ function ViewSourceView({
   );
 }
 
+function DuplicatesView({ urlId, row }: { urlId: number; row: CrawlUrlRow }) {
+  const [members, setMembers] = useState<UrlClusterMember[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setMembers(null);
+    window.freecrawl
+      .urlClusterMembers(urlId)
+      .then((rows) => {
+        if (!cancelled) setMembers(rows);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [urlId]);
+
+  if (loading) {
+    return <div className="p-3 text-[11px] text-surface-400">Loading…</div>;
+  }
+  if (row.clusterId === 0 || (row.clusterSize ?? 1) <= 1) {
+    return (
+      <div className="p-3 text-[11px] text-surface-500">
+        This URL is not part of a near-duplicate cluster. Run Crawl Analysis on
+        a finished crawl, or lower the Hamming threshold in Settings →
+        Duplicates, to widen what counts as a near-duplicate.
+      </div>
+    );
+  }
+  if (!members || members.length === 0) {
+    return (
+      <div className="p-3 text-[11px] text-surface-500">
+        No other members in this cluster. (Cluster size {row.clusterSize}.)
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[10px] text-surface-400">
+        <span>
+          Cluster <span className="text-surface-200">#{row.clusterId}</span>
+        </span>
+        <span>
+          {members.length + 1} member{members.length + 1 === 1 ? '' : 's'} total
+        </span>
+        <span className="text-surface-500">
+          (Hamming distance from this URL — lower means more similar)
+        </span>
+      </div>
+      <div className="flex-1 overflow-auto">
+        <table className="w-full text-[11px]">
+          <thead className="sticky top-0 bg-surface-900 text-left text-[10px] text-surface-400">
+            <tr>
+              <th className="px-3 py-1 font-normal">Hamming</th>
+              <th className="px-3 py-1 font-normal">URL</th>
+              <th className="px-3 py-1 font-normal">Status</th>
+              <th className="px-3 py-1 font-normal">Indexability</th>
+              <th className="px-3 py-1 font-normal">Words</th>
+              <th className="px-3 py-1 font-normal">Inlinks</th>
+              <th className="px-3 py-1 font-normal">Title</th>
+            </tr>
+          </thead>
+          <tbody>
+            {members.map((m) => (
+              <tr
+                key={m.url}
+                className="border-t border-surface-800 hover:bg-surface-900"
+              >
+                <td className="px-3 py-1 font-mono text-emerald-300">
+                  {m.hammingDistance}
+                </td>
+                <td
+                  className="px-3 py-1 text-surface-200"
+                  title={m.url}
+                >
+                  <a
+                    href={m.url}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void window.open(m.url, '_blank');
+                    }}
+                    className="hover:text-blue-400 hover:underline"
+                  >
+                    {m.url}
+                  </a>
+                </td>
+                <td className="px-3 py-1 text-surface-300">{m.statusCode ?? '—'}</td>
+                <td className="px-3 py-1 text-surface-300">{m.indexability}</td>
+                <td className="px-3 py-1 text-surface-300">{m.wordCount ?? '—'}</td>
+                <td className="px-3 py-1 text-surface-300">{m.inlinks}</td>
+                <td className="px-3 py-1 text-surface-400 truncate max-w-[280px]" title={m.title ?? ''}>
+                  {m.title ?? '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function countMatches(haystack: string, needle: string): number {
   if (!needle) return 0;
   const h = haystack.toLowerCase();
@@ -607,6 +721,16 @@ function HttpHeadersView({ headers }: { headers: { name: string; value: string }
       </table>
     </div>
   );
+}
+
+function fleschBand(score: number): string {
+  if (score >= 90) return 'very easy';
+  if (score >= 80) return 'easy';
+  if (score >= 70) return 'fairly easy';
+  if (score >= 60) return 'standard';
+  if (score >= 50) return 'fairly difficult';
+  if (score >= 30) return 'difficult';
+  return 'very difficult';
 }
 
 function NameValueView({ row }: { row: CrawlUrlRow }) {
@@ -692,6 +816,22 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['H5 Count', row.h5Count > 0 ? row.h5Count : null],
     ['H6 Count', row.h6Count > 0 ? row.h6Count : null],
     ['Word Count', row.wordCount],
+    ['Sentence Count', row.sentenceCount > 0 ? row.sentenceCount : null],
+    [
+      'Flesch Reading Ease',
+      row.fleschReadingEase !== null
+        ? `${row.fleschReadingEase} (${fleschBand(row.fleschReadingEase)})`
+        : null,
+    ],
+    [
+      'Flesch–Kincaid Grade',
+      row.fleschKincaidGrade !== null ? row.fleschKincaidGrade : null,
+    ],
+    [
+      'Gunning Fog Index',
+      row.gunningFogIndex !== null ? row.gunningFogIndex : null,
+    ],
+    ['Complex Words', row.complexWordCount > 0 ? row.complexWordCount : null],
     ['Canonical Link Element 1', row.canonical],
     ['Canonical Count', row.canonicalCount > 1 ? row.canonicalCount : null],
     ['Canonical HTTP Header', row.canonicalHttp],
@@ -726,6 +866,17 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Content-Security-Policy', row.csp],
     ['Referrer-Policy', row.referrerPolicy],
     ['Permissions-Policy', row.permissionsPolicy],
+    ['Access-Control-Allow-Origin', row.corsAllowOrigin],
+    [
+      'Access-Control-Allow-Credentials',
+      row.corsAllowCredentials === -1
+        ? null
+        : row.corsAllowCredentials === 1
+          ? 'true'
+          : 'false',
+    ],
+    ['Access-Control-Allow-Methods', row.corsAllowMethods],
+    ['Access-Control-Allow-Headers', row.corsAllowHeaders],
     ['Content-Encoding', row.contentEncoding],
     ['Analytics Tags', summarizeAnalyticsTrackers(row.analyticsTrackers)],
     ['Schema Types', row.schemaTypes],
@@ -765,6 +916,14 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ],
     ['Empty Anchor Links', row.emptyAnchorCount > 0 ? row.emptyAnchorCount : null],
     ['Mixed Content (subresources)', row.mixedContentCount > 0 ? row.mixedContentCount : null],
+    [
+      'Mixed Content Active (blocked)',
+      row.mixedContentActive > 0 ? row.mixedContentActive : null,
+    ],
+    [
+      'Mixed Content Passive (warning)',
+      row.mixedContentPassive > 0 ? row.mixedContentPassive : null,
+    ],
     [
       'Redirect Chain Length',
       row.redirectChainLength > 0 ? row.redirectChainLength : null,
@@ -1665,17 +1824,22 @@ function extractionRows(
 
 function customSearchRows(
   json: string | null,
-): [string, number | null][] {
+): [string, number | string | null][] {
   if (!json) return [];
   try {
     const obj = JSON.parse(json) as Record<string, unknown>;
     if (!obj || typeof obj !== 'object') return [];
-    const out: [string, number | null][] = [];
+    const out: [string, number | string | null][] = [];
     for (const [term, raw] of Object.entries(obj)) {
       const count = typeof raw === 'number' ? raw : null;
-      // null-render small zeros to keep the panel compact — users care
-      // about hits, not absences.
-      out.push([`Custom: "${term}"`, count && count > 0 ? count : null]);
+      // -1 is a sentinel for "regex pattern failed to compile" — surface
+      // it explicitly so the user can fix the typo. 0 is hidden to keep
+      // the panel compact (users care about hits, not absences).
+      if (count === -1) {
+        out.push([`Custom: "${term}"`, 'invalid regex']);
+      } else {
+        out.push([`Custom: "${term}"`, count && count > 0 ? count : null]);
+      }
     }
     return out;
   } catch {

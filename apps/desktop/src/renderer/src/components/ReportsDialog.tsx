@@ -29,6 +29,7 @@ type ReportKind =
   | 'response-time'
   | 'slowest-urls'
   | 'most-inlinks'
+  | 'least-inlinks'
   | 'most-outlinks'
   | 'biggest-pages'
   | 'deepest-urls'
@@ -64,6 +65,7 @@ const REPORT_LABELS: Record<ReportKind, string> = {
   'response-time': 'Response Time Histogram',
   'slowest-urls': 'Slowest URLs (Top 25)',
   'most-inlinks': 'Most-Linked URLs (Top 25)',
+  'least-inlinks': 'Least-Linked URLs (Bottom 25, indexable HTML)',
   'most-outlinks': 'Most-Outlinking URLs (Top 25)',
   'biggest-pages': 'Biggest Pages (Top 25)',
   'deepest-urls': 'Deepest URLs (Top 25)',
@@ -86,6 +88,7 @@ const KEY_LABELS: Record<ReportKind, string> = {
   'response-time': 'Bucket',
   'slowest-urls': 'URL',
   'most-inlinks': 'URL',
+  'least-inlinks': 'URL',
   'most-outlinks': 'URL',
   'biggest-pages': 'URL',
   'deepest-urls': 'URL',
@@ -108,6 +111,7 @@ const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
   'response-time': null,
   'slowest-urls': 'response-time',
   'most-inlinks': 'inlinks',
+  'least-inlinks': 'inlinks',
   'most-outlinks': 'outlinks',
   'biggest-pages': 'page-size',
   'deepest-urls': 'depth',
@@ -130,6 +134,7 @@ const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
   'response-time': (v) => (v ?? 0).toLocaleString(),
   'slowest-urls': (v) => (v == null ? '—' : `${v.toLocaleString()} ms`),
   'most-inlinks': (v) => (v ?? 0).toLocaleString(),
+  'least-inlinks': (v) => (v ?? 0).toLocaleString(),
   'most-outlinks': (v) => (v ?? 0).toLocaleString(),
   'biggest-pages': (v) => (v == null ? '—' : `${(v / 1024).toFixed(1)} KB`),
   'deepest-urls': (v) => (v ?? 0).toLocaleString(),
@@ -299,7 +304,12 @@ export function ReportsDialog({ open, onClose }: Props) {
         } else {
           const metric = TOP_URL_METRIC[kind];
           if (metric) {
-            const r = await window.freecrawl.reportsTopUrls({ metric, limit: 25 });
+            const direction = kind === 'least-inlinks' ? 'asc' : 'desc';
+            const r = await window.freecrawl.reportsTopUrls({
+              metric,
+              limit: 25,
+              direction,
+            });
             if (!cancelled)
               setRows(
                 r.map((x: TopUrlsRow) => ({
@@ -371,6 +381,7 @@ export function ReportsDialog({ open, onClose }: Props) {
               <option value="response-time">Response Time Histogram</option>
               <option value="slowest-urls">Slowest URLs (Top 25)</option>
               <option value="most-inlinks">Most-Linked URLs (Top 25)</option>
+              <option value="least-inlinks">Least-Linked URLs (Bottom 25, indexable)</option>
               <option value="most-outlinks">Most-Outlinking URLs (Top 25)</option>
               <option value="biggest-pages">Biggest Pages (Top 25)</option>
               <option value="deepest-urls">Deepest URLs (Top 25)</option>

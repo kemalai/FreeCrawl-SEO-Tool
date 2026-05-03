@@ -17,7 +17,7 @@
 
 <br />
 
-A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog–style UI, ~70 SEO issue checks, and zero native dependencies.
+A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog–style UI, ~80 SEO issue checks, and zero native dependencies.
 
 </div>
 
@@ -43,12 +43,15 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 <td width="50%" valign="top">
 
 ### 🔍 Analysis
-- **~70 SEO issue checks** across 14 tabs
+- **~80 SEO issue checks** across 14 tabs
 - Near-duplicate clustering (SimHash + LSH)
 - Full hreflang validation, sitemap diff
 - OpenGraph / Twitter Card / JSON-LD / AMP
-- SSL/TLS cert audit, security headers
+- SSL/TLS cert audit, security headers, **CORS audit**
+- **Active vs passive mixed content** split
+- Readability (Flesch, Flesch–Kincaid, Gunning Fog)
 - Custom CSS + Regex extraction (10 rules)
+- **Custom search** with `/regex/` or literal mode
 
 </td>
 </tr>
@@ -59,7 +62,9 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 - Dense dark theme, virtualized 1M+ row tables
 - Live-streaming rows during crawl
 - Advanced AND/OR search (24 fields × 12 ops)
-- Detail panel with 9 sub-tabs per URL
+- Detail panel with **13 sub-tabs** per URL
+- Per-URL **Duplicates** view (cluster siblings)
+- URL rewriting (regex + whitelist + live preview)
 - Cytoscape graph + anchor-text word cloud
 - Diagnostic popups for DNS/TLS/proxy issues
 
@@ -67,11 +72,13 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 <td valign="top">
 
 ### 📤 Export & Reports
-- 16 reports (histograms, top URLs, link positions)
+- **20 reports** (histograms, top/bottom URLs, link positions)
+- **Export Dialog** with column picker — CSV or **XLSX** (multi-sheet)
 - Bulk export (22 categorised CSVs)
 - Standalone HTML audit report
 - Sitemap generator (image / hreflang / sharded / gz)
 - Project-vs-project compare diff
+- **MCP server** for AI agents (Claude / any MCP client)
 - Webhook on completion + OS notifications
 
 </td>
@@ -394,7 +401,7 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development.** All 14 analysis tabs, advanced search, ~70 issue categories, sitemap export variants, JSON / CSV / HTML reports, list mode, custom extraction, near-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, OS notifications, robots.txt tester, in-app logs, and diagnostic popups are working. Live-streaming UX with **first row in ~1 s**.
+> **Active development.** All 14 analysis tabs, advanced search, ~80 issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate detection (per-URL Duplicates view), hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, MCP server, OS notifications, robots.txt tester, URL rewriting + preview, in-app logs, and diagnostic popups are working. Live-streaming UX with **first row in ~1 s**.
 >
 > **Upcoming:** plugin system, JavaScript rendering, log analyzer, PageSpeed API integration.
 

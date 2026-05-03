@@ -122,6 +122,18 @@ export interface ParsedPage {
    * high ratio (>30%) is content-rich. Null on non-HTML or empty pages.
    */
   textCodeRatio: number | null;
+  /**
+   * Readability scores derived from the same body-text token stream used
+   * for `wordCount`. All `null` when the page has too little prose
+   * (<50 words or zero sentences) to produce a stable score — that
+   * threshold matches the Hemingway/Yoast convention so we don't surface
+   * `0.0 grade` on a navigation-only landing page.
+   */
+  fleschReadingEase: number | null;
+  fleschKincaidGrade: number | null;
+  gunningFogIndex: number | null;
+  sentenceCount: number;
+  complexWordCount: number;
   /** Number of `<img>` with explicit `alt=""` (decorative — distinct from missing alt). */
   imagesEmptyAlt: number;
   /**
@@ -157,6 +169,17 @@ export interface ParsedPage {
    * when the page itself is served over plain HTTP.
    */
   mixedContentCount: number;
+  /**
+   * Active mixed content — script/iframe/object/embed/stylesheet served
+   * over HTTP from an HTTPS page. Browsers BLOCK these silently, so the
+   * page is missing JS/CSS the user cannot see in the rendered DOM.
+   */
+  mixedContentActive: number;
+  /**
+   * Passive mixed content — img/video/audio/source over HTTP from an
+   * HTTPS page. Browsers display it but mark the URL bar "Not Secure".
+   */
+  mixedContentPassive: number;
   /**
    * `{ "term1": count, "term2": count, ... }` — case-insensitive literal
    * substring match counts. Empty if no terms requested.
@@ -495,19 +518,34 @@ export function parseHtml(
   // Mixed content — only relevant on HTTPS pages. We scan the standard
   // subresource elements (Google's mixed-content audit list); plain
   // `<a href>` doesn't count because anchor links aren't subresources.
-  let mixedContentCount = 0;
+  //
+  // Split into the two browser-policy tiers:
+  //   - active   (script / iframe / object / embed / link rel=stylesheet)
+  //              — Chrome/Firefox/Safari BLOCK these on HTTPS, so the
+  //              page silently misses script/CSS that breaks features.
+  //   - passive  (img / video / audio / source)
+  //              — browsers downgrade UI to "Not Secure" but still load.
+  // The legacy `mixedContentCount` is the sum, kept for back-compat.
+  let mixedContentActive = 0;
+  let mixedContentPassive = 0;
   if (pageUrl.startsWith('https://')) {
+    const passiveTags = new Set(['img', 'video', 'audio', 'source']);
     $(
-      'img[src], script[src], iframe[src], video[src], audio[src], source[src], embed[src], link[rel="stylesheet"][href]',
+      'img[src], script[src], iframe[src], video[src], audio[src], source[src], embed[src], object[data], link[rel="stylesheet"][href]',
     ).each((_, el) => {
       const $el = $(el);
-      const ref = ($el.attr('src') ?? $el.attr('href') ?? '').trim();
-      if (ref.startsWith('http://')) mixedContentCount++;
+      const ref = ($el.attr('src') ?? $el.attr('href') ?? $el.attr('data') ?? '').trim();
+      if (!ref.startsWith('http://')) return;
+      const tag = (el as { tagName?: string }).tagName?.toLowerCase() ?? '';
+      if (passiveTags.has(tag)) mixedContentPassive++;
+      else mixedContentActive++;
     });
   }
+  const mixedContentCount = mixedContentActive + mixedContentPassive;
 
   const text = $('body').text().replace(/\s+/g, ' ').trim();
   const wordCount = text.length > 0 ? text.split(' ').filter(Boolean).length : 0;
+  const readability = computeReadability(text, wordCount);
 
   // Analytics / marketing trackers — fingerprinted by script src + inline
   // JS substrings + meta tags. Cheaper to scan once over `$` than per-tracker.
@@ -525,20 +563,57 @@ export function parseHtml(
       ? runExtractionRules(html, $, opts.customExtractionRules)
       : null;
 
-  // Custom search — count case-insensitive literal substring occurrences
-  // in the visible body text (not raw HTML, to avoid attribute / inline-JS
-  // false positives). Lowercase haystack/needle once per page rather than
-  // per-term so cost stays linear in body size.
+  // Custom search — counts term occurrences in the visible body text
+  // (not raw HTML, to avoid attribute / inline-JS false positives).
+  //
+  // Two modes per term, switched by the entry's syntactic shape:
+  //   - `/pattern/flags`  — regex; `g` flag is forced so all matches count.
+  //                         Invalid patterns are recorded as count = -1 so
+  //                         the user can spot the typo in the detail panel
+  //                         instead of silently getting 0 hits forever.
+  //   - anything else      — literal case-insensitive substring (legacy).
+  //
+  // Lowercase haystack is computed once per page in the literal path so
+  // cost stays linear in body size regardless of how many literal terms.
   const customSearchHits: Record<string, number> = {};
   if (opts.customSearchTerms && opts.customSearchTerms.length > 0 && text.length > 0) {
-    const haystack = text.toLowerCase();
+    let haystackLower: string | null = null;
     for (const raw of opts.customSearchTerms) {
       const term = raw.trim();
       if (!term) continue;
+      // Regex mode: /pattern/flags — last `/` separates pattern from flags.
+      // Require length ≥3 so `/` and `//` aren't mistaken for regexes.
+      if (term.length >= 3 && term.startsWith('/')) {
+        const lastSlash = term.lastIndexOf('/');
+        if (lastSlash > 0) {
+          const pattern = term.slice(1, lastSlash);
+          const userFlags = term.slice(lastSlash + 1);
+          // Force `g` so `.match()` returns every hit. Strip duplicate `g`
+          // from user input and validate the rest of the flag string.
+          const flagsClean = userFlags.replace(/g/g, '');
+          if (/^[imsuy]*$/.test(flagsClean)) {
+            try {
+              const re = new RegExp(pattern, flagsClean + 'g');
+              const matches = text.match(re);
+              customSearchHits[term] = matches ? matches.length : 0;
+              continue;
+            } catch {
+              // Invalid pattern — surface as -1 so the UI can flag it.
+              customSearchHits[term] = -1;
+              continue;
+            }
+          } else {
+            customSearchHits[term] = -1;
+            continue;
+          }
+        }
+      }
+      // Literal substring (legacy path).
+      if (haystackLower === null) haystackLower = text.toLowerCase();
       const needle = term.toLowerCase();
       let count = 0;
       let pos = 0;
-      while ((pos = haystack.indexOf(needle, pos)) !== -1) {
+      while ((pos = haystackLower.indexOf(needle, pos)) !== -1) {
         count++;
         pos += needle.length;
       }
@@ -804,12 +879,19 @@ export function parseHtml(
     emptyAnchorCount,
     jsOnlyLinksCount,
     textCodeRatio,
+    fleschReadingEase: readability.fleschReadingEase,
+    fleschKincaidGrade: readability.fleschKincaidGrade,
+    gunningFogIndex: readability.gunningFogIndex,
+    sentenceCount: readability.sentenceCount,
+    complexWordCount: readability.complexWordCount,
     imagesEmptyAlt,
     imagesLazy,
     formInputCount,
     formInputUnlabeledCount,
     headings,
     mixedContentCount,
+    mixedContentActive,
+    mixedContentPassive,
     customSearchHits,
     metaRefresh,
     metaRefreshUrl,
@@ -1185,4 +1267,97 @@ function decodeEntities(s: string): string {
     }
     return NAMED_ENTITIES[name.toLowerCase()] ?? m;
   });
+}
+
+/**
+ * Counts vowel groups as a syllable-count proxy. The dictionary-free
+ * heuristic is the same one Hemingway / textstat / Yoast use:
+ *  - lowercase, strip non-letters
+ *  - drop a silent terminal `e` (but not `le` after a consonant)
+ *  - count contiguous vowel groups (a, e, i, o, u, y)
+ *  - clamp to ≥1
+ *
+ * Accuracy is ±1 per word; over a multi-paragraph page the noise averages
+ * out into stable Flesch / Gunning Fog scores. Cheap (~2 µs/word) so we
+ * can run it inline during parsing without showing up in the profile.
+ */
+function countSyllables(word: string): number {
+  let w = word.toLowerCase().replace(/[^a-z]/g, '');
+  if (w.length === 0) return 0;
+  if (w.length <= 3) return 1;
+  if (w.endsWith('e') && !w.endsWith('le')) w = w.slice(0, -1);
+  const groups = w.match(/[aeiouy]+/g);
+  return groups ? Math.max(1, groups.length) : 1;
+}
+
+interface ReadabilityScores {
+  fleschReadingEase: number | null;
+  fleschKincaidGrade: number | null;
+  gunningFogIndex: number | null;
+  sentenceCount: number;
+  complexWordCount: number;
+}
+
+/**
+ * Flesch / Flesch–Kincaid / Gunning Fog over the body text. Returns nulls
+ * for the three scores when the page has too little prose to be stable
+ * (<50 words OR zero sentences). The intermediate `sentenceCount` and
+ * `complexWordCount` are still surfaced so the detail panel can show
+ * what the engine actually measured.
+ */
+function computeReadability(text: string, wordCount: number): ReadabilityScores {
+  if (!text || wordCount === 0) {
+    return {
+      fleschReadingEase: null,
+      fleschKincaidGrade: null,
+      gunningFogIndex: null,
+      sentenceCount: 0,
+      complexWordCount: 0,
+    };
+  }
+  // Sentence boundary heuristic: . / ! / ? / … followed by whitespace or
+  // end of text. Multiple terminators collapse into one. Newline already
+  // collapsed to single space upstream.
+  const sentenceMatches = text.match(/[^.!?…]+[.!?…]+/g);
+  const sentenceCount = sentenceMatches ? sentenceMatches.length : 1;
+
+  let totalSyllables = 0;
+  let complexWordCount = 0;
+  // Tokenise on whitespace; the upstream `text` is already normalised.
+  for (const token of text.split(' ')) {
+    if (!token) continue;
+    const syl = countSyllables(token);
+    if (syl === 0) continue;
+    totalSyllables += syl;
+    // Gunning Fog "complex" word definition: ≥3 syllables, excluding
+    // common suffixes (-es, -ed, -ing) and proper nouns (capitalised).
+    if (syl >= 3 && !/^[A-Z]/.test(token) && !/(es|ed|ing)$/i.test(token)) {
+      complexWordCount++;
+    }
+  }
+
+  if (wordCount < 50 || sentenceCount === 0) {
+    return {
+      fleschReadingEase: null,
+      fleschKincaidGrade: null,
+      gunningFogIndex: null,
+      sentenceCount,
+      complexWordCount,
+    };
+  }
+
+  const wordsPerSentence = wordCount / sentenceCount;
+  const syllablesPerWord = totalSyllables / wordCount;
+  const flesch = 206.835 - 1.015 * wordsPerSentence - 84.6 * syllablesPerWord;
+  const grade = 0.39 * wordsPerSentence + 11.8 * syllablesPerWord - 15.59;
+  const fog = 0.4 * (wordsPerSentence + (100 * complexWordCount) / wordCount);
+
+  // Clamp to the same ranges the academic formulas allow.
+  return {
+    fleschReadingEase: Math.round(Math.max(-50, Math.min(120, flesch)) * 10) / 10,
+    fleschKincaidGrade: Math.round(Math.max(-2, Math.min(30, grade)) * 10) / 10,
+    gunningFogIndex: Math.round(Math.max(0, Math.min(30, fog)) * 10) / 10,
+    sentenceCount,
+    complexWordCount,
+  };
 }

@@ -1,3 +1,14 @@
+export interface UrlRegexRewrite {
+  pattern: string;
+  replacement: string;
+  flags?: string;
+}
+
+export interface CompiledUrlRegexRewrite {
+  re: RegExp;
+  replacement: string;
+}
+
 export interface UrlRewriteOptions {
   /** Strip a leading `www.` from the host. */
   stripWww?: boolean;
@@ -7,6 +18,51 @@ export interface UrlRewriteOptions {
   lowercasePath?: boolean;
   /** Trailing-slash policy: leave / strip / add. */
   trailingSlash?: 'leave' | 'strip' | 'add';
+  /**
+   * Query-param whitelist. When non-empty, ALL query parameters not in this
+   * list are dropped — replacing the default tracking-only strip. Match is
+   * case-insensitive on the param name. Empty list = default behaviour
+   * (strip just utm_* / fbclid / gclid / mc_* tracking params).
+   */
+  keepQueryParams?: readonly string[];
+  /**
+   * Regex rewrites applied to the final stringified URL in order. Each
+   * `pattern` is compiled with the supplied `flags` (default `g`). Invalid
+   * patterns are skipped silently when passed pre-compiled — call sites
+   * should compile via `compileUrlRegexRewrites` so errors surface once
+   * up-front instead of on every URL.
+   */
+  regexRewrites?: readonly CompiledUrlRegexRewrite[];
+}
+
+const DEFAULT_TRACKING_PARAMS = [
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'fbclid',
+  'gclid',
+  'mc_cid',
+  'mc_eid',
+] as const;
+
+export function compileUrlRegexRewrites(
+  raw: readonly UrlRegexRewrite[] | undefined,
+  onError?: (pattern: string, err: string) => void,
+): CompiledUrlRegexRewrite[] {
+  if (!raw || raw.length === 0) return [];
+  const out: CompiledUrlRegexRewrite[] = [];
+  for (const r of raw) {
+    if (!r || typeof r.pattern !== 'string' || r.pattern === '') continue;
+    try {
+      const re = new RegExp(r.pattern, r.flags ?? 'g');
+      out.push({ re, replacement: typeof r.replacement === 'string' ? r.replacement : '' });
+    } catch (err) {
+      if (onError) onError(r.pattern, err instanceof Error ? err.message : String(err));
+    }
+  }
+  return out;
 }
 
 export function normalizeUrl(
@@ -17,26 +73,24 @@ export function normalizeUrl(
   try {
     const u = new URL(raw, base);
     u.hash = '';
-    const tracking = [
-      'utm_source',
-      'utm_medium',
-      'utm_campaign',
-      'utm_term',
-      'utm_content',
-      'fbclid',
-      'gclid',
-      'mc_cid',
-      'mc_eid',
-    ];
-    for (const p of tracking) u.searchParams.delete(p);
+
+    const keep = rewrites.keepQueryParams;
+    if (keep && keep.length > 0) {
+      const allowed = new Set(keep.map((p) => p.toLowerCase()));
+      const drop: string[] = [];
+      for (const k of u.searchParams.keys()) {
+        if (!allowed.has(k.toLowerCase())) drop.push(k);
+      }
+      for (const k of drop) u.searchParams.delete(k);
+    } else {
+      for (const p of DEFAULT_TRACKING_PARAMS) u.searchParams.delete(p);
+    }
+
     if (u.pathname === '') u.pathname = '/';
     if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {
       u.port = '';
     }
 
-    // User-configured rewrites — applied after the canonical pass so each
-    // branch sees a clean URL. Combinations (forceHttps + stripWww) compose
-    // naturally because each branch only touches one URL component.
     if (rewrites.forceHttps && u.protocol === 'http:') {
       u.protocol = 'https:';
     }
@@ -53,12 +107,24 @@ export function normalizeUrl(
       u.pathname.length > 0 &&
       !u.pathname.endsWith('/')
     ) {
-      // Skip file-extension paths (`.css`, `.html`, …) — adding `/` to those
-      // creates broken URLs. Detect by the final segment containing a `.`.
       const last = u.pathname.slice(u.pathname.lastIndexOf('/') + 1);
       if (!last.includes('.')) u.pathname += '/';
     }
-    return u.toString();
+
+    let result = u.toString();
+    if (rewrites.regexRewrites && rewrites.regexRewrites.length > 0) {
+      for (const { re, replacement } of rewrites.regexRewrites) {
+        re.lastIndex = 0;
+        result = result.replace(re, replacement);
+      }
+      try {
+        const reparsed = new URL(result);
+        result = reparsed.toString();
+      } catch {
+        return null;
+      }
+    }
+    return result;
   } catch {
     return null;
   }

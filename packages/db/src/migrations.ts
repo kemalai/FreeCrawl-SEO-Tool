@@ -943,6 +943,87 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 46,
+    name: 'add_readability_columns',
+    // Per-URL readability fields populated by `parseHtml()` from the body
+    // text it already tokenises for word count. Stored as REAL so the UI
+    // can render `flesch_reading_ease=58.3` without rounding.
+    //   - flesch_reading_ease     (0–100, higher = easier; <30 = "very difficult")
+    //   - flesch_kincaid_grade    (US grade level; 8 ≈ 8th grade)
+    //   - gunning_fog_index       (years of formal education needed)
+    //   - sentence_count          (used by all three formulas; surfaced in detail)
+    //   - complex_word_count      (≥3-syllable non-suffix words; Gunning Fog input)
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('flesch_reading_ease')) db.exec('ALTER TABLE urls ADD COLUMN flesch_reading_ease REAL');
+      if (!has('flesch_kincaid_grade')) db.exec('ALTER TABLE urls ADD COLUMN flesch_kincaid_grade REAL');
+      if (!has('gunning_fog_index')) db.exec('ALTER TABLE urls ADD COLUMN gunning_fog_index REAL');
+      if (!has('sentence_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN sentence_count INTEGER NOT NULL DEFAULT 0');
+      if (!has('complex_word_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN complex_word_count INTEGER NOT NULL DEFAULT 0');
+    },
+  },
+  {
+    version: 47,
+    name: 'add_cors_columns',
+    // CORS response-header audit fields. Captured per URL so the
+    // "CORS Wildcard + Credentials" + "CORS Wildcard Origin" issue
+    // filters can flag misconfigured origins, and the URL Details panel
+    // can render the values for review.
+    //   - cors_allow_origin       (raw header, e.g. `*`, `https://x.com`, `null`)
+    //   - cors_allow_credentials  (-1 missing / 0 false / 1 true)
+    //   - cors_allow_methods      (raw header)
+    //   - cors_allow_headers      (raw header, often verbose; truncated upstream)
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('cors_allow_origin'))
+        db.exec('ALTER TABLE urls ADD COLUMN cors_allow_origin TEXT');
+      if (!has('cors_allow_credentials'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN cors_allow_credentials INTEGER NOT NULL DEFAULT -1',
+        );
+      if (!has('cors_allow_methods'))
+        db.exec('ALTER TABLE urls ADD COLUMN cors_allow_methods TEXT');
+      if (!has('cors_allow_headers'))
+        db.exec('ALTER TABLE urls ADD COLUMN cors_allow_headers TEXT');
+    },
+  },
+  {
+    version: 48,
+    name: 'split_mixed_content_active_passive',
+    // Split the legacy `mixed_content_count` into the two browser-policy
+    // tiers:
+    //   - active   (script / iframe / object / embed / link rel=stylesheet)
+    //                — Chrome / Firefox / Safari BLOCK these on HTTPS;
+    //                  the page silently misses script/CSS subresources.
+    //   - passive  (img / video / audio / source)
+    //                — browsers downgrade to "Not Secure" UI but render.
+    // Both columns coexist with the existing `mixed_content_count` so
+    // older code paths keep working. Backfill is a no-op — the legacy
+    // column was a sum, so it doesn't tell us the split for past crawls.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('mixed_content_active'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN mixed_content_active INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('mixed_content_passive'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN mixed_content_passive INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

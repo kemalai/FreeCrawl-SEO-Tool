@@ -616,6 +616,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.duplicateContentExact,
               category: 'issues:duplicate-content-exact',
             },
+            {
+              key: 'issues-flesch-very-difficult',
+              label: 'Hard to Read (Flesch <30)',
+              count: o.issues.fleschVeryDifficult,
+              category: 'issues:flesch-very-difficult',
+            },
+            {
+              key: 'issues-gunning-fog-very-high',
+              label: 'Gunning Fog >17',
+              count: o.issues.gunningFogVeryHigh,
+              category: 'issues:gunning-fog-very-high',
+            },
           ],
         },
         {
@@ -894,9 +906,21 @@ function buildTree(o: OverviewCounts | null): Node[] {
             },
             {
               key: 'issues-mixed-content',
-              label: 'Mixed Content',
+              label: 'Mixed Content (any)',
               count: o.issues.mixedContent,
               category: 'issues:mixed-content',
+            },
+            {
+              key: 'issues-mixed-content-active',
+              label: 'Mixed Content Active (Blocked)',
+              count: o.issues.mixedContentActive,
+              category: 'issues:mixed-content-active',
+            },
+            {
+              key: 'issues-mixed-content-passive',
+              label: 'Mixed Content Passive (Warning)',
+              count: o.issues.mixedContentPassive,
+              category: 'issues:mixed-content-passive',
             },
             {
               key: 'issues-insecure-form-action',
@@ -909,6 +933,24 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Missing SRI (3rd-party)',
               count: o.issues.missingSri,
               category: 'issues:missing-sri',
+            },
+            {
+              key: 'issues-cors-wildcard-with-credentials',
+              label: 'CORS Wildcard + Credentials',
+              count: o.issues.corsWildcardWithCredentials,
+              category: 'issues:cors-wildcard-with-credentials',
+            },
+            {
+              key: 'issues-cors-wildcard-origin',
+              label: 'CORS Wildcard Origin',
+              count: o.issues.corsWildcardOrigin,
+              category: 'issues:cors-wildcard-origin',
+            },
+            {
+              key: 'issues-http-not-https',
+              label: 'HTTP (not HTTPS)',
+              count: o.issues.httpNotHttps,
+              category: 'issues:http-not-https',
             },
           ],
         },

@@ -84,6 +84,8 @@ interface UrlRowDb {
   amphtml: string | null;
   favicon: string | null;
   mixed_content_count: number;
+  mixed_content_active: number;
+  mixed_content_passive: number;
   hreflang_invalid_count: number;
   hreflang_self_ref_missing: number;
   hreflang_reciprocity_missing: number;
@@ -134,6 +136,15 @@ interface UrlRowDb {
   server_header: string | null;
   js_only_links_count: number;
   text_code_ratio: number | null;
+  flesch_reading_ease: number | null;
+  flesch_kincaid_grade: number | null;
+  gunning_fog_index: number | null;
+  sentence_count: number;
+  complex_word_count: number;
+  cors_allow_origin: string | null;
+  cors_allow_credentials: number;
+  cors_allow_methods: string | null;
+  cors_allow_headers: string | null;
 }
 
 interface ImageRowDb {
@@ -212,6 +223,10 @@ export interface UpsertUrlInput {
   amphtml?: string | null;
   favicon?: string | null;
   mixedContentCount?: number;
+  /** Active mixed content (blocked by browser) — script/iframe/object/embed/stylesheet over HTTP. */
+  mixedContentActive?: number;
+  /** Passive mixed content (warned but rendered) — img/video/audio/source over HTTP. */
+  mixedContentPassive?: number;
   /** JSON-stringified custom-extraction results map. */
   extractionResults?: string | null;
   simhash?: string | null;
@@ -250,6 +265,24 @@ export interface UpsertUrlInput {
   jsOnlyLinksCount?: number;
   /** Visible-text bytes / total HTML bytes as integer percent (0–100). */
   textCodeRatio?: number | null;
+  /** Flesch Reading Ease (0–100, higher = easier). Null when too little prose. */
+  fleschReadingEase?: number | null;
+  /** Flesch–Kincaid US grade level. Null when too little prose. */
+  fleschKincaidGrade?: number | null;
+  /** Gunning Fog Index (years of formal education). Null when too little prose. */
+  gunningFogIndex?: number | null;
+  /** Sentence count over body text — used by all three readability formulas. */
+  sentenceCount?: number;
+  /** Complex word count (≥3 syllables, sans common suffixes/proper nouns). */
+  complexWordCount?: number;
+  /** Raw `Access-Control-Allow-Origin` response header (or null). */
+  corsAllowOrigin?: string | null;
+  /** -1 = header missing, 0 = `false`, 1 = `true`. */
+  corsAllowCredentials?: number;
+  /** Raw `Access-Control-Allow-Methods` response header (or null). */
+  corsAllowMethods?: string | null;
+  /** Raw `Access-Control-Allow-Headers` response header (or null), truncated to 1 KB. */
+  corsAllowHeaders?: string | null;
 }
 
 const UPSERT_URL_SQL = `
@@ -266,7 +299,7 @@ const UPSERT_URL_SQL = `
     hsts, x_frame_options, x_content_type_options, content_encoding,
     schema_types, schema_block_count, schema_invalid_count,
     pagination_next, pagination_prev, hreflangs, hreflang_count,
-    amphtml, favicon, mixed_content_count,
+    amphtml, favicon, mixed_content_count, mixed_content_active, mixed_content_passive,
     folder_depth, query_param_count,
     csp, referrer_policy, permissions_policy,
     custom_search_hits,
@@ -284,7 +317,9 @@ const UPSERT_URL_SQL = `
     form_input_count, form_input_unlabeled, images_lazy,
     headings,
     server_header,
-    js_only_links_count, text_code_ratio
+    js_only_links_count, text_code_ratio,
+    flesch_reading_ease, flesch_kincaid_grade, gunning_fog_index, sentence_count, complex_word_count,
+    cors_allow_origin, cors_allow_credentials, cors_allow_methods, cors_allow_headers
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
@@ -298,7 +333,7 @@ const UPSERT_URL_SQL = `
     :hsts, :x_frame_options, :x_content_type_options, :content_encoding,
     :schema_types, :schema_block_count, :schema_invalid_count,
     :pagination_next, :pagination_prev, :hreflangs, :hreflang_count,
-    :amphtml, :favicon, :mixed_content_count,
+    :amphtml, :favicon, :mixed_content_count, :mixed_content_active, :mixed_content_passive,
     :folder_depth, :query_param_count,
     :csp, :referrer_policy, :permissions_policy,
     :custom_search_hits,
@@ -316,7 +351,9 @@ const UPSERT_URL_SQL = `
     :form_input_count, :form_input_unlabeled, :images_lazy,
     :headings,
     :server_header,
-    :js_only_links_count, :text_code_ratio
+    :js_only_links_count, :text_code_ratio,
+    :flesch_reading_ease, :flesch_kincaid_grade, :gunning_fog_index, :sentence_count, :complex_word_count,
+    :cors_allow_origin, :cors_allow_credentials, :cors_allow_methods, :cors_allow_headers
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -377,6 +414,8 @@ const UPSERT_URL_SQL = `
     amphtml = excluded.amphtml,
     favicon = excluded.favicon,
     mixed_content_count = excluded.mixed_content_count,
+    mixed_content_active = excluded.mixed_content_active,
+    mixed_content_passive = excluded.mixed_content_passive,
     folder_depth = excluded.folder_depth,
     query_param_count = excluded.query_param_count,
     csp = excluded.csp,
@@ -418,6 +457,15 @@ const UPSERT_URL_SQL = `
     server_header = excluded.server_header,
     js_only_links_count = excluded.js_only_links_count,
     text_code_ratio = excluded.text_code_ratio,
+    flesch_reading_ease = excluded.flesch_reading_ease,
+    flesch_kincaid_grade = excluded.flesch_kincaid_grade,
+    gunning_fog_index = excluded.gunning_fog_index,
+    sentence_count = excluded.sentence_count,
+    complex_word_count = excluded.complex_word_count,
+    cors_allow_origin = excluded.cors_allow_origin,
+    cors_allow_credentials = excluded.cors_allow_credentials,
+    cors_allow_methods = excluded.cors_allow_methods,
+    cors_allow_headers = excluded.cors_allow_headers,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -993,6 +1041,8 @@ export class ProjectDb {
       amphtml: input.amphtml ?? null,
       favicon: input.favicon ?? null,
       mixed_content_count: input.mixedContentCount ?? 0,
+      mixed_content_active: input.mixedContentActive ?? 0,
+      mixed_content_passive: input.mixedContentPassive ?? 0,
       folder_depth: computeFolderDepth(input.url),
       query_param_count: computeQueryParamCount(input.url),
       csp: input.csp ?? null,
@@ -1034,6 +1084,15 @@ export class ProjectDb {
       server_header: input.serverHeader ?? null,
       js_only_links_count: input.jsOnlyLinksCount ?? 0,
       text_code_ratio: input.textCodeRatio ?? null,
+      flesch_reading_ease: input.fleschReadingEase ?? null,
+      flesch_kincaid_grade: input.fleschKincaidGrade ?? null,
+      gunning_fog_index: input.gunningFogIndex ?? null,
+      sentence_count: input.sentenceCount ?? 0,
+      complex_word_count: input.complexWordCount ?? 0,
+      cors_allow_origin: input.corsAllowOrigin ?? null,
+      cors_allow_credentials: input.corsAllowCredentials ?? -1,
+      cors_allow_methods: input.corsAllowMethods ?? null,
+      cors_allow_headers: input.corsAllowHeaders ?? null,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -1753,6 +1812,70 @@ export class ProjectDb {
         hammingFromRep,
       };
     });
+  }
+
+  /**
+   * Returns OTHER URLs in the same near-duplicate cluster as `urlId`.
+   * Powers the URL Details panel's "Duplicates" sub-tab — the user
+   * selects a URL and immediately sees which other pages SimHash + LSH
+   * grouped with it. Excludes the URL itself; sorted by hamming distance
+   * from the queried URL ascending (closest matches first), then URL
+   * alphabetically. Singleton clusters (cluster_id=0) return [].
+   */
+  urlClusterMembers(urlId: number): Array<{
+    url: string;
+    statusCode: number | null;
+    indexability: Indexability;
+    title: string | null;
+    wordCount: number | null;
+    inlinks: number;
+    hammingDistance: number;
+  }> {
+    const self = this.db
+      .prepare('SELECT cluster_id, simhash FROM urls WHERE id = ?')
+      .get(urlId) as { cluster_id: number | null; simhash: string | null } | undefined;
+    if (!self || !self.cluster_id || self.cluster_id <= 0) return [];
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, url, status_code, indexability, title, word_count, inlinks, simhash
+           FROM urls
+          WHERE cluster_id = ? AND id != ?
+          ORDER BY url ASC`,
+      )
+      .all(self.cluster_id, urlId) as Array<{
+      id: number;
+      url: string;
+      status_code: number | null;
+      indexability: Indexability;
+      title: string | null;
+      word_count: number | null;
+      inlinks: number;
+      simhash: string | null;
+    }>;
+
+    const popcount = (x: bigint): number => {
+      let c = 0;
+      while (x !== 0n) {
+        x &= x - 1n;
+        c++;
+      }
+      return c;
+    };
+
+    const selfBig = self.simhash ? BigInt('0x' + self.simhash) : null;
+    return rows
+      .map((r) => ({
+        url: r.url,
+        statusCode: r.status_code,
+        indexability: r.indexability,
+        title: r.title,
+        wordCount: r.word_count,
+        inlinks: r.inlinks,
+        hammingDistance:
+          selfBig !== null && r.simhash ? popcount(selfBig ^ BigInt('0x' + r.simhash)) : 0,
+      }))
+      .sort((a, b) => a.hammingDistance - b.hammingDistance || a.url.localeCompare(b.url));
   }
 
   countDuplicateClusterMembers(): number {
@@ -2554,6 +2677,12 @@ export class ProjectDb {
       mixedContent: countWhere(
         `${html} AND url LIKE 'https://%' AND mixed_content_count > 0`,
       ),
+      mixedContentActive: countWhere(
+        `${html} AND url LIKE 'https://%' AND mixed_content_active > 0`,
+      ),
+      mixedContentPassive: countWhere(
+        `${html} AND url LIKE 'https://%' AND mixed_content_passive > 0`,
+      ),
       faviconMissing: countWhere(`${html} AND (favicon IS NULL OR favicon = '')`),
       redirectLoop: countWhere('is_external = 0 AND redirect_loop = 1'),
       redirectChainLong: countWhere('is_external = 0 AND redirect_chain_length > 3'),
@@ -2907,6 +3036,26 @@ export class ProjectDb {
       jsOnlyNavigation: countWhere(`${html} AND js_only_links_count > 0`),
       textCodeRatioLow: countWhere(
         `${html} AND text_code_ratio IS NOT NULL AND text_code_ratio < 10`,
+      ),
+      fleschVeryDifficult: countWhere(
+        `${html} AND flesch_reading_ease IS NOT NULL AND flesch_reading_ease < 30`,
+      ),
+      gunningFogVeryHigh: countWhere(
+        `${html} AND gunning_fog_index IS NOT NULL AND gunning_fog_index > 17`,
+      ),
+      corsWildcardWithCredentials: countWhere(
+        `is_external = 0 AND TRIM(cors_allow_origin) = '*' AND cors_allow_credentials = 1`,
+      ),
+      corsWildcardOrigin: countWhere(
+        `is_external = 0 AND TRIM(cors_allow_origin) = '*' AND cors_allow_credentials != 1`,
+      ),
+      httpNotHttps: countWhere(
+        `is_external = 0
+         AND url LIKE 'http://%'
+         AND url NOT LIKE 'http://localhost%'
+         AND url NOT LIKE 'http://127.0.0.1%'
+         AND url NOT LIKE 'http://%.local/%'
+         AND url NOT LIKE 'http://%.local'`,
       ),
       renderBlockingCritical: countWhere(`${html} AND render_blocking_count > 20`),
       ogImageTooLarge: countWhere(
@@ -3426,13 +3575,20 @@ export class ProjectDb {
   topUrlsBy(
     column: 'response_time_ms' | 'depth' | 'outlinks' | 'inlinks' | 'content_length',
     limit: number,
+    direction: 'asc' | 'desc' = 'desc',
   ): { url: string; value: number | null }[] {
+    // For ASC ("least-linked") we exclude URLs with `column = 0` so the
+    // user gets a list of weakly-linked indexable pages, not unlinked
+    // ones — orphans are surfaced through their own filters/reports.
+    const minClause = direction === 'asc' ? `AND ${column} > 0` : '';
+    const order = direction === 'asc' ? 'ASC' : 'DESC';
     return this.db
       .prepare(
         `SELECT url, ${column} AS value FROM urls
           WHERE is_external = 0 AND content_kind = 'html'
             AND ${column} IS NOT NULL
-          ORDER BY ${column} DESC
+            ${minClause}
+          ORDER BY ${column} ${order}, url ASC
           LIMIT ?`,
       )
       .all(limit) as { url: string; value: number | null }[];
@@ -4146,6 +4302,8 @@ export class ProjectDb {
     amphtml: r.amphtml,
     favicon: r.favicon,
     mixedContentCount: r.mixed_content_count,
+    mixedContentActive: r.mixed_content_active ?? 0,
+    mixedContentPassive: r.mixed_content_passive ?? 0,
     hreflangInvalidCount: r.hreflang_invalid_count,
     hreflangSelfRefMissing: r.hreflang_self_ref_missing === 1,
     hreflangReciprocityMissing: r.hreflang_reciprocity_missing,
@@ -4196,6 +4354,15 @@ export class ProjectDb {
     serverHeader: r.server_header ?? null,
     jsOnlyLinksCount: r.js_only_links_count ?? 0,
     textCodeRatio: r.text_code_ratio ?? null,
+    fleschReadingEase: r.flesch_reading_ease ?? null,
+    fleschKincaidGrade: r.flesch_kincaid_grade ?? null,
+    gunningFogIndex: r.gunning_fog_index ?? null,
+    sentenceCount: r.sentence_count ?? 0,
+    complexWordCount: r.complex_word_count ?? 0,
+    corsAllowOrigin: r.cors_allow_origin ?? null,
+    corsAllowCredentials: r.cors_allow_credentials ?? -1,
+    corsAllowMethods: r.cors_allow_methods ?? null,
+    corsAllowHeaders: r.cors_allow_headers ?? null,
     crawledAt: r.crawled_at,
   });
 
@@ -5448,6 +5615,55 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND text_code_ratio IS NOT NULL
               AND text_code_ratio < 10`;
+    case 'issues:flesch-very-difficult':
+      // Flesch Reading Ease < 30 — academic / "very difficult" prose,
+      // hard for the general audience. Hemingway/Yoast threshold.
+      return `is_external = 0 AND content_kind = 'html'
+              AND flesch_reading_ease IS NOT NULL
+              AND flesch_reading_ease < 30`;
+    case 'issues:gunning-fog-very-high':
+      // Gunning Fog Index > 17 — beyond college-graduate reading level.
+      // Long sentences with dense vocabulary; readers will bounce.
+      return `is_external = 0 AND content_kind = 'html'
+              AND gunning_fog_index IS NOT NULL
+              AND gunning_fog_index > 17`;
+    case 'issues:cors-wildcard-with-credentials':
+      // `Access-Control-Allow-Origin: *` paired with
+      // `Access-Control-Allow-Credentials: true`. Browsers reject this
+      // combination per the CORS spec, but misconfigured servers reach
+      // it and any working XSS could exfiltrate cookies cross-origin.
+      return `is_external = 0
+              AND TRIM(cors_allow_origin) = '*'
+              AND cors_allow_credentials = 1`;
+    case 'issues:cors-wildcard-origin':
+      // `Access-Control-Allow-Origin: *` without credentials. Not always
+      // wrong (public APIs do this) but worth reviewing on production
+      // HTML so an audit can confirm intent.
+      return `is_external = 0
+              AND TRIM(cors_allow_origin) = '*'
+              AND cors_allow_credentials != 1`;
+    case 'issues:http-not-https':
+      // Internal URL still served over plain HTTP. Modern Google ranks
+      // HTTPS as a positive signal and Chrome marks HTTP pages as "Not
+      // Secure". Excludes the localhost / 127.0.0.1 / .local hosts a
+      // user might legitimately crawl over HTTP for local dev work.
+      return `is_external = 0
+              AND url LIKE 'http://%'
+              AND url NOT LIKE 'http://localhost%'
+              AND url NOT LIKE 'http://127.0.0.1%'
+              AND url NOT LIKE 'http://%.local/%'
+              AND url NOT LIKE 'http://%.local'`;
+    case 'issues:mixed-content-active':
+      // Active mixed content: HTTPS page references HTTP script /
+      // iframe / object / embed / stylesheet. Browsers BLOCK these so
+      // the page silently misses functionality the user can't see.
+      return `is_external = 0 AND content_kind = 'html'
+              AND url LIKE 'https://%' AND mixed_content_active > 0`;
+    case 'issues:mixed-content-passive':
+      // Passive mixed content: HTTPS page references HTTP img / video /
+      // audio / source. Browser warns "Not Secure" but renders.
+      return `is_external = 0 AND content_kind = 'html'
+              AND url LIKE 'https://%' AND mixed_content_passive > 0`;
     case 'issues:render-blocking-critical':
       // Tier above the existing "Render-Blocking Head (>5)" issue.
       // 20+ blocking head resources is almost universally third-party

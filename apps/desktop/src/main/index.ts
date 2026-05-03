@@ -43,6 +43,8 @@ import {
   type RobotsTestInput,
   type SitemapValidateInput,
   type SitemapValidateResult,
+  type UrlRewritePreviewInput,
+  type UrlRewritePreviewResult,
   type TopUrlsInput,
   type TopUrlsRow,
   type ExternalDomainHealthRow,
@@ -90,6 +92,8 @@ import {
   testUrlAgainstRobots,
   fetchSitemaps,
   validateSitemap,
+  normalizeUrl,
+  compileUrlRegexRewrites,
 } from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
@@ -854,6 +858,32 @@ function registerIpc(): void {
   );
 
   ipcMain.handle(
+    IPC.urlRewritePreview,
+    (_e, input: UrlRewritePreviewInput): UrlRewritePreviewResult => {
+      const errors: Array<{ pattern: string; error: string }> = [];
+      const compiled = compileUrlRegexRewrites(input.urlRegexRewrites, (p, err) =>
+        errors.push({ pattern: p, error: err }),
+      );
+      let result: string | null = null;
+      let parseError: string | undefined;
+      try {
+        result = normalizeUrl(input.url, undefined, {
+          stripWww: input.stripWww,
+          forceHttps: input.forceHttps,
+          lowercasePath: input.lowercasePath,
+          trailingSlash: input.trailingSlash,
+          keepQueryParams: input.keepQueryParams,
+          regexRewrites: compiled,
+        });
+        if (result === null) parseError = 'URL failed to parse or rewrite produced an invalid URL';
+      } catch (err) {
+        parseError = err instanceof Error ? err.message : String(err);
+      }
+      return { result, regexErrors: errors, parseError };
+    },
+  );
+
+  ipcMain.handle(
     IPC.sitemapValidate,
     async (_e, input: SitemapValidateInput): Promise<SitemapValidateResult> => {
       const ac = new AbortController();
@@ -937,10 +967,11 @@ function registerIpc(): void {
               : input.metric === 'depth'
                 ? 'depth'
                 : 'content_length';
+      const direction = input.direction === 'asc' ? 'asc' : 'desc';
       return callReaderOrFallback<TopUrlsRow[]>(
         'topUrlsBy',
-        [column, limit],
-        () => getDb().topUrlsBy(column, limit),
+        [column, limit, direction],
+        () => getDb().topUrlsBy(column, limit, direction),
       );
     },
   );
@@ -1645,6 +1676,10 @@ function registerIpc(): void {
       const rows = getDb().pageImagesDetailed(input.id, input.limit ?? 5000);
       return { rows };
     },
+  );
+
+  ipcMain.handle(IPC.urlClusterMembers, (_e, urlId: number) =>
+    getDb().urlClusterMembers(urlId),
   );
 
   ipcMain.handle(

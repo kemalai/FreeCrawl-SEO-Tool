@@ -1,6 +1,16 @@
 export { Crawler } from './crawler.js';
 export type { CrawlerEvents } from './crawler.js';
-export { normalizeUrl, isSameHost, resolveStartUrl } from './url-utils.js';
+export {
+  normalizeUrl,
+  isSameHost,
+  resolveStartUrl,
+  compileUrlRegexRewrites,
+} from './url-utils.js';
+export type {
+  UrlRewriteOptions,
+  UrlRegexRewrite,
+  CompiledUrlRegexRewrite,
+} from './url-utils.js';
 export {
   parseHtml,
   estimatePixelWidth,

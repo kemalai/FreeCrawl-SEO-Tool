@@ -75,6 +75,9 @@ interface FormState {
   forceHttps: boolean;
   lowercasePath: boolean;
   trailingSlash: 'leave' | 'strip' | 'add';
+  keepQueryParamsText: string;
+  urlRegexRewrites: Array<{ pattern: string; replacement: string; flags?: string }>;
+  urlRewritePreview: string;
   // hardware
   memoryLimitMb: string;
   maxQueueSize: string;
@@ -308,6 +311,9 @@ function configToForm(c: CrawlConfig): FormState {
     forceHttps: c.forceHttps,
     lowercasePath: c.lowercasePath,
     trailingSlash: c.trailingSlash,
+    keepQueryParamsText: (c.keepQueryParams ?? []).join('\n'),
+    urlRegexRewrites: (c.urlRegexRewrites ?? []).map((r) => ({ ...r })),
+    urlRewritePreview: '',
     memoryLimitMb: String(c.memoryLimitMb),
     maxQueueSize: String(c.maxQueueSize),
     processPriority: c.processPriority,
@@ -447,6 +453,16 @@ export function SettingsDialog({ open, onClose }: Props) {
       forceHttps: form.forceHttps,
       lowercasePath: form.lowercasePath,
       trailingSlash: form.trailingSlash,
+      keepQueryParams: parseLines(form.keepQueryParamsText)
+        .map((s) => s.trim())
+        .filter(Boolean),
+      urlRegexRewrites: form.urlRegexRewrites
+        .map((r) => ({
+          pattern: r.pattern.trim(),
+          replacement: r.replacement,
+          flags: r.flags?.trim() || undefined,
+        }))
+        .filter((r) => r.pattern !== ''),
       memoryLimitMb: Math.max(0, num(form.memoryLimitMb, config.memoryLimitMb)),
       maxQueueSize: Math.max(0, num(form.maxQueueSize, config.maxQueueSize)),
       processPriority: form.processPriority,
@@ -1198,22 +1214,93 @@ function CustomSearchPanel({ form, update }: PanelProps) {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Flag pages whose body contains any of these substrings (case-insensitive).
+        Flag pages whose body contains any of these terms. Two modes per
+        line:
+        <span className="ml-1 font-mono text-surface-200">/pattern/flags</span>{' '}
+        for regex,
+        <span className="ml-1 font-mono text-surface-200">anything else</span>{' '}
+        for literal case-insensitive substring.
       </p>
       <Area
-        label="Search Terms (case-insensitive literal substring; one per line)"
+        label="Search Terms (one per line; /…/ = regex, plain = literal)"
         value={form.customSearchTermsText}
         onChange={(v) => update('customSearchTermsText', v)}
         rows={8}
-        placeholder={'pricing\nfree shipping\nlimited time'}
-        info="Case-insensitive literal substring (NOT regex). Each term's per-page hit count is shown in the URL Details panel. Empty list disables the scan entirely."
-        example={'free shipping\npricing\nbeta\ncoming soon'}
+        placeholder={'pricing\nfree shipping\n/coming\\s+soon/i\n/(call|contact)\\s+us/i'}
+        info="Two modes per line. (1) Wrap in slashes for a regex: /pattern/flags — supported flags imsuy (g is forced). Invalid patterns appear with count -1 in the detail panel so you can spot the typo. (2) Anything else is a literal case-insensitive substring — the legacy behaviour. Each term's per-page hit count is surfaced in the URL Details panel."
+        example={'free shipping\npricing\n/(?:^|\\s)beta(?:\\s|$)/i\n/coming\\s+soon/i'}
       />
     </>
   );
 }
 
 function UrlRewritingPanel({ form, update }: PanelProps) {
+  const [previewState, setPreviewState] = useState<{
+    pending: boolean;
+    result?: string | null;
+    parseError?: string;
+    regexErrors?: Array<{ pattern: string; error: string }>;
+  }>({ pending: false });
+
+  const updateRegexRow = (i: number, patch: Partial<{ pattern: string; replacement: string; flags?: string }>) => {
+    const next = form.urlRegexRewrites.slice();
+    next[i] = { ...next[i]!, ...patch };
+    update('urlRegexRewrites', next);
+  };
+  const removeRegexRow = (i: number) => {
+    const next = form.urlRegexRewrites.slice();
+    next.splice(i, 1);
+    update('urlRegexRewrites', next);
+  };
+  const addRegexRow = () => {
+    update('urlRegexRewrites', [
+      ...form.urlRegexRewrites,
+      { pattern: '', replacement: '', flags: 'g' },
+    ]);
+  };
+
+  const runPreview = async () => {
+    const sample = form.urlRewritePreview.trim();
+    if (!sample) {
+      setPreviewState({ pending: false, parseError: 'Enter a URL above to preview' });
+      return;
+    }
+    setPreviewState({ pending: true });
+    try {
+      const keep = form.keepQueryParamsText
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const rewrites = form.urlRegexRewrites
+        .map((r) => ({
+          pattern: r.pattern.trim(),
+          replacement: r.replacement,
+          flags: r.flags?.trim() || undefined,
+        }))
+        .filter((r) => r.pattern !== '');
+      const res = await window.freecrawl.urlRewritePreview({
+        url: sample,
+        stripWww: form.stripWww,
+        forceHttps: form.forceHttps,
+        lowercasePath: form.lowercasePath,
+        trailingSlash: form.trailingSlash,
+        keepQueryParams: keep,
+        urlRegexRewrites: rewrites,
+      });
+      setPreviewState({
+        pending: false,
+        result: res.result,
+        parseError: res.parseError,
+        regexErrors: res.regexErrors,
+      });
+    } catch (err) {
+      setPreviewState({
+        pending: false,
+        parseError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
@@ -1262,6 +1349,124 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
             <option value="add">Add (/foo → /foo/)</option>
           </select>
         </label>
+      </div>
+
+      <div className="mt-4 border-t border-surface-800 pt-3">
+        <Area
+          label="Keep query parameters (whitelist; one per line)"
+          value={form.keepQueryParamsText}
+          onChange={(v) => update('keepQueryParamsText', v)}
+          rows={4}
+          placeholder={'id\npage\nlang'}
+          info="When non-empty, ALL query parameters not on this list are dropped during normalisation (case-insensitive name match). Leave empty to keep the default behaviour, which strips just utm_*, fbclid, gclid, mc_cid, and mc_eid."
+          example={'id\npage\nlang\nproduct'}
+        />
+      </div>
+
+      <div className="mt-2">
+        <div className="mb-1 flex items-center justify-between">
+          <FieldLabel
+            label="Regex rewrites (applied to the final URL string in order)"
+            info="Each rule runs JavaScript RegExp.replace on the fully-normalised URL. Flags default to 'g'. After all rules run, the result is re-parsed as a URL — if the rewrite produces an invalid URL, the link is dropped at normalisation time."
+            example="Pattern: ^https://m\\.(.+) · Replacement: https://www.$1 · Flags: i  (collapse mobile subdomain to www)"
+          />
+          <button
+            type="button"
+            onClick={addRegexRow}
+            className="inline-flex items-center gap-1 rounded border border-surface-700 px-2 py-0.5 text-[10px] text-surface-300 hover:bg-surface-800"
+          >
+            <Plus size={11} /> Add rule
+          </button>
+        </div>
+        {form.urlRegexRewrites.length === 0 ? (
+          <div className="rounded border border-dashed border-surface-800 p-2 text-[10px] text-surface-500">
+            No regex rules. Click "Add rule" to define one.
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {form.urlRegexRewrites.map((row, i) => (
+              <div key={i} className="grid grid-cols-[1fr_1fr_60px_24px] gap-1 items-center">
+                <input
+                  type="text"
+                  className="rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  placeholder="Pattern (regex)"
+                  value={row.pattern}
+                  onChange={(e) => updateRegexRow(i, { pattern: e.target.value })}
+                  spellCheck={false}
+                />
+                <input
+                  type="text"
+                  className="rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  placeholder="Replacement (use $1, $2 …)"
+                  value={row.replacement}
+                  onChange={(e) => updateRegexRow(i, { replacement: e.target.value })}
+                  spellCheck={false}
+                />
+                <input
+                  type="text"
+                  className="rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  placeholder="g"
+                  value={row.flags ?? ''}
+                  onChange={(e) => updateRegexRow(i, { flags: e.target.value })}
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  onClick={() => removeRegexRow(i)}
+                  className="rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-red-400"
+                  title="Remove rule"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 border-t border-surface-800 pt-3">
+        <FieldLabel
+          label="Preview — test a URL against current settings"
+          info="Sends the URL through the same normalisation pipeline used by the crawler, with your unsaved settings applied. Useful for verifying regex rules before kicking off a crawl."
+        />
+        <div className="mt-1 grid grid-cols-[1fr_auto] gap-1">
+          <input
+            type="text"
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+            placeholder="https://www.example.com/Path/?utm_source=x&id=42"
+            value={form.urlRewritePreview}
+            onChange={(e) => update('urlRewritePreview', e.target.value)}
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            onClick={runPreview}
+            disabled={previewState.pending}
+            className="rounded border border-surface-700 px-3 py-1 text-[11px] text-surface-200 hover:bg-surface-800 disabled:opacity-50"
+          >
+            {previewState.pending ? 'Running…' : 'Preview'}
+          </button>
+        </div>
+        {(previewState.result !== undefined || previewState.parseError) && (
+          <div className="mt-2 rounded border border-surface-800 bg-surface-950 p-2 text-[11px]">
+            {previewState.parseError ? (
+              <div className="text-red-400">{previewState.parseError}</div>
+            ) : previewState.result === null ? (
+              <div className="text-red-400">URL could not be normalised.</div>
+            ) : (
+              <div className="break-all font-mono text-emerald-300">{previewState.result}</div>
+            )}
+            {previewState.regexErrors && previewState.regexErrors.length > 0 && (
+              <ul className="mt-1 list-disc pl-4 text-amber-400">
+                {previewState.regexErrors.map((e, i) => (
+                  <li key={i}>
+                    <span className="font-mono">{e.pattern}</span> — {e.error}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </div>
     </>
   );

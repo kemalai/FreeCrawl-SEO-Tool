@@ -89,6 +89,8 @@ export const IPC = {
   logsBusy: 'logs:busy',
   robotsTest: 'robots:test',
   sitemapValidate: 'sitemap:validate',
+  urlRewritePreview: 'url:rewrite-preview',
+  urlClusterMembers: 'urls:cluster-members',
   reportsPagesPerDirectory: 'reports:pages-per-directory',
   reportsStatusCodeHistogram: 'reports:status-code-histogram',
   reportsDepthHistogram: 'reports:depth-histogram',
@@ -515,6 +517,14 @@ export interface TopUrlsInput {
   metric: TopUrlMetric;
   /** Default 25, capped at 500. */
   limit?: number;
+  /**
+   * Sort direction. `desc` (default) gives the conventional "Top N"
+   * leaderboards (most inlinks, slowest, biggest, deepest). `asc`
+   * surfaces the bottom of each metric — Least-Linked, fastest, smallest,
+   * shallowest. ASC mode excludes rows where the metric is 0 so it
+   * doesn't degenerate into an unlinked-pages report.
+   */
+  direction?: 'asc' | 'desc';
 }
 
 export interface TopUrlsRow {
@@ -676,6 +686,47 @@ export interface SitemapValidateResult {
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+/**
+ * Inputs for the URL rewrite preview IPC. The renderer sends a sample
+ * URL plus the same set of normalisation knobs the crawler uses, so the
+ * Settings → URL Rewriting tab can show users exactly what their config
+ * will produce before they save it.
+ */
+export interface UrlRewritePreviewInput {
+  url: string;
+  stripWww: boolean;
+  forceHttps: boolean;
+  lowercasePath: boolean;
+  trailingSlash: 'leave' | 'strip' | 'add';
+  keepQueryParams: string[];
+  urlRegexRewrites: Array<{ pattern: string; replacement: string; flags?: string }>;
+}
+
+/**
+ * Per-URL near-duplicate cluster member row. Surfaced in the URL Details
+ * panel's "Duplicates" sub-tab so the user can jump from one page in a
+ * cluster to its sibling pages without leaving the detail context.
+ */
+export interface UrlClusterMember {
+  url: string;
+  statusCode: number | null;
+  indexability: Indexability;
+  title: string | null;
+  wordCount: number | null;
+  inlinks: number;
+  /** SimHash hamming distance from the queried URL (0 = identical fingerprint). */
+  hammingDistance: number;
+}
+
+export interface UrlRewritePreviewResult {
+  /** Final URL string after all rewrites. `null` if normalisation failed. */
+  result: string | null;
+  /** Per-regex compile errors (if any). Empty when all patterns valid. */
+  regexErrors: Array<{ pattern: string; error: string }>;
+  /** Set when the input URL itself failed to parse. */
+  parseError?: string;
+}
+
 export interface LogEntry {
   /** Monotonic sequence id, increments on every log call this session. */
   id: number;
@@ -735,6 +786,8 @@ export interface FreeCrawlApi {
   logsOpenWindow(): Promise<void>;
   robotsTest(input: RobotsTestInput): Promise<RobotsTestResult>;
   sitemapValidate(input: SitemapValidateInput): Promise<SitemapValidateResult>;
+  urlRewritePreview(input: UrlRewritePreviewInput): Promise<UrlRewritePreviewResult>;
+  urlClusterMembers(urlId: number): Promise<UrlClusterMember[]>;
   reportsPagesPerDirectory(input: PagesPerDirectoryInput): Promise<PagesPerDirectoryRow[]>;
   reportsStatusCodeHistogram(): Promise<StatusCodeHistogramRow[]>;
   reportsDepthHistogram(): Promise<DepthHistogramRow[]>;

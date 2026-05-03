@@ -18,6 +18,7 @@ import {
   extractExtension,
   isInScope,
   resolveStartUrl,
+  compileUrlRegexRewrites,
 } from './url-utils.js';
 import { parseHtml, estimatePixelWidth } from './html-parser.js';
 import { analyseCookies, extractSetCookies } from './cookies.js';
@@ -193,12 +194,7 @@ export class Crawler extends EventEmitter {
    * nothing per call (no `?:` chains, no per-link `if`s) and so changing
    * config mid-crawl can't desync the seen-set's keying.
    */
-  private readonly urlRewrites: {
-    stripWww?: boolean;
-    forceHttps?: boolean;
-    lowercasePath?: boolean;
-    trailingSlash?: 'leave' | 'strip' | 'add';
-  };
+  private readonly urlRewrites: import('./url-utils.js').UrlRewriteOptions;
 
   /**
    * Optional freeze-watchdog hook. The desktop main process injects a
@@ -341,11 +337,16 @@ export class Crawler extends EventEmitter {
     this.excludeRegexes = compilePatterns(config.excludePatterns, (p, err) => {
       this.emit('error', `Invalid exclude pattern "${p}": ${err}`);
     });
+    const compiledRegexRewrites = compileUrlRegexRewrites(config.urlRegexRewrites, (p, err) => {
+      this.emit('error', `Invalid URL regex rewrite "${p}": ${err}`);
+    });
     this.urlRewrites = {
       stripWww: config.stripWww,
       forceHttps: config.forceHttps,
       lowercasePath: config.lowercasePath,
       trailingSlash: config.trailingSlash,
+      keepQueryParams: config.keepQueryParams,
+      regexRewrites: compiledRegexRewrites,
     };
   }
 
@@ -1663,6 +1664,25 @@ export class Crawler extends EventEmitter {
       const csp = res.headers.get('content-security-policy');
       const referrerPolicy = res.headers.get('referrer-policy');
       const permissionsPolicy = res.headers.get('permissions-policy');
+      // CORS — captured raw so the issue filters can reason about wildcard
+      // + credentials misconfigurations and the URL Details panel can show
+      // the values verbatim. `Access-Control-Allow-Headers` is sometimes
+      // very long (every API field listed); truncated to 1 KB to keep the
+      // row size predictable.
+      const corsAllowOrigin = res.headers.get('access-control-allow-origin');
+      const corsAllowCredentialsHeader = res.headers.get('access-control-allow-credentials');
+      const corsAllowCredentials =
+        corsAllowCredentialsHeader === null
+          ? -1
+          : corsAllowCredentialsHeader.trim().toLowerCase() === 'true'
+            ? 1
+            : 0;
+      const corsAllowMethods = res.headers.get('access-control-allow-methods');
+      const corsAllowHeadersRaw = res.headers.get('access-control-allow-headers');
+      const corsAllowHeaders =
+        corsAllowHeadersRaw && corsAllowHeadersRaw.length > 1024
+          ? `${corsAllowHeadersRaw.slice(0, 1024)}…`
+          : corsAllowHeadersRaw;
       // Stack auditing — captured raw, no parsing. Sites typically return
       // `nginx/1.25.0`, `cloudflare`, `Apache/2.4.41`, `Microsoft-IIS/10`.
       const serverHeader = res.headers.get('server');
@@ -1775,6 +1795,10 @@ export class Crawler extends EventEmitter {
           csp,
           referrerPolicy,
           permissionsPolicy,
+          corsAllowOrigin,
+          corsAllowCredentials,
+          corsAllowMethods,
+          corsAllowHeaders,
           canonicalHttp,
           cookiesCount: cookieSummary.count,
           cookiesInsecure: cookieSummary.insecureCount,
@@ -1844,6 +1868,10 @@ export class Crawler extends EventEmitter {
           csp,
           referrerPolicy,
           permissionsPolicy,
+          corsAllowOrigin,
+          corsAllowCredentials,
+          corsAllowMethods,
+          corsAllowHeaders,
           canonicalHttp,
           cookiesCount: cookieSummary.count,
           cookiesInsecure: cookieSummary.insecureCount,
@@ -1994,6 +2022,8 @@ export class Crawler extends EventEmitter {
           manifestUrl: parsed.manifestUrl,
           feedUrl: parsed.feedUrl,
           mixedContentCount: parsed.mixedContentCount,
+          mixedContentActive: parsed.mixedContentActive,
+          mixedContentPassive: parsed.mixedContentPassive,
           metaRefresh: parsed.metaRefresh,
           metaRefreshUrl: parsed.metaRefreshUrl,
           charset,
@@ -2031,6 +2061,11 @@ export class Crawler extends EventEmitter {
           serverHeader,
           jsOnlyLinksCount: parsed.jsOnlyLinksCount,
           textCodeRatio: parsed.textCodeRatio,
+          fleschReadingEase: parsed.fleschReadingEase,
+          fleschKincaidGrade: parsed.fleschKincaidGrade,
+          gunningFogIndex: parsed.gunningFogIndex,
+          sentenceCount: parsed.sentenceCount,
+          complexWordCount: parsed.complexWordCount,
         },
         headers: allHeaders,
         storeBody: this.config.storeBodySnapshots

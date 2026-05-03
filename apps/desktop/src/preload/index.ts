@@ -35,6 +35,9 @@ import {
   type RobotsTestResult,
   type SitemapValidateInput,
   type SitemapValidateResult,
+  type UrlRewritePreviewInput,
+  type UrlRewritePreviewResult,
+  type UrlClusterMember,
   type PagesPerDirectoryInput,
   type PagesPerDirectoryRow,
   type StatusCodeHistogramRow,
@@ -167,6 +170,11 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.robotsTest, input),
   sitemapValidate: (input: SitemapValidateInput): Promise<SitemapValidateResult> =>
     ipcRenderer.invoke(IPC.sitemapValidate, input),
+  urlRewritePreview: (
+    input: UrlRewritePreviewInput,
+  ): Promise<UrlRewritePreviewResult> => ipcRenderer.invoke(IPC.urlRewritePreview, input),
+  urlClusterMembers: (urlId: number): Promise<UrlClusterMember[]> =>
+    ipcRenderer.invoke(IPC.urlClusterMembers, urlId),
   reportsPagesPerDirectory: (
     input: PagesPerDirectoryInput,
   ): Promise<PagesPerDirectoryRow[]> => ipcRenderer.invoke(IPC.reportsPagesPerDirectory, input),
