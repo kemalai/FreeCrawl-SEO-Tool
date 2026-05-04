@@ -3,13 +3,13 @@
 ## [0.3.3] — 2026-05-04
 
 ### Added
-- Web App Manifest parse — sayfaların PWA `theme_color`, `short_name`, `display`, `scope` ve icon sayısı artık denetlenebiliyor.
-- TLS sertifika zinciri görünümü — leaf'ten root'a CA hop'ları URL Details panelinde listeleniyor.
-- "Duplicate URL normalize" toggle'ı — Settings → Duplicates altında byte-exact vs normalize karşılaştırma seçimi.
-- Repository'e Security Policy (`SECURITY.md`) eklendi.
+- Web App Manifest parsing — pages’ PWA theme_color, short_name, display, scope, and number of icons can now be inspected.
+- TLS certificate chain view — CA hops from leaf to root are listed in the URL Details panel.
+- “Duplicate URL normalize” toggle — under Settings → Duplicates, you can choose between byte-exact vs. normalized comparison.
+- A Security Policy (SECURITY.md) has been added to the repository.
 
 ### Changed
-- Çeşitli iyileştirmeler ve geliştirmeler.
+- Various improvements and enhancements.
 
 ## [0.3.2] — 2026-05-04
 
