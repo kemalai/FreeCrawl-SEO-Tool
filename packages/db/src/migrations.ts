@@ -1024,6 +1024,64 @@ const MIGRATIONS: Migration[] = [
         );
     },
   },
+  {
+    version: 49,
+    name: 'add_responsive_imagery_columns',
+    // Track responsive-imagery adoption per page so the "Responsive
+    // Images Missing" issue filter can surface image-heavy pages that
+    // ship a single `<img src>` (no `srcset`, no `<picture>`) — a
+    // missed mobile-bandwidth optimisation lever and a common LCP
+    // regression on retina screens.
+    //   - `images_responsive`: count of `<img>` slots that carry
+    //     `srcset` themselves OR sit inside a `<picture>` parent.
+    //   - `picture_count`:     count of `<picture>` elements; useful
+    //     on its own as an art-direction adoption signal.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('images_responsive'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN images_responsive INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('picture_count'))
+        db.exec('ALTER TABLE urls ADD COLUMN picture_count INTEGER NOT NULL DEFAULT 0');
+    },
+  },
+  {
+    version: 50,
+    name: 'add_malformed_og_extras_android_icon',
+    // V1 Faz 1 polish bundle (6 columns, single migration):
+    //   - `url_malformed`     0/1 — set when the canonical URL string
+    //     contains structural issues that browsers tolerate but search
+    //     engines / log analysers may diverge on (multiple `?`, multiple
+    //     `#`, control chars, unescaped reserved chars, double-encoding
+    //     sequences). Surfaces as the "Malformed URL" issue filter.
+    //   - `og_type`/`og_url`/`og_site_name`/`og_locale` — the four
+    //     remaining OpenGraph meta tags we weren't yet capturing.
+    //     Useful for share-card validation and locale-aware crawls.
+    //   - `android_icon` — first `<link rel="icon">` with sizes ≥
+    //     192x192, the resolution Android home-screen uses for PWA
+    //     icons. Distinct from the smaller favicon.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('url_malformed'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN url_malformed INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('og_type')) db.exec('ALTER TABLE urls ADD COLUMN og_type TEXT');
+      if (!has('og_url')) db.exec('ALTER TABLE urls ADD COLUMN og_url TEXT');
+      if (!has('og_site_name'))
+        db.exec('ALTER TABLE urls ADD COLUMN og_site_name TEXT');
+      if (!has('og_locale')) db.exec('ALTER TABLE urls ADD COLUMN og_locale TEXT');
+      if (!has('android_icon'))
+        db.exec('ALTER TABLE urls ADD COLUMN android_icon TEXT');
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

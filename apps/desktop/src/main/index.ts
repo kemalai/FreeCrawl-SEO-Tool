@@ -6,7 +6,9 @@ import {
   dialog,
   Menu,
   Notification,
+  session,
   shell,
+  type DownloadItem,
   type MenuItemConstructorOptions,
 } from 'electron';
 import { fileURLToPath } from 'node:url';
@@ -704,6 +706,12 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
+interface GitHubReleaseAsset {
+  name: string;
+  browser_download_url: string;
+  size?: number;
+}
+
 interface GitHubLatestRelease {
   tag_name?: string;
   name?: string;
@@ -712,21 +720,222 @@ interface GitHubLatestRelease {
   draft?: boolean;
   prerelease?: boolean;
   published_at?: string;
+  assets?: GitHubReleaseAsset[];
 }
 
 /**
- * Manual update check. Hits the GitHub Releases API for the latest
- * non-draft, non-prerelease tag, compares it with `app.getVersion()`,
- * and surfaces a native dialog. Three outcomes:
+ * Pick the installer asset for the current host platform/arch from a
+ * GitHub Release's asset list. Returns null if no matching asset is
+ * found — caller falls back to "open release page" so the user can
+ * pick manually. Excludes electron-builder's `.blockmap` siblings; we
+ * only want the user-runnable installer.
+ */
+function pickInstallerAsset(assets: GitHubReleaseAsset[]): GitHubReleaseAsset | null {
+  const list = (assets ?? []).filter(
+    (a) => a && typeof a.name === 'string' && !a.name.endsWith('.blockmap'),
+  );
+  if (process.platform === 'win32') {
+    return list.find((a) => /\.exe$/i.test(a.name)) ?? null;
+  }
+  if (process.platform === 'darwin') {
+    const isArm = process.arch === 'arm64';
+    if (isArm) {
+      return list.find((a) => /-arm64\.dmg$/i.test(a.name)) ?? null;
+    }
+    // Intel Macs: pick the `.dmg` that is NOT the arm64 build.
+    return list.find((a) => /\.dmg$/i.test(a.name) && !/arm64/i.test(a.name)) ?? null;
+  }
+  // Linux installers aren't published yet; caller falls back to release page.
+  return null;
+}
+
+/**
+ * Strip a subset of GitHub-flavoured Markdown so it renders cleanly in
+ * Electron's plain-text `dialog.showMessageBox` `detail` field. The
+ * native dialog doesn't support markdown; this turns `**bold**`,
+ * `[text](url)`, headings, code fences, and bullets into readable
+ * plain text instead of leaving the raw `**` / `[…](…)` punctuation
+ * in the user's face. Lossy by design — full notes are one click away
+ * via "Open Release Page".
+ */
+function stripMarkdownToPlain(md: string): string {
+  if (!md) return '';
+  return md
+    // Code fences: keep the inner code lines, drop the ``` markers.
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, (_m, code: string) => code.trimEnd())
+    // Inline code: drop the backticks.
+    .replace(/`([^`]+)`/g, '$1')
+    // Images: ![alt](url) -> alt (drop URL since alt is the human-readable bit)
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    // Links: [text](url) -> text (url) so the URL is still visible.
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+    // Bold: **x** / __x__
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    // Italic: *x* / _x_ (single delimiter)
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1$2')
+    .replace(/(^|[^_])_([^_\n]+)_(?!_)/g, '$1$2')
+    // Strikethrough
+    .replace(/~~([^~]+)~~/g, '$1')
+    // Headings: drop the leading #'s, keep the text.
+    .replace(/^#{1,6}\s+/gm, '')
+    // Bullet list markers -> "• "
+    .replace(/^\s*[-*+]\s+/gm, '• ')
+    // Collapse runs of blank lines to at most one.
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Pref-key namespace for "Don't show again — version X.Y.Z" — re-uses
+ * the existing `skipDiag:` prefix so the Help → Reset Diagnostic
+ * Warnings menu also clears these. Keying is per-version so a NEW
+ * release surfaces a fresh prompt even if the user dismissed the
+ * previous one.
+ */
+function dismissedUpdatePrefKey(tag: string): string {
+  return `skipDiag:update-${tag}`;
+}
+
+function isUpdateVersionDismissed(tag: string): boolean {
+  loadPrefs();
+  return prefsCache[dismissedUpdatePrefKey(tag)] === true;
+}
+
+function dismissUpdateVersion(tag: string): void {
+  loadPrefs();
+  prefsCache[dismissedUpdatePrefKey(tag)] = true;
+  schedulePrefsWrite();
+}
+
+/**
+ * Download an installer asset to the user's Downloads folder via
+ * Electron's session download infrastructure (Chromium handles
+ * redirects + connection management; we get progress + cancel events).
+ * On success reveals the file in the OS file manager so the user can
+ * double-click to install. Progress is surfaced through the main
+ * window's taskbar/dock progress bar — no extra UI needed.
+ *
+ * No code-signing, so we cannot auto-execute the installer for the
+ * user. Reveal-in-folder is the safest middle ground: kullanıcı one
+ * click yapıyor, OS uyarısını bilinçli olarak geçiyor.
+ */
+async function downloadAndRevealInstaller(asset: GitHubReleaseAsset): Promise<void> {
+  const win = mainWindow;
+  if (!win) return;
+  const downloadsDir = app.getPath('downloads');
+  try {
+    mkdirSync(downloadsDir, { recursive: true });
+  } catch {
+    /* getPath('downloads') always exists on Win/macOS but be defensive */
+  }
+  const savePath = join(downloadsDir, asset.name);
+
+  await new Promise<void>((resolve) => {
+    const handler = (
+      _e: { preventDefault: () => void; readonly defaultPrevented: boolean },
+      item: DownloadItem,
+    ) => {
+      const url = item.getURL();
+      // GitHub redirects browser_download_url → S3; both share the asset
+      // filename, so we match on filename rather than exact URL.
+      if (!url.includes(asset.name)) return;
+      session.defaultSession.removeListener('will-download', handler);
+      item.setSavePath(savePath);
+
+      item.on('updated', (_evt, state) => {
+        if (state === 'progressing' && !item.isPaused()) {
+          const total = item.getTotalBytes();
+          const received = item.getReceivedBytes();
+          if (total > 0) {
+            try {
+              win.setProgressBar(received / total);
+            } catch {
+              /* window may be destroyed mid-download */
+            }
+          }
+        }
+      });
+
+      item.once('done', (_evt, state) => {
+        try {
+          win.setProgressBar(-1);
+        } catch {
+          /* ignore */
+        }
+        if (state === 'completed') {
+          try {
+            shell.showItemInFolder(savePath);
+          } catch {
+            /* ignore — user can navigate manually */
+          }
+          void dialog.showMessageBox(win, {
+            type: 'info',
+            title: 'Download Complete',
+            message: `${asset.name} downloaded.`,
+            detail:
+              `Saved to:\n${savePath}\n\n` +
+              `The Downloads folder has been opened — double-click the installer to upgrade.\n\n` +
+              (process.platform === 'win32'
+                ? 'Windows SmartScreen may show "Unrecognized app" because the installer is not code-signed. Click "More info → Run anyway" to proceed.'
+                : process.platform === 'darwin'
+                  ? 'macOS Gatekeeper may block the app on first open because it is not notarised. Right-click the .dmg → Open to bypass.'
+                  : ''),
+            buttons: ['OK'],
+            noLink: true,
+          });
+        } else {
+          void dialog.showMessageBox(win, {
+            type: 'error',
+            title: 'Download Failed',
+            message: `Could not download ${asset.name}`,
+            detail: `Download state: ${state}\n\nYou can retry from the GitHub Releases page.`,
+            buttons: ['OK'],
+            noLink: true,
+          });
+        }
+        resolve();
+      });
+    };
+    session.defaultSession.on('will-download', handler);
+    try {
+      session.defaultSession.downloadURL(asset.browser_download_url);
+    } catch (err) {
+      session.defaultSession.removeListener('will-download', handler);
+      void dialog.showMessageBox(win, {
+        type: 'error',
+        title: 'Download Failed',
+        message: 'Could not start the download.',
+        detail: err instanceof Error ? err.message : String(err),
+        buttons: ['OK'],
+        noLink: true,
+      });
+      resolve();
+    }
+  });
+}
+
+/**
+ * Update check. Hits the GitHub Releases API for the latest non-draft,
+ * non-prerelease tag, compares it with `app.getVersion()`, and surfaces
+ * a native dialog. Three outcomes:
  *   - up-to-date           → "You're on the latest version (vX.Y.Z)"
- *   - update available     → "v0.X.Y is available" + "Open release page" / "Later"
+ *   - update available     → "v0.X.Y is available" + Download / Open Release Page / Later
  *   - network error / rate → "Couldn't check" with the underlying error
  *
- * No background polling — only runs when the user clicks the menu item.
+ * `silent: true` is used by the one-shot startup auto-check — only the
+ * "update available AND not dismissed by the user" outcome surfaces a
+ * dialog; up-to-date / network errors / dismissed-versions stay quiet.
+ * The manual menu invocation passes `silent: false` and always shows.
+ *
  * No `electron-updater` dependency, no auto-install (that would need
- * macOS notarisation + Windows code-signing first).
+ * macOS notarisation + Windows code-signing first). The Download
+ * Installer button fetches the platform-matched asset to the user's
+ * Downloads folder and reveals it in Explorer / Finder; user double-
+ * clicks to upgrade.
  */
-async function checkForUpdates(): Promise<void> {
+async function checkForUpdates(opts: { silent?: boolean } = {}): Promise<void> {
+  const silent = opts.silent === true;
   const win = mainWindow;
   if (!win) return;
   const installed = app.getVersion();
@@ -760,6 +969,14 @@ async function checkForUpdates(): Promise<void> {
   }
 
   if (fetchError || !release || !release.tag_name) {
+    if (silent) {
+      logger.log(
+        'debug',
+        'main',
+        `Startup update check skipped: ${fetchError ?? 'no tag in response'}`,
+      );
+      return;
+    }
     void dialog.showMessageBox(win, {
       type: 'warning',
       title: 'Update Check Failed',
@@ -784,6 +1001,7 @@ async function checkForUpdates(): Promise<void> {
   const latest = release.tag_name;
   const cmp = compareSemver(installed, latest);
   if (cmp >= 0) {
+    if (silent) return;
     void dialog.showMessageBox(win, {
       type: 'info',
       title: 'Up to Date',
@@ -797,37 +1015,66 @@ async function checkForUpdates(): Promise<void> {
     return;
   }
 
-  // Newer version available — show release notes preview + open page.
-  // Trim release body to keep the dialog readable; full notes are on the
-  // GitHub page the user opens.
-  const notes = (release.body ?? '').trim();
+  // User-suppressed this version via "Don't show this version again".
+  // Startup auto-check honours the dismissal silently. Manual click
+  // still shows so the user can re-decide / hit Download anyway.
+  if (silent && isUpdateVersionDismissed(latest)) {
+    logger.log('debug', 'main', `Startup update check: ${latest} dismissed by user.`);
+    return;
+  }
+
+  // Newer version available. Strip raw markdown for a readable plain-
+  // text preview in the native dialog (which doesn't support markdown);
+  // the dialog stays roomy for ~1500 chars now that the user can stay
+  // in-app to download instead of jumping to a browser.
+  const notes = stripMarkdownToPlain(release.body ?? '');
   const notesPreview =
-    notes.length > 600 ? notes.slice(0, 600).trimEnd() + '\n…' : notes;
+    notes.length > 1500 ? notes.slice(0, 1500).trimEnd() + '\n…' : notes;
+  const installerAsset = pickInstallerAsset(release.assets ?? []);
   const detail =
     `Installed: v${installed}\nLatest:    ${latest}\n\n` +
     (notesPreview
       ? `Release notes:\n${notesPreview}`
       : 'See the release page for the changelog.');
 
-  void dialog
-    .showMessageBox(win, {
-      type: 'info',
-      title: 'Update Available',
-      message: `${latest} is available.`,
-      detail,
-      buttons: ['Open Release Page', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-    })
-    .then((r) => {
-      if (r.response === 0) {
-        const url =
-          release?.html_url ??
-          'https://github.com/kemalai/FreeCrawl-SEO-Tool/releases/latest';
-        void shell.openExternal(url);
-      }
-    });
+  // Three-way choice: in-app download (primary, when an asset matches the
+  // host platform), open release page (always available — fallback for
+  // Linux / unmatched arch), Later. Plus a "Don't show this version
+  // again" checkbox keyed by tag so a NEW release re-prompts.
+  const buttons = installerAsset
+    ? ['Download Installer', 'Open Release Page', 'Later']
+    : ['Open Release Page', 'Later'];
+  const downloadBtn = installerAsset ? 0 : -1;
+  const releasePageBtn = installerAsset ? 1 : 0;
+  const laterBtn = installerAsset ? 2 : 1;
+
+  const result = await dialog.showMessageBox(win, {
+    type: 'info',
+    title: 'Update Available',
+    message: `${latest} is available.`,
+    detail,
+    buttons,
+    defaultId: downloadBtn >= 0 ? downloadBtn : releasePageBtn,
+    cancelId: laterBtn,
+    checkboxLabel: "Don't show this version again",
+    checkboxChecked: false,
+    noLink: true,
+  });
+
+  if (result.checkboxChecked) {
+    dismissUpdateVersion(latest);
+  }
+
+  if (result.response === downloadBtn && installerAsset) {
+    await downloadAndRevealInstaller(installerAsset);
+    return;
+  }
+  if (result.response === releasePageBtn) {
+    const url =
+      release?.html_url ??
+      'https://github.com/kemalai/FreeCrawl-SEO-Tool/releases/latest';
+    void shell.openExternal(url);
+  }
 }
 
 async function promptOpenProject(): Promise<void> {
@@ -2462,6 +2709,15 @@ void app.whenReady().then(() => {
   createWindow();
   logger.log('info', 'main', `App ready — version ${app.getVersion()}`);
   freezeWatchdog.setMainOp('idle');
+
+  // One-shot silent update check 8 s after launch. Ignores network /
+  // up-to-date outcomes (no popup), only opens the Update Available
+  // dialog when there is a newer release that hasn't been dismissed.
+  // The 8 s delay lets the renderer finish first paint so the prompt
+  // doesn't compete with the loading UI.
+  setTimeout(() => {
+    void checkForUpdates({ silent: true });
+  }, 8_000);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

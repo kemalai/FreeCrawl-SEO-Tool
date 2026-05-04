@@ -52,6 +52,14 @@ export interface ParsedPage {
   ogTitle: string | null;
   ogDescription: string | null;
   ogImage: string | null;
+  /** `og:type` value (e.g. `website`, `article`, `product`), lowercased. */
+  ogType: string | null;
+  /** Raw `og:url` attribute value — verbatim, not resolved. */
+  ogUrl: string | null;
+  /** `og:site_name` — entity-decoded human-readable site label. */
+  ogSiteName: string | null;
+  /** `og:locale` (e.g. `en_US`, `tr_TR`). */
+  ogLocale: string | null;
   twitterCard: string | null;
   twitterTitle: string | null;
   twitterDescription: string | null;
@@ -100,6 +108,13 @@ export interface ParsedPage {
   favicon: string | null;
   /** Resolved `<link rel="apple-touch-icon">` URL, else null. */
   appleTouchIcon: string | null;
+  /**
+   * First `<link rel="icon" sizes>` whose declared dimension is ≥192px
+   * (or `sizes="any"` vector). Android Chrome / PWA launchers use a
+   * 192px asset, so this is the right adoption signal for "is there a
+   * home-screen icon" — distinct from the smaller favicon.
+   */
+  androidIcon: string | null;
   /** Resolved `<link rel="manifest">` URL, else null. */
   manifestUrl: string | null;
   /** Resolved RSS / Atom feed `<link rel="alternate">` URL, else null. */
@@ -142,6 +157,16 @@ export interface ParsedPage {
    * adopted on image-heavy pages — a common LCP / CLS optimisation lever.
    */
   imagesLazy: number;
+  /**
+   * Number of `<img>` slots that participate in responsive imagery —
+   * either the `<img>` itself carries a `srcset` attribute, or it sits
+   * inside a `<picture>` element whose `<source>` children supply the
+   * variants. Counted per `<img>`, not per candidate URL, so the value
+   * is comparable to `imagesCount` for adoption ratios.
+   */
+  imagesResponsive: number;
+  /** Number of `<picture>` elements on the page. */
+  pictureCount: number;
   /**
    * Total user-facing form inputs on the page (`<input>`, `<textarea>`,
    * `<select>`), excluding `type=hidden / submit / button / image / reset`
@@ -297,6 +322,19 @@ export function parseHtml(
       ($('meta[property="og:description"]').attr('content') ?? '').trim(),
     ) || null;
   const ogImage = ($('meta[property="og:image"]').attr('content') ?? '').trim() || null;
+  // Remaining OpenGraph metas. `og:url` we leave as the raw content for
+  // downstream comparison with the canonical (the spec says it should
+  // be absolute, but many sites ship a relative value — surfacing it
+  // verbatim is more useful than silently resolving).
+  const ogType =
+    ($('meta[property="og:type"]').attr('content') ?? '').trim().toLowerCase() ||
+    null;
+  const ogUrl = ($('meta[property="og:url"]').attr('content') ?? '').trim() || null;
+  const ogSiteName =
+    decodeEntities(($('meta[property="og:site_name"]').attr('content') ?? '').trim()) ||
+    null;
+  const ogLocale =
+    ($('meta[property="og:locale"]').attr('content') ?? '').trim() || null;
 
   // Twitter Cards use `name=` (not `property=`) per Twitter's spec. Many
   // sites leave one set missing and rely on the other — we capture both.
@@ -461,6 +499,36 @@ export function parseHtml(
   const appleTouchIcon = appleTouchRaw
     ? normalizeUrl(appleTouchRaw, pageUrl, opts.urlRewrites)
     : null;
+
+  // Android Chrome / PWA icon — `<link rel="icon" sizes="192x192">` (or
+  // larger). The home-screen launcher uses 192px on Android, so this is
+  // the right adoption signal distinct from the small favicon. We pick
+  // the first `<link rel="icon">` whose declared `sizes` includes a
+  // dimension >=192 in either axis. `sizes="any"` (vector icons) also
+  // qualifies — the launcher rasterises them at 192.
+  let androidIcon: string | null = null;
+  $('link[rel="icon"][sizes]').each((_, el) => {
+    if (androidIcon) return;
+    const sizes = ($(el).attr('sizes') ?? '').trim().toLowerCase();
+    if (!sizes) return;
+    const isVector = sizes === 'any';
+    let qualifies = isVector;
+    if (!qualifies) {
+      // `sizes` may carry multiple space-separated WxH tokens.
+      for (const token of sizes.split(/\s+/)) {
+        const m = token.match(/^(\d+)x(\d+)$/);
+        if (m && (Number(m[1]) >= 192 || Number(m[2]) >= 192)) {
+          qualifies = true;
+          break;
+        }
+      }
+    }
+    if (!qualifies) return;
+    const href = ($(el).attr('href') ?? '').trim();
+    if (!href) return;
+    const resolved = normalizeUrl(href, pageUrl, opts.urlRewrites);
+    if (resolved) androidIcon = resolved;
+  });
 
   // Web app manifest — PWA support signal.
   const manifestRaw = ($('link[rel="manifest"]').first().attr('href') ?? '').trim();
@@ -768,9 +836,63 @@ export function parseHtml(
 
   let imagesEmptyAlt = 0;
   let imagesLazy = 0;
+  let imagesResponsive = 0;
   const imageMap = new Map<string, DiscoveredImage>();
+
+  // Helper: parse a `srcset` attribute value into the list of candidate
+  // URLs. The HTML spec allows `URL [whitespace] [Nw|Nx]` entries
+  // separated by commas, but commas can also appear inside URLs (rare —
+  // typically encoded as %2C, but we can't assume). The robust split is
+  // by whitespace-or-EOS-after-descriptor, but a comma+whitespace split
+  // catches the overwhelming majority of real-world srcsets and is what
+  // the WHATWG reference parser uses for the simple form.
+  const parseSrcset = (raw: string): string[] => {
+    const out: string[] = [];
+    for (const entry of raw.split(/,(?=\s)/)) {
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      // The URL is everything up to the first whitespace; the rest is
+      // the optional descriptor (e.g. `1x`, `2x`, `768w`).
+      const m = trimmed.match(/^(\S+)/);
+      if (m && m[1]) out.push(m[1]);
+    }
+    return out;
+  };
+
+  // Add a candidate URL discovered from a srcset/picture-source. Same
+  // rules as the `<img src>` loop — skip data URIs, normalise, dedupe.
+  // The parent `<img>` provides the alt/width/height fallback when we
+  // see a srcset variant for the first time.
+  const addImageCandidate = (
+    rawUrl: string,
+    alt: string | null,
+    width: number | null,
+    height: number | null,
+  ): void => {
+    if (!rawUrl) return;
+    if (rawUrl.startsWith('data:')) return;
+    const normalized = normalizeUrl(rawUrl, pageUrl, opts.urlRewrites);
+    if (!normalized) return;
+    if (!/^https?:/.test(normalized)) return;
+    if (imageMap.has(normalized)) return;
+    imageMap.set(normalized, {
+      src: normalized,
+      alt,
+      width,
+      height,
+      isInternal: isSameHost(pageUrl, normalized, opts),
+    });
+  };
+
+  // Count `<picture>` elements — each <picture> wraps one <img> plus
+  // multiple <source> alternates (different formats / breakpoints).
+  // The bare count surfaces in the URL Details panel as a "responsive
+  // imagery adoption" signal alongside `images_responsive`.
+  const pictureCount = $('picture').length;
+
   $('img[src]').each((_, el) => {
-    const rawSrc = $(el).attr('src');
+    const $el = $(el);
+    const rawSrc = $el.attr('src');
     if (!rawSrc) return;
     // Skip inline data URIs — they're not "web resources" in the crawler
     // sense and would bloat the images table fast on any CMS.
@@ -778,9 +900,8 @@ export function parseHtml(
     const normalized = normalizeUrl(rawSrc, pageUrl, opts.urlRewrites);
     if (!normalized) return;
     if (!/^https?:/.test(normalized)) return;
-    if (imageMap.has(normalized)) return;
 
-    const altAttr = $(el).attr('alt');
+    const altAttr = $el.attr('alt');
     const alt =
       altAttr === undefined
         ? null // alt missing entirely (accessibility issue)
@@ -792,23 +913,55 @@ export function parseHtml(
       // image_usages rows whose alt is null.
       if (altAttr.trim() === '') imagesEmptyAlt++;
     }
-    const width = parseIntAttr($(el).attr('width'));
-    const height = parseIntAttr($(el).attr('height'));
+    const width = parseIntAttr($el.attr('width'));
+    const height = parseIntAttr($el.attr('height'));
     const isInternal = isSameHost(pageUrl, normalized, opts);
 
     // Lazy-loading adoption — `loading="lazy"` is the native browser
     // attribute and the only signal that's reliable without rendering JS.
-    if (($(el).attr('loading') ?? '').trim().toLowerCase() === 'lazy') {
+    if (($el.attr('loading') ?? '').trim().toLowerCase() === 'lazy') {
       imagesLazy++;
     }
 
-    imageMap.set(normalized, {
-      src: normalized,
-      alt,
-      width,
-      height,
-      isInternal,
-    });
+    // Responsive imagery — an `<img>` is "responsive" if it carries
+    // `srcset` itself OR is wrapped in `<picture>` (the parent supplies
+    // the variants via `<source>` siblings). We only count the primary
+    // `<img>` here so a single page contributes 1 per slot, not 1 per
+    // variant URL — the variant URLs themselves go into `imageMap` so
+    // the broken-image / large-image probes still see them.
+    const srcsetAttr = ($el.attr('srcset') ?? '').trim();
+    const inPicture = $el.parent('picture').length > 0;
+    if (srcsetAttr || inPicture) imagesResponsive++;
+
+    if (!imageMap.has(normalized)) {
+      imageMap.set(normalized, {
+        src: normalized,
+        alt,
+        width,
+        height,
+        isInternal,
+      });
+    }
+
+    // Capture every candidate URL from the `<img srcset>` so the same
+    // pages that trigger Broken-Image / Large-Image probes pick them up.
+    if (srcsetAttr) {
+      for (const candidate of parseSrcset(srcsetAttr)) {
+        addImageCandidate(candidate, alt, null, null);
+      }
+    }
+  });
+
+  // `<picture><source srcset>` — the alternates the browser may pick
+  // instead of the inner `<img src>`. Includes format-fallback cases
+  // (avif → webp → jpg) where the primary `<img>` references only the
+  // last fallback.
+  $('picture > source[srcset]').each((_, el) => {
+    const srcsetAttr = ($(el).attr('srcset') ?? '').trim();
+    if (!srcsetAttr) return;
+    for (const candidate of parseSrcset(srcsetAttr)) {
+      addImageCandidate(candidate, null, null, null);
+    }
   });
 
   // OG / Twitter share-card images. They rarely appear inside `<img>`
@@ -852,6 +1005,10 @@ export function parseHtml(
     ogTitle,
     ogDescription,
     ogImage,
+    ogType,
+    ogUrl,
+    ogSiteName,
+    ogLocale,
     twitterCard,
     twitterTitle,
     twitterDescription,
@@ -874,6 +1031,7 @@ export function parseHtml(
     amphtml,
     favicon,
     appleTouchIcon,
+    androidIcon,
     manifestUrl,
     feedUrl,
     emptyAnchorCount,
@@ -886,6 +1044,8 @@ export function parseHtml(
     complexWordCount: readability.complexWordCount,
     imagesEmptyAlt,
     imagesLazy,
+    imagesResponsive,
+    pictureCount,
     formInputCount,
     formInputUnlabeledCount,
     headings,

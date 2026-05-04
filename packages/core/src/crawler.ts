@@ -17,6 +17,7 @@ import {
   isSameHost,
   extractExtension,
   isInScope,
+  isUrlMalformed,
   resolveStartUrl,
   compileUrlRegexRewrites,
 } from './url-utils.js';
@@ -1131,6 +1132,7 @@ export class Crawler extends EventEmitter {
       try {
         this.db.upsertUrl({
           url: this.config.startUrl,
+          urlMalformed: isUrlMalformed(this.config.startUrl) ? 1 : 0,
           contentKind: 'html',
           statusCode: null,
           statusText: 'fetching',
@@ -1644,6 +1646,7 @@ export class Crawler extends EventEmitter {
           await this.dbCall<number>('upsertUrl', [
             {
               url: item.url,
+              urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
               contentKind: 'other',
               statusCode: res.status,
               statusText: 'size-cap-exceeded',
@@ -1813,6 +1816,7 @@ export class Crawler extends EventEmitter {
         const redirectUrlId = await this.dbCall<number>('upsertUrl', [
           {
             url: item.url,
+            urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
             contentKind: kind,
             statusCode,
             statusText: null,
@@ -1889,6 +1893,7 @@ export class Crawler extends EventEmitter {
         const nonHtmlUrlId = await this.dbCall<number>('upsertUrl', [
           {
             url: item.url,
+            urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
             contentKind: kind,
             statusCode,
             statusText: null,
@@ -1997,6 +2002,7 @@ export class Crawler extends EventEmitter {
       const { urlId } = await this.writeFetchedUrl({
         upsert: {
           url: item.url,
+          urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
           contentKind: 'html',
           statusCode,
           statusText: null,
@@ -2030,6 +2036,10 @@ export class Crawler extends EventEmitter {
           ogTitle: parsed.ogTitle,
           ogDescription: parsed.ogDescription,
           ogImage: parsed.ogImage,
+          ogType: parsed.ogType,
+          ogUrl: parsed.ogUrl,
+          ogSiteName: parsed.ogSiteName,
+          ogLocale: parsed.ogLocale,
           twitterCard: parsed.twitterCard,
           twitterTitle: parsed.twitterTitle,
           twitterDescription: parsed.twitterDescription,
@@ -2059,6 +2069,7 @@ export class Crawler extends EventEmitter {
           amphtml: parsed.amphtml,
           favicon: parsed.favicon,
           appleTouchIcon: parsed.appleTouchIcon,
+          androidIcon: parsed.androidIcon,
           manifestUrl: parsed.manifestUrl,
           feedUrl: parsed.feedUrl,
           mixedContentCount: parsed.mixedContentCount,
@@ -2096,6 +2107,8 @@ export class Crawler extends EventEmitter {
           formInputCount: parsed.formInputCount,
           formInputUnlabeled: parsed.formInputUnlabeledCount,
           imagesLazy: parsed.imagesLazy,
+          imagesResponsive: parsed.imagesResponsive,
+          pictureCount: parsed.pictureCount,
           headings:
             parsed.headings.length > 0 ? JSON.stringify(parsed.headings) : null,
           serverHeader,
@@ -2223,6 +2236,7 @@ export class Crawler extends EventEmitter {
       await this.dbCall<number>('upsertUrl', [
         {
           url: item.url,
+          urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
           contentKind: 'html',
           statusCode: null,
           statusText: detail,

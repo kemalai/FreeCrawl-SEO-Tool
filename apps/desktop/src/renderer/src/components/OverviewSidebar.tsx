@@ -767,6 +767,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               category: 'issues:url-spaces',
             },
             {
+              key: 'issues-url-malformed',
+              label: 'Malformed URL',
+              count: o.issues.urlMalformed,
+              category: 'issues:url-malformed',
+            },
+            {
               key: 'issues-url-query-too-long',
               label: 'Long Query String (>100 chars)',
               count: o.issues.queryStringTooLong,
@@ -1227,6 +1233,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Low Lazy-Loading Adoption',
               count: o.issues.imagesNoLazyLoading,
               category: 'issues:images-no-lazy-loading',
+            },
+            {
+              key: 'issues-images-no-responsive',
+              label: 'Low Responsive Image Adoption',
+              count: o.issues.imagesNoResponsive,
+              category: 'issues:images-no-responsive',
             },
             {
               key: 'issues-image-broken-src',

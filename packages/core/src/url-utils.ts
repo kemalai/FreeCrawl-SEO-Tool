@@ -219,6 +219,44 @@ export function extractExtension(url: string): string {
 }
 
 /**
+ * Detect URLs that browsers tolerate but search engines, log analysers,
+ * and CDN edge rules may handle inconsistently. The WHATWG URL parser
+ * (which `normalizeUrl` runs each href through) accepts a wide grammar
+ * that includes structural ambiguities — we surface those as a separate
+ * "Malformed URL" issue without rejecting the URL outright.
+ *
+ * Returns true when the URL has any of:
+ *   - Multiple `?` characters (query string with literal `?` in a value
+ *     — legal per RFC 3986 but widely mis-parsed by reverse proxies).
+ *   - Multiple `#` characters (fragments are stripped on normalize, so
+ *     this only triggers on URLs whose path/query contains a literal
+ *     `%23` decoded back into `#`).
+ *   - ASCII control characters (codepoints < 0x20 or 0x7F).
+ *   - Unescaped reserved characters that should be percent-encoded:
+ *     `<`, `>`, `"`, backtick, `{`, `}`, `|`, `\`, `^`.
+ *   - Double-encoding sequences (`%25` followed by two hex digits — a
+ *     percent-sign that was already itself percent-encoded, suggesting
+ *     a CMS double-encoded an already-encoded URL).
+ */
+export function isUrlMalformed(url: string): boolean {
+  if (!url) return false;
+  // Multiple `?` — split on first `?` and look for another in the remainder.
+  const firstQ = url.indexOf('?');
+  if (firstQ !== -1 && url.indexOf('?', firstQ + 1) !== -1) return true;
+  // Multiple `#` — same idea.
+  const firstH = url.indexOf('#');
+  if (firstH !== -1 && url.indexOf('#', firstH + 1) !== -1) return true;
+  // Control chars + unescaped reserved chars.
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1F\x7F<>"`{}|\\^]/.test(url)) return true;
+  // Double-encoding pattern: `%25` followed by two hex digits is a
+  // percent-sign whose own `%` was percent-encoded — almost always a
+  // double-encoded URL bug (e.g. `%2520` = encoded `%20` = encoded space).
+  if (/%25[0-9A-Fa-f]{2}/.test(url)) return true;
+  return false;
+}
+
+/**
  * Resolve a user-typed start URL to a full URL with protocol, following
  * any initial redirect chain so the crawler's scope calculation (e.g.
  * `subdomain` match) uses the site's canonical host.

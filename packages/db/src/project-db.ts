@@ -145,6 +145,14 @@ interface UrlRowDb {
   cors_allow_credentials: number;
   cors_allow_methods: string | null;
   cors_allow_headers: string | null;
+  images_responsive: number;
+  picture_count: number;
+  url_malformed: number;
+  og_type: string | null;
+  og_url: string | null;
+  og_site_name: string | null;
+  og_locale: string | null;
+  android_icon: string | null;
 }
 
 interface ImageRowDb {
@@ -257,6 +265,15 @@ export interface UpsertUrlInput {
   formInputCount?: number;
   formInputUnlabeled?: number;
   imagesLazy?: number;
+  imagesResponsive?: number;
+  pictureCount?: number;
+  /** 0/1 — set by the crawler via `isUrlMalformed(url)` from `@freecrawl/core/url-utils`. */
+  urlMalformed?: number;
+  ogType?: string | null;
+  ogUrl?: string | null;
+  ogSiteName?: string | null;
+  ogLocale?: string | null;
+  androidIcon?: string | null;
   /** JSON-stringified outline array, or null. */
   headings?: string | null;
   /** Raw `Server` response header, or null when absent. */
@@ -319,7 +336,9 @@ const UPSERT_URL_SQL = `
     server_header,
     js_only_links_count, text_code_ratio,
     flesch_reading_ease, flesch_kincaid_grade, gunning_fog_index, sentence_count, complex_word_count,
-    cors_allow_origin, cors_allow_credentials, cors_allow_methods, cors_allow_headers
+    cors_allow_origin, cors_allow_credentials, cors_allow_methods, cors_allow_headers,
+    images_responsive, picture_count,
+    url_malformed, og_type, og_url, og_site_name, og_locale, android_icon
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
@@ -353,7 +372,9 @@ const UPSERT_URL_SQL = `
     :server_header,
     :js_only_links_count, :text_code_ratio,
     :flesch_reading_ease, :flesch_kincaid_grade, :gunning_fog_index, :sentence_count, :complex_word_count,
-    :cors_allow_origin, :cors_allow_credentials, :cors_allow_methods, :cors_allow_headers
+    :cors_allow_origin, :cors_allow_credentials, :cors_allow_methods, :cors_allow_headers,
+    :images_responsive, :picture_count,
+    :url_malformed, :og_type, :og_url, :og_site_name, :og_locale, :android_icon
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -466,6 +487,14 @@ const UPSERT_URL_SQL = `
     cors_allow_credentials = excluded.cors_allow_credentials,
     cors_allow_methods = excluded.cors_allow_methods,
     cors_allow_headers = excluded.cors_allow_headers,
+    images_responsive = excluded.images_responsive,
+    picture_count = excluded.picture_count,
+    url_malformed = excluded.url_malformed,
+    og_type = excluded.og_type,
+    og_url = excluded.og_url,
+    og_site_name = excluded.og_site_name,
+    og_locale = excluded.og_locale,
+    android_icon = excluded.android_icon,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -1093,6 +1122,14 @@ export class ProjectDb {
       cors_allow_credentials: input.corsAllowCredentials ?? -1,
       cors_allow_methods: input.corsAllowMethods ?? null,
       cors_allow_headers: input.corsAllowHeaders ?? null,
+      images_responsive: input.imagesResponsive ?? 0,
+      picture_count: input.pictureCount ?? 0,
+      url_malformed: input.urlMalformed ?? 0,
+      og_type: input.ogType ?? null,
+      og_url: input.ogUrl ?? null,
+      og_site_name: input.ogSiteName ?? null,
+      og_locale: input.ogLocale ?? null,
+      android_icon: input.androidIcon ?? null,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -2752,6 +2789,7 @@ export class ProjectDb {
       urlSpaces: countWhere(
         "is_external = 0 AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)",
       ),
+      urlMalformed: countWhere('is_external = 0 AND url_malformed = 1'),
       imageEmptyAlt: countWhere(`${html} AND images_empty_alt > 0`),
       linkEmptyAnchor: countWhere(`${html} AND empty_anchor_count > 0`),
       appleTouchIconMissing: countWhere(
@@ -2924,6 +2962,9 @@ export class ProjectDb {
       ),
       imagesNoLazyLoading: countWhere(
         `${html} AND images_count >= 5 AND (images_lazy * 2) < images_count`,
+      ),
+      imagesNoResponsive: countWhere(
+        `${html} AND images_count >= 5 AND (images_responsive * 2) < images_count`,
       ),
       imageBrokenSrc: countWhere(
         `${html} AND EXISTS (
@@ -4363,6 +4404,14 @@ export class ProjectDb {
     corsAllowCredentials: r.cors_allow_credentials ?? -1,
     corsAllowMethods: r.cors_allow_methods ?? null,
     corsAllowHeaders: r.cors_allow_headers ?? null,
+    imagesResponsive: r.images_responsive ?? 0,
+    pictureCount: r.picture_count ?? 0,
+    urlMalformed: r.url_malformed ?? 0,
+    ogType: r.og_type ?? null,
+    ogUrl: r.og_url ?? null,
+    ogSiteName: r.og_site_name ?? null,
+    ogLocale: r.og_locale ?? null,
+    androidIcon: r.android_icon ?? null,
     crawledAt: r.crawled_at,
   });
 
@@ -5075,6 +5124,12 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // Literal space or `%20` in URL — encoding bug, often from CMS that
       // produced filenames with spaces.
       return "is_external = 0 AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)";
+    case 'issues:url-malformed':
+      // Computed by `isUrlMalformed` at upsert time. Captures the
+      // ambiguities the URL parser tolerates but middleware diverges on:
+      // multiple `?`/`#`, control chars, unescaped reserved chars,
+      // double-encoding sequences (`%2520` etc).
+      return 'is_external = 0 AND url_malformed = 1';
     case 'issues:image-empty-alt':
       // alt="" specifically. Decorative images use this intentionally, but
       // many sites apply it to content images by mistake.
@@ -5354,6 +5409,14 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND images_count >= 5
               AND (images_lazy * 2) < images_count`;
+    case 'issues:images-no-responsive':
+      // Pages with ≥5 images but `srcset`/`<picture>` adoption < 50%.
+      // Same 5-image floor as the lazy-loading rule — single-image hero
+      // pages legitimately ship a fixed-size art-directed image without
+      // a responsive variant set.
+      return `is_external = 0 AND content_kind = 'html'
+              AND images_count >= 5
+              AND (images_responsive * 2) < images_count`;
     case 'issues:image-broken-src':
       // Pages referencing at least one internal image whose HEAD probe
       // returned a 4xx/5xx status. Uses the existing `probe_status`

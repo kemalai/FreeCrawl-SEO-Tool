@@ -842,6 +842,10 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['OG Title', row.ogTitle],
     ['OG Description', row.ogDescription],
     ['OG Image', row.ogImage],
+    ['OG Type', row.ogType],
+    ['OG URL', row.ogUrl],
+    ['OG Site Name', row.ogSiteName],
+    ['OG Locale', row.ogLocale],
     ['Twitter Card', row.twitterCard],
     ['Twitter Title', row.twitterTitle],
     ['Twitter Description', row.twitterDescription],
@@ -897,6 +901,7 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['AMP HTML', row.amphtml],
     ['Favicon', row.favicon],
     ['Apple Touch Icon', row.appleTouchIcon],
+    ['Android / PWA Icon', row.androidIcon],
     ['Web Manifest', row.manifestUrl],
     ['RSS / Atom Feed', row.feedUrl],
     ['Title Tag Count', row.titleCount > 1 ? row.titleCount : null],
@@ -909,6 +914,15 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
           )}%)`
         : null,
     ],
+    [
+      'Responsive Images',
+      row.imagesCount > 0
+        ? `${row.imagesResponsive} / ${row.imagesCount} (${Math.round(
+            (row.imagesResponsive / row.imagesCount) * 100,
+          )}%)`
+        : null,
+    ],
+    ['<picture> Elements', row.pictureCount > 0 ? row.pictureCount : null],
     ['Form Inputs', row.formInputCount > 0 ? row.formInputCount : null],
     [
       'Form Inputs Without Label',

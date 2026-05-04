@@ -117,6 +117,7 @@ export type UrlCategory =
   | 'issues:title-multiple'
   | 'issues:url-fragment'
   | 'issues:url-spaces'
+  | 'issues:url-malformed'
   | 'issues:link-empty-anchor'
   | 'issues:apple-touch-icon-missing'
   | 'issues:manifest-missing'
@@ -152,6 +153,7 @@ export type UrlCategory =
   | 'issues:anchor-text-generic'
   | 'issues:form-input-unlabeled'
   | 'issues:images-no-lazy-loading'
+  | 'issues:images-no-responsive'
   | 'issues:image-broken-src'
   | 'issues:target-blank-no-noopener'
   | 'issues:page-empty'
@@ -245,6 +247,27 @@ export interface CrawlUrlRow {
   imagesEmptyAlt: number;
   /** Number of `<img>` tags with `loading="lazy"`. */
   imagesLazy: number;
+  /**
+   * Number of `<img>` slots that participate in responsive imagery —
+   * either via a `srcset` attribute on the `<img>` itself or via a
+   * `<picture>` parent with `<source>` siblings. Counted per `<img>`,
+   * comparable to `imagesCount` for adoption ratios.
+   */
+  imagesResponsive: number;
+  /** Number of `<picture>` elements on the page. */
+  pictureCount: number;
+  /** 0/1 — set when the canonical URL string is structurally suspect (multiple `?`/`#`, control chars, unescaped reserved chars, double-encoding). */
+  urlMalformed: number;
+  /** `og:type` (e.g. `website`, `article`, `product`), lowercased. */
+  ogType: string | null;
+  /** Raw `og:url` content, verbatim. */
+  ogUrl: string | null;
+  /** `og:site_name`. */
+  ogSiteName: string | null;
+  /** `og:locale` (e.g. `en_US`). */
+  ogLocale: string | null;
+  /** First `<link rel="icon" sizes>` ≥ 192px (or `sizes="any"`). PWA / Android home-screen icon. */
+  androidIcon: string | null;
   /** Total user-facing form inputs (input/textarea/select, excluding hidden/submit/button/image/reset). */
   formInputCount: number;
   /** Form inputs without label / aria-label / title (WCAG 1.3.1, 4.1.2 violation). */
@@ -946,6 +969,8 @@ export interface OverviewCounts {
     titleMultiple: number;
     urlFragment: number;
     urlSpaces: number;
+    /** URLs flagged by `isUrlMalformed` (multiple `?`/`#`, control chars, unescaped reserved chars, double-encoding). */
+    urlMalformed: number;
     imageEmptyAlt: number;
     linkEmptyAnchor: number;
     appleTouchIconMissing: number;
@@ -998,6 +1023,8 @@ export interface OverviewCounts {
     formInputUnlabeled: number;
     /** Pages with ≥5 images but lazy-loading adoption below 50%. */
     imagesNoLazyLoading: number;
+    /** Pages with ≥5 images but `srcset`/`<picture>` adoption below 50%. */
+    imagesNoResponsive: number;
     /** Pages referencing at least one image whose HEAD probe returned a 4xx/5xx status. */
     imageBrokenSrc: number;
     /** Pages with at least one `<a target="_blank">` without `rel="noopener"` (reverse-tabnabbing risk). */
