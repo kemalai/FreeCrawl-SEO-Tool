@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.2] — 2026-05-04
+
+### Added
+- **In-app installer download** in the "Update Available" dialog — when GitHub Releases lists a matching artifact for the current platform/arch (Windows `.exe`, macOS Intel `.dmg`, macOS ARM64 `-arm64.dmg`), the dialog now offers a "Download Installer" button alongside "Open Release Page". Saves to the user's Downloads folder via `session.defaultSession.downloadURL` with taskbar/dock progress, then reveals the file with `shell.showItemInFolder`. Linux falls back to the release page (no single canonical artifact). Code-signing-free path — the user installs manually after Gatekeeper / SmartScreen prompt.
+- **Markdown release notes** rendered as plain text — `stripMarkdownToPlain` collapses code fences, bold / italic, headings, links (`[text](url)` → `text (url)`), images, bullets, and strikethrough. Preview window expanded from 600 to 1500 chars.
+- **"Don't show this version again"** checkbox in the Update Available dialog — persists in the existing `skipDiag:update-${tag}` prefs namespace, so Help → "Reset Diagnostic Warnings" already clears it. Silent startup auto-check (8 s after launch) respects dismissals; manual menu invocation always shows.
+- **`srcset` + `<picture>` support for images** — html-parser now captures every candidate URL from `<img srcset>` and `<picture> > <source srcset>` (WHATWG-compatible split), feeding them into the same broken-image / large-image probe pipeline so retina + breakpoint variants no longer slip through. Per-page `images_responsive` (count of `<img>` slots that carry `srcset` or sit inside a `<picture>` parent) and `picture_count` columns (migration v49). New issue filter **Low Responsive Image Adoption** under Sidebar → Issues → Images, mirroring the lazy-loading rule's ≥5-image / <50%-adoption threshold. Detail Panel surfaces "Responsive Images" ratio + "`<picture>` Elements" count rows.
+- **Malformed URL detection** — `isUrlMalformed` helper in `url-utils.ts` flags URLs that browsers tolerate but search engines / log analysers diverge on: multiple `?` or `#`, ASCII control chars (<0x20 / 0x7F), unescaped reserved chars (`<>"`{}|\^`), and double-encoding sequences (`%2520` etc.). The crawler sets a per-URL `url_malformed` 0/1 flag at every upsert path (HTML, redirect, non-HTML, size-cap, network-fail, seed-stub). New **Malformed URL** issue filter under Sidebar → Issues → URL.
+- **OpenGraph extras** — `og:type` (lowercased), `og:url` (verbatim raw, useful for canonical comparison), `og:site_name` (entity-decoded), and `og:locale` are now stored as separate columns and shown in the URL Details panel.
+- **Android / PWA icon detection** — first `<link rel="icon" sizes>` whose declared dimension is ≥192px (or `sizes="any"` for vectors) is captured as `android_icon` — the right adoption signal for home-screen / PWA launchers, distinct from the smaller favicon. Surfaced in the URL Details panel as "Android / PWA Icon".
+- **Database migrations v49 + v50** — bundled column additions: `images_responsive`, `picture_count` (v49); `url_malformed`, `og_type`, `og_url`, `og_site_name`, `og_locale`, `android_icon` (v50).
+
+### Changed
+- **Update Available dialog** is now a 3-button dialog (`Download Installer / Open Release Page / Later`) on platforms with a matching installer asset, falling back to the 2-button form (`Open Release Page / Later`) elsewhere. Silent startup check skips network errors, up-to-date results, and dismissed versions so it isn't intrusive.
+
 ## [0.3.1] — 2026-05-04
 
 ### Fixed
