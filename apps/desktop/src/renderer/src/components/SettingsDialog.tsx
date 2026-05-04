@@ -85,6 +85,7 @@ interface FormState {
   // duplicates
   nearDuplicateHammingThreshold: string;
   duplicatesOnlyIndexable: boolean;
+  dedupePreNormalize: boolean;
   // custom extraction
   customExtractionRules: CustomExtractionRule[];
   // webhook
@@ -319,6 +320,7 @@ function configToForm(c: CrawlConfig): FormState {
     processPriority: c.processPriority,
     nearDuplicateHammingThreshold: String(c.nearDuplicateHammingThreshold),
     duplicatesOnlyIndexable: c.duplicatesOnlyIndexable,
+    dedupePreNormalize: c.dedupePreNormalize ?? true,
     customExtractionRules: (c.customExtractionRules ?? []).map((r) => ({ ...r })),
     webhookUrl: c.webhookUrl ?? '',
     auth: { ...(c.auth ?? { type: 'none' }) },
@@ -474,6 +476,7 @@ export function SettingsDialog({ open, onClose }: Props) {
         ),
       ),
       duplicatesOnlyIndexable: form.duplicatesOnlyIndexable,
+      dedupePreNormalize: form.dedupePreNormalize,
       customExtractionRules: form.customExtractionRules
         .filter((r) => r.name.trim() && r.selector.trim())
         .slice(0, 10),
@@ -1918,6 +1921,13 @@ function DuplicatesPanel({ form, update }: PanelProps) {
           onChange={(v) => update('duplicatesOnlyIndexable', v)}
           info="When on, pages with noindex / canonicalised / robots-blocked indexability are excluded from clustering — the Near-Duplicate report then surfaces only issues that affect search visibility."
           example="ON for SEO audits (the typical case). Turn OFF to also cluster paginated / canonical-blocked variants for completeness."
+        />
+        <Bool
+          label="Normalise URLs before duplicate-URL check"
+          checked={form.dedupePreNormalize}
+          onChange={(v) => update('dedupePreNormalize', v)}
+          info="When ON (default), the Duplicate URL filter compares URLs after lowercasing the host, dropping the query string, and trimming the trailing slash — the canonical SEO behaviour. When OFF, comparison is byte-exact, so the filter only fires on rows that share an identical raw URL string (rare since URLs are deduped at insert time)."
+          example="ON for SEO audits. OFF only when you specifically need to inspect raw-URL collisions (e.g. case-sensitive filesystem CMSes)."
         />
       </div>
 

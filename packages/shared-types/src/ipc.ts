@@ -427,6 +427,10 @@ export interface UrlCertInfoResult {
   subject: string | null;
   signatureAlgorithm: string | null;
   protocol: string | null;
+  /** Total certificates in the peer chain (1 = self-signed, 2 = leaf+root, ≥3 = with intermediates). */
+  chainLength: number | null;
+  /** Distinguished names of the certs in the chain, leaf-first, capped at 5 entries. */
+  chainSubjects: string[] | null;
   /** 200 = handshake OK + cert read, 0 = error/timeout, -1 = no probe yet. */
   probeStatus: number;
   probeError: string | null;

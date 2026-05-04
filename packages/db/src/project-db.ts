@@ -153,6 +153,12 @@ interface UrlRowDb {
   og_site_name: string | null;
   og_locale: string | null;
   android_icon: string | null;
+  manifest_json: string | null;
+  manifest_theme_color: string | null;
+  manifest_short_name: string | null;
+  manifest_display: string | null;
+  manifest_scope: string | null;
+  manifest_icon_count: number;
 }
 
 interface ImageRowDb {
@@ -3749,6 +3755,8 @@ export class ProjectDb {
     subject: string | null;
     signatureAlgorithm: string | null;
     protocol: string | null;
+    chainLength?: number | null;
+    chainSubjects?: string[] | null;
     probeStatus: number;
     probeError: string | null;
   }): void {
@@ -3757,10 +3765,12 @@ export class ProjectDb {
         `INSERT INTO host_certs (
            host, port, valid_from, valid_to, days_until_expiry,
            issuer, subject, signature_algorithm, protocol,
+           chain_length, chain_subjects,
            probe_status, probe_error, probed_at
          ) VALUES (
            :host, :port, :valid_from, :valid_to, :days_until_expiry,
            :issuer, :subject, :signature_algorithm, :protocol,
+           :chain_length, :chain_subjects,
            :probe_status, :probe_error, CURRENT_TIMESTAMP
          )
          ON CONFLICT(host) DO UPDATE SET
@@ -3771,6 +3781,8 @@ export class ProjectDb {
            subject = excluded.subject,
            signature_algorithm = excluded.signature_algorithm,
            protocol = excluded.protocol,
+           chain_length = excluded.chain_length,
+           chain_subjects = excluded.chain_subjects,
            probe_status = excluded.probe_status,
            probe_error = excluded.probe_error,
            probed_at = CURRENT_TIMESTAMP`,
@@ -3785,8 +3797,71 @@ export class ProjectDb {
         subject: input.subject,
         signature_algorithm: input.signatureAlgorithm,
         protocol: input.protocol,
+        chain_length: input.chainLength ?? null,
+        chain_subjects:
+          input.chainSubjects && input.chainSubjects.length > 0
+            ? JSON.stringify(input.chainSubjects)
+            : null,
         probe_status: input.probeStatus,
         probe_error: input.probeError,
+      });
+  }
+
+  /**
+   * Return distinct manifest URLs referenced by indexable HTML 2xx
+   * pages that don't yet have manifest data filled in. The post-crawl
+   * `runManifestProbes` pass walks this list once.
+   */
+  unprobedManifestUrls(limit = 1000): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT manifest_url AS u
+           FROM urls
+          WHERE manifest_url IS NOT NULL
+            AND manifest_url != ''
+            AND is_external = 0
+            AND content_kind = 'html'
+            AND status_code >= 200 AND status_code < 300
+            AND (manifest_json IS NULL OR manifest_json = '')
+          LIMIT ?`,
+      )
+      .all(limit) as { u: string }[];
+    return rows.map((r) => r.u).filter((u) => typeof u === 'string' && u.length > 0);
+  }
+
+  /**
+   * Stamp parsed manifest fields onto every URL that referenced this
+   * `manifest_url`. A single manifest is typically shared site-wide,
+   * so this is a one-fetch fan-out write.
+   */
+  setManifestForReferrers(input: {
+    manifestUrl: string;
+    rawJson: string | null;
+    themeColor: string | null;
+    shortName: string | null;
+    display: string | null;
+    scope: string | null;
+    iconCount: number;
+  }): void {
+    this.db
+      .prepare(
+        `UPDATE urls
+            SET manifest_json = :json,
+                manifest_theme_color = :theme,
+                manifest_short_name = :short_name,
+                manifest_display = :display,
+                manifest_scope = :scope,
+                manifest_icon_count = :icons
+          WHERE manifest_url = :url`,
+      )
+      .run({
+        url: input.manifestUrl,
+        json: input.rawJson,
+        theme: input.themeColor,
+        short_name: input.shortName,
+        display: input.display,
+        scope: input.scope,
+        icons: input.iconCount,
       });
   }
 
@@ -3804,6 +3879,8 @@ export class ProjectDb {
     subject: string | null;
     signatureAlgorithm: string | null;
     protocol: string | null;
+    chainLength: number | null;
+    chainSubjects: string[] | null;
     probeStatus: number;
     probeError: string | null;
     probedAt: string | null;
@@ -3812,6 +3889,7 @@ export class ProjectDb {
       .prepare(
         `SELECT hc.host, hc.valid_from, hc.valid_to, hc.days_until_expiry,
                 hc.issuer, hc.subject, hc.signature_algorithm, hc.protocol,
+                hc.chain_length, hc.chain_subjects,
                 hc.probe_status, hc.probe_error, hc.probed_at
            FROM urls u
            JOIN host_certs hc
@@ -3829,12 +3907,25 @@ export class ProjectDb {
           subject: string | null;
           signature_algorithm: string | null;
           protocol: string | null;
+          chain_length: number | null;
+          chain_subjects: string | null;
           probe_status: number;
           probe_error: string | null;
           probed_at: string | null;
         }
       | undefined;
     if (!row) return null;
+    let chainSubjects: string[] | null = null;
+    if (row.chain_subjects) {
+      try {
+        const parsed = JSON.parse(row.chain_subjects) as unknown;
+        if (Array.isArray(parsed) && parsed.every((s) => typeof s === 'string')) {
+          chainSubjects = parsed as string[];
+        }
+      } catch {
+        /* leave null on parse failure */
+      }
+    }
     return {
       host: row.host,
       validFrom: row.valid_from,
@@ -3844,6 +3935,8 @@ export class ProjectDb {
       subject: row.subject,
       signatureAlgorithm: row.signature_algorithm,
       protocol: row.protocol,
+      chainLength: row.chain_length ?? null,
+      chainSubjects,
       probeStatus: row.probe_status,
       probeError: row.probe_error,
       probedAt: row.probed_at,
@@ -4412,6 +4505,12 @@ export class ProjectDb {
     ogSiteName: r.og_site_name ?? null,
     ogLocale: r.og_locale ?? null,
     androidIcon: r.android_icon ?? null,
+    manifestJson: r.manifest_json ?? null,
+    manifestThemeColor: r.manifest_theme_color ?? null,
+    manifestShortName: r.manifest_short_name ?? null,
+    manifestDisplay: r.manifest_display ?? null,
+    manifestScope: r.manifest_scope ?? null,
+    manifestIconCount: r.manifest_icon_count ?? 0,
     crawledAt: r.crawled_at,
   });
 

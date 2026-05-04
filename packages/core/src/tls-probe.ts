@@ -15,6 +15,20 @@ export interface TlsCertInfo {
   signatureAlgorithm: string | null;
   /** Negotiated TLS protocol version, e.g. `TLSv1.3`. */
   protocol: string | null;
+  /**
+   * Number of certificates the server presented in its chain (leaf
+   * inclusive). 1 means leaf-only / self-signed; 2 means leaf + root
+   * with no intermediate; ≥3 indicates one or more intermediate CAs.
+   * Null on probe failure.
+   */
+  chainLength: number | null;
+  /**
+   * Distinguished names of the certs in the chain, leaf-first. Capped
+   * at 5 entries to keep the column tiny — corporate PKIs occasionally
+   * present long chains and we don't need the full path for the audit.
+   * Null on probe failure.
+   */
+  chainSubjects: string[] | null;
   /** Empty on success. Free-form error string when the connect/handshake fails. */
   error: string | null;
 }
@@ -44,6 +58,8 @@ export async function probeTlsCert(
       subject: null,
       signatureAlgorithm: null,
       protocol: null,
+      chainLength: null,
+      chainSubjects: null,
       error: null,
     };
 
@@ -76,13 +92,36 @@ export async function probeTlsCert(
       () => {
         clearTimeout(timer);
         try {
-          // `getPeerCertificate(false)` returns just the leaf cert — what
-          // we need for expiry/issuer. `(true)` would walk the chain but
-          // we don't surface chain info in V1.
-          const peer = socket.getPeerCertificate(false) as PeerCertificate;
+          // `getPeerCertificate(true)` returns the leaf cert with its
+          // `issuerCertificate` chain attached so we can surface chain
+          // length + intermediate CA subjects alongside the leaf
+          // expiry/issuer/signature data.
+          const peer = socket.getPeerCertificate(true) as PeerCertificate;
           if (!peer || Object.keys(peer).length === 0) {
             finish({ ...empty, error: 'peer certificate unavailable' });
             return;
+          }
+          // Walk the chain via `issuerCertificate` until we hit a
+          // self-signed cert (issuerCertificate === self) or run out.
+          // Capped at 5 hops to defend against weird PKIs that loop.
+          const chainSubjects: string[] = [];
+          let chainLength = 0;
+          {
+            let cursor: PeerCertificate | undefined = peer;
+            const seen = new Set<PeerCertificate>();
+            while (cursor && !seen.has(cursor) && chainLength < 5) {
+              seen.add(cursor);
+              chainLength++;
+              const sub = formatDistinguishedName(
+                (cursor as { subject?: Record<string, string> }).subject ?? null,
+              );
+              if (sub) chainSubjects.push(sub);
+              const next: PeerCertificate | undefined = (
+                cursor as { issuerCertificate?: PeerCertificate }
+              ).issuerCertificate;
+              if (!next || next === cursor) break;
+              cursor = next;
+            }
           }
           const validTo = (peer as { valid_to?: string }).valid_to ?? null;
           const validFrom = (peer as { valid_from?: string }).valid_from ?? null;
@@ -111,6 +150,8 @@ export async function probeTlsCert(
               (peer as { signatureAlgorithm?: string }).signatureAlgorithm ??
               null,
             protocol,
+            chainLength,
+            chainSubjects: chainSubjects.length > 0 ? chainSubjects : null,
             error: null,
           });
         } catch (err) {

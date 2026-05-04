@@ -2134,6 +2134,8 @@ function registerIpc(): void {
           subject: null,
           signatureAlgorithm: null,
           protocol: null,
+          chainLength: null,
+          chainSubjects: null,
           probeStatus: -1,
           probeError: null,
           probedAt: null,

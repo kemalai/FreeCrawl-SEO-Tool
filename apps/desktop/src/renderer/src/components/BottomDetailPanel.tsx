@@ -861,6 +861,14 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['TLS Cert Issuer', cert?.issuer ?? null],
     ['TLS Cert Subject', cert?.subject ?? null],
     ['TLS Cert Signature Alg', cert?.signatureAlgorithm ?? null],
+    [
+      'TLS Cert Chain',
+      cert?.chainLength
+        ? cert.chainSubjects && cert.chainSubjects.length > 0
+          ? `${cert.chainLength} cert(s): ${cert.chainSubjects.join(' ← ')}`
+          : `${cert.chainLength} cert(s)`
+        : null,
+    ],
     ['TLS Cert Valid From', cert?.validFrom ?? null],
     ['TLS Cert Valid To', cert?.validTo ?? null],
     ['TLS Cert Status', certExpiryLabel],
@@ -903,6 +911,11 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Apple Touch Icon', row.appleTouchIcon],
     ['Android / PWA Icon', row.androidIcon],
     ['Web Manifest', row.manifestUrl],
+    ['Manifest Theme Color', row.manifestThemeColor],
+    ['Manifest Short Name', row.manifestShortName],
+    ['Manifest Display Mode', row.manifestDisplay],
+    ['Manifest Scope', row.manifestScope],
+    ['Manifest Icon Count', row.manifestIconCount > 0 ? row.manifestIconCount : null],
     ['RSS / Atom Feed', row.feedUrl],
     ['Title Tag Count', row.titleCount > 1 ? row.titleCount : null],
     ['Empty-Alt Images', row.imagesEmptyAlt > 0 ? row.imagesEmptyAlt : null],

@@ -268,6 +268,18 @@ export interface CrawlUrlRow {
   ogLocale: string | null;
   /** First `<link rel="icon" sizes>` ≥ 192px (or `sizes="any"`). PWA / Android home-screen icon. */
   androidIcon: string | null;
+  /** Raw parsed Web App Manifest JSON (4 KB cap). Filled by post-crawl `runManifestProbes`. */
+  manifestJson: string | null;
+  /** Manifest `theme_color` field (hex / CSS color). */
+  manifestThemeColor: string | null;
+  /** Manifest `short_name` (home-screen label). */
+  manifestShortName: string | null;
+  /** Manifest `display` mode (`fullscreen` / `standalone` / `minimal-ui` / `browser`). */
+  manifestDisplay: string | null;
+  /** Manifest `scope` (PWA install scope URL). */
+  manifestScope: string | null;
+  /** Number of icons in the parsed manifest's `icons` array. */
+  manifestIconCount: number;
   /** Total user-facing form inputs (input/textarea/select, excluding hidden/submit/button/image/reset). */
   formInputCount: number;
   /** Form inputs without label / aria-label / title (WCAG 1.3.1, 4.1.2 violation). */
@@ -708,6 +720,24 @@ export interface CrawlConfig {
    * connect per host — typically a handful of probes for a site crawl.
    */
   probeTlsCerts: boolean;
+  /**
+   * After the HTML crawl finishes, GET each unique declared
+   * `<link rel="manifest">` once and stamp the parsed `theme_color`,
+   * `short_name`, `display`, `scope`, and icon count onto every page
+   * that referenced it. Raw JSON body is preserved (4 KB cap) so the
+   * Detail panel can show every custom field. Default `true` — one
+   * fetch per unique manifest URL, typically site-wide singleton.
+   */
+  probeManifestJson: boolean;
+  /**
+   * When the post-norm "Duplicate URL" issue filter runs, normalise
+   * URLs (lowercase, strip query, trim trailing slash) before
+   * comparing. Default `true` — the canonical SEO behaviour. Set to
+   * `false` for a byte-exact match (rarely useful; surfaces nothing
+   * because URLs are already deduped at insert time, but kept as a
+   * config knob for symmetry with the URL-rewrite preview).
+   */
+  dedupePreNormalize: boolean;
   /**
    * Hostnames (lowercase, no scheme/port) that should be treated as
    * "same host" for scope purposes — used to keep CDN-served subdomains
@@ -1411,6 +1441,8 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   probeImageSizes: true,
   largeImageBytes: 102_400,
   probeTlsCerts: true,
+  probeManifestJson: true,
+  dedupePreNormalize: true,
   cdnHosts: [],
   maxLinksPerPage: 100,
   maxResponseTimeMs: 0,

@@ -1082,6 +1082,60 @@ const MIGRATIONS: Migration[] = [
         db.exec('ALTER TABLE urls ADD COLUMN android_icon TEXT');
     },
   },
+  {
+    version: 51,
+    name: 'add_manifest_json_and_cert_chain_columns',
+    // V1 Faz 1 final bundle:
+    //   urls.manifest_json        — raw parsed manifest JSON (string,
+    //                                ~2 KB cap recommended at write time)
+    //                                so the Detail panel can show every
+    //                                custom field without us shaping
+    //                                a column for each.
+    //   urls.manifest_theme_color — `theme_color` shorthand for the
+    //                                Stack / Server color tinting in
+    //                                the URL Details panel.
+    //   urls.manifest_short_name  — `short_name` (home-screen label).
+    //   urls.manifest_display     — `display` (e.g. `standalone`).
+    //   urls.manifest_scope       — `scope` (PWA install scope URL).
+    //   urls.manifest_icon_count  — number of icons in the parsed manifest.
+    //
+    //   host_certs.chain_length   — total certificates in the peer-cert
+    //                                chain (1 = self-signed, 2 = leaf
+    //                                + root, ≥3 = intermediate(s) +
+    //                                root). Surfaces partial / missing
+    //                                chain misconfigurations.
+    //   host_certs.chain_subjects — JSON-stringified subject DN list,
+    //                                root-first order (max 5 hops).
+    up: (db) => {
+      const urlCols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const hasUrl = (n: string) => urlCols.some((c) => c.name === n);
+      if (!hasUrl('manifest_json'))
+        db.exec('ALTER TABLE urls ADD COLUMN manifest_json TEXT');
+      if (!hasUrl('manifest_theme_color'))
+        db.exec('ALTER TABLE urls ADD COLUMN manifest_theme_color TEXT');
+      if (!hasUrl('manifest_short_name'))
+        db.exec('ALTER TABLE urls ADD COLUMN manifest_short_name TEXT');
+      if (!hasUrl('manifest_display'))
+        db.exec('ALTER TABLE urls ADD COLUMN manifest_display TEXT');
+      if (!hasUrl('manifest_scope'))
+        db.exec('ALTER TABLE urls ADD COLUMN manifest_scope TEXT');
+      if (!hasUrl('manifest_icon_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN manifest_icon_count INTEGER NOT NULL DEFAULT 0',
+        );
+
+      const certCols = db
+        .prepare('PRAGMA table_info(host_certs)')
+        .all() as unknown as { name: string }[];
+      const hasCert = (n: string) => certCols.some((c) => c.name === n);
+      if (!hasCert('chain_length'))
+        db.exec('ALTER TABLE host_certs ADD COLUMN chain_length INTEGER');
+      if (!hasCert('chain_subjects'))
+        db.exec('ALTER TABLE host_certs ADD COLUMN chain_subjects TEXT');
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

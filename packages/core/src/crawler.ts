@@ -658,6 +658,9 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.setOp('post-crawl:tls-probes');
     await this.runTlsCertProbes();
+    await yieldToEventLoop();
+    this.setOp('post-crawl:manifest-probes');
+    await this.runManifestProbes();
     this.running = false;
     this.stopMemoryMonitor();
     // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
@@ -838,6 +841,76 @@ export class Crawler extends EventEmitter {
    * crawls have at most a few unique hosts and the cost is dominated by
    * the handshake round-trip, not throughput.
    */
+  /**
+   * Post-crawl pass: GET each declared `<link rel="manifest">` URL once
+   * and stamp parsed fields onto every URL that referenced it. Manifest
+   * URLs are usually site-wide singletons (one fetch covers thousands
+   * of pages) so concurrency is small. Failures store an error string
+   * in the per-URL `manifest_json` column so the next crawl re-probes.
+   */
+  private async runManifestProbes(): Promise<void> {
+    if (!this.config.probeManifestJson) return;
+    if (this.stopped) return;
+    let urls: string[] = [];
+    try {
+      urls = this.db.unprobedManifestUrls(2_000);
+    } catch (err) {
+      this.emit(
+        'info',
+        `manifest probe skipped (DB query failed): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    if (urls.length === 0) return;
+    this.emit('info', `Probing ${urls.length} web manifest(s)…`);
+
+    const { probeManifest } = await import('./manifest-probe.js');
+    const concurrency = 4;
+    let cursor = 0;
+    let probed = 0;
+    let failed = 0;
+
+    const worker = async (): Promise<void> => {
+      while (!this.stopped) {
+        const idx = cursor++;
+        if (idx >= urls.length) return;
+        const url = urls[idx];
+        if (!url) return;
+        try {
+          const result = await probeManifest(url, {
+            userAgent: this.resolveUserAgent(url),
+            acceptLanguage: this.config.acceptLanguage,
+            customHeaders: this.config.customHeaders,
+            auth: this.config.auth,
+          });
+          this.db.setManifestForReferrers({
+            manifestUrl: url,
+            rawJson: result.error ? null : result.rawJson,
+            themeColor: result.themeColor,
+            shortName: result.shortName,
+            display: result.display,
+            scope: result.scope,
+            iconCount: result.iconCount,
+          });
+          if (result.error) failed++;
+          probed++;
+        } catch {
+          failed++;
+        }
+      }
+    };
+
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < concurrency; i++) workers.push(worker());
+    await Promise.all(workers);
+    this.emit(
+      'info',
+      `Manifest probe complete: ${probed - failed}/${probed} parsed, ${failed} failed`,
+    );
+  }
+
   private async runTlsCertProbes(): Promise<void> {
     if (!this.config.probeTlsCerts) return;
     if (this.stopped) return;
@@ -888,6 +961,8 @@ export class Crawler extends EventEmitter {
             subject: info.subject,
             signatureAlgorithm: info.signatureAlgorithm,
             protocol: info.protocol,
+            chainLength: info.chainLength,
+            chainSubjects: info.chainSubjects,
             probeStatus: info.error ? 0 : 200,
             probeError: info.error,
           });
@@ -908,6 +983,8 @@ export class Crawler extends EventEmitter {
               subject: null,
               signatureAlgorithm: null,
               protocol: null,
+              chainLength: null,
+              chainSubjects: null,
               probeStatus: 0,
               probeError: err instanceof Error ? err.message : String(err),
             });
