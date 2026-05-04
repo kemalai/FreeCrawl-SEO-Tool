@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.3] — 2026-05-04
+
+### Added
+- Web App Manifest parse — sayfaların PWA `theme_color`, `short_name`, `display`, `scope` ve icon sayısı artık denetlenebiliyor.
+- TLS sertifika zinciri görünümü — leaf'ten root'a CA hop'ları URL Details panelinde listeleniyor.
+- "Duplicate URL normalize" toggle'ı — Settings → Duplicates altında byte-exact vs normalize karşılaştırma seçimi.
+- Repository'e Security Policy (`SECURITY.md`) eklendi.
+
+### Changed
+- Çeşitli iyileştirmeler ve geliştirmeler.
+
 ## [0.3.2] — 2026-05-04
 
 ### Added
