@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.4] — 2026-05-09
+
+### Added
+- Accessibility issue filters — Main Landmark Missing, Skip Link Missing, and Invalid ARIA Role surface WCAG gaps.
+- Critical performance tier — Render-Blocking Head >20 and Page Size >3MB highlight LCP regressions beyond the warning thresholds.
+- Pagination Canonical Conflict filter — flags pages declaring both rel=next/prev and a non-self canonical.
+- Structured-data validation — Duplicate `@id`, Malformed `@type`, and Missing Required Property catch JSON-LD bugs that hurt rich-result eligibility.
+- Seven new top-level filter tabs — Pagination, Hreflang, AMP, Structured Data, Meta Refresh, Custom Extraction, Custom Search.
+- View Source match navigation — Enter / Shift+Enter cycle through hits, ↑/↓ buttons, and the active match auto-scrolls into view.
+
+### Changed
+- Clear button is ~4-5× faster (~2 s → ~400 ms) by wrapping the reset in a single SQLite transaction and truncating the WAL afterwards.
+- Various improvements and refinements.
+
+### Fixed
+- Bot-blocked pages with no URL extension now stay visible in the Internal tab instead of disappearing into the Other content kind.
+
 ## [0.3.3] — 2026-05-04
 
 ### Added
