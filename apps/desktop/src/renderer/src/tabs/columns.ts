@@ -385,5 +385,53 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
     COL.redirectLoop,
     COL.inlinks,
   ],
+  // V1 Faz 3 — new top-level filter tabs. Each starts with the
+  // minimum-viable column set; per-tab specialised columns can be
+  // added in follow-up sessions without changing the dispatch.
+  pagination: [
+    COL.url,
+    COL.status,
+    COL.indexability,
+    COL.title,
+    COL.canonical,
+    COL.inlinks,
+  ],
+  hreflang: [
+    COL.url,
+    COL.status,
+    COL.indexability,
+    COL.title,
+    COL.canonical,
+    COL.inlinks,
+  ],
+  amp: [COL.url, COL.status, COL.indexability, COL.title, COL.inlinks],
+  'structured-data': [
+    COL.url,
+    COL.status,
+    COL.indexability,
+    COL.title,
+    COL.inlinks,
+  ],
+  'meta-refresh': [
+    COL.url,
+    COL.status,
+    COL.indexability,
+    COL.title,
+    COL.inlinks,
+  ],
+  'custom-extraction': [
+    COL.url,
+    COL.status,
+    COL.indexability,
+    COL.title,
+    COL.inlinks,
+  ],
+  'custom-search': [
+    COL.url,
+    COL.status,
+    COL.indexability,
+    COL.title,
+    COL.inlinks,
+  ],
   links: [COL.url, COL.inlinks, COL.outlinks, COL.status, COL.indexability],
 };

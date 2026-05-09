@@ -1136,6 +1136,81 @@ const MIGRATIONS: Migration[] = [
         db.exec('ALTER TABLE host_certs ADD COLUMN chain_subjects TEXT');
     },
   },
+  {
+    version: 52,
+    name: 'add_a11y_landmark_skiplink_aria_columns',
+    // V1 Faz 2 ilk batch — accessibility / a11y issue filter columns:
+    //   - `landmark_main`        0/1 — page has `<main>` element OR
+    //                              `role="main"` somewhere. Pages
+    //                              without a main landmark fail WCAG
+    //                              1.3.1 (info-and-relationships) and
+    //                              break screen-reader navigation.
+    //   - `skip_link_present`    0/1 — first interactive element in
+    //                              `<body>` is an in-page skip link
+    //                              (`<a href="#main">…</a>` style).
+    //                              WCAG 2.4.1 (bypass blocks).
+    //   - `aria_invalid_roles`   count of `role="…"` attribute values
+    //                              that aren't part of the WAI-ARIA
+    //                              role taxonomy. Common typos
+    //                              ("buttn", "navagation") and legacy
+    //                              made-up roles surface here.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('landmark_main'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN landmark_main INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('skip_link_present'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN skip_link_present INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('aria_invalid_roles'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN aria_invalid_roles INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
+  {
+    version: 53,
+    name: 'add_structured_data_validation_columns',
+    // V1 Faz 2 batch 2 — structured-data validation:
+    //   - `schema_duplicate_ids` count of `@id` values that appear
+    //     more than once across the page's JSON-LD blocks. Two
+    //     entities sharing an `@id` collide in Google's knowledge
+    //     graph; a CMS bug typically caused by a copy-pasted block.
+    //   - `schema_unknown_types` count of `@type` values that look
+    //     malformed: empty string, whitespace inside, lowercase first
+    //     letter (Schema.org convention is PascalCase), or otherwise
+    //     non-conforming. Catches typos like `"product"` (should be
+    //     `"Product"`) without needing a full ~750-entry taxonomy.
+    //   - `schema_missing_required` count of JSON-LD nodes whose
+    //     declared `@type` is one of the high-traffic types
+    //     (Article / NewsArticle / Product / BreadcrumbList / Recipe
+    //     / Event / FAQPage / HowTo / Organization / VideoObject)
+    //     and which is missing one or more Google-documented
+    //     required properties.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('schema_duplicate_ids'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN schema_duplicate_ids INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('schema_unknown_types'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN schema_unknown_types INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('schema_missing_required'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN schema_missing_required INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

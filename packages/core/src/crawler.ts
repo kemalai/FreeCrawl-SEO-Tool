@@ -2186,6 +2186,12 @@ export class Crawler extends EventEmitter {
           imagesLazy: parsed.imagesLazy,
           imagesResponsive: parsed.imagesResponsive,
           pictureCount: parsed.pictureCount,
+          landmarkMain: parsed.hasMain ? 1 : 0,
+          skipLinkPresent: parsed.skipLinkPresent ? 1 : 0,
+          ariaInvalidRoles: parsed.ariaInvalidRolesCount,
+          schemaDuplicateIds: parsed.schemaDuplicateIds,
+          schemaUnknownTypes: parsed.schemaUnknownTypes,
+          schemaMissingRequired: parsed.schemaMissingRequired,
           headings:
             parsed.headings.length > 0 ? JSON.stringify(parsed.headings) : null,
           serverHeader,
@@ -2654,6 +2660,17 @@ function detectContentKind(url: string, contentType: string | null): ContentKind
   if (ct.includes('application/pdf')) return 'pdf';
   if (ct.includes('font/') || ct.includes('application/font')) return 'font';
 
+  // Extension-driven fallback when content-type is missing or generic
+  // (typical for WAF / CDN bot-block responses where the gateway never
+  // surfaces the real handler's `Content-Type`):
+  //   - Explicit asset extension (.css/.png/.pdf/.zip…) → its `EXT_TO_KIND`
+  //     entry, or `'other'` for anything in the map's tail.
+  //   - No extension at all (`/kategori/x`, `/urun/y`, dynamic CMS routes)
+  //     → `'html'`, matching the Screaming Frog convention. Without this
+  //     default, Cloudflare 429/403 pages on extension-less URLs end up
+  //     as `'other'` and disappear from the Internal-HTML view, leaving
+  //     the user with an empty table after a bot-blocked crawl.
   const ext = extractExtension(url);
-  return EXT_TO_KIND[ext] ?? 'other';
+  if (ext) return EXT_TO_KIND[ext] ?? 'other';
+  return 'html';
 }

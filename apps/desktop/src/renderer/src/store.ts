@@ -22,6 +22,13 @@ export type TabKey =
   | 'canonicals'
   | 'directives'
   | 'redirects'
+  | 'pagination'
+  | 'hreflang'
+  | 'amp'
+  | 'structured-data'
+  | 'meta-refresh'
+  | 'custom-extraction'
+  | 'custom-search'
   | 'links'
   | 'broken-links';
 
@@ -39,6 +46,13 @@ export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'canonicals', label: 'Canonicals' },
   { key: 'directives', label: 'Directives' },
   { key: 'redirects', label: 'Redirects' },
+  { key: 'pagination', label: 'Pagination' },
+  { key: 'hreflang', label: 'Hreflang' },
+  { key: 'amp', label: 'AMP' },
+  { key: 'structured-data', label: 'Structured Data' },
+  { key: 'meta-refresh', label: 'Meta Refresh' },
+  { key: 'custom-extraction', label: 'Custom Extraction' },
+  { key: 'custom-search', label: 'Custom Search' },
   { key: 'links', label: 'Links' },
   { key: 'broken-links', label: 'Broken Links' },
 ];
@@ -209,6 +223,20 @@ function categoryForTab(tab: TabKey): UrlCategory {
       return 'tab:directives';
     case 'redirects':
       return 'tab:redirects';
+    case 'pagination':
+      return 'tab:pagination';
+    case 'hreflang':
+      return 'tab:hreflang';
+    case 'amp':
+      return 'tab:amp';
+    case 'structured-data':
+      return 'tab:structured-data';
+    case 'meta-refresh':
+      return 'tab:meta-refresh';
+    case 'custom-extraction':
+      return 'tab:custom-extraction';
+    case 'custom-search':
+      return 'tab:custom-search';
     default:
       return 'internal:html';
   }

@@ -155,6 +155,14 @@ export type UrlCategory =
   | 'issues:images-no-lazy-loading'
   | 'issues:images-no-responsive'
   | 'issues:image-broken-src'
+  | 'issues:landmark-main-missing'
+  | 'issues:skip-link-missing'
+  | 'issues:aria-invalid-role'
+  | 'issues:page-too-large-critical'
+  | 'issues:pagination-canonical-conflict'
+  | 'issues:schema-duplicate-id'
+  | 'issues:schema-unknown-type'
+  | 'issues:schema-missing-required'
   | 'issues:target-blank-no-noopener'
   | 'issues:page-empty'
   | 'issues:og-image-not-absolute'
@@ -188,6 +196,13 @@ export type UrlCategory =
   | 'tab:redirects'
   | 'tab:canonicals'
   | 'tab:directives'
+  | 'tab:pagination'
+  | 'tab:hreflang'
+  | 'tab:amp'
+  | 'tab:structured-data'
+  | 'tab:meta-refresh'
+  | 'tab:custom-extraction'
+  | 'tab:custom-search'
   | 'issues:hreflang-inconsistent-lang'
 
 export type Indexability =
@@ -280,6 +295,18 @@ export interface CrawlUrlRow {
   manifestScope: string | null;
   /** Number of icons in the parsed manifest's `icons` array. */
   manifestIconCount: number;
+  /** 1 when the page has a `<main>` element OR `role="main"`. */
+  landmarkMain: number;
+  /** 1 when the first focusable `<a href="#…">` matches a skip-link convention. */
+  skipLinkPresent: number;
+  /** Count of `role="…"` attributes with an unknown ARIA token. */
+  ariaInvalidRoles: number;
+  /** Surplus occurrences of `@id` across all JSON-LD blocks (duplicates). */
+  schemaDuplicateIds: number;
+  /** `@type` values with malformed shape (empty / whitespace / non-PascalCase). */
+  schemaUnknownTypes: number;
+  /** Nodes failing required-property check for Article/Product/Recipe/Event/FAQ/HowTo/etc. */
+  schemaMissingRequired: number;
   /** Total user-facing form inputs (input/textarea/select, excluding hidden/submit/button/image/reset). */
   formInputCount: number;
   /** Form inputs without label / aria-label / title (WCAG 1.3.1, 4.1.2 violation). */
@@ -1055,6 +1082,22 @@ export interface OverviewCounts {
     imagesNoLazyLoading: number;
     /** Pages with ≥5 images but `srcset`/`<picture>` adoption below 50%. */
     imagesNoResponsive: number;
+    /** Indexable HTML 2xx pages without a `<main>` / `role="main"` landmark. */
+    landmarkMainMissing: number;
+    /** Indexable HTML 2xx pages whose first focusable in-page anchor is not a recognised skip link. */
+    skipLinkMissing: number;
+    /** Pages with at least one `role="…"` whose every token is unknown to WAI-ARIA 1.2. */
+    ariaInvalidRole: number;
+    /** Pages whose response body exceeds 3 MB (critical page-weight tier). */
+    pageTooLargeCritical: number;
+    /** Pages declaring `rel=next`/`prev` AND a non-self canonical — pagination signals conflict. */
+    paginationCanonicalConflict: number;
+    /** Pages where the same `@id` appears in two or more JSON-LD entities. */
+    schemaDuplicateId: number;
+    /** Pages with at least one malformed `@type` (empty / whitespace / non-PascalCase). */
+    schemaUnknownType: number;
+    /** Pages where a high-traffic JSON-LD type is missing one or more Google-required properties. */
+    schemaMissingRequired: number;
     /** Pages referencing at least one image whose HEAD probe returned a 4xx/5xx status. */
     imageBrokenSrc: number;
     /** Pages with at least one `<a target="_blank">` without `rel="noopener"` (reverse-tabnabbing risk). */

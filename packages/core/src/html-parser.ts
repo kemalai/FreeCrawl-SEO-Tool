@@ -74,6 +74,26 @@ export interface ParsedPage {
   schemaBlockCount: number;
   /** Number of JSON-LD blocks that failed to parse. */
   schemaInvalidCount: number;
+  /**
+   * Number of `@id` collisions across all JSON-LD blocks on the page.
+   * Each surplus occurrence beyond the first counts as one duplicate
+   * — so an `@id` appearing 3 times contributes 2.
+   */
+  schemaDuplicateIds: number;
+  /**
+   * Count of `@type` values that look malformed (empty, contain
+   * whitespace, lowercase first letter, non-PascalCase characters).
+   * Heuristic — we don't ship the full Schema.org taxonomy, just
+   * shape validation.
+   */
+  schemaUnknownTypes: number;
+  /**
+   * Count of JSON-LD nodes whose declared `@type` is one of the
+   * Google-documented high-traffic types (Article / Product / Recipe
+   * / Event / FAQPage / HowTo / BreadcrumbList / Organization /
+   * VideoObject) and which is missing one or more required properties.
+   */
+  schemaMissingRequired: number;
   /** Number of Microdata `itemscope` elements declared on the page. */
   microdataCount: number;
   /** Number of RDFa `typeof` / `vocab` / `property` attribute occurrences. */
@@ -180,6 +200,19 @@ export interface ParsedPage {
    * 4.1.2 and ship as "unlabeled form field" in axe / Lighthouse audits.
    */
   formInputUnlabeledCount: number;
+  /** True when the page declares a `<main>` element OR `role="main"`. */
+  hasMain: boolean;
+  /**
+   * True when the first focusable `<a href="#…">` in `<body>` matches a
+   * known skip-link convention (`#main` / `#content` / `#skip…`).
+   * WCAG 2.4.1 "bypass blocks" success criterion.
+   */
+  skipLinkPresent: boolean;
+  /**
+   * Count of `role="…"` attributes whose every space-separated token
+   * is unknown to the WAI-ARIA 1.2 taxonomy. Typos and made-up roles.
+   */
+  ariaInvalidRolesCount: number;
   /**
    * Document outline — every `<h1>`–`<h6>` in source order, capped at
    * 200 entries so a 5000-heading CMS dump can't bloat the row. Drives
@@ -367,12 +400,20 @@ export function parseHtml(
   const schemaTypeSet = new Set<string>();
   let schemaBlockCount = 0;
   let schemaInvalidCount = 0;
+  // V1 Faz 2 — accumulator for the validation pass that runs alongside
+  // type collection. `walkSchemaForValidation` populates these.
+  const schemaIdCounts = new Map<string, number>();
+  let schemaUnknownTypes = 0;
+  let schemaMissingRequired = 0;
   $('script[type="application/ld+json"]').each((_, el) => {
     const raw = $(el).text().trim();
     if (!raw) return;
     try {
       const parsed = JSON.parse(raw) as unknown;
       collectSchemaTypes(parsed, schemaTypeSet);
+      const validation = walkSchemaForValidation(parsed, schemaIdCounts);
+      schemaUnknownTypes += validation.unknownTypeCount;
+      schemaMissingRequired += validation.missingRequiredCount;
       schemaBlockCount++;
     } catch {
       // Malformed JSON-LD — still count presence so Structured Data
@@ -382,6 +423,13 @@ export function parseHtml(
     }
   });
   const schemaTypes = [...schemaTypeSet].sort();
+  // Duplicate `@id` is computed across ALL blocks (a page may split
+  // entities into multiple JSON-LD scripts that share a knowledge-graph
+  // namespace). Count entries whose total occurrence is >1.
+  let schemaDuplicateIds = 0;
+  for (const count of schemaIdCounts.values()) {
+    if (count > 1) schemaDuplicateIds += count - 1; // surplus = duplicates
+  }
 
   // Microdata & RDFa — alternative structured-data formats. We only count
   // occurrences (not the type vocabulary), because the data model varies
@@ -834,6 +882,81 @@ export function parseHtml(
     }
   });
 
+  // Accessibility landmarks — does the page have a `<main>` element OR
+  // any element with `role="main"`? Screen readers rely on the main
+  // landmark to skip past navigation chrome on every page load.
+  const hasMain =
+    $('main').length > 0 || $('[role="main"]').length > 0;
+
+  // Skip link — WCAG 2.4.1 "bypass blocks": the first interactive
+  // element in `<body>` should be an in-page anchor that jumps past
+  // the repetitive nav. We look for an `<a href="#…">` whose target is
+  // the main content (id matches a landmark / common conventions).
+  // Heuristic: any `<a href="#…">` appearing as the first focusable
+  // element in `<body>` (before any visible link/button/input).
+  let skipLinkPresent = false;
+  {
+    const candidates = $('body a[href^="#"]').slice(0, 5);
+    candidates.each((_, el) => {
+      if (skipLinkPresent) return;
+      const href = ($(el).attr('href') ?? '').trim();
+      // Pure `#` (no fragment) is not a skip link — it's a placeholder.
+      if (href === '#' || href === '') return;
+      // Most CMS skip links: `#main`, `#content`, `#main-content`,
+      // `#skip-to-content`, `#primary`, `#site-content`.
+      const target = href.slice(1).toLowerCase();
+      if (
+        target === 'main' ||
+        target === 'content' ||
+        target === 'maincontent' ||
+        target === 'main-content' ||
+        target === 'site-content' ||
+        target === 'page-content' ||
+        target === 'primary' ||
+        target.startsWith('skip')
+      ) {
+        skipLinkPresent = true;
+      }
+    });
+  }
+
+  // ARIA role validation — count `role="…"` attribute values that
+  // aren't part of the WAI-ARIA 1.2 role taxonomy. The list below is
+  // the authoritative set including abstract / document-structure /
+  // landmark / live-region / widget roles. Typos like `buttn` /
+  // `navagation` and made-up legacy values surface as failures.
+  const ariaValidRoles = new Set([
+    'alert', 'alertdialog', 'application', 'article', 'banner', 'blockquote',
+    'button', 'caption', 'cell', 'checkbox', 'code', 'columnheader', 'combobox',
+    'command', 'complementary', 'composite', 'contentinfo', 'definition',
+    'deletion', 'dialog', 'directory', 'document', 'emphasis', 'feed',
+    'figure', 'form', 'generic', 'graphics-document', 'graphics-object',
+    'graphics-symbol', 'grid', 'gridcell', 'group', 'heading', 'img',
+    'input', 'insertion', 'landmark', 'link', 'list', 'listbox', 'listitem',
+    'log', 'main', 'mark', 'marquee', 'math', 'menu', 'menubar', 'menuitem',
+    'menuitemcheckbox', 'menuitemradio', 'meter', 'navigation', 'none',
+    'note', 'option', 'paragraph', 'presentation', 'progressbar', 'radio',
+    'radiogroup', 'range', 'region', 'roletype', 'row', 'rowgroup',
+    'rowheader', 'scrollbar', 'search', 'searchbox', 'section',
+    'sectionhead', 'select', 'separator', 'slider', 'spinbutton', 'status',
+    'strong', 'structure', 'subscript', 'suggestion', 'superscript',
+    'switch', 'tab', 'table', 'tablist', 'tabpanel', 'term', 'textbox',
+    'time', 'timer', 'toolbar', 'tooltip', 'tree', 'treegrid', 'treeitem',
+    'widget', 'window',
+  ]);
+  let ariaInvalidRolesCount = 0;
+  $('[role]').each((_, el) => {
+    const raw = ($(el).attr('role') ?? '').trim().toLowerCase();
+    if (!raw) return;
+    // Multiple roles allowed — space-separated. The element validates
+    // if ANY token is recognised; we count it as invalid only when
+    // every token is unknown (typical for typo bugs vs. fallback chains).
+    const tokens = raw.split(/\s+/).filter((t) => t.length > 0);
+    if (tokens.length === 0) return;
+    const anyValid = tokens.some((t) => ariaValidRoles.has(t));
+    if (!anyValid) ariaInvalidRolesCount++;
+  });
+
   let imagesEmptyAlt = 0;
   let imagesLazy = 0;
   let imagesResponsive = 0;
@@ -1020,6 +1143,9 @@ export function parseHtml(
     schemaTypes,
     schemaBlockCount,
     schemaInvalidCount,
+    schemaDuplicateIds,
+    schemaUnknownTypes,
+    schemaMissingRequired,
     microdataCount,
     rdfaCount,
     insecureFormActionCount,
@@ -1048,6 +1174,9 @@ export function parseHtml(
     pictureCount,
     formInputCount,
     formInputUnlabeledCount,
+    hasMain,
+    skipLinkPresent,
+    ariaInvalidRolesCount,
     headings,
     mixedContentCount,
     mixedContentActive,
@@ -1292,6 +1421,138 @@ function collectSchemaTypes(node: unknown, out: Set<string>): void {
       collectSchemaTypes(value, out);
     }
   }
+}
+
+/**
+ * Required-property whitelist for the high-traffic Schema.org types Google
+ * documents validation rules for. Source:
+ * <https://developers.google.com/search/docs/appearance/structured-data>.
+ * Each entry lists "must be present" properties — for types where Google
+ * accepts one of several alternatives (e.g. Product needs `image` OR
+ * `offers`), those are listed in `oneOf` instead.
+ *
+ * The check is intentionally permissive: a node passes validation if it
+ * declares one of the listed `@type` values AND every required property
+ * is present (truthy). Additional properties are fine. Types not in this
+ * map are skipped — we don't want to raise false positives for niche
+ * types (Movie, ComicBook, …) where the page may legitimately ship a
+ * minimal subset.
+ */
+const SCHEMA_REQUIRED_PROPS: Record<
+  string,
+  { required: string[]; oneOf?: string[][] }
+> = {
+  Article: { required: ['headline', 'image', 'datePublished'] },
+  NewsArticle: { required: ['headline', 'image', 'datePublished'] },
+  BlogPosting: { required: ['headline', 'image', 'datePublished'] },
+  Product: { required: ['name'], oneOf: [['image', 'offers']] },
+  BreadcrumbList: { required: ['itemListElement'] },
+  Recipe: {
+    required: ['name', 'image'],
+    oneOf: [['recipeIngredient', 'recipeInstructions']],
+  },
+  Event: { required: ['name', 'startDate', 'location'] },
+  FAQPage: { required: ['mainEntity'] },
+  HowTo: { required: ['name', 'step'] },
+  Organization: { required: [], oneOf: [['name', 'url']] },
+  VideoObject: { required: ['name', 'thumbnailUrl', 'uploadDate'] },
+};
+
+/**
+ * Walk a parsed JSON-LD payload and accumulate three structured-data
+ * health signals into the caller's tallies / map:
+ *
+ *   - **Duplicate `@id`** — populated by recording every `@id` value
+ *     into `idCounts`. The caller computes the "duplicates" count as
+ *     `Σ(count > 1 ? count - 1 : 0)` after walking every block on the
+ *     page. We do this in the caller (not here) so a `@id` shared
+ *     across multiple `<script>` tags is still detected.
+ *   - **Unknown / malformed `@type`** — `@type` strings that look
+ *     malformed: empty, contain whitespace, start with a lowercase
+ *     letter (Schema.org convention is PascalCase), or contain
+ *     characters outside `[A-Za-z0-9_]`. This catches typos like
+ *     `"product"` (lowercase) or `"News Article"` (whitespace) without
+ *     us needing to ship the full ~750-entry Schema.org taxonomy.
+ *   - **Missing required props** — when a node's `@type` matches an
+ *     entry in `SCHEMA_REQUIRED_PROPS`, every entry in `required` and
+ *     at least one entry of each `oneOf[i]` group must be present.
+ */
+function walkSchemaForValidation(
+  node: unknown,
+  idCounts: Map<string, number>,
+): { unknownTypeCount: number; missingRequiredCount: number } {
+  let unknownTypeCount = 0;
+  let missingRequiredCount = 0;
+
+  const visit = (n: unknown): void => {
+    if (!n) return;
+    if (Array.isArray(n)) {
+      for (const item of n) visit(item);
+      return;
+    }
+    if (typeof n !== 'object') return;
+    const obj = n as Record<string, unknown>;
+
+    // Record `@id` for cross-block duplicate detection.
+    const idVal = obj['@id'];
+    if (typeof idVal === 'string' && idVal) {
+      idCounts.set(idVal, (idCounts.get(idVal) ?? 0) + 1);
+    }
+
+    // Validate `@type` shape and check required props for known types.
+    const typeRaw = obj['@type'];
+    const types: string[] = [];
+    if (typeof typeRaw === 'string') types.push(typeRaw);
+    else if (Array.isArray(typeRaw)) {
+      for (const t of typeRaw) if (typeof t === 'string') types.push(t);
+    }
+    for (const t of types) {
+      // Malformed shapes — Schema.org PascalCase convention.
+      if (
+        !t ||
+        /\s/.test(t) ||
+        !/^[A-Z][A-Za-z0-9_]*$/.test(t)
+      ) {
+        unknownTypeCount++;
+        continue;
+      }
+      // Required-prop check for the curated high-traffic types.
+      const rule = SCHEMA_REQUIRED_PROPS[t];
+      if (!rule) continue;
+      for (const key of rule.required) {
+        if (!isTruthyProp(obj[key])) {
+          missingRequiredCount++;
+          break; // one failure per node, not per missing prop
+        }
+      }
+      if (rule.oneOf) {
+        for (const group of rule.oneOf) {
+          if (!group.some((k) => isTruthyProp(obj[k]))) {
+            missingRequiredCount++;
+            break;
+          }
+        }
+      }
+    }
+
+    // Recurse into nested objects/arrays (e.g. `@graph`, `mainEntity`).
+    for (const value of Object.values(obj)) {
+      if (value && (typeof value === 'object' || Array.isArray(value))) {
+        visit(value);
+      }
+    }
+  };
+
+  visit(node);
+  return { unknownTypeCount, missingRequiredCount };
+}
+
+function isTruthyProp(v: unknown): boolean {
+  if (v === undefined || v === null) return false;
+  if (typeof v === 'string') return v.trim().length > 0;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === 'object') return Object.keys(v as object).length > 0;
+  return true;
 }
 
 function detectPathType(rawHref: string): LinkPathType {

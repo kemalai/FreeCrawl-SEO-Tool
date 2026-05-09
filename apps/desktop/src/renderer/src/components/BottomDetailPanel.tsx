@@ -412,6 +412,11 @@ function ViewSourceView({
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [wrap, setWrap] = useState(false);
+  // Active match index (0-based). When the user presses Enter (next) or
+  // Shift+Enter (prev) we cycle through matches and the active one is
+  // scrolled into view + highlighted in a stronger colour.
+  const [activeMatch, setActiveMatch] = useState(0);
+  const preRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
     if (urlId === null) {
@@ -433,6 +438,13 @@ function ViewSourceView({
     };
   }, [urlId]);
 
+  // When the search term changes, reset the cycle to the first match so
+  // a fresh query doesn't carry over a stale index from a longer match
+  // list. Also runs when the user clears the term entirely.
+  useEffect(() => {
+    setActiveMatch(0);
+  }, [search, urlId]);
+
   if (loading && !src) {
     return <div className="p-4 text-[11px] text-surface-500">Loading source…</div>;
   }
@@ -450,6 +462,18 @@ function ViewSourceView({
 
   const body = src.body;
   const matches = search ? countMatches(body, search) : 0;
+  // Clamp active match into the current range so a shrinking match
+  // count (after the user typed an extra character) doesn't leave us
+  // pointing past the end.
+  const safeActive = matches > 0 ? activeMatch % matches : 0;
+
+  function step(delta: number): void {
+    if (matches === 0) return;
+    setActiveMatch((cur) => {
+      const next = (cur + delta + matches) % matches;
+      return next;
+    });
+  }
 
   function copy() {
     void navigator.clipboard.writeText(body);
@@ -492,12 +516,45 @@ function ViewSourceView({
           placeholder="Search source…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter / Shift+Enter cycle through matches in place — the
+            // input keeps focus so the user can keep typing or step
+            // again without re-clicking. Escape clears the search.
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              step(e.shiftKey ? -1 : 1);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              setSearch('');
+            }
+          }}
           spellCheck={false}
         />
-        {search && (
-          <span className="text-surface-500">
-            {matches} match{matches === 1 ? '' : 'es'}
-          </span>
+        {search && matches > 0 && (
+          <>
+            <span className="text-surface-500">
+              {safeActive + 1} of {matches}
+            </span>
+            <button
+              className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800 disabled:opacity-40"
+              onClick={() => step(-1)}
+              disabled={matches < 2}
+              title="Previous match (Shift+Enter)"
+            >
+              ↑
+            </button>
+            <button
+              className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800 disabled:opacity-40"
+              onClick={() => step(1)}
+              disabled={matches < 2}
+              title="Next match (Enter)"
+            >
+              ↓
+            </button>
+          </>
+        )}
+        {search && matches === 0 && (
+          <span className="text-surface-500">No matches</span>
         )}
         <label className="flex items-center gap-1 text-surface-400">
           <input
@@ -525,16 +582,54 @@ function ViewSourceView({
       </div>
       <div className="flex-1 overflow-auto bg-surface-950 p-3">
         <pre
+          ref={preRef}
           className={clsx(
             'font-mono text-[10.5px] leading-[14px] text-surface-200',
             wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre',
           )}
         >
-          {search ? renderHighlighted(body, search) : body}
+          {search
+            ? renderHighlighted(body, search, safeActive)
+            : body}
         </pre>
       </div>
+      <ViewSourceScrollEffect
+        preRef={preRef}
+        depKey={`${urlId}|${search}|${safeActive}`}
+        enabled={search.length > 0 && matches > 0}
+      />
     </div>
   );
+}
+
+/**
+ * Scrolls the active `<mark data-active="true">` highlight into view
+ * inside the `<pre>` block whenever the active match index changes.
+ * Implemented as a tiny child component so the effect's dep array can
+ * be tied to a string key without polluting the parent's render.
+ */
+function ViewSourceScrollEffect({
+  preRef,
+  depKey,
+  enabled,
+}: {
+  preRef: React.RefObject<HTMLPreElement | null>;
+  depKey: string;
+  enabled: boolean;
+}) {
+  useEffect(() => {
+    if (!enabled) return;
+    const pre = preRef.current;
+    if (!pre) return;
+    const active = pre.querySelector<HTMLElement>('mark[data-active="true"]');
+    if (!active) return;
+    // `block: 'nearest'` avoids snap-jumping when the active hit is
+    // already visible. `behavior: 'smooth'` reads better than instant
+    // jumps for a 200 KB body.
+    active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depKey, enabled]);
+  return null;
 }
 
 function DuplicatesView({ urlId, row }: { urlId: number; row: CrawlUrlRow }) {
@@ -657,7 +752,11 @@ function countMatches(haystack: string, needle: string): number {
   return count;
 }
 
-function renderHighlighted(body: string, needle: string): ReactNode {
+function renderHighlighted(
+  body: string,
+  needle: string,
+  activeIndex = -1,
+): ReactNode {
   if (!needle) return body;
   const out: ReactNode[] = [];
   const lower = body.toLowerCase();
@@ -674,10 +773,16 @@ function renderHighlighted(body: string, needle: string): ReactNode {
       break;
     }
     if (idx > pos) out.push(body.slice(pos, idx));
+    const isActive = hits === activeIndex;
     out.push(
       <mark
         key={`m${idx}`}
-        className="rounded bg-amber-500/40 text-amber-100"
+        data-active={isActive ? 'true' : undefined}
+        className={
+          isActive
+            ? 'rounded bg-amber-400 text-surface-950 outline outline-1 outline-amber-200'
+            : 'rounded bg-amber-500/40 text-amber-100'
+        }
       >
         {body.slice(idx, idx + needle.length)}
       </mark>,

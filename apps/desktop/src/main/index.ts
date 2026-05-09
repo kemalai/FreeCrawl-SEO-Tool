@@ -1711,6 +1711,7 @@ function registerIpc(): void {
   });
 
   ipcMain.handle(IPC.crawlClear, async () => {
+    const t0 = Date.now();
     activeCrawler?.stop();
     activeCrawler = null;
     const database = getDb();
@@ -1750,6 +1751,11 @@ function registerIpc(): void {
     // dialog can't fire after Clear if the user cancelled the boot
     // prompt earlier.
     pendingRecoveryCheckpoint = [];
+    // Broadcast `dataChanged` so any open table / overview / detail
+    // panel re-queries against the now-empty DB instead of showing
+    // stale rows until the next refresh tick.
+    fireDataChanged();
+    logger.log('info', 'main', `Clear completed in ${Date.now() - t0} ms`);
   });
 
   ipcMain.handle(IPC.crawlAddUrl, (_e, url: string): { accepted: boolean } => {

@@ -28,6 +28,13 @@ const TAB_CATEGORY: Record<TabKey, UrlCategory> = {
   canonicals: 'internal:html',
   directives: 'internal:html',
   redirects: 'all',
+  pagination: 'tab:pagination',
+  hreflang: 'tab:hreflang',
+  amp: 'tab:amp',
+  'structured-data': 'tab:structured-data',
+  'meta-refresh': 'tab:meta-refresh',
+  'custom-extraction': 'tab:custom-extraction',
+  'custom-search': 'tab:custom-search',
   links: 'all',
   'broken-links': 'all',
 };
