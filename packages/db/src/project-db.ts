@@ -165,6 +165,8 @@ interface UrlRowDb {
   schema_duplicate_ids: number;
   schema_unknown_types: number;
   schema_missing_required: number;
+  heading_order_violations: number;
+  subresource_request_count: number;
 }
 
 interface ImageRowDb {
@@ -292,6 +294,10 @@ export interface UpsertUrlInput {
   schemaDuplicateIds?: number;
   schemaUnknownTypes?: number;
   schemaMissingRequired?: number;
+  /** Skipped-level heading events on this page (h1→h3 etc.). */
+  headingOrderViolations?: number;
+  /** Total subresource requests declared (img/script/stylesheet/iframe/video/audio). */
+  subresourceRequestCount?: number;
   /** JSON-stringified outline array, or null. */
   headings?: string | null;
   /** Raw `Server` response header, or null when absent. */
@@ -358,7 +364,8 @@ const UPSERT_URL_SQL = `
     images_responsive, picture_count,
     url_malformed, og_type, og_url, og_site_name, og_locale, android_icon,
     landmark_main, skip_link_present, aria_invalid_roles,
-    schema_duplicate_ids, schema_unknown_types, schema_missing_required
+    schema_duplicate_ids, schema_unknown_types, schema_missing_required,
+    heading_order_violations, subresource_request_count
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
@@ -396,7 +403,8 @@ const UPSERT_URL_SQL = `
     :images_responsive, :picture_count,
     :url_malformed, :og_type, :og_url, :og_site_name, :og_locale, :android_icon,
     :landmark_main, :skip_link_present, :aria_invalid_roles,
-    :schema_duplicate_ids, :schema_unknown_types, :schema_missing_required
+    :schema_duplicate_ids, :schema_unknown_types, :schema_missing_required,
+    :heading_order_violations, :subresource_request_count
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -523,6 +531,8 @@ const UPSERT_URL_SQL = `
     schema_duplicate_ids = excluded.schema_duplicate_ids,
     schema_unknown_types = excluded.schema_unknown_types,
     schema_missing_required = excluded.schema_missing_required,
+    heading_order_violations = excluded.heading_order_violations,
+    subresource_request_count = excluded.subresource_request_count,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -1195,6 +1205,8 @@ export class ProjectDb {
       schema_duplicate_ids: input.schemaDuplicateIds ?? 0,
       schema_unknown_types: input.schemaUnknownTypes ?? 0,
       schema_missing_required: input.schemaMissingRequired ?? 0,
+      heading_order_violations: input.headingOrderViolations ?? 0,
+      subresource_request_count: input.subresourceRequestCount ?? 0,
     };
 
     const row = this.stmtUpsertUrl.get(params) as { id: number } | undefined;
@@ -2674,12 +2686,7 @@ export class ProjectDb {
       h1Duplicate: dup('h1'),
       h1Multiple: countWhere(`${html} AND h1_count > 1`),
       headingSkippedLevel: countWhere(
-        `${html} AND (
-           (h2_count = 0 AND h3_count > 0)
-           OR (h3_count = 0 AND h4_count > 0)
-           OR (h4_count = 0 AND h5_count > 0)
-           OR (h5_count = 0 AND h6_count > 0)
-         )`,
+        `${html} AND heading_order_violations > 0`,
       ),
       multipleCanonicals: countWhere(`${html} AND canonical_count > 1`),
       canonicalMissing: countWhere(
@@ -3211,6 +3218,9 @@ export class ProjectDb {
       linksPerPageTooMany: countWhere(`${html} AND outlinks > 100`),
       hreflangInconsistentLang: countWhere(
         `${html} AND hreflang_inconsistent_lang = 1`,
+      ),
+      pageManyRequests: countWhere(
+        `${html} AND subresource_request_count > 100`,
       ),
     };
   }
@@ -4599,6 +4609,8 @@ export class ProjectDb {
     schemaDuplicateIds: r.schema_duplicate_ids ?? 0,
     schemaUnknownTypes: r.schema_unknown_types ?? 0,
     schemaMissingRequired: r.schema_missing_required ?? 0,
+    headingOrderViolations: r.heading_order_violations ?? 0,
+    subresourceRequestCount: r.subresource_request_count ?? 0,
     crawledAt: r.crawled_at,
   });
 
@@ -5016,15 +5028,11 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     case 'issues:h1-multiple':
       return "is_external = 0 AND content_kind = 'html' AND h1_count > 1";
     case 'issues:heading-skipped-level':
-      // A "skipped" heading level is when level N+ exists but level N
-      // is missing — the page jumps over a tier (e.g. H1 → H3 with no
-      // H2). Each rung is checked independently.
-      return `is_external = 0 AND content_kind = 'html' AND (
-                (h2_count = 0 AND h3_count > 0)
-                OR (h3_count = 0 AND h4_count > 0)
-                OR (h4_count = 0 AND h5_count > 0)
-                OR (h5_count = 0 AND h6_count > 0)
-              )`;
+      // Skipped-level heading detection — counts source-order events
+      // where two consecutive headings differ by more than one tier
+      // (e.g. h1 → h3, h2 → h5). Computed during HTML parse and
+      // stored as `heading_order_violations`.
+      return `is_external = 0 AND content_kind = 'html' AND heading_order_violations > 0`;
     case 'issues:multiple-canonicals':
       // More than one `<link rel="canonical">` on a page is a confusion
       // signal — Google may pick any of them, defeating the canonical's
@@ -6045,6 +6053,14 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // token mapped to two different hrefs on the same page.
       return `is_external = 0 AND content_kind = 'html'
               AND hreflang_inconsistent_lang = 1`;
+    case 'issues:page-many-requests':
+      // V1 Faz 2 closeout — pages whose total subresource count
+      // (img + script + stylesheet + iframe + video + audio) exceeds
+      // 100. High request count is a known LCP regression on slower
+      // connections and a typical consequence of unbounded third-
+      // party tag injection.
+      return `is_external = 0 AND content_kind = 'html'
+              AND subresource_request_count > 100`;
     case 'tab:directives':
       // Wave 4 — Directives tab. Pages declaring any indexability
       // directive: meta robots, X-Robots-Tag header, robots.txt block,
@@ -6115,6 +6131,33 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               AND custom_search_hits IS NOT NULL
               AND custom_search_hits != ''
               AND custom_search_hits != '{}'`;
+    case 'tab:security':
+      // V1 Faz 3 — Security tab. Every internal HTML page so the user
+      // can audit security posture wholesale (HSTS, CSP, X-Frame-
+      // Options, X-Content-Type-Options, mixed content active/passive,
+      // missing-SRI, insecure form actions). The COL spec surfaces
+      // these as the visible columns; the row set itself is the same
+      // universe as Internal HTML.
+      return `is_external = 0 AND content_kind = 'html'`;
+    case 'tab:duplicates':
+      // V1 Faz 3 — Duplicates tab. Pages that participate in either
+      // a near-duplicate cluster (cluster_size > 1, post-crawl SimHash
+      // pass) or share a content_hash with another page (exact
+      // duplicate). Both signals come from the existing SimHash + FNV
+      // recompute pass, no new column required.
+      return `is_external = 0 AND content_kind = 'html'
+              AND (
+                cluster_size > 1
+                OR (
+                  content_hash IS NOT NULL AND content_hash != ''
+                  AND content_hash IN (
+                    SELECT content_hash FROM urls
+                    WHERE is_external = 0 AND content_kind = 'html'
+                      AND content_hash IS NOT NULL AND content_hash != ''
+                    GROUP BY content_hash HAVING COUNT(*) > 1
+                  )
+                )
+              )`;
     default:
       return null;
   }

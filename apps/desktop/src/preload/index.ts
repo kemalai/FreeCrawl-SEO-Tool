@@ -33,6 +33,7 @@ import {
   type MenuEvent,
   type RobotsTestInput,
   type RobotsTestResult,
+  type RobotsValidationIssue,
   type SitemapValidateInput,
   type SitemapValidateResult,
   type UrlRewritePreviewInput,
@@ -72,6 +73,7 @@ import {
   type UrlCertInfoResult,
   type UrlsQueryInput,
   type UrlsQueryResult,
+  type MemoryStats,
 } from '@freecrawl/shared-types';
 
 function subscribe<T>(
@@ -152,6 +154,7 @@ const api: FreeCrawlApi = {
   sitemapGenerate: (input: SitemapGenerateInput): Promise<SitemapGenerateResult> =>
     ipcRenderer.invoke(IPC.sitemapGenerate, input),
   appVersion: (): Promise<string> => ipcRenderer.invoke(IPC.appVersion),
+  memoryStats: (): Promise<MemoryStats> => ipcRenderer.invoke(IPC.memoryStats),
   prefsGetAll: () => ({ ...prefsCache }),
   prefsGet: (key) => prefsCache[key],
   prefsSet: (key, value) => {
@@ -168,6 +171,8 @@ const api: FreeCrawlApi = {
   logsOpenWindow: (): Promise<void> => ipcRenderer.invoke(IPC.logsOpenWindow),
   robotsTest: (input: RobotsTestInput): Promise<RobotsTestResult> =>
     ipcRenderer.invoke(IPC.robotsTest, input),
+  robotsValidate: (text: string): Promise<RobotsValidationIssue[]> =>
+    ipcRenderer.invoke(IPC.robotsValidate, text),
   sitemapValidate: (input: SitemapValidateInput): Promise<SitemapValidateResult> =>
     ipcRenderer.invoke(IPC.sitemapValidate, input),
   urlRewritePreview: (

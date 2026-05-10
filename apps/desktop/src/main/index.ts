@@ -14,6 +14,7 @@ import {
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { totalmem, freemem } from 'node:os';
 import {
   DEFAULT_CRAWL_CONFIG,
   IPC,
@@ -92,6 +93,7 @@ import {
   exportHtmlReport,
   compareCrawls,
   testUrlAgainstRobots,
+  validateRobotsTxt,
   fetchSitemaps,
   validateSitemap,
   normalizeUrl,
@@ -934,8 +936,34 @@ async function downloadAndRevealInstaller(asset: GitHubReleaseAsset): Promise<vo
  * Downloads folder and reveals it in Explorer / Finder; user double-
  * clicks to upgrade.
  */
+/**
+ * Re-entrancy guard for `checkForUpdates`. Prevents stacked dialogs
+ * when (a) the user clicks Help → Check for Updates while the silent
+ * startup auto-check is still resolving its GitHub API request, or
+ * (b) the user double-clicks the menu item before the first dialog
+ * paints. Cleared in the `finally` block of `checkForUpdates`.
+ */
+let updateCheckInFlight = false;
+
 async function checkForUpdates(opts: { silent?: boolean } = {}): Promise<void> {
   const silent = opts.silent === true;
+  if (updateCheckInFlight) {
+    logger.log(
+      'debug',
+      'main',
+      `checkForUpdates skipped — another check is in progress (silent=${silent}).`,
+    );
+    return;
+  }
+  updateCheckInFlight = true;
+  try {
+    await runUpdateCheck(silent);
+  } finally {
+    updateCheckInFlight = false;
+  }
+}
+
+async function runUpdateCheck(silent: boolean): Promise<void> {
   const win = mainWindow;
   if (!win) return;
   const installed = app.getVersion();
@@ -1269,6 +1297,32 @@ function openLogsWindow(): void {
 function registerIpc(): void {
   ipcMain.handle(IPC.appVersion, () => app.getVersion());
 
+  // Live memory snapshot for the in-app monitor (status bar). Returns
+  // process RSS / heap + system total/free + the active project's URL
+  // count so the renderer can derive per-URL cost + capacity ceilings
+  // (1M / 5M / 10M projection) without separate round-trips.
+  // `urlsCrawled = 0` when no project is open — the renderer suppresses
+  // the per-URL cost UI in that case.
+  ipcMain.handle(IPC.memoryStats, () => {
+    const mu = process.memoryUsage();
+    let urlsCrawled = 0;
+    try {
+      urlsCrawled = getDb().countUrls();
+    } catch {
+      // DB may be mid-truncate or closed — treat as 0 rather than throwing.
+    }
+    return {
+      rss: mu.rss,
+      heapUsed: mu.heapUsed,
+      heapTotal: mu.heapTotal,
+      external: mu.external,
+      arrayBuffers: mu.arrayBuffers,
+      systemTotal: totalmem(),
+      systemFree: freemem(),
+      urlsCrawled,
+    };
+  });
+
   // Renderer → main heartbeat carrying live input-lag (ms). Forwarded
   // to the active crawler so it can adaptively shrink its concurrency
   // when the renderer's main thread is starved. `ipcMain.on` (not
@@ -1289,6 +1343,10 @@ function registerIpc(): void {
     logger.log('info', 'main', 'Log buffer cleared');
   });
   ipcMain.handle(IPC.logsOpenWindow, () => openLogsWindow());
+
+  ipcMain.handle(IPC.robotsValidate, (_e, text: string) =>
+    validateRobotsTxt(typeof text === 'string' ? text : ''),
+  );
 
   ipcMain.handle(IPC.robotsTest, (_e, input: RobotsTestInput) =>
     testUrlAgainstRobots(input.url, input.userAgent, input.customRobots),

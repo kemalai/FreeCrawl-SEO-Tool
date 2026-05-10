@@ -846,7 +846,15 @@ function Cell({ row, spec }: { row: CrawlUrlRow | null; spec: ColumnSpec }) {
     return <span className="text-surface-700">…</span>;
   }
   const raw = row[spec.key];
-  const value = raw === null || raw === undefined ? '' : String(raw);
+  // Booleans render as "Y" / "—" rather than the JS-default "true"/"false".
+  // Matches Screaming Frog's compact convention for flag columns
+  // (Loop, Sequence Break, Self-Ref Missing, …).
+  const value =
+    raw === null || raw === undefined
+      ? ''
+      : typeof raw === 'boolean'
+        ? raw ? 'Y' : ''
+        : String(raw);
 
   if (spec.kind === 'status') {
     const code = row.statusCode;

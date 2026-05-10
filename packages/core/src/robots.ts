@@ -187,6 +187,226 @@ export async function testUrlAgainstRobots(
 }
 
 /**
+ * One issue surfaced by `validateRobotsTxt`. Lines are 1-indexed
+ * (matching what the user sees in the editor gutter); `severity`
+ * separates "this will be ignored" (warning) from "this changes
+ * crawler behaviour" (error). `directive` carries the lowercased
+ * directive name when one was recognised, else null.
+ */
+export interface RobotsValidationIssue {
+  line: number;
+  severity: 'error' | 'warning';
+  message: string;
+  directive: string | null;
+}
+
+const KNOWN_DIRECTIVES = new Set([
+  // Core RFC 9309 directives.
+  'user-agent',
+  'disallow',
+  'allow',
+  // Widely-supported extensions Googlebot and most major crawlers honour.
+  'sitemap',
+  'crawl-delay',
+  // Yandex-specific but commonly seen — not an error, only an info-level
+  // reminder isn't useful at this granularity, so we accept silently.
+  'host',
+  'clean-param',
+  // Very common typos / case-folded: 'noindex' was historically used
+  // here but Google formally dropped it in 2019. We warn rather than
+  // error because it's not actively harmful.
+  'noindex',
+]);
+
+const TYPO_DIRECTIVES: Record<string, string> = {
+  disalow: 'disallow',
+  dissalow: 'disallow',
+  dissallow: 'disallow',
+  alow: 'allow',
+  allwo: 'allow',
+  'user-agnet': 'user-agent',
+  useragent: 'user-agent',
+  'crawldelay': 'crawl-delay',
+  sitmap: 'sitemap',
+  sitemaps: 'sitemap',
+};
+
+/**
+ * Lint a robots.txt body and return per-line issues. Pure / network-
+ * free / sync — safe to call from IPC handlers without timeout
+ * worries. Validates:
+ *   - Unknown directives (with a near-miss suggestion when one matches
+ *     a common typo).
+ *   - Missing `:` separator (e.g. `Disallow /admin` instead of
+ *     `Disallow: /admin`).
+ *   - `Disallow` / `Allow` rules appearing before any `User-agent`
+ *     group is opened — these rules are silently dropped by parsers.
+ *   - Sitemap references that are not absolute URLs (RFC 9309 §2.2.4
+ *     requires absolute URIs).
+ *   - `Crawl-delay` values that are not valid non-negative numbers.
+ *   - Wildcards (`*` / `$`) used anywhere other than path patterns
+ *     where browsers honour them — `User-agent: foo*` is fine but
+ *     `User-agent: foo*bar` is non-portable.
+ *
+ * Returns an empty array when the body is well-formed.
+ */
+export function validateRobotsTxt(text: string): RobotsValidationIssue[] {
+  const issues: RobotsValidationIssue[] = [];
+  const lines = text.split(/\r?\n/);
+  let groupOpen = false; // any `User-agent:` line seen yet?
+  for (let i = 0; i < lines.length; i++) {
+    const lineNo = i + 1;
+    const raw = lines[i] ?? '';
+    // Strip BOM on first line — some Windows editors prepend U+FEFF.
+    const noBom = i === 0 ? raw.replace(/^﻿/, '') : raw;
+    // Strip trailing CR (handled by split, but defensive) + comments.
+    // Comments start at `#` and consume the rest of the line (including
+    // `#` mid-line); per RFC 9309 §2.2 leading whitespace is allowed.
+    const noComment = noBom.replace(/#.*$/, '');
+    const trimmed = noComment.trim();
+    if (trimmed === '') continue;
+
+    // RFC 9309 line shape: `<directive>:<value>` with optional whitespace.
+    // The colon is mandatory — without it the line is silently skipped
+    // by every major parser, so flag it.
+    const colonIdx = trimmed.indexOf(':');
+    if (colonIdx <= 0) {
+      issues.push({
+        line: lineNo,
+        severity: 'error',
+        message:
+          'Missing `:` separator. Robots.txt directives must be `<name>: <value>`.',
+        directive: null,
+      });
+      continue;
+    }
+
+    const directive = trimmed.slice(0, colonIdx).trim().toLowerCase();
+    const value = trimmed.slice(colonIdx + 1).trim();
+
+    if (directive === '') {
+      issues.push({
+        line: lineNo,
+        severity: 'error',
+        message: 'Empty directive name before `:`.',
+        directive: null,
+      });
+      continue;
+    }
+
+    // Unknown directive — but if it looks like a typo of a known one,
+    // surface the suggestion so the user can fix faster.
+    if (!KNOWN_DIRECTIVES.has(directive)) {
+      const suggestion = TYPO_DIRECTIVES[directive];
+      issues.push({
+        line: lineNo,
+        severity: 'warning',
+        message: suggestion
+          ? `Unknown directive "${directive}" — did you mean "${suggestion}"?`
+          : `Unknown directive "${directive}". Crawlers will ignore this line.`,
+        directive,
+      });
+      // Still allow the rest of the validators to run on this line so
+      // the user sees every issue, not just the first.
+    }
+
+    // Directive-specific checks.
+    switch (directive) {
+      case 'user-agent':
+        if (value === '') {
+          issues.push({
+            line: lineNo,
+            severity: 'error',
+            message: '`User-agent:` value is empty.',
+            directive,
+          });
+        } else if (/[*$].*[^*$]/.test(value) && value !== '*') {
+          // Wildcards mid-token (e.g. `foo*bar`) are non-portable.
+          issues.push({
+            line: lineNo,
+            severity: 'warning',
+            message:
+              'User-agent wildcards are only widely supported as a single `*`. Mid-token wildcards may not match.',
+            directive,
+          });
+        }
+        groupOpen = true;
+        break;
+
+      case 'disallow':
+      case 'allow':
+        if (!groupOpen) {
+          issues.push({
+            line: lineNo,
+            severity: 'error',
+            message:
+              '`Disallow` / `Allow` must come after a `User-agent:` line — orphan rules are dropped.',
+            directive,
+          });
+        }
+        // Empty `Disallow:` is the canonical "allow everything" idiom — accept.
+        break;
+
+      case 'sitemap': {
+        if (value === '') {
+          issues.push({
+            line: lineNo,
+            severity: 'error',
+            message: '`Sitemap:` value is empty.',
+            directive,
+          });
+          break;
+        }
+        try {
+          const u = new URL(value);
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+            issues.push({
+              line: lineNo,
+              severity: 'warning',
+              message: `Sitemap URL uses scheme "${u.protocol}" — most crawlers only accept http/https.`,
+              directive,
+            });
+          }
+        } catch {
+          issues.push({
+            line: lineNo,
+            severity: 'error',
+            message:
+              'Sitemap value must be an absolute URL (e.g. `https://example.com/sitemap.xml`).',
+            directive,
+          });
+        }
+        break;
+      }
+
+      case 'crawl-delay': {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 0) {
+          issues.push({
+            line: lineNo,
+            severity: 'error',
+            message: '`Crawl-delay:` must be a non-negative number (seconds).',
+            directive,
+          });
+        }
+        break;
+      }
+
+      case 'noindex':
+        issues.push({
+          line: lineNo,
+          severity: 'warning',
+          message:
+            '`Noindex` in robots.txt was deprecated by Google in 2019 — use a `<meta name="robots">` or `X-Robots-Tag` header instead.',
+          directive,
+        });
+        break;
+    }
+  }
+  return issues;
+}
+
+/**
  * Coerce flexible user input into a fully-qualified URL.
  *  - `gamesatis.com`        → `https://gamesatis.com/`
  *  - `www.example.com/foo`  → `https://www.example.com/foo`

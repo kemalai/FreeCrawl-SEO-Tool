@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import clsx from 'clsx';
-import type { RobotsTestResult } from '@freecrawl/shared-types';
+import type { RobotsTestResult, RobotsValidationIssue } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
 interface Props {
@@ -20,6 +20,32 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
   // (probe live robots.txt) still works in one click.
   const [useCustom, setUseCustom] = useState(false);
   const [customRobots, setCustomRobots] = useState('');
+  // Live syntax-validation results for the custom robots.txt body.
+  // Recomputed in main process via `robots:validate` whenever the body
+  // changes (debounced 250 ms — local lint is cheap but pure-IPC churn
+  // on every keystroke would still be noisy).
+  const [validation, setValidation] = useState<RobotsValidationIssue[]>([]);
+
+  // Re-lint the custom-robots body whenever it changes. Validation is
+  // sync + pure, so we don't need cancellation; the debounce is only
+  // about smoothing keystrokes.
+  useEffect(() => {
+    if (!useCustom) {
+      setValidation([]);
+      return;
+    }
+    if (!customRobots.trim()) {
+      setValidation([]);
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      void window.freecrawl
+        .robotsValidate(customRobots)
+        .then(setValidation)
+        .catch(() => setValidation([]));
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [useCustom, customRobots]);
 
   // Re-seed inputs whenever the dialog opens — pre-fills the URL with the
   // current crawl's start URL (handy: most "why is this blocked?" checks
@@ -144,18 +170,21 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
           </div>
 
           {useCustom && (
-            <label className="mb-3 flex flex-col gap-1">
-              <span className="text-[10px] text-surface-400">
-                Custom robots.txt body (parsed — no fetch)
-              </span>
-              <textarea
-                className="h-40 w-full resize-y rounded border border-surface-700 bg-surface-950 px-2 py-1.5 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
-                value={customRobots}
-                onChange={(e) => setCustomRobots(e.target.value)}
-                placeholder={`User-agent: *\nDisallow: /admin/\nDisallow: /private/\nSitemap: https://example.com/sitemap.xml`}
-                spellCheck={false}
-              />
-            </label>
+            <>
+              <label className="mb-3 flex flex-col gap-1">
+                <span className="text-[10px] text-surface-400">
+                  Custom robots.txt body (parsed — no fetch)
+                </span>
+                <textarea
+                  className="h-40 w-full resize-y rounded border border-surface-700 bg-surface-950 px-2 py-1.5 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  value={customRobots}
+                  onChange={(e) => setCustomRobots(e.target.value)}
+                  placeholder={`User-agent: *\nDisallow: /admin/\nDisallow: /private/\nSitemap: https://example.com/sitemap.xml`}
+                  spellCheck={false}
+                />
+              </label>
+              <ValidationPanel issues={validation} bodyEmpty={!customRobots.trim()} />
+            </>
           )}
 
           <div className="mb-4 flex items-center gap-2">
@@ -257,6 +286,70 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between rounded border border-surface-800 bg-surface-950 px-2 py-1">
       <span className="text-surface-400">{label}</span>
       <span className="font-mono text-surface-100">{value}</span>
+    </div>
+  );
+}
+
+function ValidationPanel({
+  issues,
+  bodyEmpty,
+}: {
+  issues: RobotsValidationIssue[];
+  bodyEmpty: boolean;
+}) {
+  if (bodyEmpty) {
+    return (
+      <div className="mb-3 rounded border border-surface-800 bg-surface-950 px-2 py-1.5 text-[10px] text-surface-500">
+        Paste a draft robots.txt above to lint syntax.
+      </div>
+    );
+  }
+  if (issues.length === 0) {
+    return (
+      <div className="mb-3 rounded border border-emerald-700/60 bg-emerald-900/20 px-2 py-1.5 text-[11px] text-emerald-200">
+        ✓ No syntax issues detected.
+      </div>
+    );
+  }
+  const errors = issues.filter((i) => i.severity === 'error').length;
+  const warnings = issues.length - errors;
+  return (
+    <div className="mb-3 rounded border border-amber-700/60 bg-amber-900/15">
+      <div className="flex items-center gap-3 border-b border-amber-700/30 px-2 py-1 text-[10px] text-amber-300">
+        <span>
+          {errors > 0 && <span className="font-medium">{errors} error{errors === 1 ? '' : 's'}</span>}
+          {errors > 0 && warnings > 0 && <span> · </span>}
+          {warnings > 0 && (
+            <span className="font-medium text-amber-200/80">
+              {warnings} warning{warnings === 1 ? '' : 's'}
+            </span>
+          )}
+        </span>
+      </div>
+      <ul className="max-h-40 overflow-auto px-2 py-1 text-[10px]">
+        {issues.map((issue, idx) => (
+          <li
+            key={idx}
+            className={clsx(
+              'flex items-start gap-2 py-0.5 font-mono',
+              issue.severity === 'error' ? 'text-red-300' : 'text-amber-200/80',
+            )}
+          >
+            <span className="w-12 shrink-0 text-right text-surface-500">L{issue.line}</span>
+            <span
+              className={clsx(
+                'inline-block w-12 shrink-0 rounded px-1 text-center text-[9px] uppercase tracking-wider',
+                issue.severity === 'error'
+                  ? 'bg-red-900/40 text-red-200'
+                  : 'bg-amber-900/30 text-amber-200',
+              )}
+            >
+              {issue.severity}
+            </span>
+            <span className="text-[10px] leading-snug text-surface-200">{issue.message}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

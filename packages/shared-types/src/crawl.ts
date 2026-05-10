@@ -203,7 +203,10 @@ export type UrlCategory =
   | 'tab:meta-refresh'
   | 'tab:custom-extraction'
   | 'tab:custom-search'
+  | 'tab:security'
+  | 'tab:duplicates'
   | 'issues:hreflang-inconsistent-lang'
+  | 'issues:page-many-requests'
 
 export type Indexability =
   | 'indexable'
@@ -317,6 +320,18 @@ export interface CrawlUrlRow {
    * headings. Capped at 200 entries server-side.
    */
   headings: string | null;
+  /**
+   * Number of times the heading sequence skips a level (e.g. h1 → h3
+   * counts 1, h1 → h4 counts 1). 0 = well-formed outline. Computed
+   * across the entire page, independent of the 200-entry outline cap.
+   */
+  headingOrderViolations: number;
+  /**
+   * Total subresource references the page declares — `<img>` +
+   * `<script src>` + `<link rel="stylesheet">` + `<iframe>` +
+   * `<video src>` + `<audio src>`. Each DOM node counted once.
+   */
+  subresourceRequestCount: number;
   /**
    * Raw `Server` response header (e.g. `"nginx/1.25.0"`, `"cloudflare"`,
    * `"Apache/2.4.41 (Ubuntu)"`). Useful for stack auditing — surfaces
@@ -1245,6 +1260,13 @@ export interface OverviewCounts {
      * which writes a boolean flag onto each affected URL.
      */
     hreflangInconsistentLang: number;
+    /**
+     * Pages whose total subresource count (img + script + stylesheet +
+     * iframe + video + audio) exceeds 100 — a known LCP regression on
+     * slower connections and a common consequence of unbounded third-
+     * party tag injection.
+     */
+    pageManyRequests: number;
   };
 }
 

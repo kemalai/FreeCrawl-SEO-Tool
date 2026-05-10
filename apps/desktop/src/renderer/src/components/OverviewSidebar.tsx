@@ -1079,6 +1079,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               category: 'issues:render-blocking-critical',
             },
             {
+              key: 'issues-page-many-requests',
+              label: 'Too Many Requests (>100 subresources)',
+              count: o.issues.pageManyRequests,
+              category: 'issues:page-many-requests',
+            },
+            {
               key: 'issues-text-code-ratio-low',
               label: 'Low Text/Code Ratio (<10%)',
               count: o.issues.textCodeRatioLow,

@@ -29,6 +29,8 @@ export type TabKey =
   | 'meta-refresh'
   | 'custom-extraction'
   | 'custom-search'
+  | 'security'
+  | 'duplicates'
   | 'links'
   | 'broken-links';
 
@@ -53,6 +55,8 @@ export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'meta-refresh', label: 'Meta Refresh' },
   { key: 'custom-extraction', label: 'Custom Extraction' },
   { key: 'custom-search', label: 'Custom Search' },
+  { key: 'security', label: 'Security' },
+  { key: 'duplicates', label: 'Duplicates' },
   { key: 'links', label: 'Links' },
   { key: 'broken-links', label: 'Broken Links' },
 ];
@@ -237,6 +241,10 @@ function categoryForTab(tab: TabKey): UrlCategory {
       return 'tab:custom-extraction';
     case 'custom-search':
       return 'tab:custom-search';
+    case 'security':
+      return 'tab:security';
+    case 'duplicates':
+      return 'tab:duplicates';
     default:
       return 'internal:html';
   }

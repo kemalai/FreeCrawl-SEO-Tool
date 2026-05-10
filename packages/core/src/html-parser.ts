@@ -222,6 +222,20 @@ export interface ParsedPage {
    */
   headings: { level: number; text: string }[];
   /**
+   * Number of times the source-order heading sequence skips levels
+   * (e.g. h1 → h3 counts 1, h1 → h4 counts 1). Going back UP the
+   * hierarchy (h3 → h2) is allowed. WCAG 1.3.1 violation when > 0.
+   */
+  headingOrderViolations: number;
+  /**
+   * Total subresource references the page declares — `<img>` +
+   * `<script src>` + `<link rel="stylesheet">` + `<iframe>` +
+   * `<video src>` + `<audio src>`. Each entry counted once even if
+   * referenced multiple times via the same DOM node. High counts
+   * (>100) regress LCP on slower connections.
+   */
+  subresourceRequestCount: number;
+  /**
    * Number of `http://` subresources (img, script, stylesheet, iframe, …)
    * referenced from a HTTPS page — i.e. mixed-content findings. Always 0
    * when the page itself is served over plain HTTP.
@@ -333,11 +347,21 @@ export function parseHtml(
   // page's structural hierarchy and flag skipped levels (h1 → h3 with
   // no h2 in between).
   const headings: { level: number; text: string }[] = [];
+  // Skipped-level events accumulate across the WHOLE document, not only
+  // the first 200 captured for the outline. We track via a separate
+  // counter so the outline cap doesn't suppress the issue signal on
+  // page templates that emit thousands of headings.
+  let headingOrderViolations = 0;
+  let prevHeadingLevel = 0;
   $('h1, h2, h3, h4, h5, h6').each((_, el) => {
-    if (headings.length >= 200) return;
     const tag = (el as { name?: string }).name?.toLowerCase() ?? '';
     const level = parseInt(tag.slice(1), 10);
     if (!Number.isFinite(level) || level < 1 || level > 6) return;
+    if (prevHeadingLevel > 0 && level > prevHeadingLevel + 1) {
+      headingOrderViolations++;
+    }
+    prevHeadingLevel = level;
+    if (headings.length >= 200) return;
     const raw = $(el).text().replace(/\s+/g, ' ').trim();
     const text = decodeEntities(raw).slice(0, 200);
     headings.push({ level, text });
@@ -501,6 +525,24 @@ export function parseHtml(
     // counts here (selector already excludes preload).
     renderBlockingCount++;
   });
+
+  // Total subresource request count — the headline LCP-relevant signal.
+  // Counts only nodes the browser will actually fetch: `<img>` (skips
+  // `data:` URIs because those don't hit the network), `<script src>`,
+  // `<link rel="stylesheet">` (anywhere on the page), `<iframe src>`,
+  // `<video src>`, `<audio src>`. Each DOM node counts once; we don't
+  // dedupe by URL because two `<img>` referencing the same src still
+  // generate two render reservations even if the second is cache-hit.
+  let subresourceRequestCount = 0;
+  $('img[src]').each((_, el) => {
+    const src = ($(el).attr('src') ?? '').trim();
+    if (src && !src.startsWith('data:')) subresourceRequestCount++;
+  });
+  subresourceRequestCount += $('script[src]').length;
+  subresourceRequestCount += $('link[rel="stylesheet"]').length;
+  subresourceRequestCount += $('iframe[src]').length;
+  subresourceRequestCount += $('video[src]').length;
+  subresourceRequestCount += $('audio[src]').length;
 
   // Pagination — `<link rel="next">` / `<link rel="prev">`. Resolved to
   // absolute via normalizeUrl so the values are comparable to the URLs
@@ -1178,6 +1220,8 @@ export function parseHtml(
     skipLinkPresent,
     ariaInvalidRolesCount,
     headings,
+    headingOrderViolations,
+    subresourceRequestCount,
     mixedContentCount,
     mixedContentActive,
     mixedContentPassive,

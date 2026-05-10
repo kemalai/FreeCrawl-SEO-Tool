@@ -35,6 +35,8 @@ const TAB_CATEGORY: Record<TabKey, UrlCategory> = {
   'meta-refresh': 'tab:meta-refresh',
   'custom-extraction': 'tab:custom-extraction',
   'custom-search': 'tab:custom-search',
+  security: 'tab:security',
+  duplicates: 'tab:duplicates',
   links: 'all',
   'broken-links': 'all',
 };

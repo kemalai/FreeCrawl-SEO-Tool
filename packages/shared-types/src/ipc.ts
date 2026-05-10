@@ -66,6 +66,9 @@ export const IPC = {
   menuEvent: 'menu:event',
   dataChanged: 'data:changed',
   appVersion: 'app:version',
+  /** Returns live process + system memory stats for the in-app
+   * memory monitor (status bar). One-shot pull; renderer polls. */
+  memoryStats: 'app:memory-stats',
   prefsGetAllSync: 'prefs:get-all-sync',
   prefsSet: 'prefs:set',
   prefsDelete: 'prefs:delete',
@@ -88,6 +91,7 @@ export const IPC = {
    * drag. */
   logsBusy: 'logs:busy',
   robotsTest: 'robots:test',
+  robotsValidate: 'robots:validate',
   sitemapValidate: 'sitemap:validate',
   urlRewritePreview: 'url:rewrite-preview',
   urlClusterMembers: 'urls:cluster-members',
@@ -261,6 +265,33 @@ export interface CrashRecoveryStatus {
   pendingCount: number;
   /** The start URL the previous crawl was running against. */
   seedUrl: string;
+}
+
+/**
+ * Snapshot of process + system memory used by the in-app memory
+ * monitor. All values in bytes; the renderer formats for display.
+ *
+ * `urlsCrawled` lets the monitor compute the per-URL cost
+ * (`rss / urlsCrawled`) and the projected ceiling for 1M / 5M / 10M
+ * URLs without a separate IPC.
+ */
+export interface MemoryStats {
+  /** `process.memoryUsage().rss` — resident set size in bytes. */
+  rss: number;
+  /** V8 heap currently in use. */
+  heapUsed: number;
+  /** V8 heap total reservation (committed). */
+  heapTotal: number;
+  /** Off-heap native allocations (Buffer, n-api, etc.). */
+  external: number;
+  /** ArrayBuffer-backed allocations counted toward `external`. */
+  arrayBuffers: number;
+  /** `os.totalmem()` — installed system memory in bytes. */
+  systemTotal: number;
+  /** `os.freemem()` — currently free system memory in bytes. */
+  systemFree: number;
+  /** Number of URLs in the active project DB (used for per-URL cost). */
+  urlsCrawled: number;
 }
 
 export interface DataDeleteByDomainResult {
@@ -480,6 +511,19 @@ export interface RobotsTestInput {
    * made and `result.robotsUrl` is the literal string `"<custom>"`.
    */
   customRobots?: string;
+}
+
+/**
+ * One issue surfaced by `robots:validate`. Lines are 1-indexed
+ * (matching what the user sees in the editor gutter). Re-exported
+ * from `@freecrawl/core` so the renderer can type the IPC result
+ * without depending on core directly.
+ */
+export interface RobotsValidationIssue {
+  line: number;
+  severity: 'error' | 'warning';
+  message: string;
+  directive: string | null;
 }
 
 export interface PagesPerDirectoryInput {
@@ -780,6 +824,7 @@ export interface FreeCrawlApi {
   topAnchorTexts(limit?: number): Promise<AnchorTextRow[]>;
   sitemapGenerate(input: SitemapGenerateInput): Promise<SitemapGenerateResult>;
   appVersion(): Promise<string>;
+  memoryStats(): Promise<MemoryStats>;
   prefsGetAll(): Record<string, unknown>;
   prefsGet(key: string): unknown;
   prefsSet(key: string, value: unknown): void;
@@ -789,6 +834,7 @@ export interface FreeCrawlApi {
   logsClear(): Promise<void>;
   logsOpenWindow(): Promise<void>;
   robotsTest(input: RobotsTestInput): Promise<RobotsTestResult>;
+  robotsValidate(text: string): Promise<RobotsValidationIssue[]>;
   sitemapValidate(input: SitemapValidateInput): Promise<SitemapValidateResult>;
   urlRewritePreview(input: UrlRewritePreviewInput): Promise<UrlRewritePreviewResult>;
   urlClusterMembers(urlId: number): Promise<UrlClusterMember[]>;

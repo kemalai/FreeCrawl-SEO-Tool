@@ -2192,6 +2192,8 @@ export class Crawler extends EventEmitter {
           schemaDuplicateIds: parsed.schemaDuplicateIds,
           schemaUnknownTypes: parsed.schemaUnknownTypes,
           schemaMissingRequired: parsed.schemaMissingRequired,
+          headingOrderViolations: parsed.headingOrderViolations,
+          subresourceRequestCount: parsed.subresourceRequestCount,
           headings:
             parsed.headings.length > 0 ? JSON.stringify(parsed.headings) : null,
           serverHeader,

@@ -1211,6 +1211,37 @@ const MIGRATIONS: Migration[] = [
         );
     },
   },
+  {
+    version: 54,
+    name: 'add_heading_order_and_subresource_count',
+    // V1 Faz 2 closeout — final two HTML-only issue filters:
+    //   - `heading_order_violations` count of times a heading skips
+    //     levels (e.g. h1→h3 = 1, h1→h4 = 1) computed from the source-
+    //     order outline. Replaces the earlier coarse h2-missing-but-h3-
+    //     present SQL approximation in `headingSkippedLevel` with a
+    //     precise per-page count. Old rows default to 0 (no violation
+    //     counted) until they're recrawled.
+    //   - `subresource_request_count` total number of fetched
+    //     subresources the page declares: `<img>` + `<script src>` +
+    //     `<link rel="stylesheet">` + `<iframe>` + `<video src>` +
+    //     `<audio src>`. Powers the "Too Many Requests" issue filter
+    //     (>100 typical threshold) — high request count is a known LCP
+    //     regression on slower connections.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      const has = (n: string) => cols.some((c) => c.name === n);
+      if (!has('heading_order_violations'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN heading_order_violations INTEGER NOT NULL DEFAULT 0',
+        );
+      if (!has('subresource_request_count'))
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN subresource_request_count INTEGER NOT NULL DEFAULT 0',
+        );
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

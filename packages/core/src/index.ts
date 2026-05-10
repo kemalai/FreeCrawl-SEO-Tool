@@ -26,7 +26,12 @@ export {
   type TabularExportResult,
   type TabularSection,
 } from './tabular-export.js';
-export { testUrlAgainstRobots, type RobotsTestResult } from './robots.js';
+export {
+  testUrlAgainstRobots,
+  validateRobotsTxt,
+  type RobotsTestResult,
+  type RobotsValidationIssue,
+} from './robots.js';
 export {
   exportSitemap,
   validateSitemap,

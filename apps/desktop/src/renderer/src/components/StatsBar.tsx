@@ -1,6 +1,7 @@
 import clsx from 'clsx';
 import { useAppStore } from '../store.js';
 import { usePerfMeter } from '../hooks/usePerfMeter.js';
+import { useMemoryMonitor } from '../hooks/useMemoryMonitor.js';
 
 function Stat({
   label,
@@ -44,6 +45,50 @@ function heapClass(heapMb: number | null): string {
   return 'text-surface-100';
 }
 
+/** Format bytes for the status bar. Uses MB / GB depending on
+ * magnitude — RSS routinely sits at 250-1500 MB on a busy crawl, so
+ * we render in MB until the value crosses 1 GB to keep the column
+ * width stable. */
+function formatBytes(b: number): string {
+  if (b >= 1024 * 1024 * 1024) return `${(b / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (b >= 1024 * 1024) return `${Math.round(b / (1024 * 1024))} MB`;
+  if (b >= 1024) return `${Math.round(b / 1024)} KB`;
+  return `${b} B`;
+}
+
+/** Compact integer (1.2K / 850K / 5.3M / 12.4B) — used for the
+ *  "Capacity" projection so a 1 234 567 estimate doesn't blow out
+ *  the StatsBar layout. */
+function formatCount(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return Math.round(n).toString();
+}
+
+/** RSS colour. Electron base + main + workers idle around 250-400 MB;
+ *  during heavy crawls 800-1500 MB is normal; > 2 GB on a 4 GB box is
+ *  a memory-leak red flag. We tier against the system total so a 32 GB
+ *  workstation isn't flagged at 1.5 GB. */
+function rssClass(rss: number, systemTotal: number): string {
+  if (systemTotal === 0) return 'text-surface-100';
+  const ratio = rss / systemTotal;
+  if (ratio >= 0.5) return 'text-red-300';
+  if (ratio >= 0.25) return 'text-amber-300';
+  return 'text-surface-100';
+}
+
+/** System-free colour. Lower than 10% remaining = OS will start
+ *  swapping; 10-25% = pause-soon territory; > 25% = fine. */
+function systemFreeClass(freeBytes: number, totalBytes: number): string {
+  if (totalBytes === 0) return 'text-surface-100';
+  const ratio = freeBytes / totalBytes;
+  if (ratio < 0.1) return 'text-red-300';
+  if (ratio < 0.25) return 'text-amber-300';
+  return 'text-emerald-300';
+}
+
 /** Input lag colour. The same numbers a user "feels":
  *   < 16 ms = one frame at 60 Hz (input feels instant)
  *   16–50 ms = a couple of frames late (subtle drag stutter)
@@ -60,9 +105,21 @@ export function StatsBar() {
   const error = useAppStore((s) => s.error);
   const setError = useAppStore((s) => s.setError);
   const perf = usePerfMeter();
+  const mem = useMemoryMonitor();
 
   const elapsed = progress?.elapsedMs ?? 0;
   const elapsedStr = formatElapsed(elapsed);
+
+  // Per-URL memory cost = RSS / urlsCrawled. Suppressed below 100 URLs
+  // because the Electron base footprint dominates the calculation and
+  // the projection becomes meaningless (e.g. one URL would imply a
+  // 400 MB/page cost). Capacity = systemFree / perUrlCost — projects
+  // how many MORE URLs the current process can fit in remaining
+  // system memory at the observed cost.
+  const perUrlCost =
+    mem && mem.urlsCrawled >= 100 ? mem.rss / mem.urlsCrawled : null;
+  const capacity =
+    perUrlCost && perUrlCost > 0 ? mem!.systemFree / perUrlCost : null;
 
   return (
     <div className="flex shrink-0 items-center gap-5 border-t border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
@@ -92,6 +149,36 @@ export function StatsBar() {
           valueClassName={heapClass(perf.heapMb)}
           title="Renderer JS heap. >500 MB = warm, >1 GB = likely a listener / cache leak"
         />
+      )}
+      {mem && (
+        <>
+          <Stat
+            label="RSS"
+            value={formatBytes(mem.rss)}
+            valueClassName={rssClass(mem.rss, mem.systemTotal)}
+            title={`Main-process resident set size (Electron + workers). System total: ${formatBytes(mem.systemTotal)}.`}
+          />
+          <Stat
+            label="Sys Free"
+            value={formatBytes(mem.systemFree)}
+            valueClassName={systemFreeClass(mem.systemFree, mem.systemTotal)}
+            title={`OS-reported free memory. < 10% of system total triggers swap; pause the crawl before that. System total: ${formatBytes(mem.systemTotal)}.`}
+          />
+          {perUrlCost !== null && (
+            <Stat
+              label="Per URL"
+              value={formatBytes(perUrlCost)}
+              title={`Average bytes of RSS per crawled URL (${mem.urlsCrawled.toLocaleString()} URLs). Includes Electron overhead, so the marginal cost on real-world large crawls is typically lower.`}
+            />
+          )}
+          {capacity !== null && (
+            <Stat
+              label="Capacity"
+              value={formatCount(capacity)}
+              title={`Estimated additional URLs that fit in remaining system memory at the current per-URL cost. Calc: systemFree / perUrlCost. Treat as an upper bound — sustained throughput is usually CPU-bound first.`}
+            />
+          )}
+        </>
       )}
       <Stat
         label="Lag"
