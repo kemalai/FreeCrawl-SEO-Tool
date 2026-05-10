@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.5] — 2026-05-10
+
+### Added
+- Skipped Heading Level and Too Many Requests issue filters — surface accessibility outline gaps and pages with >100 subresources.
+- Security and Duplicates top-level tabs — security-header audit and near-duplicate cluster review in dedicated views.
+- Specialised columns on Pagination, Hreflang, AMP, Structured Data, Meta Refresh, Custom Extraction/Search, and Links tabs — each surfaces its domain data instead of generic placeholders.
+- Live memory monitor in the status bar — RSS, system free, per-URL cost, and capacity projection update every 2 seconds.
+- Robots.txt syntax validation — the Robots Tester custom-policy editor lints typos, orphan rules, sitemap URLs, crawl-delay, and deprecated noindex inline.
+
+### Changed
+- Boolean flag cells render as "Y" / "—" instead of "true" / "false" for a more compact table.
+
+### Fixed
+- Duplicate "Check for Updates" popup — concurrent silent and manual checks now share a re-entrancy guard so only one dialog appears.
+
 ## [0.3.4] — 2026-05-09
 
 ### Added
