@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.6] — 2026-05-12
+
+### Added
+- Top Words report — frequency table over the title + meta description + H1 corpus, with English/Turkish stopword filtering.
+- Status-code diagnosis banner in the HTTP Headers panel — decodes Cloudflare 52x/530 and standard 4xx/5xx codes with header-derived signals (cf-ray, Retry-After, CDN/server detection) and crawl-context fixes.
+- Request headers view in the HTTP Headers panel — toggle between captured response headers and the request headers reconstructed from the active crawl config.
+
+### Changed
+- Crawler settings relabelled to their Screaming Frog equivalents and the duplicated throughput inputs consolidated into the Speed section for clarity.
+- Settings dialog gained a "Reset to Defaults" button.
+
 ## [0.3.5] — 2026-05-10
 
 ### Added
