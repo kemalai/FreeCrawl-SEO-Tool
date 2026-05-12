@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
 import type {
+  CrawlConfig,
   CrawlUrlRow,
   LinkOrigin,
   LinkPathType,
@@ -13,6 +14,7 @@ import type {
   UrlSourceResult,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
+import { diagnoseStatus, type StatusDiagnosis } from '../utils/statusDiagnosis.js';
 
 type SubTab =
   | 'url-details'
@@ -383,7 +385,9 @@ export function BottomDetailPanel() {
           <ExtractedDataView row={detail.row} />
         )}
         {detail && subTab === 'serp-snippet' && <SerpSnippet row={detail.row} />}
-        {detail && subTab === 'http-headers' && <HttpHeadersView headers={detail.headers} />}
+        {detail && subTab === 'http-headers' && (
+          <HttpHeadersView headers={detail.headers} row={detail.row} />
+        )}
         {detail && subTab === 'cookies' && (
           <CookiesView row={detail.row} headers={detail.headers} />
         )}
@@ -796,36 +800,230 @@ function renderHighlighted(
   return out;
 }
 
-function HttpHeadersView({ headers }: { headers: { name: string; value: string }[] }) {
-  if (headers.length === 0) {
-    return (
-      <div className="p-4 text-[11px] text-surface-500">
-        No response headers captured for this URL.
-      </div>
-    );
-  }
+function HttpHeadersView({
+  headers,
+  row,
+}: {
+  headers: { name: string; value: string }[];
+  row: CrawlUrlRow;
+}) {
+  const config = useAppStore((s) => s.config);
+  const [side, setSide] = useState<'response' | 'request'>('response');
+  // Request headers reconstructed from the active crawl config — the
+  // same defaults the crawler dispatches (`defaultRequestHeaders` in
+  // `@freecrawl/core/http-client`) using a renderer-safe basic-auth
+  // builder. This is reconstructed-not-stored because per-URL request
+  // headers are deterministic from (config, URL) and storing them
+  // would multiply the row size by ~5x for zero diagnostic gain.
+  const requestHeaders = useMemo(
+    () => buildPreviewRequestHeaders(config, row.url),
+    [config, row.url],
+  );
+  // Decode the status code (esp. Cloudflare 52x / 530, 4xx bot blocks,
+  // 5xx-under-load) into a plain-English explanation enriched with
+  // signals read off the response headers (Retry-After, cf-ray, …).
+  const diag = useMemo(
+    () => diagnoseStatus(row.statusCode, row.statusText, headers),
+    [row.statusCode, row.statusText, headers],
+  );
+  const rows = side === 'response' ? headers : requestHeaders;
+  // Only surface the diagnosis banner when there's something worth
+  // saying — i.e. not on a clean 2xx.
+  const showDiag = diag.severity !== 'ok';
+
   return (
-    <div className="p-3">
-      <table className="w-full text-[11px]">
-        <thead className="sticky top-0 bg-surface-900">
-          <tr className="text-surface-400">
-            <th className="w-64 py-1 pr-3 text-left font-medium">Header</th>
-            <th className="py-1 text-left font-medium">Value</th>
-          </tr>
-        </thead>
-        <tbody>
-          {headers.map((h) => (
-            <tr key={h.name} className="border-b border-surface-900 last:border-0">
-              <td className="py-1.5 pr-3 align-top font-mono text-surface-400">{h.name}</td>
-              <td className="break-all py-1.5 align-top font-mono text-surface-100">
-                {h.value}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="flex h-full flex-col">
+      <div className="sticky top-0 flex shrink-0 items-center gap-1 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px]">
+        <button
+          className={clsx(
+            'rounded px-2 py-0.5',
+            side === 'response'
+              ? 'bg-surface-800 text-surface-100'
+              : 'text-surface-400 hover:bg-surface-800/60 hover:text-surface-200',
+          )}
+          onClick={() => setSide('response')}
+        >
+          Response ({headers.length})
+        </button>
+        <button
+          className={clsx(
+            'rounded px-2 py-0.5',
+            side === 'request'
+              ? 'bg-surface-800 text-surface-100'
+              : 'text-surface-400 hover:bg-surface-800/60 hover:text-surface-200',
+          )}
+          onClick={() => setSide('request')}
+        >
+          Request ({requestHeaders.length})
+        </button>
+        <span className="ml-auto text-surface-500">
+          {side === 'request'
+            ? 'Reconstructed from active crawl config — actual values may have differed if config changed since crawl.'
+            : 'Captured at crawl time.'}
+        </span>
+      </div>
+      <div className="flex-1 overflow-auto">
+        {showDiag && <StatusDiagnosisBanner diag={diag} />}
+        {rows.length === 0 ? (
+          <div className="p-4 text-[11px] text-surface-500">
+            {side === 'response'
+              ? 'No response headers captured for this URL.'
+              : 'No request headers — config may be empty.'}
+          </div>
+        ) : (
+          <div className="p-3">
+            <table className="w-full text-[11px]">
+              <thead className="sticky top-0 bg-surface-900">
+                <tr className="text-surface-400">
+                  <th className="w-64 py-1 pr-3 text-left font-medium">Header</th>
+                  <th className="py-1 text-left font-medium">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((h) => (
+                  <tr key={h.name} className="border-b border-surface-900 last:border-0">
+                    <td className="py-1.5 pr-3 align-top font-mono text-surface-400">{h.name}</td>
+                    <td className="break-all py-1.5 align-top font-mono text-surface-100">
+                      {h.value}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
+}
+
+function StatusDiagnosisBanner({ diag }: { diag: StatusDiagnosis }) {
+  const tone =
+    diag.severity === 'error'
+      ? { border: 'border-red-700/50', bg: 'bg-red-900/15', text: 'text-red-200', head: 'text-red-300' }
+      : diag.severity === 'warning'
+        ? { border: 'border-amber-700/50', bg: 'bg-amber-900/15', text: 'text-amber-200', head: 'text-amber-300' }
+        : { border: 'border-blue-700/40', bg: 'bg-blue-900/15', text: 'text-blue-200', head: 'text-blue-300' };
+  return (
+    <div className={clsx('m-3 mb-2 rounded border px-3 py-2.5 text-[11px]', tone.border, tone.bg, tone.text)}>
+      <div className={clsx('mb-1 text-[12px] font-semibold', tone.head)}>{diag.title}</div>
+      <p className="leading-relaxed text-surface-200">{diag.explanation}</p>
+      {diag.signals.length > 0 && (
+        <div className="mt-2">
+          <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-surface-400">
+            From the response headers
+          </div>
+          <ul className="list-disc space-y-0.5 pl-4 text-surface-200">
+            {diag.signals.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {diag.causes.length > 0 && (
+        <div className="mt-2">
+          <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-surface-400">
+            Likely causes
+          </div>
+          <ul className="list-disc space-y-0.5 pl-4 text-surface-300">
+            {diag.causes.map((c, i) => (
+              <li key={i}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {diag.whatToDo.length > 0 && (
+        <div className="mt-2">
+          <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-surface-400">
+            What to do
+          </div>
+          <ul className="list-disc space-y-0.5 pl-4 text-surface-200">
+            {diag.whatToDo.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Renderer-side counterpart to `defaultRequestHeaders` in
+ * `@freecrawl/core/http-client`. Kept inline (not imported from core)
+ * because (a) the basic-auth path uses Node's `Buffer` which isn't
+ * available in the browser, and (b) the renderer doesn't otherwise
+ * pull core, so dragging it in would bloat the renderer bundle for
+ * one display-only helper.
+ *
+ * Per-host UA matching mirrors `Crawler.resolveUserAgent`. Auth /
+ * custom headers / accept-language come straight from the active
+ * config. This is reconstructed at render time, so if the user
+ * changed the config since the crawl ran the values reflect the
+ * NEW config — that's noted to the user via the panel header banner.
+ */
+function buildPreviewRequestHeaders(
+  config: CrawlConfig,
+  url: string,
+): { name: string; value: string }[] {
+  const userAgent = resolvePreviewUserAgent(config, url);
+  const map = new Map<string, string>();
+  map.set('user-agent', userAgent);
+  map.set('accept-language', config.acceptLanguage || 'en');
+  map.set('accept-encoding', 'gzip, deflate, br');
+  map.set(
+    'accept',
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  );
+  if (config.auth.type === 'basic' && config.auth.username) {
+    // btoa is browser-safe; the crawler uses Buffer.from(...).toString('base64')
+    // which produces the same encoding.
+    const creds = btoa(`${config.auth.username}:${config.auth.password ?? ''}`);
+    map.set('authorization', `Basic ${creds}`);
+  } else if (config.auth.type === 'bearer' && config.auth.token) {
+    map.set('authorization', `Bearer ${config.auth.token}`);
+  }
+  // Custom headers override defaults (case-insensitive). Same logic
+  // as `defaultRequestHeaders` so the preview matches reality.
+  for (const [rawKey, value] of Object.entries(config.customHeaders ?? {})) {
+    const key = rawKey.trim();
+    if (!key) continue;
+    const lower = key.toLowerCase();
+    for (const existing of [...map.keys()]) {
+      if (existing.toLowerCase() === lower) map.delete(existing);
+    }
+    map.set(key, value);
+  }
+  return [...map.entries()].map(([name, value]) => ({ name, value }));
+}
+
+/**
+ * Renderer counterpart to `Crawler.resolveUserAgent`. Walks
+ * `perHostUserAgents` in order; first match wins. Pattern syntax:
+ * exact host (`m.example.com`) or leading wildcard (`*.example.com`).
+ */
+function resolvePreviewUserAgent(config: CrawlConfig, url: string): string {
+  const rules = config.perHostUserAgents ?? [];
+  if (rules.length === 0) return config.userAgent;
+  let host = '';
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return config.userAgent;
+  }
+  for (const rule of rules) {
+    const pat = rule.hostPattern.trim().toLowerCase();
+    if (!pat) continue;
+    if (pat.startsWith('*.')) {
+      const suffix = pat.slice(1);
+      if (host.endsWith(suffix) && host.length > suffix.length) {
+        return rule.userAgent;
+      }
+    } else if (host === pat) {
+      return rule.userAgent;
+    }
+  }
+  return config.userAgent;
 }
 
 function fleschBand(score: number): string {

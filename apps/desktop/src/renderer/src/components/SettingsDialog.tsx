@@ -30,6 +30,7 @@ import type {
   CustomExtractionRule,
   HttpAuth,
 } from '@freecrawl/shared-types';
+import { DEFAULT_CRAWL_CONFIG } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip, type FieldInfo } from './InfoTip.js';
 
@@ -428,6 +429,21 @@ export function SettingsDialog({ open, onClose }: Props) {
     setForm((s) => ({ ...s, [key]: value }));
   }
 
+  /**
+   * Reset the in-progress form to the factory `DEFAULT_CRAWL_CONFIG`.
+   * Only touches the local form — the user still has to click Save to
+   * persist, and Cancel discards. We confirm first because this wipes
+   * include/exclude patterns, custom-extraction rules, auth, proxy
+   * profiles, etc. — all of which live in the same form.
+   */
+  function resetToDefaults() {
+    const ok = window.confirm(
+      'Reset ALL crawl settings to their defaults?\n\nThis clears include/exclude patterns, custom search & extraction rules, URL rewrites, auth, proxy profiles, per-host user-agents, and webhook URL. Nothing is saved until you click Save — Cancel still discards.',
+    );
+    if (!ok) return;
+    setForm(configToForm(DEFAULT_CRAWL_CONFIG));
+  }
+
   function save() {
     setConfig({
       mode: form.mode,
@@ -689,19 +705,28 @@ export function SettingsDialog({ open, onClose }: Props) {
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-t border-surface-800 px-4 py-2.5">
+        <div className="flex items-center justify-between gap-2 border-t border-surface-800 px-4 py-2.5">
           <button
-            className="rounded border border-surface-700 px-3 py-1 text-[11px] hover:bg-surface-800"
-            onClick={onClose}
+            className="rounded border border-surface-700 px-3 py-1 text-[11px] text-surface-300 hover:bg-surface-800 hover:text-surface-100"
+            onClick={resetToDefaults}
+            title="Reset every crawl setting to its factory default (you still have to Save)"
           >
-            Cancel
+            Reset to Defaults
           </button>
-          <button
-            className="rounded bg-blue-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-500"
-            onClick={save}
-          >
-            Save
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              className="rounded border border-surface-700 px-3 py-1 text-[11px] hover:bg-surface-800"
+              onClick={onClose}
+            >
+              Cancel
+            </button>
+            <button
+              className="rounded bg-blue-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-500"
+              onClick={save}
+            >
+              Save
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -947,102 +972,77 @@ function CrawlerPanel({ form, update }: PanelProps) {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Throughput, concurrency, and traversal limits.
+        Traversal limits and crawl-scope toggles. Screaming Frog equivalents shown in
+        parentheses.
       </p>
+
+      <div className="mb-4 rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
+        <span className="font-medium">Looking for crawl speed?</span> Thread count, requests
+        per second, per-request delay, and retries live in the{' '}
+        <span className="font-medium">Speed</span> section — that&apos;s where you cap how fast
+        the crawler hits a server.
+      </div>
+
       <div className="grid grid-cols-2 gap-3">
         <Num
-          label="Max Depth"
+          label="Crawl Depth Limit (Max Depth)"
           value={form.maxDepth}
           onChange={(v) => update('maxDepth', v)}
-          info="Hop count from the start URL. Start URL is depth 0; its outlinks are depth 1, theirs depth 2, and so on."
+          info="Hop count from the start URL. Start URL is depth 0; its outlinks are depth 1, theirs depth 2, and so on. Screaming Frog: 'Limit Crawl Depth' (Configuration → Spider → Limits)."
           example="10 covers most sites; 3 limits crawls to top-of-funnel pages only."
         />
         <Num
-          label="Max URLs"
+          label="Crawl Total Limit (Max URLs)"
           value={form.maxUrls}
           onChange={(v) => update('maxUrls', v)}
-          info="Hard cap on total URLs crawled. The crawl stops as soon as this is reached."
+          info="Hard cap on total URLs crawled. The crawl stops as soon as this is reached. Screaming Frog: 'Limit Crawl Total'."
           example="1000000 (1M) for a full site audit; 5000 for spot checks."
         />
         <Num
-          label="Max Concurrency"
-          value={form.maxConcurrency}
-          onChange={(v) => update('maxConcurrency', v)}
-          info="Number of parallel HTTP workers. Higher = faster crawl but more load on the target server."
-          example="20 is a safe default; bump to 50 on fast servers, drop to 5 if the site rate-limits."
-        />
-        <Num
-          label="Max RPS"
-          value={form.maxRps}
-          onChange={(v) => update('maxRps', v)}
-          info="Requests per second cap across all workers combined. Hard rate limit independent of concurrency."
-          example="20 for typical sites; 5 to be polite on shared hosting."
-        />
-        <Num
-          label="Request Timeout (ms)"
+          label="Response Timeout (ms)"
           value={form.requestTimeoutMs}
           onChange={(v) => update('requestTimeoutMs', v)}
-          info="Per-request abort threshold. Pages that take longer than this are recorded as network errors."
+          info="Per-request abort threshold. Pages that take longer than this are recorded as network errors. Screaming Frog: 'Response Timeout (secs)' (Configuration → Spider → Advanced) — that one's in seconds, this is in milliseconds."
           example="20000 (20 s) for typical use; 5000 for fast spot checks; 60000 for slow APIs."
         />
-        <Num
-          label="Crawl Delay (ms, per worker)"
-          value={form.crawlDelayMs}
-          onChange={(v) => update('crawlDelayMs', v)}
-          info="Sleep inserted after each request, applied per worker. Stacks with robots.txt's own crawl-delay if larger."
-          example="0 disables; 250 for very polite crawling; 1000 to throttle aggressively."
-        />
-        <Num
-          label="Retry Attempts"
-          value={form.retryAttempts}
-          onChange={(v) => update('retryAttempts', v)}
-          info="How many times to retry on network errors / 5xx / 429. The original request is not counted."
-          example="2 (default) means original + 2 retries (3 total). 0 disables retry."
-        />
-        <Num
-          label="Retry Initial Delay (ms)"
-          value={form.retryInitialDelayMs}
-          onChange={(v) => update('retryInitialDelayMs', v)}
-          info="Backoff before the first retry. Doubles each subsequent attempt (exponential backoff)."
-          example="500 → next attempts wait 500 ms, then 1000 ms, then 2000 ms…"
-        />
       </div>
+
       <div className="mt-4 grid grid-cols-2 gap-2">
         <Bool
-          label="Follow redirects"
+          label="Always Follow Redirects"
           checked={form.followRedirects}
           onChange={(v) => update('followRedirects', v)}
-          info="Crawl 3xx redirect targets. Each hop is its own row; the chain is reconstructed in the Response Codes view."
+          info="Crawl 3xx redirect targets. Each hop is its own row; the chain is reconstructed in the Response Codes view. Screaming Frog: 'Always Follow Redirects' (Configuration → Spider → Advanced)."
           example="On for normal audits; off when you only want to inspect raw 3xx behaviour."
         />
         <Bool
           label="Respect robots.txt"
           checked={form.respectRobotsTxt}
           onChange={(v) => update('respectRobotsTxt', v)}
-          info="Honor Disallow rules + crawl-delay declared in /robots.txt for the configured User-Agent."
+          info="Honor Disallow rules + crawl-delay declared in /robots.txt for the configured User-Agent. Screaming Frog: 'Respect robots.txt' (Configuration → robots.txt)."
           example="On (default). Off only when crawling sites you own and need to bypass."
         />
         <Bool
-          label="Crawl external links"
+          label="Check External Links"
           checked={form.crawlExternal}
           onChange={(v) => update('crawlExternal', v)}
-          info="Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals."
+          info="Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."
           example="On for outbound link audits; off for fast internal-only crawls."
         />
         <Bool
-          label="Store nofollow links"
+          label="Follow / Store Nofollow Links"
           checked={form.storeNofollowLinks}
           onChange={(v) => update('storeNofollowLinks', v)}
-          hint="Default off (Screaming-Frog style 'Respect Nofollow')"
-          info='Persist rel="nofollow" links in the link graph. When off, nofollow links are dropped entirely (not counted in outlinks, not probed as externals).'
+          hint="Default off — Screaming Frog 'Respect Nofollow' behaviour"
+          info='Persist rel="nofollow" links in the link graph. When off, nofollow links are dropped entirely (not counted in outlinks, not probed as externals). Screaming Frog inverse: turning this ON ≈ unchecking "Follow Internal/External Nofollow".'
           example="On if you need nofollow attribute audits; off keeps the link graph cleaner."
         />
         <Bool
-          label="Discover sitemaps"
+          label="Auto-Discover XML Sitemaps"
           checked={form.discoverSitemaps}
           onChange={(v) => update('discoverSitemaps', v)}
-          hint="Read sitemap.xml from robots.txt + default paths at crawl start"
-          info="Fetches /robots.txt sitemap directives + /sitemap.xml fallbacks. Powers the 'Non-Indexable in Sitemap' issue filter."
+          hint="Reads sitemap.xml from robots.txt + default paths at crawl start"
+          info="Fetches /robots.txt sitemap directives + /sitemap.xml fallbacks. Powers the 'Non-Indexable in Sitemap' issue filter. Screaming Frog: 'Auto Discover XML Sitemaps via robots.txt' (Configuration → Spider → Crawl)."
           example="On (default) — cheap I/O, high SEO value."
         />
       </div>

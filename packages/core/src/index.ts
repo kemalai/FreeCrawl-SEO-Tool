@@ -33,6 +33,13 @@ export {
   type RobotsValidationIssue,
 } from './robots.js';
 export {
+  aggregateTopWords,
+  tokenizeForTopWords,
+  type TopWordsRow,
+  type TopWordsOptions,
+  type TopWordsLocale,
+} from './top-words.js';
+export {
   exportSitemap,
   validateSitemap,
   type SitemapOptions,

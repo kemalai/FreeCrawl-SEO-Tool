@@ -13,6 +13,7 @@ import type {
   ImageWeightRow,
   BucketHistogramRow,
   ServerHeaderRow,
+  TopWordsRow,
   WordCountPerDirectoryRow,
   SitemapOrphanRow,
 } from '@freecrawl/shared-types';
@@ -42,7 +43,8 @@ type ReportKind =
   | 'url-length-histogram'
   | 'word-count-per-dir'
   | 'sitemap-orphans'
-  | 'server-headers';
+  | 'server-headers'
+  | 'top-words';
 
 interface ReportRow {
   /** Display key (directory path / status code / depth label). */
@@ -79,6 +81,7 @@ const REPORT_LABELS: Record<ReportKind, string> = {
   'word-count-per-dir': 'Word Count per Directory',
   'sitemap-orphans': 'Sitemap Orphans (Top 1000)',
   'server-headers': 'Server Stack (Server Header)',
+  'top-words': 'Top Words (Title + Meta + H1, Top 100)',
 };
 
 const KEY_LABELS: Record<ReportKind, string> = {
@@ -102,6 +105,7 @@ const KEY_LABELS: Record<ReportKind, string> = {
   'word-count-per-dir': 'Directory',
   'sitemap-orphans': 'URL',
   'server-headers': 'Server',
+  'top-words': 'Word',
 };
 
 const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
@@ -125,6 +129,7 @@ const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
   'word-count-per-dir': null,
   'sitemap-orphans': null,
   'server-headers': null,
+  'top-words': null,
 };
 
 const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
@@ -153,6 +158,7 @@ const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
   'word-count-per-dir': (v) => (v ?? 0).toLocaleString(),
   'sitemap-orphans': (v) => (v ?? 0).toLocaleString(),
   'server-headers': (v) => (v ?? 0).toLocaleString(),
+  'top-words': (v) => (v ?? 0).toLocaleString(),
 };
 
 export function ReportsDialog({ open, onClose }: Props) {
@@ -301,6 +307,22 @@ export function ReportsDialog({ open, onClose }: Props) {
           const r = await window.freecrawl.reportsServerHeaders();
           if (!cancelled)
             setRows(r.map((x: ServerHeaderRow) => ({ key: x.server, count: x.count })));
+        } else if (kind === 'top-words') {
+          const r = await window.freecrawl.reportsTopWords({ limit: 100, minLength: 3 });
+          if (!cancelled)
+            setRows(
+              r.map((x: TopWordsRow) => ({
+                key: x.word,
+                // Bar metric is total occurrence count so the loudest
+                // terms spike visually. Page-coverage is shown beside it
+                // so the user can spot "high count, narrow coverage" =
+                // a single page repeating a word.
+                count: x.count,
+                valueLabel: `${x.count.toLocaleString()} hits · ${x.pages.toLocaleString()} page${
+                  x.pages === 1 ? '' : 's'
+                }`,
+              })),
+            );
         } else {
           const metric = TOP_URL_METRIC[kind];
           if (metric) {
@@ -395,6 +417,7 @@ export function ReportsDialog({ open, onClose }: Props) {
               <option value="word-count-per-dir">Word Count per Directory</option>
               <option value="sitemap-orphans">Sitemap Orphans (Top 1000)</option>
               <option value="server-headers">Server Stack</option>
+              <option value="top-words">Top Words (Title + Meta + H1)</option>
             </select>
           </label>
           {(kind === 'pages-per-dir' || kind === 'word-count-per-dir') && (

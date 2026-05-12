@@ -56,6 +56,8 @@ import {
   type ImageWeightRow,
   type BucketHistogramRow,
   type ServerHeaderRow,
+  type TopWordsInput,
+  type TopWordsRow,
   type WordCountPerDirectoryInput,
   type WordCountPerDirectoryRow,
   type SitemapOrphanRow,
@@ -94,6 +96,7 @@ import {
   compareCrawls,
   testUrlAgainstRobots,
   validateRobotsTxt,
+  aggregateTopWords,
   fetchSitemaps,
   validateSitemap,
   normalizeUrl,
@@ -1546,6 +1549,23 @@ function registerIpc(): void {
     callReaderOrFallback<ServerHeaderRow[]>('serverHeaderBreakdown', [], () =>
       getDb().serverHeaderBreakdown(),
     ),
+  );
+
+  // Top Words — pull the title+meta+H1 corpus from the active DB then
+  // aggregate via core's `aggregateTopWords` (kept in core because the
+  // db package isn't allowed to depend on core per the monorepo
+  // dependency graph). Aggregation is sync + cheap so we don't need
+  // the reader pool's worker offload here.
+  ipcMain.handle(
+    IPC.reportsTopWords,
+    (_e, input: TopWordsInput): TopWordsRow[] => {
+      const corpus = getDb().seoTextCorpus();
+      return aggregateTopWords(corpus, {
+        limit: input.limit,
+        minLength: input.minLength,
+        locale: input.locale,
+      });
+    },
   );
 
   ipcMain.handle(

@@ -110,6 +110,7 @@ export const IPC = {
   reportsWordCountPerDirectory: 'reports:word-count-per-directory',
   reportsSitemapOrphans: 'reports:sitemap-orphans',
   reportsServerHeaders: 'reports:server-headers',
+  reportsTopWords: 'reports:top-words',
   /**
    * Renderer → main heartbeat carrying the live input-lag estimate (ms).
    * The crawler subscribes to this so it can adaptively shrink its
@@ -658,6 +659,31 @@ export interface ServerHeaderRow {
 }
 
 /**
+ * One row in the Top Words report — body-text frequency aggregation
+ * over the title + meta description + H1 corpus of every indexable
+ * 2xx HTML page. Stopwords (en/tr) and tokens shorter than the
+ * configured `minLength` are filtered out before counting.
+ *
+ * `count` is total occurrences, `pages` is how many distinct pages
+ * contained the word. The latter discriminates "site-wide topic"
+ * (high pages) from "one page repeats this term" (high count, low pages).
+ */
+export interface TopWordsRow {
+  word: string;
+  count: number;
+  pages: number;
+}
+
+export interface TopWordsInput {
+  /** Max rows to return. Default 100, hard cap 1000. */
+  limit?: number;
+  /** Minimum word length. Default 3. */
+  minLength?: number;
+  /** Stopword set: `en`, `tr`, or `all` (union). Default `all`. */
+  locale?: 'en' | 'tr' | 'all';
+}
+
+/**
  * One row in the Analytics Coverage report. Counts how many indexable HTML
  * pages declare a given tracker — useful to spot incomplete rollouts
  * ("GA4 only on 80% of pages") or duplicated stacks ("GTM and gtag both
@@ -855,6 +881,7 @@ export interface FreeCrawlApi {
   ): Promise<WordCountPerDirectoryRow[]>;
   reportsSitemapOrphans(limit?: number): Promise<SitemapOrphanRow[]>;
   reportsServerHeaders(): Promise<ServerHeaderRow[]>;
+  reportsTopWords(input: TopWordsInput): Promise<TopWordsRow[]>;
   /** Heartbeat: renderer reports its latest input-lag sample (ms). */
   reportRendererLag(lagMs: number): void;
   prefsExportSettings(input: SettingsExportInput): Promise<SettingsExportResult>;

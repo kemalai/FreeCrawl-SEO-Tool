@@ -4285,6 +4285,38 @@ export class ProjectDb {
   }
 
   /**
+   * Concatenated SEO text for the Top Words report — title, meta
+   * description, and H1 joined with spaces, one row per indexable HTML
+   * page. Body text is intentionally NOT included: at 100K URLs the
+   * `url_sources.body` aggregate would be hundreds of MB and the SEO
+   * signal is well concentrated in the title-meta-h1 trio anyway.
+   *
+   * Returns an array because the consumer (main process) feeds it into
+   * `aggregateTopWords` which expects an iterable.
+   */
+  seoTextCorpus(): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT title, meta_description, h1
+           FROM urls
+          WHERE is_external = 0
+            AND content_kind = 'html'
+            AND status_code BETWEEN 200 AND 299
+            AND indexability = 'indexable'`,
+      )
+      .all() as { title: string | null; meta_description: string | null; h1: string | null }[];
+    const out: string[] = [];
+    for (const r of rows) {
+      const parts: string[] = [];
+      if (r.title) parts.push(r.title);
+      if (r.meta_description) parts.push(r.meta_description);
+      if (r.h1) parts.push(r.h1);
+      if (parts.length > 0) out.push(parts.join(' '));
+    }
+    return out;
+  }
+
+  /**
    * URLs declared in the sitemap but never reached during the crawl —
    * the canonical "orphan" definition. Surfaces sitemap URLs that the
    * spider couldn't link-follow to (because no internal page linked to
