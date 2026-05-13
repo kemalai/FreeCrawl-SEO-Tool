@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.7] — 2026-05-13
+
+### Added
+- MCP crawl control — Claude Code and any MCP client can now start, pause, resume, and stop crawls in the running desktop app and poll live progress, in addition to the existing read-only data queries.
+
 ## [0.3.6] — 2026-05-12
 
 ### Added
