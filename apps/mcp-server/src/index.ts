@@ -152,10 +152,27 @@ server.on('tools/call', async (raw) => {
   const tool = tools.find((t) => t.name === name);
   if (!tool) throw new Error(`Unknown tool: ${name}`);
 
-  const sess = getSession();
+  // Most tools need the project DB (read-only). Crawl-control tools
+  // proxy to the desktop bridge over HTTP and don't touch the DB, so
+  // we skip session init for them — this lets `start_crawl` / etc.
+  // work on a fresh install where the local `.seoproject` file doesn't
+  // exist yet (only the desktop app has it).
+  const needsDb = tool.requiresDb !== false;
+  // `db` is unused when `needsDb` is false; we pass the session's DB
+  // when available, else a never-used null cast — type system lets us
+  // do this because the handler ignores `db` for those tools.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let db: any = null;
+  if (needsDb) {
+    db = getSession().db;
+  } else if (session) {
+    // Re-use an already-open session if there is one (saves opening
+    // the DB just to satisfy the param), but don't force-open.
+    db = session.db;
+  }
   let result: unknown;
   try {
-    result = await tool.handler(args, sess.db);
+    result = await tool.handler(args, db);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {

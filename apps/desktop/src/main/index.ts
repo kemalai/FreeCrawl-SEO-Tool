@@ -110,6 +110,11 @@ import { dbWriterPool } from './db-writer-pool.js';
 import { freezeWatchdog } from './freeze-watchdog.js';
 import { parserPool } from './parser-pool.js';
 import { parseHtml as inlineParseHtml } from '@freecrawl/core';
+import {
+  startMcpBridge,
+  stopMcpBridge,
+  type McpStartCrawlInput,
+} from './mcp-bridge.js';
 import type { ProjectDb as ProjectDbType } from '@freecrawl/db';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -123,6 +128,22 @@ let activeCrawler: Crawler | null = null;
  * had set, without re-prompting. Hydrated lazily from `project_meta`
  * on first DB open. */
 let lastCrawlConfig: CrawlConfig | null = null;
+/** Latest `CrawlProgress` event captured from the active Crawler.
+ * Exposed to the MCP bridge so external agents (Claude Code, etc.)
+ * can poll live crawl state without a renderer subscription. Null
+ * when no crawl has run since app launch. */
+let latestProgress: CrawlProgress | null = null;
+/** Handle to the in-process crawl control primitives. Populated by
+ * `registerIpc()` so the MCP bridge can drive Start/Stop/Pause/Resume
+ * through the same code path as the renderer's IPC handlers — without
+ * having to know about the closure-scoped helpers. Null before
+ * `registerIpc()` runs. */
+let crawlController: {
+  launchCrawl: (config: CrawlConfig) => void;
+  stopCrawl: () => void;
+  pauseCrawl: () => void;
+  resumeCrawl: () => void;
+} | null = null;
 /** In-memory snapshot of the previous session's checkpoint, captured
  * before `db.reset()` wipes it. Cleared once the user accepts or
  * discards the recovery prompt. */
@@ -1689,6 +1710,7 @@ function registerIpc(): void {
   function attachCrawlerListeners(crawler: Crawler): void {
     crawler.on('progress', (p: CrawlProgress) => {
       if (activeCrawler !== crawler) return;
+      latestProgress = p;
       mainWindow?.webContents.send(IPC.crawlProgress, p);
       freezeWatchdog.updateCounters({
         crawled: p.crawled,
@@ -1739,7 +1761,7 @@ function registerIpc(): void {
     });
   }
 
-  ipcMain.handle(IPC.crawlStart, (_e, config: CrawlConfig) => {
+  function launchCrawl(config: CrawlConfig): void {
     if (activeCrawler) {
       activeCrawler.stop();
       logger.log('info', 'crawler', 'Stopped previous crawl before starting a new one');
@@ -1774,6 +1796,10 @@ function registerIpc(): void {
     activeCrawler = crawler;
     attachCrawlerListeners(crawler);
     void crawler.start();
+  }
+
+  ipcMain.handle(IPC.crawlStart, (_e, config: CrawlConfig) => {
+    launchCrawl(config);
   });
 
   ipcMain.handle(IPC.crawlStop, () => {
@@ -1787,6 +1813,16 @@ function registerIpc(): void {
   ipcMain.handle(IPC.crawlResume, () => {
     activeCrawler?.resume();
   });
+
+  // Expose the same primitives to the MCP bridge so external agents
+  // (Claude Code, etc.) can drive Start/Stop/Pause/Resume through the
+  // exact same code path the renderer does.
+  crawlController = {
+    launchCrawl,
+    stopCrawl: () => activeCrawler?.stop(),
+    pauseCrawl: () => activeCrawler?.pause(),
+    resumeCrawl: () => activeCrawler?.resume(),
+  };
 
   ipcMain.handle(IPC.crawlClear, async () => {
     const t0 = Date.now();
@@ -2796,6 +2832,67 @@ void app.whenReady().then(() => {
   logger.log('info', 'main', `App ready — version ${app.getVersion()}`);
   freezeWatchdog.setMainOp('idle');
 
+  // Open the localhost MCP bridge so Claude Code / Claude Desktop can
+  // drive crawls + poll progress against this running instance. Bind
+  // failure is logged but non-fatal: the desktop app keeps working,
+  // only MCP-driven crawl control is disabled.
+  try {
+    const bridge = startMcpBridge({
+      userDataDir: app.getPath('userData'),
+      startCrawl: async (input: McpStartCrawlInput) => {
+        if (!crawlController) {
+          return { ok: false as const, error: 'IPC handlers not registered yet — try again in a moment.' };
+        }
+        // Layer the supplied overrides on top of the last-used config
+        // (so a `start_crawl` with just a `startUrl` keeps the user's
+        // saved scope/threads/RPS). Fall back to factory defaults when
+        // there is no saved config.
+        const base: CrawlConfig =
+          lastCrawlConfig !== null ? lastCrawlConfig : { ...DEFAULT_CRAWL_CONFIG };
+        const overrides = input.configOverrides ?? {};
+        const resolved: CrawlConfig = {
+          ...base,
+          ...overrides,
+          startUrl: (input.startUrl ?? base.startUrl ?? '').trim(),
+        };
+        if (!resolved.startUrl) {
+          return {
+            ok: false as const,
+            error: 'startUrl is empty — pass it in the request or run a crawl from the desktop UI at least once so the bridge has a saved default.',
+          };
+        }
+        crawlController.launchCrawl(resolved);
+        return { ok: true as const, config: resolved };
+      },
+      stopCrawl: () => crawlController?.stopCrawl(),
+      pauseCrawl: () => crawlController?.pauseCrawl(),
+      resumeCrawl: () => crawlController?.resumeCrawl(),
+      getProgress: () => latestProgress,
+      getProjectPath: () => currentProjectPath || null,
+      getUrlCount: () => {
+        try {
+          return getDb().countUrls();
+        } catch {
+          return 0;
+        }
+      },
+      log: (level, msg) => logger.log(level, 'mcp-bridge', msg),
+    });
+    if (bridge) {
+      logger.log(
+        'info',
+        'mcp-bridge',
+        `MCP bridge ready on 127.0.0.1:${bridge.port}. Discovery file written to userData/mcp-bridge.json.`,
+      );
+    }
+  } catch (err) {
+    logger.log(
+      'warn',
+      'mcp-bridge',
+      `MCP bridge failed to start: ${err instanceof Error ? err.message : String(err)} — MCP crawl control disabled this session.`,
+    );
+  }
+
   // One-shot silent update check 8 s after launch. Ignores network /
   // up-to-date outcomes (no popup), only opens the Update Available
   // dialog when there is a newer release that hasn't been dismissed.
@@ -2812,6 +2909,13 @@ void app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   activeCrawler?.stop();
+  // Tear down the MCP bridge first so any in-flight HTTP calls fail
+  // fast rather than racing with the DB shutdown that follows.
+  try {
+    stopMcpBridge();
+  } catch {
+    /* best-effort */
+  }
   freezeWatchdog.setMainOp('shutdown');
   void freezeWatchdog.terminate();
   void parserPool.terminate();

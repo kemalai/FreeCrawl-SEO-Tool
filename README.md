@@ -17,7 +17,7 @@
 
 <br />
 
-A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog–style UI, ~80 SEO issue checks, and zero native dependencies.
+A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog–style UI, **150+ SEO issue checks**, and zero native dependencies.
 
 </div>
 
@@ -43,15 +43,16 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 <td width="50%" valign="top">
 
 ### 🔍 Analysis
-- **~80 SEO issue checks** across 14 tabs
-- Near-duplicate clustering (SimHash + LSH)
-- Full hreflang validation, sitemap diff
-- OpenGraph / Twitter Card / JSON-LD / AMP
-- SSL/TLS cert audit, security headers, **CORS audit**
+- **150+ SEO issue checks** across 24 top-level tabs
+- Near-duplicate clustering (SimHash + LSH) + exact-duplicate content hash
+- Full hreflang validation (reciprocity, self-ref, inconsistent lang)
+- OpenGraph / Twitter Card / JSON-LD / AMP / **Web App Manifest** parsing
+- **Structured-data validation** — duplicate `@id`, malformed `@type`, missing required props
+- **Accessibility** — `<main>` landmark, skip-link, ARIA roles, heading order
+- SSL/TLS cert chain audit, security headers, **CORS audit**
 - **Active vs passive mixed content** split
 - Readability (Flesch, Flesch–Kincaid, Gunning Fog)
-- Custom CSS + Regex extraction (10 rules)
-- **Custom search** with `/regex/` or literal mode
+- Custom CSS + Regex extraction (10 rules) + `/regex/` literal Custom Search
 
 </td>
 </tr>
@@ -62,23 +63,25 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 - Dense dark theme, virtualized 1M+ row tables
 - Live-streaming rows during crawl
 - Advanced AND/OR search (24 fields × 12 ops)
-- Detail panel with **13 sub-tabs** per URL
+- Detail panel with 13 sub-tabs — **HTTP Headers** has Request/Response toggle + **status-code diagnosis banner** (decodes Cloudflare 52x/530 and 4xx/5xx with header signals)
 - Per-URL **Duplicates** view (cluster siblings)
+- **Live memory monitor** in status bar (RSS / Sys Free / per-URL cost / capacity projection)
+- **Robots.txt syntax validator** in the Robots Tester (typo suggestions, orphan rules, sitemap URL check)
 - URL rewriting (regex + whitelist + live preview)
-- Cytoscape graph + anchor-text word cloud
+- Cytoscape graph + anchor-text word cloud + **Top Words** report
 - Diagnostic popups for DNS/TLS/proxy issues
 
 </td>
 <td valign="top">
 
 ### 📤 Export & Reports
-- **20 reports** (histograms, top/bottom URLs, link positions)
+- **21 reports** — histograms, top/bottom URLs, link positions, top words
 - **Export Dialog** with column picker — CSV or **XLSX** (multi-sheet)
 - Bulk export (22 categorised CSVs)
 - Standalone HTML audit report
 - Sitemap generator (image / hreflang / sharded / gz)
 - Project-vs-project compare diff
-- **MCP server** for AI agents (Claude / any MCP client)
+- **MCP server** for AI agents — **drive crawls live from Claude Code**, poll progress, plus full read-only DB access
 - Webhook on completion + OS notifications
 
 </td>
@@ -223,13 +226,24 @@ npm --workspace apps/desktop run build:linux   # AppImage / .deb
 </details>
 
 <details>
-<summary><b>🤖 MCP server</b> — query your crawl from Claude / any MCP client</summary>
+<summary><b>🤖 MCP server</b> — query AND drive crawls from Claude / any MCP client</summary>
 
 <br />
 
-FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the active `.seoproject` to AI agents over stdio. Read-only — runs alongside the desktop app without contention (SQLite WAL).
+FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the active `.seoproject` to AI agents over stdio. Two capabilities in one server:
 
-**Tools**: `get_summary`, `get_overview_counts`, `top_issues`, `query_urls`, `get_url_detail`, `list_projects`, `set_project`, `current_project`.
+1. **Read-only data access** to the SQLite project — runs alongside the desktop app without contention (WAL allows concurrent readers).
+2. **Live crawl control** — when the desktop app is open, an agent can start / pause / resume / stop crawls and poll progress in real time. This goes through a localhost-only HTTP bridge (127.0.0.1, ephemeral random port, 32-byte Bearer token auth, discovery file written to `<userData>/mcp-bridge.json` on app launch).
+
+**14 tools**:
+
+| Group | Tools |
+| :--- | :--- |
+| 📊 **Data queries** (always available) | `get_summary`, `get_overview_counts`, `top_issues`, `query_urls`, `get_url_detail` |
+| 📁 **Project management** | `list_projects`, `set_project`, `current_project` |
+| 🕷 **Crawl control** (desktop must be open) | `start_crawl`, `stop_crawl`, `pause_crawl`, `resume_crawl`, `get_crawl_progress`, `get_desktop_project` |
+
+`start_crawl` accepts a `startUrl` plus optional whitelisted overrides (scope, maxDepth, maxUrls, maxConcurrency, maxRps, crawlDelayMs, requestTimeoutMs, respectRobotsTxt, followRedirects, crawlExternal, userAgent, include/excludePatterns) — anything you don't override keeps the desktop user's saved value. Crawls launched via MCP go through the **same code path** as the UI's Start button, so progress shows up in the desktop app live as the agent drives it.
 
 **1. Build it once:**
 
@@ -291,9 +305,11 @@ The server speaks newline-delimited JSON-RPC 2.0 — point any MCP-compatible cl
 
 **3. Try it.** Ask your agent things like:
 
+> *"Crawl https://example.com with maxDepth 3 and watch the progress."*
 > *"Show the 10 URLs with the longest response time in my last crawl."*
 > *"What are the top 5 issue categories with the most affected pages?"*
 > *"List every URL with a missing meta description."*
+> *"Pause the running crawl, then resume it once I've checked the first 1000 URLs."*
 
 **Pointing at a non-default project:**
 
@@ -401,7 +417,7 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development.** All 14 analysis tabs, advanced search, ~80 issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate detection (per-URL Duplicates view), hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, MCP server, OS notifications, robots.txt tester, URL rewriting + preview, in-app logs, and diagnostic popups are working. Live-streaming UX with **first row in ~1 s**.
+> **Active development.** All 24 analysis tabs, advanced search, 150+ issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, in-app logs, and diagnostic popups are working. Live-streaming UX with **first row in ~1 s**.
 >
 > **Upcoming:** plugin system, JavaScript rendering, log analyzer, PageSpeed API integration.
 
