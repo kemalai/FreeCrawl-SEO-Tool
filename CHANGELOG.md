@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0] — 2026-05-15
+
+### Added
+- Visualization and SERP top-level tabs — the link graph and Google-style snippet preview moved out of a modal/sub-panel into permanent tabs.
+- Column show/hide menu in every URL table — toolbar button, header right-click to hide, and per-tab persistence.
+- Bulk Export added ~37 named CSVs across redirect, canonical, pagination, hreflang, duplicate, security, image, structured-data, AMP, and SERP families.
+
+### Fixed
+- MCP bridge silently failed to start because the address was read before the socket bound — Claude Code can now reliably drive desktop crawls again.
+
 ## [0.3.7] — 2026-05-13
 
 ### Added
