@@ -118,12 +118,21 @@ let server: Server | null = null;
 let discoveryPath: string | null = null;
 
 /**
- * Open the localhost HTTP bridge and write the discovery file. Returns
- * `null` if it could not start (already running, permission denied,
- * etc.) — non-fatal: the desktop app keeps running, MCP just won't be
- * able to drive a crawl.
+ * Open the localhost HTTP bridge and write the discovery file. Resolves
+ * with `null` if it could not start (already running, permission denied,
+ * listen error, etc.) — non-fatal: the desktop app keeps running, MCP
+ * just won't be able to drive a crawl.
+ *
+ * Async because `server.listen()` is asynchronous: the OS only assigns
+ * the ephemeral port after the kernel binds the socket, and calling
+ * `server.address()` synchronously right after `.listen()` returns
+ * `null`. We resolve on the first `listening` event (or reject-style
+ * `null` on `error`) so the discovery file always reflects the real
+ * bound port.
  */
-export function startMcpBridge(deps: McpBridgeDeps): { port: number; token: string } | null {
+export async function startMcpBridge(
+  deps: McpBridgeDeps,
+): Promise<{ port: number; token: string } | null> {
   if (server) return null; // already started
 
   const token = randomBytes(32).toString('hex');
@@ -141,21 +150,47 @@ export function startMcpBridge(deps: McpBridgeDeps): { port: number; token: stri
     });
   };
 
-  try {
-    server = createServer(handler);
-    // listen(0, '127.0.0.1') — random ephemeral port on loopback only.
-    server.listen(0, '127.0.0.1');
-  } catch (err) {
-    log('error', `mcp-bridge listen failed: ${err instanceof Error ? err.message : String(err)}`);
+  const localServer = createServer(handler);
+  server = localServer;
+
+  // listen(0, '127.0.0.1') — random ephemeral port on loopback only.
+  // The 'listening' event is what tells us the kernel has actually
+  // bound the socket; only then does `address()` return the assigned
+  // port. Pair with a one-shot 'error' listener so a bind failure
+  // (port-exhaustion, permission, etc.) resolves to `null` instead of
+  // hanging the promise.
+  const listened = await new Promise<boolean>((resolve) => {
+    const onError = (err: Error) => {
+      log('error', `mcp-bridge listen failed: ${err.message}`);
+      localServer.off('listening', onListening);
+      resolve(false);
+    };
+    const onListening = () => {
+      localServer.off('error', onError);
+      resolve(true);
+    };
+    localServer.once('error', onError);
+    localServer.once('listening', onListening);
+    try {
+      localServer.listen(0, '127.0.0.1');
+    } catch (err) {
+      log('error', `mcp-bridge listen threw: ${err instanceof Error ? err.message : String(err)}`);
+      localServer.off('listening', onListening);
+      localServer.off('error', onError);
+      resolve(false);
+    }
+  });
+
+  if (!listened) {
     server = null;
     return null;
   }
 
-  const addr = server.address();
+  const addr = localServer.address();
   if (!addr || typeof addr === 'string') {
     log('error', 'mcp-bridge: invalid address after listen');
     try {
-      server.close();
+      localServer.close();
     } catch {
       /* ignore */
     }
@@ -181,7 +216,7 @@ export function startMcpBridge(deps: McpBridgeDeps): { port: number; token: stri
   } catch (err) {
     log('error', `mcp-bridge: failed to write discovery file: ${err instanceof Error ? err.message : String(err)}`);
     try {
-      server.close();
+      localServer.close();
     } catch {
       /* ignore */
     }

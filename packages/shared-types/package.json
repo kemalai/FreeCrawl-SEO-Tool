@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/shared-types",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",

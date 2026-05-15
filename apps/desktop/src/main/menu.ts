@@ -135,7 +135,7 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         },
         { type: 'separator' },
         {
-          label: 'Visualization…',
+          label: 'Show Visualization Tab',
           accelerator: 'CmdOrCtrl+G',
           click: () => send('open-visualization'),
         },

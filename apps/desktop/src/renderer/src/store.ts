@@ -32,7 +32,9 @@ export type TabKey =
   | 'security'
   | 'duplicates'
   | 'links'
-  | 'broken-links';
+  | 'broken-links'
+  | 'serp'
+  | 'visualization';
 
 export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'internal', label: 'Internal' },
@@ -59,6 +61,8 @@ export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'duplicates', label: 'Duplicates' },
   { key: 'links', label: 'Links' },
   { key: 'broken-links', label: 'Broken Links' },
+  { key: 'serp', label: 'SERP' },
+  { key: 'visualization', label: 'Visualization' },
 ];
 
 interface AppState {
@@ -245,6 +249,8 @@ function categoryForTab(tab: TabKey): UrlCategory {
       return 'tab:security';
     case 'duplicates':
       return 'tab:duplicates';
+    case 'serp':
+      return 'tab:serp';
     default:
       return 'internal:html';
   }

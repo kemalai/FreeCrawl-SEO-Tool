@@ -39,6 +39,8 @@ const TAB_CATEGORY: Record<TabKey, UrlCategory> = {
   duplicates: 'tab:duplicates',
   links: 'all',
   'broken-links': 'all',
+  serp: 'tab:serp',
+  visualization: 'all',
 };
 
 function buildExportableTabs(): ExportTab[] {

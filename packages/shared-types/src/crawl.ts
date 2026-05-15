@@ -205,6 +205,7 @@ export type UrlCategory =
   | 'tab:custom-search'
   | 'tab:security'
   | 'tab:duplicates'
+  | 'tab:serp'
   | 'issues:hreflang-inconsistent-lang'
   | 'issues:page-many-requests'
 

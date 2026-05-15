@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronsUpDown, Download, Filter, X } from 'lucide-react';
+import { ChevronsUpDown, Columns3, Download, Filter, X } from 'lucide-react';
 import clsx from 'clsx';
 import type { AdvancedFilter, CrawlUrlRow } from '@freecrawl/shared-types';
 import { useAppStore, type TabKey } from '../store.js';
@@ -18,6 +18,7 @@ const ROW_NUM_DEFAULT_WIDTH = 56;
 const ROW_NUM_KEY = '__row_num__';
 const STATUS_BAR_HEIGHT = 22;
 const PREFS_PREFIX = 'col-widths:';
+const PREFS_HIDDEN_PREFIX = 'col-hidden:';
 
 function loadStoredWidths(tab: TabKey): Record<string, number> {
   const value = window.freecrawl.prefsGet(PREFS_PREFIX + tab);
@@ -25,6 +26,22 @@ function loadStoredWidths(tab: TabKey): Record<string, number> {
     return value as Record<string, number>;
   }
   return {};
+}
+
+function loadHiddenColumns(tab: TabKey): Set<string> {
+  const value = window.freecrawl.prefsGet(PREFS_HIDDEN_PREFIX + tab);
+  if (Array.isArray(value)) {
+    return new Set(value.filter((v): v is string => typeof v === 'string'));
+  }
+  return new Set();
+}
+
+function saveHiddenColumns(tab: TabKey, hidden: Set<string>): void {
+  try {
+    window.freecrawl.prefsSet(PREFS_HIDDEN_PREFIX + tab, [...hidden]);
+  } catch {
+    // best-effort persistence
+  }
 }
 
 export function UrlsTab() {
@@ -84,12 +101,34 @@ export function UrlsTab() {
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() =>
     loadStoredWidths(activeTab),
   );
+  const [hiddenColumns, setHiddenColumnsState] = useState<Set<string>>(() =>
+    loadHiddenColumns(activeTab),
+  );
+  const [columnPickerOpen, setColumnPickerOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const columns = COLUMN_SPECS[activeTab];
+  const allColumns = COLUMN_SPECS[activeTab];
+  // Visible columns drive the rendered header + body. Hidden ids that no
+  // longer exist on the active tab (e.g. user switched between tabs with
+  // different specs) are silently filtered out — they remain in the saved
+  // set so toggling back to the originating tab restores them.
+  const columns = useMemo(
+    () => allColumns.filter((c) => !hiddenColumns.has(columnId(c))),
+    [allColumns, hiddenColumns],
+  );
+
+  const setHiddenColumns = useCallback(
+    (next: Set<string>) => {
+      setHiddenColumnsState(next);
+      saveHiddenColumns(activeTab, next);
+    },
+    [activeTab],
+  );
 
   useEffect(() => {
     setColumnWidths(loadStoredWidths(activeTab));
+    setHiddenColumnsState(loadHiddenColumns(activeTab));
+    setColumnPickerOpen(false);
   }, [activeTab]);
 
   useEffect(() => {
@@ -99,7 +138,7 @@ export function UrlsTab() {
     selectionAnchor.current = null;
     cellAnchor.current = null;
     dragRef.current = null;
-  }, [activeCategory, activeTab, search, sortBy, sortDir]);
+  }, [activeCategory, activeTab, search, sortBy, sortDir, hiddenColumns]);
 
   // Clear the drag flag on any mouseup anywhere — without this, releasing
   // the button outside a cell would leave `dragRef` dangling and the next
@@ -518,12 +557,51 @@ export function UrlsTab() {
             <X className="h-3 w-3" />
           </button>
         )}
+        <div className="relative ml-auto">
+          <button
+            type="button"
+            data-columns-anchor="1"
+            onClick={() => setColumnPickerOpen((v) => !v)}
+            disabled={allColumns.length === 0}
+            className={clsx(
+              'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition',
+              allColumns.length === 0
+                ? 'cursor-not-allowed border-surface-800 text-surface-600'
+                : columnPickerOpen
+                  ? 'border-accent-500 bg-accent-500/15 text-accent-300'
+                  : hiddenColumns.size > 0
+                    ? 'border-accent-500/60 bg-accent-500/10 text-accent-300 hover:bg-accent-500/20'
+                    : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+            )}
+            title={
+              allColumns.length === 0
+                ? 'This tab has no toggleable columns'
+                : 'Show/hide columns'
+            }
+          >
+            <Columns3 className="h-3.5 w-3.5" />
+            <span>Columns</span>
+            {hiddenColumns.size > 0 && (
+              <span className="rounded bg-accent-500/20 px-1 font-mono text-[10px]">
+                {allColumns.length - hiddenColumns.size}/{allColumns.length}
+              </span>
+            )}
+          </button>
+          {columnPickerOpen && (
+            <ColumnPickerPopover
+              allColumns={allColumns}
+              hiddenColumns={hiddenColumns}
+              onChange={setHiddenColumns}
+              onClose={() => setColumnPickerOpen(false)}
+            />
+          )}
+        </div>
         <button
           type="button"
           onClick={() => setExportDialogOpen(true)}
           disabled={lazy.total === 0}
           className={clsx(
-            'ml-auto inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition',
+            'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition',
             lazy.total === 0
               ? 'cursor-not-allowed border-surface-800 text-surface-600'
               : 'border-surface-700 text-surface-300 hover:bg-surface-800',
@@ -587,7 +665,14 @@ export function UrlsTab() {
                   onMouseEnter={() => {
                     if (dragRef.current?.kind === 'column') applyColumnDrag(colIdx);
                   }}
-                  title={c.header + ' (click to select column · drag to select multiple · click arrow to sort)'}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const next = new Set(hiddenColumns);
+                    next.add(columnId(c));
+                    setHiddenColumns(next);
+                  }}
+                  title={c.header + ' (click to select · drag to multi-select · right-click to hide)'}
                 >
                   <span className="cursor-pointer truncate">{c.header}</span>
                   {(c.info || c.example) && (
@@ -837,6 +922,108 @@ export function UrlsTab() {
           />
         )}
       </ErrorBoundary>
+    </div>
+  );
+}
+
+function ColumnPickerPopover({
+  allColumns,
+  hiddenColumns,
+  onChange,
+  onClose,
+}: {
+  allColumns: ColumnSpec[];
+  hiddenColumns: Set<string>;
+  onChange: (next: Set<string>) => void;
+  onClose: () => void;
+}) {
+  const popRef = useRef<HTMLDivElement | null>(null);
+  // Outside-click closes the popover. We attach to mousedown so the
+  // listener fires before any click handler inside the table can fire
+  // and reopen us in the same gesture. Clicks on the anchoring "Columns"
+  // button are exempted via the `data-columns-anchor` guard.
+  useEffect(() => {
+    const onDocDown = (e: MouseEvent) => {
+      if (!popRef.current) return;
+      if (popRef.current.contains(e.target as Node)) return;
+      let n = e.target as HTMLElement | null;
+      while (n) {
+        if (n.dataset && n.dataset['columnsAnchor'] === '1') return;
+        n = n.parentElement;
+      }
+      onClose();
+    };
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, [onClose]);
+
+  // Escape closes too — keeps the popover keyboard-accessible.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const toggle = (id: string) => {
+    const next = new Set(hiddenColumns);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange(next);
+  };
+
+  const visibleCount = allColumns.length - hiddenColumns.size;
+
+  return (
+    <div
+      ref={popRef}
+      className="absolute right-0 top-full z-30 mt-1 w-80 rounded-md border border-surface-700 bg-surface-900 shadow-2xl"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between border-b border-surface-800 px-3 py-2">
+        <div className="text-[12px] font-semibold text-surface-100">
+          Columns ({visibleCount}/{allColumns.length})
+        </div>
+        <div className="flex items-center gap-1 text-[10px]">
+          <button
+            type="button"
+            onClick={() => onChange(new Set())}
+            className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800"
+            title="Make every column visible"
+          >
+            Show all
+          </button>
+          <button
+            type="button"
+            onClick={() => onChange(new Set(allColumns.map((c) => columnId(c))))}
+            className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800"
+            title="Hide every column except Row #"
+          >
+            Hide all
+          </button>
+        </div>
+      </div>
+      <div className="max-h-[60vh] overflow-y-auto py-1">
+        {allColumns.map((c) => {
+          const id = columnId(c);
+          const visible = !hiddenColumns.has(id);
+          return (
+            <label
+              key={id}
+              className="flex cursor-pointer items-center gap-2 px-3 py-1 text-[11px] text-surface-200 hover:bg-surface-800"
+            >
+              <input
+                type="checkbox"
+                checked={visible}
+                onChange={() => toggle(id)}
+                className="h-3 w-3 accent-blue-500"
+              />
+              <span className="truncate">{c.header}</span>
+            </label>
+          );
+        })}
+      </div>
     </div>
   );
 }

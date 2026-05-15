@@ -10,10 +10,11 @@ import { SitemapValidatorDialog } from './components/SitemapValidatorDialog.js';
 import { ReportsDialog } from './components/ReportsDialog.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { CompareDialog } from './components/CompareDialog.js';
-import { VisualizationDialog } from './components/VisualizationDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
+import { SerpTab } from './tabs/SerpTab.js';
+import { VisualizationTab } from './tabs/VisualizationTab.js';
 import { useAppStore } from './store.js';
 import type { MenuEvent } from '@freecrawl/shared-types';
 import { clearCrawlWithConfirm } from './utils/clearCrawl.js';
@@ -32,11 +33,11 @@ export function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const setConfig = useAppStore((s) => s.setConfig);
+  const setActiveTab = useAppStore((s) => s.setActiveTab);
   const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
   const [sitemapValidatorOpen, setSitemapValidatorOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
-  const [visualizationOpen, setVisualizationOpen] = useState(false);
   const [dropFlash, setDropFlash] = useState<string | null>(null);
 
   // Drag & drop URL list — drop a `.txt` / `.csv` of URLs anywhere on the
@@ -275,7 +276,7 @@ export function App() {
           void window.freecrawl.projectSaveAs();
           break;
         case 'open-visualization':
-          setVisualizationOpen(true);
+          setActiveTab('visualization');
           break;
       }
     });
@@ -295,6 +296,7 @@ export function App() {
     reset,
     bumpDataVersion,
     setSettingsOpen,
+    setActiveTab,
   ]);
 
   return (
@@ -325,11 +327,15 @@ export function App() {
                   <ImagesTab />
                 ) : activeTab === 'broken-links' ? (
                   <BrokenLinksTab />
+                ) : activeTab === 'serp' ? (
+                  <SerpTab />
+                ) : activeTab === 'visualization' ? (
+                  <VisualizationTab />
                 ) : (
                   <UrlsTab />
                 )}
               </Panel>
-              {detailPanelOpen && (
+              {detailPanelOpen && activeTab !== 'visualization' && (
                 <>
                   <PanelResizeHandle className="group relative h-1.5 bg-surface-800 transition-colors hover:bg-accent-500/60 data-[resize-handle-state=drag]:bg-accent-500">
                     <div className="absolute inset-x-0 -top-1 -bottom-1" />
@@ -365,10 +371,6 @@ export function App() {
       <ReportsDialog open={reportsOpen} onClose={() => setReportsOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <CompareDialog open={compareOpen} onClose={() => setCompareOpen(false)} />
-      <VisualizationDialog
-        open={visualizationOpen}
-        onClose={() => setVisualizationOpen(false)}
-      />
     </div>
   );
 }

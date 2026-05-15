@@ -599,11 +599,13 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
     COL.indexability,
     COL.inlinks,
   ],
-  // Images / Broken Links tabs have their own table layouts (separate
-  // components) and don't share the URL-row column schema. Entries kept
-  // so Record<TabKey, ...> is total.
+  // Images / Broken Links / SERP / Visualization tabs have their own
+  // layouts (separate components) and don't share the URL-row column
+  // schema. Entries kept so Record<TabKey, ...> is total.
   images: [],
   'broken-links': [],
+  serp: [],
+  visualization: [],
   canonicals: [
     COL.url,
     COL.canonical,

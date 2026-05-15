@@ -6190,6 +6190,16 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                   )
                 )
               )`;
+    case 'tab:serp':
+      // V1 Faz 10 — SERP tab. Indexable internal HTML 2xx pages with a
+      // title so the SERP-snippet preview always has something to render.
+      // Meta description is optional (Google falls back to page text), so
+      // we don't require it here; the empty-state copy in the SERP card
+      // makes the missing description visible.
+      return `is_external = 0 AND content_kind = 'html'
+              AND indexability = 'indexable'
+              AND status_code >= 200 AND status_code < 300
+              AND title IS NOT NULL AND title != ''`;
     default:
       return null;
   }

@@ -2545,6 +2545,178 @@ function registerIpc(): void {
         file: 'issues-near-duplicate.csv',
         category: 'issues:near-duplicate',
       },
+      // V1 Faz 4 — Redirects family.
+      { label: 'All Redirects', file: 'all-redirects.csv', category: 'tab:redirects' },
+      {
+        label: 'Redirect Chains (Long)',
+        file: 'redirect-chains-long.csv',
+        category: 'issues:redirect-chain-long',
+      },
+      { label: 'Redirect Loops', file: 'redirect-loops.csv', category: 'issues:redirect-loop' },
+      {
+        label: 'Self-Redirects',
+        file: 'redirect-self.csv',
+        category: 'issues:redirect-self',
+      },
+      // V1 Faz 4 — Canonical family.
+      { label: 'All Canonicals', file: 'all-canonicals.csv', category: 'tab:canonicals' },
+      {
+        label: 'Canonical — Non Self-Referencing',
+        file: 'canonical-non-self.csv',
+        category: 'issues:canonical-non-self',
+      },
+      {
+        label: 'Canonical — To Non-200',
+        file: 'canonical-to-non-200.csv',
+        category: 'issues:canonical-to-non-200',
+      },
+      {
+        label: 'Canonical — To Redirect',
+        file: 'canonical-to-redirect.csv',
+        category: 'issues:canonical-to-redirect',
+      },
+      {
+        label: 'Canonical — To Noindex',
+        file: 'canonical-to-noindex.csv',
+        category: 'issues:canonical-to-noindex',
+      },
+      {
+        label: 'Canonical — Multi-Hop Chain',
+        file: 'canonical-chain-multi-hop.csv',
+        category: 'issues:canonical-chain-multi-hop',
+      },
+      {
+        label: 'Multiple Canonicals',
+        file: 'canonical-multiple.csv',
+        category: 'issues:multiple-canonicals',
+      },
+      // V1 Faz 4 — Pagination family.
+      { label: 'All Pagination', file: 'all-pagination.csv', category: 'tab:pagination' },
+      {
+        label: 'Pagination — Sequence Break',
+        file: 'pagination-sequence-break.csv',
+        category: 'issues:pagination-sequence-break',
+      },
+      {
+        label: 'Pagination — Canonical Conflict',
+        file: 'pagination-canonical-conflict.csv',
+        category: 'issues:pagination-canonical-conflict',
+      },
+      // V1 Faz 4 — Hreflang family (7 variants).
+      { label: 'Hreflang — All', file: 'hreflang-all.csv', category: 'tab:hreflang' },
+      {
+        label: 'Hreflang — x-default Missing',
+        file: 'hreflang-x-default-missing.csv',
+        category: 'issues:hreflang-x-default-missing',
+      },
+      {
+        label: 'Hreflang — Invalid Language Code',
+        file: 'hreflang-invalid-code.csv',
+        category: 'issues:hreflang-invalid-code',
+      },
+      {
+        label: 'Hreflang — Self-Ref Missing',
+        file: 'hreflang-self-ref-missing.csv',
+        category: 'issues:hreflang-self-ref-missing',
+      },
+      {
+        label: 'Hreflang — Target Issues',
+        file: 'hreflang-target-issues.csv',
+        category: 'issues:hreflang-target-issues',
+      },
+      {
+        label: 'Hreflang — Inconsistent Language',
+        file: 'hreflang-inconsistent-lang.csv',
+        category: 'issues:hreflang-inconsistent-lang',
+      },
+      // V1 Faz 4 — Duplicates (cluster + exact).
+      { label: 'Duplicate Pages', file: 'duplicate-pages.csv', category: 'tab:duplicates' },
+      {
+        label: 'Duplicate Content — Exact',
+        file: 'duplicate-content-exact.csv',
+        category: 'issues:duplicate-content-exact',
+      },
+      // V1 Faz 4 — Custom data exports.
+      {
+        label: 'Custom Extraction Results',
+        file: 'custom-extraction.csv',
+        category: 'tab:custom-extraction',
+      },
+      { label: 'Custom Search Hits', file: 'custom-search.csv', category: 'tab:custom-search' },
+      // V1 Faz 4 — Structured data validation errors.
+      {
+        label: 'Structured Data — Missing',
+        file: 'structured-data-missing.csv',
+        category: 'issues:structured-data-missing',
+      },
+      {
+        label: 'Structured Data — Invalid',
+        file: 'structured-data-invalid.csv',
+        category: 'issues:structured-data-invalid',
+      },
+      {
+        label: 'Structured Data — Duplicate @id',
+        file: 'structured-data-duplicate-id.csv',
+        category: 'issues:schema-duplicate-id',
+      },
+      {
+        label: 'Structured Data — Missing Required Property',
+        file: 'structured-data-missing-required.csv',
+        category: 'issues:schema-missing-required',
+      },
+      // V1 Faz 4 — AMP.
+      { label: 'AMP Pages', file: 'amp-pages.csv', category: 'tab:amp' },
+      // V1 Faz 4 — Image variants.
+      {
+        label: 'Image — Missing Alt',
+        file: 'image-missing-alt.csv',
+        category: 'issues:image-missing-alt',
+      },
+      {
+        label: 'Image — Empty Alt',
+        file: 'image-empty-alt.csv',
+        category: 'issues:image-empty-alt',
+      },
+      {
+        label: 'Image — Too Large',
+        file: 'image-too-large.csv',
+        category: 'issues:image-too-large',
+      },
+      {
+        label: 'Image — Broken Src',
+        file: 'image-broken-src.csv',
+        category: 'issues:image-broken-src',
+      },
+      // V1 Faz 4 — Security.
+      { label: 'Security Audit', file: 'security-audit.csv', category: 'tab:security' },
+      {
+        label: 'Mixed Content — Active',
+        file: 'mixed-content-active.csv',
+        category: 'issues:mixed-content-active',
+      },
+      {
+        label: 'Mixed Content — Passive',
+        file: 'mixed-content-passive.csv',
+        category: 'issues:mixed-content-passive',
+      },
+      {
+        label: 'HSTS Missing',
+        file: 'security-hsts-missing.csv',
+        category: 'issues:hsts-missing',
+      },
+      {
+        label: 'CSP Missing',
+        file: 'security-csp-missing.csv',
+        category: 'issues:csp-missing',
+      },
+      // V1 Faz 4 — SERP summary.
+      { label: 'SERP Summary', file: 'serp-summary.csv', category: 'tab:serp' },
+      // V1 Faz 4 — Outlinks Zero (dead-end pages: no outbound links).
+      {
+        label: 'Outlinks Zero',
+        file: 'outlinks-zero.csv',
+        category: 'issues:outlinks-zero',
+      },
     ];
     const files: BulkExportFile[] = [];
     const errors: { label: string; error: string }[] = [];
@@ -2790,7 +2962,7 @@ if (!gotSingleInstanceLock) {
 app.commandLine.appendSwitch('disable-gpu-disk-cache');
 app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   // Disk logging is bootstrapped after `app.whenReady()` — `getPath('userData')`
   // is only valid post-ready. Prior log lines are still in the ring buffer
   // and will be flushed to disk lazily via subsequent writes.
@@ -2837,7 +3009,7 @@ void app.whenReady().then(() => {
   // failure is logged but non-fatal: the desktop app keeps working,
   // only MCP-driven crawl control is disabled.
   try {
-    const bridge = startMcpBridge({
+    const bridge = await startMcpBridge({
       userDataDir: app.getPath('userData'),
       startCrawl: async (input: McpStartCrawlInput) => {
         if (!crawlController) {
