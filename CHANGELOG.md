@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1] — 2026-05-15
+
+### Added
+- In-app scheduled crawl — File → Scheduled Crawl… arms an hourly/daily/weekly/custom recurring crawl per project, fires while FreeCrawl stays open.
+- Two new reports — Indexability Distribution and Content-Type Distribution histograms (Reports total 21 → 23).
+- Linux/macOS launcher script (.sh) mirrors the existing Windows .bat launcher with Node/npm checks, dependency install prompt, and production start.
+
 ## [0.4.0] — 2026-05-15
 
 ### Added
