@@ -64,6 +64,8 @@ import {
   type SettingsExportInput,
   type SettingsExportResult,
   type SettingsImportResult,
+  type ScheduleEntry,
+  type ScheduleSpec,
   type PagesPerDirectoryInput,
   type ImagesQueryInput,
   type ImagesQueryResult,
@@ -115,6 +117,13 @@ import {
   stopMcpBridge,
   type McpStartCrawlInput,
 } from './mcp-bridge.js';
+import {
+  claimIfDue,
+  getSchedule,
+  recordFireResult,
+  setSchedule,
+  type SchedulerStore,
+} from './scheduler.js';
 import type { ProjectDb as ProjectDbType } from '@freecrawl/db';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -204,6 +213,93 @@ function flushPrefs(): void {
 
 function fireDataChanged(): void {
   mainWindow?.webContents.send(IPC.dataChanged);
+}
+
+/**
+ * Schedule-store adapter — bridges the scheduler module to the prefs
+ * cache. `load()` always returns a fresh object reference so the
+ * module's mutate-then-save flow can't leak references back into the
+ * prefs cache without an explicit `save()`.
+ */
+const schedulerStore: SchedulerStore = {
+  load() {
+    const raw = prefsCache['schedules'];
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      // Shallow clone — callers mutate this map.
+      return { ...(raw as Record<string, ScheduleEntry>) };
+    }
+    return {};
+  },
+  save(map) {
+    prefsCache['schedules'] = map;
+    schedulePrefsWrite();
+  },
+};
+
+let schedulerTickTimer: NodeJS.Timeout | null = null;
+/** Set to true at the moment the scheduler tick calls `launchCrawl`,
+ *  cleared on the next crawl-done / crawl-error event. Lets the
+ *  done/error handlers update the schedule's `lastStatus` without
+ *  duplicating the launch path for user-initiated crawls. */
+let crawlerStartedByScheduler = false;
+
+/**
+ * Scheduler tick — invoked every 60 s while the app is open. Checks
+ * whether the currently-loaded project has a due schedule and, if so,
+ * launches the crawl using the last-used CrawlConfig.
+ *
+ * No-ops when:
+ *   - No project is loaded
+ *   - A crawl is already running (we don't preempt a manual crawl)
+ *   - The schedule isn't due yet
+ *   - No CrawlConfig has ever been saved (we'd have nothing to fire)
+ */
+function schedulerTick(): void {
+  if (!currentProjectPath) return;
+  if (activeCrawler) return;
+  const entry = claimIfDue(schedulerStore, currentProjectPath);
+  if (!entry) return;
+  if (!lastCrawlConfig) {
+    // No saved config — record a failure so the dialog surfaces the
+    // condition rather than silently retrying on the next tick.
+    recordFireResult(schedulerStore, currentProjectPath, 'failure');
+    logger.log(
+      'warn',
+      'scheduler',
+      `Schedule due for ${currentProjectPath} but no CrawlConfig saved yet — run a crawl manually once first.`,
+    );
+    return;
+  }
+  if (!crawlController) {
+    recordFireResult(schedulerStore, currentProjectPath, 'failure');
+    return;
+  }
+  logger.log(
+    'info',
+    'scheduler',
+    `Scheduled crawl firing: ${lastCrawlConfig.startUrl} (cadence=${entry.spec.cadence})`,
+  );
+  crawlerStartedByScheduler = true;
+  crawlController.launchCrawl(lastCrawlConfig);
+}
+
+function startScheduler(): void {
+  if (schedulerTickTimer) return;
+  // 60 s tick is granular enough for hourly/daily/weekly cadences and
+  // for the 15-min minimum custom interval. Wall-clock drift across an
+  // hour-long browser session is negligible at this resolution.
+  schedulerTickTimer = setInterval(schedulerTick, 60_000);
+  // Fire once shortly after startup so a daily schedule whose target
+  // time-of-day has already passed today doesn't wait 60 s before
+  // checking. 3 s lets the renderer mount + initial DB load finish.
+  setTimeout(schedulerTick, 3_000);
+}
+
+function stopScheduler(): void {
+  if (schedulerTickTimer) {
+    clearInterval(schedulerTickTimer);
+    schedulerTickTimer = null;
+  }
 }
 
 /**
@@ -1462,6 +1558,18 @@ function registerIpc(): void {
     ),
   );
 
+  ipcMain.handle(IPC.reportsIndexabilityDistribution, () =>
+    callReaderOrFallback('getIndexabilityDistribution', [], () =>
+      getDb().getIndexabilityDistribution(),
+    ),
+  );
+
+  ipcMain.handle(IPC.reportsContentKindDistribution, () =>
+    callReaderOrFallback('getContentKindDistribution', [], () =>
+      getDb().getContentKindDistribution(),
+    ),
+  );
+
   ipcMain.handle(IPC.reportsDepthHistogram, () =>
     callReaderOrFallback('getDepthHistogram', [], () => getDb().getDepthHistogram()),
   );
@@ -1660,6 +1768,15 @@ function registerIpc(): void {
     },
   );
 
+  // V1 Faz 6 — Scheduled crawl IPC. One schedule per project, stored
+  // app-level under the `schedules` prefs key keyed by project path.
+  ipcMain.handle(IPC.scheduleGet, () => {
+    return getSchedule(schedulerStore, currentProjectPath);
+  });
+  ipcMain.handle(IPC.scheduleSet, (_e, spec: ScheduleSpec | null) => {
+    return setSchedule(schedulerStore, currentProjectPath, spec);
+  });
+
   // Stream new entries to the logs window in coalesced batches. A heavy
   // crawl emits 100–300 logs/s; sending each as its own IPC message
   // saturated the renderer's event loop and caused visible UI stutters
@@ -1729,6 +1846,15 @@ function registerIpc(): void {
       mainWindow?.webContents.send(IPC.crawlDone, summary);
       activeCrawler = null;
       freezeWatchdog.setMainOp('idle');
+      // V1 Faz 6 — if this run was kicked off by the scheduler, record
+      // the result so the dialog's "Last status" row reflects the
+      // outcome. The schedule has already been re-armed (nextFiresAt
+      // advanced) at claim time; we only need to flip the status from
+      // `running` to a terminal value.
+      if (crawlerStartedByScheduler) {
+        crawlerStartedByScheduler = false;
+        recordFireResult(schedulerStore, currentProjectPath, 'success');
+      }
       if (Notification.isSupported() && !mainWindow?.isFocused()) {
         try {
           new Notification({
@@ -1746,6 +1872,10 @@ function registerIpc(): void {
       logger.log('error', 'crawler', msg);
       mainWindow?.webContents.send(IPC.crawlError, msg);
       maybeShowDiagnosticDialog(msg);
+      if (crawlerStartedByScheduler) {
+        crawlerStartedByScheduler = false;
+        recordFireResult(schedulerStore, currentProjectPath, 'failure');
+      }
     });
     crawler.on('warn', (msg: string) => {
       if (activeCrawler !== crawler) return;
@@ -3074,6 +3204,11 @@ void app.whenReady().then(async () => {
     void checkForUpdates({ silent: true });
   }, 8_000);
 
+  // V1 Faz 6 — start the in-app crawl scheduler. The tick is a no-op
+  // until the user configures a schedule via the Scheduled Crawl
+  // dialog, so it's safe to leave running for the lifetime of the app.
+  startScheduler();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -3081,6 +3216,7 @@ void app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   activeCrawler?.stop();
+  stopScheduler();
   // Tear down the MCP bridge first so any in-flight HTTP calls fail
   // fast rather than racing with the DB shutdown that follows.
   try {

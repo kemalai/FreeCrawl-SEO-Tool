@@ -42,6 +42,8 @@ import {
   type PagesPerDirectoryInput,
   type PagesPerDirectoryRow,
   type StatusCodeHistogramRow,
+  type IndexabilityDistributionRow,
+  type ContentKindDistributionRow,
   type DepthHistogramRow,
   type ResponseTimeHistogramRow,
   type TopUrlsInput,
@@ -60,6 +62,8 @@ import {
   type SettingsExportInput,
   type SettingsExportResult,
   type SettingsImportResult,
+  type ScheduleEntry,
+  type ScheduleSpec,
   type OverviewCounts,
   type SitemapGenerateInput,
   type SitemapGenerateResult,
@@ -187,6 +191,10 @@ const api: FreeCrawlApi = {
   ): Promise<PagesPerDirectoryRow[]> => ipcRenderer.invoke(IPC.reportsPagesPerDirectory, input),
   reportsStatusCodeHistogram: (): Promise<StatusCodeHistogramRow[]> =>
     ipcRenderer.invoke(IPC.reportsStatusCodeHistogram),
+  reportsIndexabilityDistribution: (): Promise<IndexabilityDistributionRow[]> =>
+    ipcRenderer.invoke(IPC.reportsIndexabilityDistribution),
+  reportsContentKindDistribution: (): Promise<ContentKindDistributionRow[]> =>
+    ipcRenderer.invoke(IPC.reportsContentKindDistribution),
   reportsDepthHistogram: (): Promise<DepthHistogramRow[]> =>
     ipcRenderer.invoke(IPC.reportsDepthHistogram),
   reportsResponseTimeHistogram: (): Promise<ResponseTimeHistogramRow[]> =>
@@ -228,6 +236,9 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.prefsExportSettings, input),
   prefsImportSettings: (): Promise<SettingsImportResult> =>
     ipcRenderer.invoke(IPC.prefsImportSettings),
+  scheduleGet: (): Promise<ScheduleEntry | null> => ipcRenderer.invoke(IPC.scheduleGet),
+  scheduleSet: (spec: ScheduleSpec | null): Promise<ScheduleEntry | null> =>
+    ipcRenderer.invoke(IPC.scheduleSet, spec),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
   onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),

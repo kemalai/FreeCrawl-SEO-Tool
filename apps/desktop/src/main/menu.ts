@@ -106,6 +106,12 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => send('compare-with-project'),
         },
         {
+          label: 'Scheduled Crawl…',
+          toolTip:
+            'Set up an in-app recurring crawl for the currently-open project. Fires only while FreeCrawl is open; use the CLI + OS scheduler for triggers that survive restarts.',
+          click: () => send('open-scheduled-crawl'),
+        },
+        {
           label: 'Save Project As…',
           accelerator: 'CmdOrCtrl+Shift+S',
           click: () => send('save-project-as'),

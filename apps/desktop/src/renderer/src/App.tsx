@@ -10,6 +10,7 @@ import { SitemapValidatorDialog } from './components/SitemapValidatorDialog.js';
 import { ReportsDialog } from './components/ReportsDialog.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { CompareDialog } from './components/CompareDialog.js';
+import { ScheduledCrawlDialog } from './components/ScheduledCrawlDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
@@ -38,6 +39,7 @@ export function App() {
   const [sitemapValidatorOpen, setSitemapValidatorOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [dropFlash, setDropFlash] = useState<string | null>(null);
 
   // Drag & drop URL list — drop a `.txt` / `.csv` of URLs anywhere on the
@@ -278,6 +280,9 @@ export function App() {
         case 'open-visualization':
           setActiveTab('visualization');
           break;
+        case 'open-scheduled-crawl':
+          setScheduleOpen(true);
+          break;
       }
     });
     return () => {
@@ -371,6 +376,7 @@ export function App() {
       <ReportsDialog open={reportsOpen} onClose={() => setReportsOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <CompareDialog open={compareOpen} onClose={() => setCompareOpen(false)} />
+      <ScheduledCrawlDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)} />
     </div>
   );
 }

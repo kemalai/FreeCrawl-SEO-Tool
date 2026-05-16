@@ -2293,6 +2293,42 @@ export class ProjectDb {
   }
 
   /**
+   * Indexability distribution across internal URLs. Seven buckets —
+   * `indexable` + the six `non-indexable:…` reasons — give the user a
+   * one-glance breakdown of why pages are or aren't reaching Google.
+   * Ordered by `count DESC` so the dominant bucket sits at the top.
+   */
+  getIndexabilityDistribution(): { indexability: string; count: number }[] {
+    return this.db
+      .prepare(
+        `SELECT indexability, COUNT(*) AS count
+         FROM urls
+         WHERE is_external = 0 AND indexability IS NOT NULL
+         GROUP BY indexability
+         ORDER BY count DESC, indexability`,
+      )
+      .all() as { indexability: string; count: number }[];
+  }
+
+  /**
+   * Content-kind distribution across internal URLs (HTML / CSS / JS /
+   * image / font / pdf / other). Mirrors `content_kind` exactly; useful
+   * for spotting unexpectedly large non-HTML payloads (e.g. an asset CDN
+   * accidentally crawled in-scope).
+   */
+  getContentKindDistribution(): { contentKind: string; count: number }[] {
+    return this.db
+      .prepare(
+        `SELECT content_kind AS contentKind, COUNT(*) AS count
+         FROM urls
+         WHERE is_external = 0 AND content_kind IS NOT NULL
+         GROUP BY content_kind
+         ORDER BY count DESC, content_kind`,
+      )
+      .all() as { contentKind: string; count: number }[];
+  }
+
+  /**
    * Click-depth distribution for internal HTML pages — the canonical
    * "site architecture flatness" metric. Shallow sites bias toward depths
    * 0–2; sites with orphaned / deeply nested clusters show a long tail.

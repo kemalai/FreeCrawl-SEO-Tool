@@ -3,6 +3,8 @@ import { X } from 'lucide-react';
 import type {
   PagesPerDirectoryRow,
   StatusCodeHistogramRow,
+  IndexabilityDistributionRow,
+  ContentKindDistributionRow,
   DepthHistogramRow,
   ResponseTimeHistogramRow,
   TopUrlsRow,
@@ -26,6 +28,8 @@ interface Props {
 type ReportKind =
   | 'pages-per-dir'
   | 'status-codes'
+  | 'indexability-distribution'
+  | 'content-kind-distribution'
   | 'depth'
   | 'response-time'
   | 'slowest-urls'
@@ -63,6 +67,8 @@ interface ReportRow {
 const REPORT_LABELS: Record<ReportKind, string> = {
   'pages-per-dir': 'Pages per Directory',
   'status-codes': 'Status Code Histogram',
+  'indexability-distribution': 'Indexability Distribution',
+  'content-kind-distribution': 'Content-Type Distribution',
   depth: 'Depth Histogram',
   'response-time': 'Response Time Histogram',
   'slowest-urls': 'Slowest URLs (Top 25)',
@@ -87,6 +93,8 @@ const REPORT_LABELS: Record<ReportKind, string> = {
 const KEY_LABELS: Record<ReportKind, string> = {
   'pages-per-dir': 'Directory',
   'status-codes': 'Status',
+  'indexability-distribution': 'Indexability',
+  'content-kind-distribution': 'Content Type',
   depth: 'Depth',
   'response-time': 'Bucket',
   'slowest-urls': 'URL',
@@ -111,6 +119,8 @@ const KEY_LABELS: Record<ReportKind, string> = {
 const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
   'pages-per-dir': null,
   'status-codes': null,
+  'indexability-distribution': null,
+  'content-kind-distribution': null,
   depth: null,
   'response-time': null,
   'slowest-urls': 'response-time',
@@ -135,6 +145,8 @@ const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
 const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
   'pages-per-dir': (v) => (v ?? 0).toLocaleString(),
   'status-codes': (v) => (v ?? 0).toLocaleString(),
+  'indexability-distribution': (v) => (v ?? 0).toLocaleString(),
+  'content-kind-distribution': (v) => (v ?? 0).toLocaleString(),
   depth: (v) => (v ?? 0).toLocaleString(),
   'response-time': (v) => (v ?? 0).toLocaleString(),
   'slowest-urls': (v) => (v == null ? '—' : `${v.toLocaleString()} ms`),
@@ -184,6 +196,25 @@ export function ReportsDialog({ open, onClose }: Props) {
               r.map((x: StatusCodeHistogramRow) => ({
                 key: x.status === null ? 'No response' : String(x.status),
                 badge: statusBadge(x.status),
+                count: x.count,
+              })),
+            );
+        } else if (kind === 'indexability-distribution') {
+          const r = await window.freecrawl.reportsIndexabilityDistribution();
+          if (!cancelled)
+            setRows(
+              r.map((x: IndexabilityDistributionRow) => ({
+                key: indexabilityLabel(x.indexability),
+                badge: x.indexability === 'indexable' ? 'OK' : 'NON',
+                count: x.count,
+              })),
+            );
+        } else if (kind === 'content-kind-distribution') {
+          const r = await window.freecrawl.reportsContentKindDistribution();
+          if (!cancelled)
+            setRows(
+              r.map((x: ContentKindDistributionRow) => ({
+                key: contentKindLabel(x.contentKind),
                 count: x.count,
               })),
             );
@@ -530,4 +561,56 @@ function rtBadge(label: string): string {
   if (label === '< 100ms' || label === '100–500ms') return 'OK';
   if (label === '500ms–1s') return 'WARN';
   return 'SLOW';
+}
+
+/**
+ * Friendly label for the `indexability` enum the crawler writes. Keeps the
+ * machine-friendly token (`non-indexable:robots-blocked`) out of the UI so
+ * the dropdown reads naturally — Title Case + human-readable suffix.
+ */
+function indexabilityLabel(value: string): string {
+  switch (value) {
+    case 'indexable':
+      return 'Indexable';
+    case 'non-indexable:noindex':
+      return 'Non-indexable — noindex';
+    case 'non-indexable:canonical':
+      return 'Non-indexable — canonicalised';
+    case 'non-indexable:robots-blocked':
+      return 'Non-indexable — robots-blocked';
+    case 'non-indexable:redirect':
+      return 'Non-indexable — redirect';
+    case 'non-indexable:client-error':
+      return 'Non-indexable — 4xx';
+    case 'non-indexable:server-error':
+      return 'Non-indexable — 5xx';
+    default:
+      return value;
+  }
+}
+
+/**
+ * Friendly label for the `content_kind` enum (html / css / js / image /
+ * font / pdf / other). Upper-cases acronyms (HTML/CSS/JS/PDF) so the chart
+ * matches the way users talk about file types.
+ */
+function contentKindLabel(value: string): string {
+  switch (value) {
+    case 'html':
+      return 'HTML';
+    case 'css':
+      return 'CSS';
+    case 'js':
+      return 'JavaScript';
+    case 'image':
+      return 'Image';
+    case 'font':
+      return 'Font';
+    case 'pdf':
+      return 'PDF';
+    case 'other':
+      return 'Other';
+    default:
+      return value;
+  }
 }

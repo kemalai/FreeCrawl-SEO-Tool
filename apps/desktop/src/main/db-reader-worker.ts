@@ -90,6 +90,8 @@ const ALLOWED_METHODS = new Set<string>([
   'sitemapOrphans',
   'getPagesPerDirectory',
   'getStatusCodeHistogram',
+  'getIndexabilityDistribution',
+  'getContentKindDistribution',
   'getDepthHistogram',
   'getResponseTimeHistogram',
   'countUrls',

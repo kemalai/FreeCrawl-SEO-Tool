@@ -97,6 +97,8 @@ export const IPC = {
   urlClusterMembers: 'urls:cluster-members',
   reportsPagesPerDirectory: 'reports:pages-per-directory',
   reportsStatusCodeHistogram: 'reports:status-code-histogram',
+  reportsIndexabilityDistribution: 'reports:indexability-distribution',
+  reportsContentKindDistribution: 'reports:content-kind-distribution',
   reportsDepthHistogram: 'reports:depth-histogram',
   reportsResponseTimeHistogram: 'reports:response-time-histogram',
   reportsTopUrls: 'reports:top-urls',
@@ -121,9 +123,47 @@ export const IPC = {
   rendererLagReport: 'renderer:lag-report',
   prefsExportSettings: 'prefs:export-settings',
   prefsImportSettings: 'prefs:import-settings',
+  scheduleGet: 'schedule:get',
+  scheduleSet: 'schedule:set',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
+
+/**
+ * In-app scheduled crawl spec. One schedule per project (keyed by the
+ * absolute `.seoproject` path in app-level prefs). Fires only while the
+ * desktop app is open and the project is loaded — for triggers that
+ * survive an app restart, drive the CLI via the OS scheduler (Windows
+ * Task Scheduler / launchd / cron); that path is V2.
+ */
+export interface ScheduleSpec {
+  enabled: boolean;
+  /** `hourly` = every hour on the minute. `daily` = once at hourOfDay:
+   *  minuteOfHour. `weekly` = once at dayOfWeek+hourOfDay:minuteOfHour.
+   *  `custom` = every `intervalMinutes` (min 15). */
+  cadence: 'hourly' | 'daily' | 'weekly' | 'custom';
+  /** For `custom`. Minimum enforced at 15 to prevent runaway loops. */
+  intervalMinutes?: number;
+  /** 0–23. Used by daily/weekly. */
+  hourOfDay?: number;
+  /** 0–59. Used by daily/weekly. */
+  minuteOfHour?: number;
+  /** 0 = Sunday … 6 = Saturday. Used by weekly. */
+  dayOfWeek?: number;
+}
+
+export interface ScheduleStatus {
+  /** Epoch ms when last fire completed (success or failure). */
+  lastFiredAt: number | null;
+  /** Epoch ms when the next fire is due. Server-computed on set. */
+  nextFiresAt: number | null;
+  lastStatus: 'success' | 'failure' | 'running' | null;
+}
+
+export interface ScheduleEntry {
+  spec: ScheduleSpec;
+  status: ScheduleStatus;
+}
 
 export interface UrlsQueryInput {
   limit: number;
@@ -192,6 +232,7 @@ export type MenuEvent =
   | 'open-sitemap-validator'
   | 'open-reports'
   | 'open-settings'
+  | 'open-scheduled-crawl'
   | 'about';
 
 export interface ExportCsvResult {
@@ -544,6 +585,20 @@ export interface StatusCodeHistogramRow {
   count: number;
 }
 
+export interface IndexabilityDistributionRow {
+  /** `indexable` or one of `non-indexable:noindex` / `:canonical` /
+   *  `:robots-blocked` / `:redirect` / `:client-error` / `:server-error`. */
+  indexability: string;
+  count: number;
+}
+
+export interface ContentKindDistributionRow {
+  /** `html` / `css` / `js` / `image` / `font` / `pdf` / `other` — matches
+   *  the `content_kind` column populated at insert time. */
+  contentKind: string;
+  count: number;
+}
+
 export interface DepthHistogramRow {
   depth: number;
   count: number;
@@ -866,6 +921,8 @@ export interface FreeCrawlApi {
   urlClusterMembers(urlId: number): Promise<UrlClusterMember[]>;
   reportsPagesPerDirectory(input: PagesPerDirectoryInput): Promise<PagesPerDirectoryRow[]>;
   reportsStatusCodeHistogram(): Promise<StatusCodeHistogramRow[]>;
+  reportsIndexabilityDistribution(): Promise<IndexabilityDistributionRow[]>;
+  reportsContentKindDistribution(): Promise<ContentKindDistributionRow[]>;
   reportsDepthHistogram(): Promise<DepthHistogramRow[]>;
   reportsResponseTimeHistogram(): Promise<ResponseTimeHistogramRow[]>;
   reportsTopUrls(input: TopUrlsInput): Promise<TopUrlsRow[]>;
@@ -886,6 +943,12 @@ export interface FreeCrawlApi {
   reportRendererLag(lagMs: number): void;
   prefsExportSettings(input: SettingsExportInput): Promise<SettingsExportResult>;
   prefsImportSettings(): Promise<SettingsImportResult>;
+  /** Read the schedule for the currently-loaded project. `null` when no
+   *  project is open OR no schedule has been configured. */
+  scheduleGet(): Promise<ScheduleEntry | null>;
+  /** Save / update the schedule for the currently-loaded project. Passing
+   *  `null` removes the schedule entirely. */
+  scheduleSet(spec: ScheduleSpec | null): Promise<ScheduleEntry | null>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onLogsBatch(cb: (entries: LogEntry[]) => void): () => void;
   onLogsBusy(cb: (busy: boolean) => void): () => void;
