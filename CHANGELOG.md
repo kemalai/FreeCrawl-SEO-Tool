@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.2] — 2026-05-19
+
+### Fixed
+- Linux `.deb` / `.rpm` installer build — added `author.email` maintainer metadata and pinned the linux artifact filename so the scoped package name (`@freecrawl/desktop`) no longer breaks the deb output path.
+
 ## [0.5.1] — 2026-05-19
 
 ### Fixed

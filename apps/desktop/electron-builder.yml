@@ -40,11 +40,17 @@ mac:
         - x64
   category: public.app-category.developer-tools
 linux:
+  executableName: freecrawl-seo
+  artifactName: freecrawl-seo-${version}-${arch}.${ext}
   target:
     - AppImage
     - deb
     - rpm
   category: Development
+rpm:
+  fpm:
+    - "--name"
+    - "freecrawl-seo"
 fileAssociations:
   - ext: seoproject
     name: FreeCrawl SEO Project
