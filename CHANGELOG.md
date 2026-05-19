@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0] — 2026-05-19
+
+### Added
+- Multi-language UI (English + Turkish) — instant swap from Settings → Language, covers menus, sidebar, every tab, every dialog, and the detail panel.
+- Settings → Storage panel — pick a default folder for new `.seoproject` files; falls back to the OS Documents folder when unset.
+- Settings → Privacy panel — opt-in toggle for anonymous telemetry (off by default; no endpoint wired up yet, consent is persisted for future builds).
+- Linux .rpm installer target alongside AppImage / deb.
+- Windows portable .exe target alongside the NSIS installer — runs without installation.
+- `.seoproject` file association — double-clicking a project file from the OS opens it in FreeCrawl (Windows / macOS / Linux).
+- Custom CSS override — drop a `custom-theme.css` in the user-data folder to tweak colours, spacing, or typography without rebuilding the app.
+
 ## [0.4.1] — 2026-05-15
 
 ### Added
