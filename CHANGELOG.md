@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1] — 2026-05-19
+
+### Fixed
+- Linux installer build — added the `homepage` / `repository` metadata that electron-builder's fpm target needs to package `.deb` and `.rpm` artifacts.
+
+### Changed
+- README updated with multi-language UI, scheduled crawl, file association, portable `.exe`, Linux `.rpm`, and the macOS / Linux `.sh` launcher.
+
 ## [0.5.0] — 2026-05-19
 
 ### Added
