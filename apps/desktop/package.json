@@ -1,8 +1,13 @@
 {
   "name": "@freecrawl/desktop",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "FreeCrawl SEO â€” desktop application",
+  "homepage": "https://github.com/kemalai/FreeCrawl-SEO-Tool",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kemalai/FreeCrawl-SEO-Tool.git"
+  },
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

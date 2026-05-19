@@ -61,14 +61,18 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 ### 🖥 Desktop UI
 - Dense dark theme, virtualized 1M+ row tables
+- **Multi-language UI** (English + Turkish) — switch instantly from Settings → Language
 - Live-streaming rows during crawl
 - Advanced AND/OR search (24 fields × 12 ops)
 - Detail panel with 13 sub-tabs — **HTTP Headers** has Request/Response toggle + **status-code diagnosis banner** (decodes Cloudflare 52x/530 and 4xx/5xx with header signals)
 - Per-URL **Duplicates** view (cluster siblings)
 - **Live memory monitor** in status bar (RSS / Sys Free / per-URL cost / capacity projection)
 - **Robots.txt syntax validator** in the Robots Tester (typo suggestions, orphan rules, sitemap URL check)
+- **In-app scheduled crawl** (hourly / daily / weekly / custom) per project
+- **`.seoproject` file association** — double-click a project file from the OS to open it
 - URL rewriting (regex + whitelist + live preview)
 - Cytoscape graph + anchor-text word cloud + **Top Words** report
+- Custom CSS theme override (`custom-theme.css` in user-data folder)
 - Diagnostic popups for DNS/TLS/proxy issues
 
 </td>
@@ -137,6 +141,8 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 Double-click **`FreeCrawl-SEO-Tool-Start.bat`** at the repo root. It verifies Node.js, runs `npm install` on first launch, then starts the app with `npm run dev`.
 
+> **Don't want to install?** Grab the **portable `.exe`** from the [Releases page](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases) — runs without installation.
+
 Or manually:
 
 ```bat
@@ -152,6 +158,15 @@ npm run dev
 <summary><b>🍎 macOS</b> — Apple Silicon + Intel</summary>
 
 <br />
+
+Easiest path is the **`FreeCrawl-SEO-Tool-Start.sh`** launcher at the repo root — same one-click flow as the Windows `.bat` (verifies Node, prompts to install on first run, then starts the app).
+
+```bash
+chmod +x FreeCrawl-SEO-Tool-Start.sh
+./FreeCrawl-SEO-Tool-Start.sh
+```
+
+Or manually:
 
 ```bash
 # 1. Install prerequisites (skip any you already have)
@@ -177,6 +192,10 @@ xattr -cr "/Applications/FreeCrawl SEO.app"
 <summary><b>🐧 Linux</b> — Debian / Ubuntu / Fedora / Arch</summary>
 
 <br />
+
+Easiest path is the **`FreeCrawl-SEO-Tool-Start.sh`** launcher at the repo root (same as macOS).
+
+Prebuilt installers are available for all three families: **`.AppImage`** (universal), **`.deb`** (Debian / Ubuntu), and **`.rpm`** (Fedora / RHEL).
 
 ```bash
 # 1. Install Node.js 22 LTS (Debian / Ubuntu via NodeSource)
@@ -218,9 +237,9 @@ node apps/cli/dist/index.js --list urls.txt --out out.json     # list mode + JSO
 
 ```bash
 npm run build                                  # all packages + desktop + CLI
-npm --workspace apps/desktop run build:win     # Windows installer (NSIS)
-npm --workspace apps/desktop run build:mac     # macOS DMG
-npm --workspace apps/desktop run build:linux   # AppImage / .deb
+npm --workspace apps/desktop run build:win     # Windows installer (NSIS) + portable .exe
+npm --workspace apps/desktop run build:mac     # macOS DMG (arm64 + x64)
+npm --workspace apps/desktop run build:linux   # AppImage / .deb / .rpm
 ```
 
 </details>
@@ -390,10 +409,12 @@ npm --version     # 10+
 ```
 FreeCrawl-SEO-Tool/
 ├── 📄 FreeCrawl-SEO-Tool-Start.bat   # Windows one-click launcher
+├── 📄 FreeCrawl-SEO-Tool-Start.sh    # macOS / Linux one-click launcher
 ├── 📄 CHANGELOG.md                   # versioned release notes
 ├── 📂 apps/
 │   ├── 🪟 desktop/                   # Electron app (main + preload + renderer)
-│   └── ⌨  cli/                       # headless Node CLI
+│   ├── ⌨  cli/                       # headless Node CLI
+│   └── 🤖 mcp-server/                # MCP server for AI agents
 └── 📂 packages/
     ├── 🔗 shared-types/              # IPC + domain types
     ├── 💾 db/                        # ProjectDb (node:sqlite) + migrations
@@ -408,6 +429,7 @@ graph LR
   B --> C[core]
   C --> D[desktop]
   C --> E[cli]
+  B --> F[mcp-server]
 ```
 
 <br />
@@ -417,7 +439,7 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development.** All 24 analysis tabs, advanced search, 150+ issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, in-app logs, and diagnostic popups are working. Live-streaming UX with **first row in ~1 s**.
+> **Active development.** All 24 analysis tabs, advanced search, 150+ issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, **in-app scheduled crawl**, **multi-language UI (EN + TR)**, **`.seoproject` file association**, in-app logs, and diagnostic popups are working. Cross-platform installers (Windows `.exe` + portable, macOS `.dmg`, Linux `.AppImage` / `.deb` / `.rpm`). Live-streaming UX with **first row in ~1 s**.
 >
 > **Upcoming:** plugin system, JavaScript rendering, log analyzer, PageSpeed API integration.
 
