@@ -36,6 +36,14 @@ jobs:
               apps/desktop/release/*.dmg.blockmap
               apps/desktop/release/*.zip
               apps/desktop/release/latest-mac.yml
+          - os: ubuntu-latest
+            build_script: build:linux
+            artifact_name: linux-installer
+            artifact_paths: |
+              apps/desktop/release/*.AppImage
+              apps/desktop/release/*.deb
+              apps/desktop/release/*.rpm
+              apps/desktop/release/latest-linux.yml
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

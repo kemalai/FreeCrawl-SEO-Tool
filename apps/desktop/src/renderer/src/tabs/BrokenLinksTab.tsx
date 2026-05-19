@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type { BrokenLinkRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip } from '../components/InfoTip.js';
+import { translateLabel } from '../i18n/labels.js';
 
 const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
@@ -18,6 +20,8 @@ const POLL_MS_IDLE = 30_000;
 const PAGE_SIZE = 5000;
 
 export function BrokenLinksTab() {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const activeCategory = useAppStore((s) => s.activeCategory);
   const dataVersion = useAppStore((s) => s.dataVersion);
   const progress = useAppStore((s) => s.progress);
@@ -128,19 +132,19 @@ export function BrokenLinksTab() {
       <div className="flex shrink-0 items-center gap-2 border-b border-surface-800 bg-surface-900/30 px-3 py-1.5">
         <input
           className="input w-96"
-          placeholder="Search source / target…"
+          placeholder={t('brokenTab.searchPlaceholder', { defaultValue: 'Search broken target URLs…' })}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           spellCheck={false}
         />
         {internal !== 'all' && (
           <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
-            {internal === 'internal' ? 'Internal only' : 'External only'}
+            {internal === 'internal' ? t('brokenTab.internalOnly', { defaultValue: 'Internal only' }) : t('brokenTab.externalOnly', { defaultValue: 'External only' })}
           </span>
         )}
         <div className="ml-auto text-[11px] text-surface-500">
-          <span className="font-mono text-surface-200">{total.toLocaleString()}</span> broken links
-          <span className="ml-2 text-surface-600">({rows.length.toLocaleString()} loaded)</span>
+          <span className="font-mono text-surface-200">{total.toLocaleString()}</span> {t('brokenTab.linksUnit', { defaultValue: 'broken links' })}
+          <span className="ml-2 text-surface-600">({t('imagesTab.loaded', { defaultValue: '{{n}} loaded', n: rows.length.toLocaleString() })})</span>
         </div>
       </div>
 
@@ -158,7 +162,7 @@ export function BrokenLinksTab() {
                 flex: `0 0 ${ROW_NUM_WIDTH}px`,
               }}
             >
-              Row
+              {t('imagesTab.row', { defaultValue: 'Row' })}
             </div>
             {columns.map((c) => (
               <div
@@ -167,7 +171,7 @@ export function BrokenLinksTab() {
                 style={{ width: c.width, minWidth: c.width, flex: `0 0 ${c.width}px` }}
               >
                 <span className={clsx('truncate', c.align === 'right' && 'ml-auto')}>
-                  {c.label}
+                  {translateLabel(c.label, lang)}
                 </span>
                 {(c.info || c.example) && (
                   <span className="shrink-0">
@@ -315,7 +319,7 @@ export function BrokenLinksTab() {
             style={{ top: HEADER_HEIGHT }}
           >
             <div className="max-w-md text-center">
-              <div className="mb-1 text-sm font-semibold text-surface-300">No broken links</div>
+              <div className="mb-1 text-sm font-semibold text-surface-300">{t('brokenTab.noBrokenLinks', { defaultValue: 'No broken links' })}</div>
               <div className="text-xs text-surface-500">
                 Every link in the crawl resolves to a healthy response.
               </div>

@@ -106,6 +106,7 @@ import {
 } from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
+import { isMenuLang, type MenuLang } from './menu-i18n.js';
 import * as logger from './logger.js';
 import { dbReaderPool, callReaderOrFallback } from './db-reader-pool.js';
 import { dbWriterPool } from './db-writer-pool.js';
@@ -715,9 +716,15 @@ function clearRecentProjects(): void {
   rebuildMenu();
 }
 
+function getMenuLang(): MenuLang {
+  const raw = prefsCache['uiLanguage'];
+  return isMenuLang(raw) ? raw : 'en';
+}
+
 function rebuildMenu(): void {
   Menu.setApplicationMenu(
     buildAppMenu({
+      lang: getMenuLang(),
       onOpenLogs: openLogsWindow,
       onOpenProject: () => void promptOpenProject(),
       onOpenRecent: (path) => {
@@ -1266,6 +1273,28 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => mainWindow?.show());
 
+  // V1 Faz 8 — Custom CSS override. Lets users tweak colours / spacing
+  // / typography without rebuilding the app. The file is read once per
+  // window lifetime; users have to relaunch (or refocus) to pick up
+  // edits. Best-effort: any read / inject error is logged and ignored
+  // so a typo'd CSS file never bricks startup.
+  mainWindow.webContents.on('did-finish-load', () => {
+    try {
+      const themePath = join(app.getPath('userData'), 'custom-theme.css');
+      if (!existsSync(themePath)) return;
+      const css = readFileSync(themePath, 'utf8');
+      if (!css.trim()) return;
+      void mainWindow?.webContents.insertCSS(css);
+      logger.log('info', 'main', `Custom theme CSS injected from ${themePath}`);
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `Custom theme CSS load failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  });
+
   // Keep the versioned title — prevent the renderer's <title> from overriding it.
   mainWindow.on('page-title-updated', (e) => e.preventDefault());
 
@@ -1777,6 +1806,37 @@ function registerIpc(): void {
     return setSchedule(schedulerStore, currentProjectPath, spec);
   });
 
+  // V1 Faz 9 — directory picker for Settings → Storage. Returns the chosen
+  // absolute path, or null if the user cancelled.
+  ipcMain.handle(
+    IPC.pickDirectory,
+    async (
+      _e,
+      input?: { title?: string; defaultPath?: string },
+    ): Promise<string | null> => {
+      const win = mainWindow;
+      if (!win) return null;
+      const res = await dialog.showOpenDialog(win, {
+        title: input?.title ?? 'Choose Folder',
+        defaultPath: input?.defaultPath,
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (res.canceled || res.filePaths.length === 0) return null;
+      return res.filePaths[0]!;
+    },
+  );
+
+  // V1 Faz 9 — resolved default project save dir. Returns the user's
+  // configured `projectSaveDir` pref when set & non-empty, otherwise the
+  // OS Documents folder. Used by Settings → Storage to display the active
+  // value, and by `projectSaveAs` as the dialog's starting directory.
+  ipcMain.handle(IPC.defaultProjectDir, (): string => {
+    loadPrefs();
+    const raw = prefsCache['projectSaveDir'];
+    if (typeof raw === 'string' && raw.trim().length > 0) return raw;
+    return app.getPath('documents');
+  });
+
   // Stream new entries to the logs window in coalesced batches. A heavy
   // crawl emits 100–300 logs/s; sending each as its own IPC message
   // saturated the renderer's event loop and caused visible UI stutters
@@ -1813,6 +1873,12 @@ function registerIpc(): void {
     loadPrefs();
     prefsCache[key] = value;
     schedulePrefsWrite();
+    // V1 Faz 8 Phase 2 — when the renderer switches language, rebuild the
+    // app menu so File/View/Help/etc. labels follow immediately. Cheap;
+    // rebuildMenu is also the recent-projects refresh path.
+    if (key === 'uiLanguage' && isMenuLang(value)) {
+      rebuildMenu();
+    }
   });
   ipcMain.handle(IPC.prefsDelete, (_e, key: string) => {
     loadPrefs();
@@ -2016,9 +2082,17 @@ function registerIpc(): void {
     async (): Promise<{ filePath: string; bytesWritten: number } | null> => {
       const win = mainWindow;
       if (!win) return null;
+      // Honour the user-configured default save directory (Settings →
+      // Storage). Falls back to the OS Documents folder when unset.
+      loadPrefs();
+      const baseDir = (() => {
+        const raw = prefsCache['projectSaveDir'];
+        if (typeof raw === 'string' && raw.trim().length > 0) return raw;
+        return app.getPath('documents');
+      })();
       const res = await dialog.showSaveDialog(win, {
         title: 'Save Project As…',
-        defaultPath: 'crawl.seoproject',
+        defaultPath: join(baseDir, 'crawl.seoproject'),
         filters: [
           { name: 'FreeCrawl Project', extensions: ['seoproject'] },
           { name: 'All Files', extensions: ['*'] },
@@ -2099,16 +2173,18 @@ function registerIpc(): void {
   ipcMain.handle(IPC.confirmClear, async (): Promise<ConfirmClearResult> => {
     const win = mainWindow;
     if (!win) return { confirmed: false, skipNext: false };
+    const isTr = getMenuLang() === 'tr';
     const res = await dialog.showMessageBox(win, {
       type: 'warning',
-      buttons: ['Clear', 'Cancel'],
+      buttons: isTr ? ['Temizle', 'İptal'] : ['Clear', 'Cancel'],
       defaultId: 1,
       cancelId: 1,
-      title: 'Clear Crawl Data',
-      message: 'Clear all crawl data?',
-      detail:
-        'This will remove all discovered URLs, links, and crawl metadata for this project. This action cannot be undone.',
-      checkboxLabel: "Don't ask me again",
+      title: isTr ? 'Crawl Verilerini Temizle' : 'Clear Crawl Data',
+      message: isTr ? 'Tüm crawl verileri temizlensin mi?' : 'Clear all crawl data?',
+      detail: isTr
+        ? 'Bu, bu projedeki tüm keşfedilmiş URL\'leri, linkleri ve crawl meta verilerini siler. Bu işlem geri alınamaz.'
+        : 'This will remove all discovered URLs, links, and crawl metadata for this project. This action cannot be undone.',
+      checkboxLabel: isTr ? 'Bana bir daha sorma' : "Don't ask me again",
       checkboxChecked: false,
       noLink: true,
     });
@@ -3073,13 +3149,60 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_e, argv) => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
       mainWindow.focus();
     }
+    // V1 Faz 8 — File association on Windows/Linux. A double-click on
+    // a `.seoproject` while the app is already running spawns a second
+    // process whose `argv` carries the path; this handler opens it in
+    // the existing window.
+    const path = pickProjectPathFromArgv(argv);
+    if (path) {
+      try {
+        openProjectAtPath(path);
+      } catch (err) {
+        logger.log(
+          'warn',
+          'main',
+          `Open project from second-instance argv failed: ${(err as Error).message}`,
+        );
+      }
+    }
   });
+}
+
+// V1 Faz 8 — macOS file-association entry point. `open-file` fires
+// before `whenReady` on cold-start double-clicks, so we stash the path
+// and replay it after the main window is created.
+let pendingOpenFilePath: string | null = null;
+app.on('open-file', (event, filePath) => {
+  event.preventDefault();
+  if (mainWindow) {
+    try {
+      openProjectAtPath(filePath);
+    } catch (err) {
+      logger.log('warn', 'main', `Open project from open-file event failed: ${(err as Error).message}`);
+    }
+  } else {
+    pendingOpenFilePath = filePath;
+  }
+});
+
+/**
+ * Extract a `.seoproject` (or .sqlite / .db) path from a process argv
+ * array. Returns null when nothing usable was passed (the common
+ * desktop-shortcut launch). The first matching path wins.
+ */
+function pickProjectPathFromArgv(argv: readonly string[]): string | null {
+  for (const a of argv) {
+    if (typeof a !== 'string') continue;
+    if (a.startsWith('-')) continue;
+    if (/\.(seoproject|sqlite|db)$/i.test(a) && existsSync(a)) return a;
+  }
+  return null;
 }
 
 // Suppress Chromium's GPU disk cache. Windows users whose %APPDATA%
@@ -3208,6 +3331,26 @@ void app.whenReady().then(async () => {
   // until the user configures a schedule via the Scheduled Crawl
   // dialog, so it's safe to leave running for the lifetime of the app.
   startScheduler();
+
+  // V1 Faz 8 — Cold-start file association. On Windows/Linux the OS
+  // appends the double-clicked file path to argv; on macOS it arrived
+  // via the `open-file` event before this point and is parked in
+  // `pendingOpenFilePath`. Either way, open it now that the window and
+  // DB layer are ready.
+  const coldStartPath =
+    pendingOpenFilePath ?? pickProjectPathFromArgv(process.argv);
+  pendingOpenFilePath = null;
+  if (coldStartPath) {
+    try {
+      openProjectAtPath(coldStartPath);
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `Open project from cold-start argv failed: ${(err as Error).message}`,
+      );
+    }
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

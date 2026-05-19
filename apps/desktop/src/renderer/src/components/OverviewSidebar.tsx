@@ -1,8 +1,10 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type { OverviewCounts, UrlCategory } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
+import { translateLabel } from '../i18n/labels.js';
 
 interface Node {
   key: string;
@@ -13,6 +15,8 @@ interface Node {
 }
 
 export function OverviewSidebar() {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const overview = useAppStore((s) => s.overview);
   const setOverview = useAppStore((s) => s.setOverview);
   const dataVersion = useAppStore((s) => s.dataVersion);
@@ -130,11 +134,11 @@ export function OverviewSidebar() {
     <div className="flex h-full flex-col bg-surface-900">
       <div className="flex items-center border-b border-surface-800 bg-surface-850 px-2 py-1.5">
         <div className="text-[10px] font-semibold uppercase tracking-wide text-surface-400">
-          Overview
+          {t('sidebar.overview', { defaultValue: 'Overview' })}
         </div>
         <div className="ml-auto flex items-center gap-3 text-[10px] text-surface-500">
-          <span>URLs</span>
-          <span>% of Total</span>
+          <span>{t('sidebar.urls', { defaultValue: 'URLs' })}</span>
+          <span>{t('sidebar.percentOfTotal', { defaultValue: '% of Total' })}</span>
         </div>
       </div>
       <div className="flex-1 overflow-auto">
@@ -149,6 +153,7 @@ export function OverviewSidebar() {
               activeCategory={activeCategory}
               onClick={navigateToCategory}
               total={totalForPercent}
+              lang={lang}
             />
           ))}
         </div>
@@ -165,6 +170,7 @@ const TreeNode = memo(function TreeNode({
   activeCategory,
   onClick,
   total,
+  lang,
 }: {
   node: Node;
   depth: number;
@@ -173,6 +179,7 @@ const TreeNode = memo(function TreeNode({
   activeCategory: UrlCategory;
   onClick: (c: UrlCategory) => void;
   total: number;
+  lang: string;
 }) {
   const isExpanded = expanded.has(node.key);
   const isActive = node.category && node.category === activeCategory;
@@ -200,7 +207,7 @@ const TreeNode = memo(function TreeNode({
         ) : (
           <span className="w-3 shrink-0" />
         )}
-        <span className="min-w-0 flex-1 truncate text-surface-200">{node.label}</span>
+        <span className="min-w-0 flex-1 truncate text-surface-200">{translateLabel(node.label, lang)}</span>
         {node.count !== undefined && (
           <>
             <span className="font-mono tabular-nums text-surface-300">
@@ -223,6 +230,7 @@ const TreeNode = memo(function TreeNode({
             activeCategory={activeCategory}
             onClick={onClick}
             total={total}
+            lang={lang}
           />
         ))}
     </>

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
+import { translateLabel } from '../i18n/labels.js';
 import type {
   CrawlConfig,
   CrawlUrlRow,
@@ -68,6 +70,8 @@ const SINGLE_URL_ONLY_TABS: ReadonlySet<SubTab> = new Set([
 ]);
 
 export function BottomDetailPanel() {
+  const { t: tx, i18n } = useTranslation();
+  const lang = i18n.language;
   const selectedUrlId = useAppStore((s) => s.selectedUrlId);
   const selectedUrlIds = useAppStore((s) => s.selectedUrlIds);
   const [detail, setDetail] = useState<UrlDetail | null>(null);
@@ -230,25 +234,25 @@ export function BottomDetailPanel() {
   return (
     <div className="flex h-full flex-col bg-surface-950">
       <div className="flex items-center border-b border-surface-800 bg-surface-900">
-        {SUB_TABS.map((t) => (
+        {SUB_TABS.map((tab) => (
           <button
-            key={t.key}
-            disabled={t.disabled}
+            key={tab.key}
+            disabled={tab.disabled}
             className={clsx(
               'tab',
-              subTab === t.key && 'tab-active',
-              t.disabled && 'cursor-not-allowed opacity-40',
+              subTab === tab.key && 'tab-active',
+              tab.disabled && 'cursor-not-allowed opacity-40',
             )}
-            onClick={() => !t.disabled && setSubTab(t.key)}
-            title={t.disabled ? 'Coming soon' : undefined}
+            onClick={() => !tab.disabled && setSubTab(tab.key)}
+            title={tab.disabled ? tx('detail.comingSoon', { defaultValue: 'Coming soon' }) : undefined}
           >
-            {t.label}
-            {t.key === 'inlinks' && inlinksCountLabel !== undefined && (
+            {translateLabel(tab.label, lang)}
+            {tab.key === 'inlinks' && inlinksCountLabel !== undefined && (
               <span className="ml-1 text-surface-500">
                 ({inlinksCountLabel.toLocaleString()})
               </span>
             )}
-            {t.key === 'outlinks' && outlinksCountLabel !== undefined && (
+            {tab.key === 'outlinks' && outlinksCountLabel !== undefined && (
               <span className="ml-1 text-surface-500">
                 ({outlinksCountLabel.toLocaleString()})
               </span>
@@ -260,10 +264,10 @@ export function BottomDetailPanel() {
             <span className="font-mono text-accent-300">
               {effectiveIds.length.toLocaleString()}
             </span>{' '}
-            URLs selected
+            {tx('detail.urlsSelected', { defaultValue: 'URLs selected' })}
             {truncated && (
               <span className="ml-2 text-amber-400">
-                · aggregating first {MULTI_DETAIL_LIMIT}
+                · {tx('detail.aggregatingFirst', { defaultValue: 'aggregating first {{n}}', n: MULTI_DETAIL_LIMIT })}
               </span>
             )}
           </div>
@@ -272,20 +276,20 @@ export function BottomDetailPanel() {
 
       {showSingleScopeBanner && detail && (
         <div className="shrink-0 border-b border-surface-800 bg-surface-900/40 px-3 py-1 text-[10.5px] text-surface-400">
-          This tab is per-page — showing data for{' '}
+          {tx('detail.perPagePrefix', { defaultValue: 'This tab is per-page — showing data for' })}{' '}
           <span className="font-mono text-surface-200">{detail.row.url}</span>{' '}
-          (primary URL of the selection).
+          {tx('detail.perPageSuffix', { defaultValue: '(primary URL of the selection).' })}
         </div>
       )}
 
       <div className="flex-1 overflow-auto">
         {effectiveIds.length === 0 && (
           <div className="flex h-full items-center justify-center text-xs text-surface-500">
-            Select a URL from the table to see details.
+            {tx('detail.selectUrl', { defaultValue: 'Select a URL from the table to see details.' })}
           </div>
         )}
         {effectiveIds.length > 0 && !detail && loading && (
-          <div className="p-4 text-xs text-surface-500">Loading…</div>
+          <div className="p-4 text-xs text-surface-500">{tx('common.loading', { defaultValue: 'Loading…' })}</div>
         )}
         {detail && subTab === 'url-details' && <NameValueView row={detail.row} />}
         {subTab === 'inlinks' &&
@@ -412,6 +416,7 @@ function ViewSourceView({
   urlId: number | null;
   pageUrl: string;
 }) {
+  const { t } = useTranslation();
   const [src, setSrc] = useState<UrlSourceResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
@@ -450,15 +455,16 @@ function ViewSourceView({
   }, [search, urlId]);
 
   if (loading && !src) {
-    return <div className="p-4 text-[11px] text-surface-500">Loading source…</div>;
+    return <div className="p-4 text-[11px] text-surface-500">{t('viewSource.loadingSource', { defaultValue: 'Loading source…' })}</div>;
   }
   if (!src || src.body === null) {
     return (
       <div className="p-4 text-[11px] text-surface-500">
-        No HTML body stored for this URL.
+        {t('viewSource.noBody', { defaultValue: 'No HTML body stored for this URL.' })}
         <div className="mt-1 text-[10px] text-surface-600">
-          View Source is only captured for HTML pages crawled with the
-          <span className="font-mono">storeBodySnapshots</span> setting enabled.
+          {t('viewSource.noBodyHint1', { defaultValue: 'View Source is only captured for HTML pages crawled with the' })}{' '}
+          <span className="font-mono">storeBodySnapshots</span>{' '}
+          {t('viewSource.noBodyHint2', { defaultValue: 'setting enabled.' })}
         </div>
       </div>
     );
@@ -517,7 +523,7 @@ function ViewSourceView({
         <input
           type="text"
           className="ml-3 w-48 rounded border border-surface-700 bg-surface-950 px-2 py-0.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
-          placeholder="Search source…"
+          placeholder={t('viewSource.searchPlaceholder', { defaultValue: 'Search source…' })}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           onKeyDown={(e) => {
@@ -537,13 +543,13 @@ function ViewSourceView({
         {search && matches > 0 && (
           <>
             <span className="text-surface-500">
-              {safeActive + 1} of {matches}
+              {t('viewSource.matchOf', { defaultValue: '{{n}} of {{total}}', n: safeActive + 1, total: matches })}
             </span>
             <button
               className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800 disabled:opacity-40"
               onClick={() => step(-1)}
               disabled={matches < 2}
-              title="Previous match (Shift+Enter)"
+              title={t('viewSource.prevMatch', { defaultValue: 'Previous match (Shift+Enter)' })}
             >
               ↑
             </button>
@@ -551,14 +557,14 @@ function ViewSourceView({
               className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800 disabled:opacity-40"
               onClick={() => step(1)}
               disabled={matches < 2}
-              title="Next match (Enter)"
+              title={t('viewSource.nextMatch', { defaultValue: 'Next match (Enter)' })}
             >
               ↓
             </button>
           </>
         )}
         {search && matches === 0 && (
-          <span className="text-surface-500">No matches</span>
+          <span className="text-surface-500">{t('viewSource.noMatches', { defaultValue: 'No matches' })}</span>
         )}
         <label className="flex items-center gap-1 text-surface-400">
           <input
@@ -567,20 +573,20 @@ function ViewSourceView({
             onChange={(e) => setWrap(e.target.checked)}
             className="h-3 w-3"
           />
-          Wrap
+          {t('viewSource.wrap', { defaultValue: 'Wrap' })}
         </label>
         <div className="ml-auto flex gap-1.5">
           <button
             className="rounded border border-surface-700 px-2 py-0.5 text-[10px] hover:bg-surface-800"
             onClick={copy}
           >
-            Copy
+            {t('logs.copy', { defaultValue: 'Copy' })}
           </button>
           <button
             className="rounded border border-surface-700 px-2 py-0.5 text-[10px] hover:bg-surface-800"
             onClick={download}
           >
-            Download
+            {t('viewSource.download', { defaultValue: 'Download' })}
           </button>
         </div>
       </div>
@@ -637,6 +643,8 @@ function ViewSourceScrollEffect({
 }
 
 function DuplicatesView({ urlId, row }: { urlId: number; row: CrawlUrlRow }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [members, setMembers] = useState<UrlClusterMember[] | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -658,21 +666,19 @@ function DuplicatesView({ urlId, row }: { urlId: number; row: CrawlUrlRow }) {
   }, [urlId]);
 
   if (loading) {
-    return <div className="p-3 text-[11px] text-surface-400">Loading…</div>;
+    return <div className="p-3 text-[11px] text-surface-400">{t('common.loading', { defaultValue: 'Loading…' })}</div>;
   }
   if (row.clusterId === 0 || (row.clusterSize ?? 1) <= 1) {
     return (
       <div className="p-3 text-[11px] text-surface-500">
-        This URL is not part of a near-duplicate cluster. Run Crawl Analysis on
-        a finished crawl, or lower the Hamming threshold in Settings →
-        Duplicates, to widen what counts as a near-duplicate.
+        {t('duplicates.notInCluster', { defaultValue: 'This URL is not part of a near-duplicate cluster. Run Crawl Analysis on a finished crawl, or lower the Hamming threshold in Settings → Duplicates, to widen what counts as a near-duplicate.' })}
       </div>
     );
   }
   if (!members || members.length === 0) {
     return (
       <div className="p-3 text-[11px] text-surface-500">
-        No other members in this cluster. (Cluster size {row.clusterSize}.)
+        {t('duplicates.noOtherMembers', { defaultValue: 'No other members in this cluster. (Cluster size {{n}}.)', n: row.clusterSize })}
       </div>
     );
   }
@@ -681,26 +687,26 @@ function DuplicatesView({ urlId, row }: { urlId: number; row: CrawlUrlRow }) {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[10px] text-surface-400">
         <span>
-          Cluster <span className="text-surface-200">#{row.clusterId}</span>
+          {t('duplicates.cluster', { defaultValue: 'Cluster' })} <span className="text-surface-200">#{row.clusterId}</span>
         </span>
         <span>
-          {members.length + 1} member{members.length + 1 === 1 ? '' : 's'} total
+          {t('duplicates.membersTotal', { defaultValue: '{{n}} member(s) total', n: members.length + 1 })}
         </span>
         <span className="text-surface-500">
-          (Hamming distance from this URL — lower means more similar)
+          {t('duplicates.hammingHint', { defaultValue: '(Hamming distance from this URL — lower means more similar)' })}
         </span>
       </div>
       <div className="flex-1 overflow-auto">
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-surface-900 text-left text-[10px] text-surface-400">
             <tr>
-              <th className="px-3 py-1 font-normal">Hamming</th>
+              <th className="px-3 py-1 font-normal">{translateLabel('Hamming', lang)}</th>
               <th className="px-3 py-1 font-normal">URL</th>
-              <th className="px-3 py-1 font-normal">Status</th>
-              <th className="px-3 py-1 font-normal">Indexability</th>
-              <th className="px-3 py-1 font-normal">Words</th>
-              <th className="px-3 py-1 font-normal">Inlinks</th>
-              <th className="px-3 py-1 font-normal">Title</th>
+              <th className="px-3 py-1 font-normal">{translateLabel('Status', lang)}</th>
+              <th className="px-3 py-1 font-normal">{translateLabel('Indexability', lang)}</th>
+              <th className="px-3 py-1 font-normal">{translateLabel('Words', lang)}</th>
+              <th className="px-3 py-1 font-normal">{translateLabel('Inlinks', lang)}</th>
+              <th className="px-3 py-1 font-normal">{translateLabel('Title', lang)}</th>
             </tr>
           </thead>
           <tbody>
@@ -807,6 +813,8 @@ function HttpHeadersView({
   headers: { name: string; value: string }[];
   row: CrawlUrlRow;
 }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const config = useAppStore((s) => s.config);
   const [side, setSide] = useState<'response' | 'request'>('response');
   // Request headers reconstructed from the active crawl config — the
@@ -875,8 +883,8 @@ function HttpHeadersView({
             <table className="w-full text-[11px]">
               <thead className="sticky top-0 bg-surface-900">
                 <tr className="text-surface-400">
-                  <th className="w-64 py-1 pr-3 text-left font-medium">Header</th>
-                  <th className="py-1 text-left font-medium">Value</th>
+                  <th className="w-64 py-1 pr-3 text-left font-medium">{translateLabel('Header', lang)}</th>
+                  <th className="py-1 text-left font-medium">{translateLabel('Value', lang)}</th>
                 </tr>
               </thead>
               <tbody>
@@ -898,6 +906,7 @@ function HttpHeadersView({
 }
 
 function StatusDiagnosisBanner({ diag }: { diag: StatusDiagnosis }) {
+  const { t } = useTranslation();
   const tone =
     diag.severity === 'error'
       ? { border: 'border-red-700/50', bg: 'bg-red-900/15', text: 'text-red-200', head: 'text-red-300' }
@@ -911,7 +920,7 @@ function StatusDiagnosisBanner({ diag }: { diag: StatusDiagnosis }) {
       {diag.signals.length > 0 && (
         <div className="mt-2">
           <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-surface-400">
-            From the response headers
+            {t('diag.fromHeaders', { defaultValue: 'From the response headers' })}
           </div>
           <ul className="list-disc space-y-0.5 pl-4 text-surface-200">
             {diag.signals.map((s, i) => (
@@ -923,7 +932,7 @@ function StatusDiagnosisBanner({ diag }: { diag: StatusDiagnosis }) {
       {diag.causes.length > 0 && (
         <div className="mt-2">
           <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-surface-400">
-            Likely causes
+            {t('diag.likelyCauses', { defaultValue: 'Likely causes' })}
           </div>
           <ul className="list-disc space-y-0.5 pl-4 text-surface-300">
             {diag.causes.map((c, i) => (
@@ -935,7 +944,7 @@ function StatusDiagnosisBanner({ diag }: { diag: StatusDiagnosis }) {
       {diag.whatToDo.length > 0 && (
         <div className="mt-2">
           <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-surface-400">
-            What to do
+            {t('diag.whatToDo', { defaultValue: 'What to do' })}
           </div>
           <ul className="list-disc space-y-0.5 pl-4 text-surface-200">
             {diag.whatToDo.map((w, i) => (
@@ -1037,6 +1046,8 @@ function fleschBand(score: number): string {
 }
 
 function NameValueView({ row }: { row: CrawlUrlRow }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   // Server-side pixel-width is the source of truth (drives the issue
   // filters); fall back to the renderer estimate only when the column is
   // legitimately 0 because the title/desc is empty.
@@ -1276,14 +1287,14 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
       <table className="w-full text-[11px]">
         <thead className="sticky top-0 bg-surface-900">
           <tr className="text-surface-400">
-            <th className="w-64 py-1 pr-3 text-left font-medium">Name</th>
-            <th className="py-1 text-left font-medium">Value</th>
+            <th className="w-64 py-1 pr-3 text-left font-medium">{translateLabel('Name', lang)}</th>
+            <th className="py-1 text-left font-medium">{translateLabel('Value', lang)}</th>
           </tr>
         </thead>
         <tbody>
           {fields.map(([label, value]) => (
             <tr key={label} className="border-b border-surface-900 last:border-0">
-              <td className="py-1.5 pr-3 align-top text-surface-400">{label}</td>
+              <td className="py-1.5 pr-3 align-top text-surface-400">{translateLabel(label, lang)}</td>
               <td
                 className="break-all py-1.5 font-mono text-surface-100"
                 title={value !== null && value !== undefined ? String(value) : ''}
@@ -1416,6 +1427,8 @@ function LinksView({
   columns: LinksColumn[];
   rows: string[][];
 }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const prefsKey = LINKS_PREFS_PREFIX + tableId;
   const [colWidths, setColWidths] = useState<Record<string, number>>(() => {
     const v = window.freecrawl.prefsGet(prefsKey);
@@ -1694,11 +1707,13 @@ function LinksView({
   return (
     <div ref={rootRef} className="relative flex h-full select-none flex-col">
       <div className="shrink-0 px-3 pt-2 text-[11px] text-surface-500">
-        Showing <span className="font-mono text-surface-200">{shown.toLocaleString()}</span> of{' '}
+        {t('links.showing', { defaultValue: 'Showing' })}{' '}
+        <span className="font-mono text-surface-200">{shown.toLocaleString()}</span>{' '}
+        {t('links.of', { defaultValue: 'of' })}{' '}
         <span className="font-mono text-surface-200">{total.toLocaleString()}</span>
       </div>
       {rows.length === 0 ? (
-        <div className="py-8 text-center text-xs text-surface-500">No links.</div>
+        <div className="py-8 text-center text-xs text-surface-500">{t('links.noLinks', { defaultValue: 'No links.' })}</div>
       ) : (
         <div className="mt-2 flex-1 overflow-auto">
           <div style={{ minWidth: totalWidth, width: '100%' }}>
@@ -1721,9 +1736,9 @@ function LinksView({
                     onMouseEnter={() => {
                       if (dragRef.current?.kind === 'column') applyColumnDrag(ci);
                     }}
-                    title="Click to select column · drag across headers to select multiple · drag right edge to resize"
+                    title={t('links.columnHint', { defaultValue: 'Click to select column · drag across headers to select multiple · drag right edge to resize' })}
                   >
-                    <span className="truncate">{c.header}</span>
+                    <span className="truncate">{translateLabel(c.header, lang)}</span>
                     <div
                       className="absolute -right-1 top-0 bottom-0 z-20 w-2 cursor-col-resize hover:bg-accent-500/40"
                       onMouseDown={(e) => {
@@ -1737,7 +1752,7 @@ function LinksView({
                         resetColumn(c.id);
                       }}
                       onClick={(e) => e.stopPropagation()}
-                      title="Drag to resize · double-click to reset"
+                      title={t('links.dragResize', { defaultValue: 'Drag to resize · double-click to reset' })}
                     />
                   </div>
                 );
@@ -1865,32 +1880,29 @@ function CellContextMenu({
   onOpen: () => void;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   const items: { label: string; action: () => void; disabled?: boolean }[] = [
     {
       label:
         selectionSize > 1
-          ? `Copy ${selectionSize.toLocaleString()} Cells`
-          : 'Copy Cell',
+          ? t('cellMenu.copyCells', { defaultValue: 'Copy {{n}} Cells', n: selectionSize.toLocaleString() })
+          : t('cellMenu.copyCell', { defaultValue: 'Copy Cell' }),
       action: onCopy,
       disabled: selectionSize === 0,
     },
   ];
   if (clickedIsUrl) {
-    // When the right-clicked URL is part of a multi-cell selection
-    // that spans multiple URL-looking cells, "Copy URL" copies ALL of
-    // them (one per line). Single-cell selection collapses to the
-    // legacy "copy this one URL" behaviour.
     if (urlCountInSelection > 1) {
       items.push({
-        label: `Copy ${urlCountInSelection.toLocaleString()} URLs`,
+        label: t('cellMenu.copyUrls', { defaultValue: 'Copy {{n}} URLs', n: urlCountInSelection.toLocaleString() }),
         action: onCopyUrls,
       });
     } else {
-      items.push({ label: 'Copy URL', action: onCopyValue });
+      items.push({ label: t('cellMenu.copyUrl', { defaultValue: 'Copy URL' }), action: onCopyValue });
     }
-    items.push({ label: 'Open in Browser', action: onOpen });
+    items.push({ label: t('cellMenu.openInBrowser', { defaultValue: 'Open in Browser' }), action: onOpen });
   } else if (clickedValue) {
-    items.push({ label: 'Copy Value', action: onCopyValue });
+    items.push({ label: t('cellMenu.copyValue', { defaultValue: 'Copy Value' }), action: onCopyValue });
   }
 
   return (
@@ -2035,12 +2047,14 @@ async function copyCellsToClipboard(
 }
 
 function SerpSnippet({ row }: { row: CrawlUrlRow }) {
-  const title = row.title ?? '(no title)';
-  const desc = row.metaDescription ?? '(no meta description)';
+  const { t } = useTranslation();
+  const title = row.title ?? t('serp.noTitle', { defaultValue: '(no title)' });
+  const desc = row.metaDescription ?? t('serp.noMeta', { defaultValue: '(no meta description)' });
   const titlePx = row.title ? measurePixelWidth(row.title, 15) : 0;
   const descPx = row.metaDescription ? measurePixelWidth(row.metaDescription, 13) : 0;
   const titleLimit = 600;
   const descLimit = 990;
+  const charsSuffix = t('serp.chars', { defaultValue: 'chars' });
 
   return (
     <div className="p-5">
@@ -2057,16 +2071,16 @@ function SerpSnippet({ row }: { row: CrawlUrlRow }) {
         </div>
       </div>
       <div className="mt-4 grid grid-cols-2 gap-3 text-[11px]">
-        <InfoLine label="Title pixel width" value={`${titlePx}px / ${titleLimit}px`} warn={titlePx > titleLimit} />
-        <InfoLine label="Title length" value={String(row.titleLength ?? 0) + ' chars'} />
+        <InfoLine label={t('serp.titlePixelWidth', { defaultValue: 'Title pixel width' })} value={`${titlePx}px / ${titleLimit}px`} warn={titlePx > titleLimit} />
+        <InfoLine label={t('serp.titleLength', { defaultValue: 'Title length' })} value={String(row.titleLength ?? 0) + ' ' + charsSuffix} />
         <InfoLine
-          label="Description pixel width"
+          label={t('serp.descriptionPixelWidth', { defaultValue: 'Description pixel width' })}
           value={`${descPx}px / ${descLimit}px`}
           warn={descPx > descLimit}
         />
         <InfoLine
-          label="Description length"
-          value={String(row.metaDescriptionLength ?? 0) + ' chars'}
+          label={t('serp.descriptionLength', { defaultValue: 'Description length' })}
+          value={String(row.metaDescriptionLength ?? 0) + ' ' + charsSuffix}
         />
       </div>
     </div>
@@ -2291,6 +2305,8 @@ function CookiesView({
   row: CrawlUrlRow;
   headers: { name: string; value: string }[];
 }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const cookies: ParsedCookie[] = [];
   for (const h of headers) {
     if (h.name.toLowerCase() !== 'set-cookie') continue;
@@ -2303,11 +2319,11 @@ function CookiesView({
   if (cookies.length === 0) {
     return (
       <div className="p-4 text-[11px] text-surface-500">
-        This page did not set any cookies (no <span className="font-mono">Set-Cookie</span> response headers).
+        {t('cookies.emptyPrefix', { defaultValue: 'This page did not set any cookies (no' })}{' '}
+        <span className="font-mono">Set-Cookie</span>{' '}
+        {t('cookies.emptySuffix', { defaultValue: 'response headers).' })}
         <div className="mt-2 text-[10px] text-surface-600">
-          Note: only first-party cookies set by the page itself are listed here.
-          Cookies set by third-party scripts (analytics, ads) are set in the
-          browser at runtime and are not visible to a static crawler.
+          {t('cookies.emptyNote', { defaultValue: 'Note: only first-party cookies set by the page itself are listed here. Cookies set by third-party scripts (analytics, ads) are set in the browser at runtime and are not visible to a static crawler.' })}
         </div>
       </div>
     );
@@ -2317,31 +2333,31 @@ function CookiesView({
     <div className="p-3">
       <div className="mb-2 flex flex-wrap gap-3 text-[11px] text-surface-400">
         <span>
-          <span className="font-medium text-surface-200">{cookies.length}</span> cookies set
+          <span className="font-medium text-surface-200">{cookies.length}</span> {t('cookies.cookiesSet', { defaultValue: 'cookies set' })}
         </span>
         {row.cookiesInsecure > 0 && (
           <span className="text-amber-400">
-            {row.cookiesInsecure} missing <code>Secure</code>
+            {t('cookies.missing', { defaultValue: '{{n}} missing', n: row.cookiesInsecure })} <code>Secure</code>
           </span>
         )}
         {row.cookiesNoHttpOnly > 0 && (
           <span className="text-amber-400">
-            {row.cookiesNoHttpOnly} missing <code>HttpOnly</code>
+            {t('cookies.missing', { defaultValue: '{{n}} missing', n: row.cookiesNoHttpOnly })} <code>HttpOnly</code>
           </span>
         )}
         {row.cookiesNoSameSite > 0 && (
           <span className="text-amber-400">
-            {row.cookiesNoSameSite} missing <code>SameSite</code>
+            {t('cookies.missing', { defaultValue: '{{n}} missing', n: row.cookiesNoSameSite })} <code>SameSite</code>
           </span>
         )}
       </div>
       <table className="w-full text-[11px]">
         <thead className="sticky top-0 bg-surface-900">
           <tr className="text-surface-400">
-            <th className="py-1 pr-3 text-left font-medium">Name</th>
-            <th className="py-1 pr-3 text-left font-medium">Domain</th>
-            <th className="py-1 pr-3 text-left font-medium">Path</th>
-            <th className="py-1 pr-3 text-left font-medium">Expires</th>
+            <th className="py-1 pr-3 text-left font-medium">{translateLabel('Name', lang)}</th>
+            <th className="py-1 pr-3 text-left font-medium">{translateLabel('Domain', lang)}</th>
+            <th className="py-1 pr-3 text-left font-medium">{translateLabel('Path', lang)}</th>
+            <th className="py-1 pr-3 text-left font-medium">{translateLabel('Expires', lang)}</th>
             <th className="py-1 pr-3 text-center font-medium">Secure</th>
             <th className="py-1 pr-3 text-center font-medium">HttpOnly</th>
             <th className="py-1 text-left font-medium">SameSite</th>
@@ -2428,6 +2444,7 @@ function StructuredDataView({
   urlId: number | null;
   row: CrawlUrlRow;
 }) {
+  const { t } = useTranslation();
   const [src, setSrc] = useState<UrlSourceResult | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -2467,31 +2484,31 @@ function StructuredDataView({
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
-          <span className="font-medium text-surface-200">{row.schemaBlockCount}</span> JSON-LD
-          {row.schemaBlockCount === 1 ? ' block' : ' blocks'}
+          <span className="font-medium text-surface-200">{row.schemaBlockCount}</span> JSON-LD{' '}
+          {t('structured.blocks', { defaultValue: 'block(s)' })}
         </span>
         {row.schemaInvalidCount > 0 && (
-          <span className="text-amber-400">{row.schemaInvalidCount} invalid</span>
+          <span className="text-amber-400">{t('structured.invalid', { defaultValue: '{{n}} invalid', n: row.schemaInvalidCount })}</span>
         )}
         <span>
-          <span className="font-medium text-surface-200">{row.microdataCount}</span> microdata items
+          <span className="font-medium text-surface-200">{row.microdataCount}</span> {t('structured.microdataItems', { defaultValue: 'microdata items' })}
         </span>
         <span>
-          <span className="font-medium text-surface-200">{row.rdfaCount}</span> RDFa attrs
+          <span className="font-medium text-surface-200">{row.rdfaCount}</span> {t('structured.rdfaAttrs', { defaultValue: 'RDFa attrs' })}
         </span>
       </div>
 
       <div className="flex-1 overflow-auto p-3">
         {!hasAnyData && (
           <div className="text-[11px] text-surface-500">
-            No structured data declared on this page (no JSON-LD, microdata or RDFa).
+            {t('structured.empty', { defaultValue: 'No structured data declared on this page (no JSON-LD, microdata or RDFa).' })}
           </div>
         )}
 
         {types.length > 0 && (
           <div className="mb-3">
             <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">
-              Schema types
+              {t('structured.schemaTypes', { defaultValue: 'Schema types' })}
             </div>
             <div className="flex flex-wrap gap-1.5">
               {types.map((t) => (
@@ -2507,13 +2524,13 @@ function StructuredDataView({
         )}
 
         {loading && blocks.length === 0 && (
-          <div className="text-[11px] text-surface-500">Loading source…</div>
+          <div className="text-[11px] text-surface-500">{t('structured.loadingSource', { defaultValue: 'Loading source…' })}</div>
         )}
 
         {blocks.length > 0 && (
           <div className="space-y-3">
             <div className="text-[10px] uppercase tracking-wide text-surface-500">
-              JSON-LD blocks ({blocks.length})
+              {t('structured.jsonLdBlocks', { defaultValue: 'JSON-LD blocks' })} ({blocks.length})
             </div>
             {blocks.map((b) => (
               <div
@@ -2521,11 +2538,11 @@ function StructuredDataView({
                 className="rounded border border-surface-800 bg-surface-900/40"
               >
                 <div className="flex items-center gap-2 border-b border-surface-800 px-2 py-1 text-[10px] text-surface-400">
-                  <span className="font-mono">Block #{b.index + 1}</span>
+                  <span className="font-mono">{t('structured.blockN', { defaultValue: 'Block #{{n}}', n: b.index + 1 })}</span>
                   {b.ok ? (
-                    <span className="text-emerald-400">parsed OK</span>
+                    <span className="text-emerald-400">{t('structured.parsedOk', { defaultValue: 'parsed OK' })}</span>
                   ) : (
-                    <span className="text-amber-400">parse failed</span>
+                    <span className="text-amber-400">{t('structured.parseFailed', { defaultValue: 'parse failed' })}</span>
                   )}
                 </div>
                 <pre className="overflow-auto p-2 font-mono text-[10.5px] leading-[14px] text-surface-200">
@@ -2540,10 +2557,9 @@ function StructuredDataView({
 
         {!loading && blocks.length === 0 && row.schemaBlockCount > 0 && (
           <div className="mt-2 text-[10px] text-surface-600">
-            JSON-LD blocks were detected during crawl but the page body
-            snapshot is unavailable. Re-crawl with{' '}
-            <span className="font-mono">storeBodySnapshots</span> enabled to
-            view the raw payload.
+            {t('structured.snapshotUnavailable1', { defaultValue: 'JSON-LD blocks were detected during crawl but the page body snapshot is unavailable. Re-crawl with' })}{' '}
+            <span className="font-mono">storeBodySnapshots</span>{' '}
+            {t('structured.snapshotUnavailable2', { defaultValue: 'enabled to view the raw payload.' })}
           </div>
         )}
       </div>
@@ -2558,6 +2574,8 @@ function ImagesView({
   urlId: number | null;
   row: CrawlUrlRow;
 }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [rows, setRows] = useState<UrlPageImageRow[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -2582,12 +2600,14 @@ function ImagesView({
   }, [urlId]);
 
   if (loading && rows.length === 0) {
-    return <div className="p-4 text-[11px] text-surface-500">Loading images…</div>;
+    return <div className="p-4 text-[11px] text-surface-500">{t('imagesView.loading', { defaultValue: 'Loading images…' })}</div>;
   }
   if (rows.length === 0) {
     return (
       <div className="p-4 text-[11px] text-surface-500">
-        No <code>&lt;img&gt;</code> tags discovered on this page.
+        {t('imagesView.emptyPrefix', { defaultValue: 'No' })}{' '}
+        <code>&lt;img&gt;</code>{' '}
+        {t('imagesView.emptySuffix', { defaultValue: 'tags discovered on this page.' })}
       </div>
     );
   }
@@ -2604,22 +2624,22 @@ function ImagesView({
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
-          <span className="font-medium text-surface-200">{rows.length}</span> images
+          <span className="font-medium text-surface-200">{rows.length}</span> {t('imagesView.images', { defaultValue: 'images' })}
         </span>
         {missingAlt > 0 && (
-          <span className="text-amber-400">{missingAlt} missing alt</span>
+          <span className="text-amber-400">{t('imagesView.missingAlt', { defaultValue: '{{n}} missing alt', n: missingAlt })}</span>
         )}
         {emptyAlt > 0 && (
-          <span className="text-surface-300">{emptyAlt} empty alt (decorative)</span>
+          <span className="text-surface-300">{t('imagesView.emptyAlt', { defaultValue: '{{n}} empty alt (decorative)', n: emptyAlt })}</span>
         )}
         {externalCount > 0 && (
           <span>
-            <span className="font-medium text-surface-200">{externalCount}</span> external
+            <span className="font-medium text-surface-200">{externalCount}</span> {t('imagesView.external', { defaultValue: 'external' })}
           </span>
         )}
         {largeCount > 0 && (
           <span className="text-amber-400">
-            {largeCount} &gt; 100&nbsp;KB
+            {t('imagesView.largeCount', { defaultValue: '{{n}} > 100 KB', n: largeCount })}
           </span>
         )}
         {row.imagesCount > rows.length && (
@@ -2632,12 +2652,12 @@ function ImagesView({
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-surface-900">
             <tr className="text-surface-400">
-              <th className="py-1 pr-3 text-left font-medium">Source</th>
-              <th className="py-1 pr-3 text-left font-medium">Alt</th>
+              <th className="py-1 pr-3 text-left font-medium">{translateLabel('Source', lang)}</th>
+              <th className="py-1 pr-3 text-left font-medium">{translateLabel('Alt', lang)}</th>
               <th className="py-1 pr-3 text-right font-medium">W</th>
               <th className="py-1 pr-3 text-right font-medium">H</th>
-              <th className="py-1 pr-3 text-right font-medium">Size</th>
-              <th className="py-1 text-left font-medium">Scope</th>
+              <th className="py-1 pr-3 text-right font-medium">{translateLabel('Size', lang)}</th>
+              <th className="py-1 text-left font-medium">{translateLabel('Scope', lang)}</th>
             </tr>
           </thead>
           <tbody>
@@ -2806,6 +2826,8 @@ function ResourcesView({
   urlId: number | null;
   row: CrawlUrlRow;
 }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [src, setSrc] = useState<UrlSourceResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<
@@ -2833,14 +2855,16 @@ function ResourcesView({
   }, [urlId]);
 
   if (loading && !src) {
-    return <div className="p-4 text-[11px] text-surface-500">Loading source…</div>;
+    return <div className="p-4 text-[11px] text-surface-500">{t('resources.loadingSource', { defaultValue: 'Loading source…' })}</div>;
   }
   if (!src || src.body === null) {
     return (
       <div className="p-4 text-[11px] text-surface-500">
-        Resources view requires a stored HTML body snapshot.
+        {t('resources.requiresSnapshot', { defaultValue: 'Resources view requires a stored HTML body snapshot.' })}
         <div className="mt-1 text-[10px] text-surface-600">
-          Re-crawl with the <span className="font-mono">storeBodySnapshots</span> setting enabled.
+          {t('resources.recrawlPrefix', { defaultValue: 'Re-crawl with the' })}{' '}
+          <span className="font-mono">storeBodySnapshots</span>{' '}
+          {t('resources.recrawlSuffix', { defaultValue: 'setting enabled.' })}
         </div>
       </div>
     );
@@ -2885,21 +2909,21 @@ function ResourcesView({
                 : 'border-surface-700 text-surface-300 hover:bg-surface-800',
             )}
           >
-            {f.label} <span className="text-surface-500">({f.count})</span>
+            {translateLabel(f.label, lang)} <span className="text-surface-500">({f.count})</span>
           </button>
         ))}
       </div>
       <div className="flex-1 overflow-auto p-3">
         {filtered.length === 0 ? (
-          <div className="text-[11px] text-surface-500">No resources match this filter.</div>
+          <div className="text-[11px] text-surface-500">{t('resources.noMatch', { defaultValue: 'No resources match this filter.' })}</div>
         ) : (
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 bg-surface-900">
               <tr className="text-surface-400">
-                <th className="w-24 py-1 pr-3 text-left font-medium">Type</th>
+                <th className="w-24 py-1 pr-3 text-left font-medium">{translateLabel('Type', lang)}</th>
                 <th className="py-1 pr-3 text-left font-medium">URL</th>
                 <th className="w-16 py-1 pr-3 text-center font-medium">3rd-party</th>
-                <th className="py-1 text-left font-medium">Hints</th>
+                <th className="py-1 text-left font-medium">{translateLabel('Hints', lang)}</th>
               </tr>
             </thead>
             <tbody>
@@ -2972,6 +2996,8 @@ interface MultiPage {
  * source URL of each image is unambiguous.
  */
 function MultiImagesView({ pages }: { pages: MultiPage[] }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [byPage, setByPage] = useState<Map<number, UrlPageImageRow[]>>(new Map());
   const [loading, setLoading] = useState(false);
   const key = pages.map((p) => p.id).join(',');
@@ -3004,7 +3030,7 @@ function MultiImagesView({ pages }: { pages: MultiPage[] }) {
   }, [key]);
 
   if (loading && byPage.size === 0) {
-    return <div className="p-4 text-[11px] text-surface-500">Loading images…</div>;
+    return <div className="p-4 text-[11px] text-surface-500">{t('imagesView.loading', { defaultValue: 'Loading images…' })}</div>;
   }
   let total = 0;
   let missingAlt = 0;
@@ -3023,7 +3049,7 @@ function MultiImagesView({ pages }: { pages: MultiPage[] }) {
   if (total === 0) {
     return (
       <div className="p-4 text-[11px] text-surface-500">
-        No <code>&lt;img&gt;</code> tags discovered across the {pages.length} selected pages.
+        {t('imagesView.multiEmpty', { defaultValue: 'No <img> tags discovered across the {{n}} selected pages.', n: pages.length })}
       </div>
     );
   }
@@ -3033,30 +3059,29 @@ function MultiImagesView({ pages }: { pages: MultiPage[] }) {
       <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
           <span className="font-medium text-surface-200">{total.toLocaleString()}</span>{' '}
-          images across <span className="font-medium text-surface-200">{pages.length}</span>{' '}
-          pages
+          {t('imagesView.multiSummary', { defaultValue: 'images across {{n}} pages', n: pages.length })}
         </span>
-        {missingAlt > 0 && <span className="text-amber-400">{missingAlt} missing alt</span>}
+        {missingAlt > 0 && <span className="text-amber-400">{t('imagesView.missingAlt', { defaultValue: '{{n}} missing alt', n: missingAlt })}</span>}
         {externalCount > 0 && (
           <span>
-            <span className="font-medium text-surface-200">{externalCount}</span> external
+            <span className="font-medium text-surface-200">{externalCount}</span> {t('imagesView.external', { defaultValue: 'external' })}
           </span>
         )}
         {largeCount > 0 && (
-          <span className="text-amber-400">{largeCount} &gt; 100&nbsp;KB</span>
+          <span className="text-amber-400">{t('imagesView.largeCount', { defaultValue: '{{n}} > 100 KB', n: largeCount })}</span>
         )}
       </div>
       <div className="flex-1 overflow-auto p-3">
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-surface-900">
             <tr className="text-surface-400">
-              <th className="py-1 pr-3 text-left font-medium">Page</th>
-              <th className="py-1 pr-3 text-left font-medium">Source</th>
-              <th className="py-1 pr-3 text-left font-medium">Alt</th>
+              <th className="py-1 pr-3 text-left font-medium">{translateLabel('Page', lang)}</th>
+              <th className="py-1 pr-3 text-left font-medium">{translateLabel('Source', lang)}</th>
+              <th className="py-1 pr-3 text-left font-medium">{translateLabel('Alt', lang)}</th>
               <th className="py-1 pr-3 text-right font-medium">W</th>
               <th className="py-1 pr-3 text-right font-medium">H</th>
-              <th className="py-1 pr-3 text-right font-medium">Size</th>
-              <th className="py-1 text-left font-medium">Scope</th>
+              <th className="py-1 pr-3 text-right font-medium">{translateLabel('Size', lang)}</th>
+              <th className="py-1 text-left font-medium">{translateLabel('Scope', lang)}</th>
             </tr>
           </thead>
           <tbody>
@@ -3133,6 +3158,8 @@ function MultiImagesView({ pages }: { pages: MultiPage[] }) {
  * everything into one flat table with a leading Page column.
  */
 function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [byPage, setByPage] = useState<Map<number, ResourceEntry[]>>(new Map());
   const [missingSnapshots, setMissingSnapshots] = useState<number>(0);
   const [loading, setLoading] = useState(false);
@@ -3179,7 +3206,7 @@ function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
   }, [key]);
 
   if (loading && byPage.size === 0 && missingSnapshots === 0) {
-    return <div className="p-4 text-[11px] text-surface-500">Loading resources…</div>;
+    return <div className="p-4 text-[11px] text-surface-500">{t('resources.loadingResources', { defaultValue: 'Loading resources…' })}</div>;
   }
 
   const allEntries: { page: MultiPage; entry: ResourceEntry }[] = [];
@@ -3215,9 +3242,11 @@ function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
   if (allEntries.length === 0 && missingSnapshots === pages.length) {
     return (
       <div className="p-4 text-[11px] text-surface-500">
-        Resources view requires a stored HTML body snapshot for each page.
+        {t('resources.multiRequiresSnapshot', { defaultValue: 'Resources view requires a stored HTML body snapshot for each page.' })}
         <div className="mt-1 text-[10px] text-surface-600">
-          Re-crawl with the <span className="font-mono">storeBodySnapshots</span> setting enabled.
+          {t('resources.recrawlPrefix', { defaultValue: 'Re-crawl with the' })}{' '}
+          <span className="font-mono">storeBodySnapshots</span>{' '}
+          {t('resources.recrawlSuffix', { defaultValue: 'setting enabled.' })}
         </div>
       </div>
     );
@@ -3237,24 +3266,24 @@ function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
                 : 'border-surface-700 text-surface-300 hover:bg-surface-800',
             )}
           >
-            {f.label} <span className="text-surface-500">({f.count})</span>
+            {translateLabel(f.label, lang)} <span className="text-surface-500">({f.count})</span>
           </button>
         ))}
         {missingSnapshots > 0 && (
           <span className="ml-2 text-[10px] text-amber-400">
-            {missingSnapshots} of {pages.length} pages have no stored body
+            {t('resources.missingSnapshots', { defaultValue: '{{missing}} of {{total}} pages have no stored body', missing: missingSnapshots, total: pages.length })}
           </span>
         )}
       </div>
       <div className="flex-1 overflow-auto p-3">
         {filtered.length === 0 ? (
-          <div className="text-[11px] text-surface-500">No resources match this filter.</div>
+          <div className="text-[11px] text-surface-500">{t('resources.noMatch', { defaultValue: 'No resources match this filter.' })}</div>
         ) : (
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 bg-surface-900">
               <tr className="text-surface-400">
-                <th className="py-1 pr-3 text-left font-medium">Page</th>
-                <th className="w-24 py-1 pr-3 text-left font-medium">Type</th>
+                <th className="py-1 pr-3 text-left font-medium">{translateLabel('Page', lang)}</th>
+                <th className="w-24 py-1 pr-3 text-left font-medium">{translateLabel('Type', lang)}</th>
                 <th className="py-1 pr-3 text-left font-medium">URL</th>
                 <th className="w-16 py-1 pr-3 text-center font-medium">3rd-party</th>
               </tr>
@@ -3304,6 +3333,8 @@ function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
 }
 
 function ExtractedDataView({ row }: { row: CrawlUrlRow }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const extraction = row.extractionResults
     ? safeJsonParse(row.extractionResults)
     : null;
@@ -3321,10 +3352,12 @@ function ExtractedDataView({ row }: { row: CrawlUrlRow }) {
   if (!hasExtraction && !hasSearch) {
     return (
       <div className="p-4 text-[11px] text-surface-500">
-        No custom extraction rules or search terms have produced data for this page.
+        {t('extraction.empty1', { defaultValue: 'No custom extraction rules or search terms have produced data for this page.' })}
         <div className="mt-2 text-[10px] text-surface-600">
-          Configure rules in <span className="font-mono">Settings → Extraction</span> or search
-          terms in <span className="font-mono">Settings → Custom Search</span>, then re-crawl.
+          {t('extraction.empty2', { defaultValue: 'Configure rules in' })}{' '}
+          <span className="font-mono">Settings → Extraction</span>{' '}
+          {t('extraction.empty3', { defaultValue: 'or search terms in' })}{' '}
+          <span className="font-mono">Settings → Custom Search</span>, {t('extraction.empty4', { defaultValue: 'then re-crawl.' })}
         </div>
       </div>
     );
@@ -3335,13 +3368,13 @@ function ExtractedDataView({ row }: { row: CrawlUrlRow }) {
       {hasExtraction && (
         <section>
           <div className="mb-2 text-[10px] uppercase tracking-wide text-surface-500">
-            Custom Extraction
+            {t('extraction.customExtraction', { defaultValue: 'Custom Extraction' })}
           </div>
           <table className="w-full text-[11px]">
             <thead className="bg-surface-900">
               <tr className="text-surface-400">
-                <th className="w-64 py-1 pr-3 text-left font-medium">Rule</th>
-                <th className="py-1 text-left font-medium">Value</th>
+                <th className="w-64 py-1 pr-3 text-left font-medium">{translateLabel('Rule', lang)}</th>
+                <th className="py-1 text-left font-medium">{translateLabel('Value', lang)}</th>
               </tr>
             </thead>
             <tbody>
@@ -3361,13 +3394,13 @@ function ExtractedDataView({ row }: { row: CrawlUrlRow }) {
       {hasSearch && (
         <section>
           <div className="mb-2 text-[10px] uppercase tracking-wide text-surface-500">
-            Custom Search hits
+            {t('extraction.customSearchHits', { defaultValue: 'Custom Search hits' })}
           </div>
           <table className="w-full text-[11px]">
             <thead className="bg-surface-900">
               <tr className="text-surface-400">
-                <th className="w-64 py-1 pr-3 text-left font-medium">Term</th>
-                <th className="py-1 text-right font-medium">Hits</th>
+                <th className="w-64 py-1 pr-3 text-left font-medium">{translateLabel('Term', lang)}</th>
+                <th className="py-1 text-right font-medium">{translateLabel('Hits', lang)}</th>
               </tr>
             </thead>
             <tbody>
@@ -3440,28 +3473,24 @@ function parseHeadings(json: string | null): HeadingEntry[] {
 }
 
 function OutlineView({ row }: { row: CrawlUrlRow }) {
+  const { t } = useTranslation();
   const outline = parseHeadings(row.headings);
 
   if (outline.length === 0) {
     return (
       <div className="p-4 text-[11px] text-surface-500">
-        This page has no detected headings (no <code>&lt;h1&gt;</code>–
-        <code>&lt;h6&gt;</code> elements). Pages without headings are
-        harder for screen readers to navigate and may rank poorly for
-        long-form queries.
+        {t('outline.emptyPrefix', { defaultValue: 'This page has no detected headings (no' })}{' '}
+        <code>&lt;h1&gt;</code>–<code>&lt;h6&gt;</code>{' '}
+        {t('outline.emptySuffix', { defaultValue: 'elements). Pages without headings are harder for screen readers to navigate and may rank poorly for long-form queries.' })}
       </div>
     );
   }
 
-  // Skip-detection: a heading skips a level when its level is more than
-  // one greater than the previous heading's level (h1 → h3 etc.). The
-  // very first heading isn't checked because the spec doesn't require
-  // a strict h1 start (<main>-scoped outlines are valid).
   let prevLevel: number | null = null;
   const annotated = outline.map((h) => {
     const skipped =
       prevLevel !== null && h.level > prevLevel + 1
-        ? `Skipped: previous was h${prevLevel}`
+        ? t('outline.skipped', { defaultValue: 'Skipped: previous was h{{n}}', n: prevLevel })
         : null;
     prevLevel = h.level;
     return { ...h, skipped };
@@ -3478,7 +3507,7 @@ function OutlineView({ row }: { row: CrawlUrlRow }) {
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
-          <span className="font-medium text-surface-200">{outline.length}</span> headings
+          <span className="font-medium text-surface-200">{outline.length}</span> {t('outline.headings', { defaultValue: 'headings' })}
         </span>
         {(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const).map((k) =>
           counts[k] && counts[k] > 0 ? (
@@ -3489,11 +3518,11 @@ function OutlineView({ row }: { row: CrawlUrlRow }) {
         )}
         {skippedCount > 0 && (
           <span className="text-amber-400">
-            {skippedCount} skipped level{skippedCount === 1 ? '' : 's'}
+            {t('outline.skippedCount', { defaultValue: '{{n}} skipped level(s)', n: skippedCount })}
           </span>
         )}
         {outline.length === 200 && (
-          <span className="text-surface-500">(capped at 200)</span>
+          <span className="text-surface-500">{t('outline.capped', { defaultValue: '(capped at 200)' })}</span>
         )}
       </div>
       <div className="flex-1 overflow-auto p-3">
@@ -3524,7 +3553,7 @@ function OutlineView({ row }: { row: CrawlUrlRow }) {
               </span>
               <span className="flex-1 break-words text-surface-100">
                 {h.text || (
-                  <span className="italic text-surface-600">(empty heading)</span>
+                  <span className="italic text-surface-600">{t('outline.emptyHeading', { defaultValue: '(empty heading)' })}</span>
                 )}
                 {h.skipped && (
                   <span className="ml-2 text-[10px] text-amber-400">

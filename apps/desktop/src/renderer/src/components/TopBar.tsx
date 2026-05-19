@@ -1,18 +1,19 @@
 import { useState } from 'react';
 import { Play, Square, Pause, Eraser, ChevronDown, Settings, History, Plus } from 'lucide-react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type { CrawlScope } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { clearCrawlWithConfirm } from '../utils/clearCrawl.js';
 
-const SCOPE_OPTIONS: { value: CrawlScope; label: string; hint: string }[] = [
-  { value: 'subdomain', label: 'Subdomain', hint: 'Same subdomain only' },
-  { value: 'subfolder', label: 'Subfolder', hint: 'Only under the start URL path' },
-  { value: 'all-subdomains', label: 'All Subdomains', hint: '*.example.com' },
-  { value: 'exact-url', label: 'Exact URL', hint: 'Single URL, no link following' },
-];
-
 export function TopBar() {
+  const { t } = useTranslation();
+  const scopeOptions: { value: CrawlScope; label: string; hint: string }[] = [
+    { value: 'subdomain', label: t('topbar.scope.subdomain'), hint: t('topbar.scope.subdomainHint') },
+    { value: 'subfolder', label: t('topbar.scope.subfolder'), hint: t('topbar.scope.subfolderHint') },
+    { value: 'all-subdomains', label: t('topbar.scope.allSubdomains'), hint: t('topbar.scope.allSubdomainsHint') },
+    { value: 'exact-url', label: t('topbar.scope.exactUrl'), hint: t('topbar.scope.exactUrlHint') },
+  ];
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
   // Scalar subscriptions instead of the full `progress` object — TopBar
@@ -49,12 +50,12 @@ export function TopBar() {
     summaryTotal > 0 ||
     overviewInternalTotal > 0 ||
     overviewExternalTotal > 0;
-  const activeScope = SCOPE_OPTIONS.find((o) => o.value === config.scope)!;
+  const activeScope = scopeOptions.find((o) => o.value === config.scope)!;
 
   async function start() {
     const trimmed = config.startUrl.trim();
     if (!trimmed) {
-      setError('Please enter a starting URL.');
+      setError(t('topbar.errorEmptyUrl'));
       return;
     }
     addRecentUrl(trimmed);
@@ -101,13 +102,13 @@ export function TopBar() {
   }
 
   async function addManualUrl() {
-    const raw = window.prompt('Add URL to queue:', '');
+    const raw = window.prompt(t('topbar.addUrlPrompt'), '');
     if (!raw) return;
     const trimmed = raw.trim();
     if (!trimmed) return;
     const r = await window.freecrawl.crawlAddUrl(trimmed);
     if (!r.accepted) {
-      setError('URL not accepted (invalid format, already crawled at full depth, or queue full).');
+      setError(t('topbar.errorAddUrl'));
     }
   }
 
@@ -120,7 +121,7 @@ export function TopBar() {
       <div className="relative flex-1">
         <input
           className="input w-full"
-          placeholder="https://example.com"
+          placeholder={t('topbar.urlPlaceholder')}
           value={config.startUrl}
           onChange={(e) => setConfig({ startUrl: e.target.value })}
           onFocus={() => {
@@ -142,7 +143,7 @@ export function TopBar() {
             <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded border border-surface-700 bg-surface-900 shadow-xl">
               <div className="flex items-center gap-1.5 border-b border-surface-800 px-3 py-1.5 text-[10px] uppercase tracking-wider text-surface-500">
                 <History className="h-3 w-3" />
-                Recent URLs
+                {t('topbar.recentUrls')}
               </div>
               {recentUrls.map((url) => (
                 <button
@@ -177,7 +178,7 @@ export function TopBar() {
           <>
             <div className="fixed inset-0 z-10" onClick={() => setScopeOpen(false)} />
             <div className="absolute right-0 top-full z-20 mt-1 w-56 rounded border border-surface-700 bg-surface-900 shadow-xl">
-              {SCOPE_OPTIONS.map((opt) => (
+              {scopeOptions.map((opt) => (
                 <button
                   key={opt.value}
                   className={clsx(
@@ -204,47 +205,47 @@ export function TopBar() {
             <button
               className="btn btn-ghost border border-amber-700/60 text-amber-300"
               onClick={resumeCrawl}
-              title="Resume crawl"
+              title={t('topbar.resumeTooltip')}
             >
-              <Play className="h-3.5 w-3.5" /> Resume
+              <Play className="h-3.5 w-3.5" /> {t('topbar.resume')}
             </button>
           ) : (
             <button
               className="btn btn-ghost border border-surface-700"
               onClick={pauseCrawl}
-              title="Pause crawl (in-flight requests will finish)"
+              title={t('topbar.pauseTooltip')}
             >
-              <Pause className="h-3.5 w-3.5" /> Pause
+              <Pause className="h-3.5 w-3.5" /> {t('topbar.pause')}
             </button>
           )}
           <button className="btn btn-ghost border border-red-700/50 text-red-300" onClick={stop}>
-            <Square className="h-3.5 w-3.5" /> Stop
+            <Square className="h-3.5 w-3.5" /> {t('topbar.stop')}
           </button>
           <button
             className="btn btn-ghost border border-surface-700"
             onClick={addManualUrl}
-            title="Inject a URL into the running queue"
+            title={t('topbar.addUrlTooltip')}
           >
-            <Plus className="h-3.5 w-3.5" /> Add URL
+            <Plus className="h-3.5 w-3.5" /> {t('topbar.addUrl')}
           </button>
         </>
       ) : (
         <button className="btn btn-primary" onClick={start}>
-          <Play className="h-3.5 w-3.5" /> Start
+          <Play className="h-3.5 w-3.5" /> {t('topbar.start')}
         </button>
       )}
       <button
         className="btn btn-ghost border border-surface-700"
         onClick={clearCrawl}
         disabled={running || !hasData}
-        title={!hasData ? 'Nothing to clear' : undefined}
+        title={!hasData ? t('topbar.nothingToClear') : undefined}
       >
-        <Eraser className="h-3.5 w-3.5" /> Clear
+        <Eraser className="h-3.5 w-3.5" /> {t('topbar.clear')}
       </button>
       <button
         className="btn btn-ghost border border-surface-700 px-2 py-1.5"
         onClick={() => setSettingsOpen(true)}
-        title="Settings"
+        title={t('topbar.settings')}
         disabled={running}
       >
         <Settings className="h-3.5 w-3.5" />

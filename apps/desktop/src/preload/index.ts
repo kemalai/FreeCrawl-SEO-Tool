@@ -239,6 +239,9 @@ const api: FreeCrawlApi = {
   scheduleGet: (): Promise<ScheduleEntry | null> => ipcRenderer.invoke(IPC.scheduleGet),
   scheduleSet: (spec: ScheduleSpec | null): Promise<ScheduleEntry | null> =>
     ipcRenderer.invoke(IPC.scheduleSet, spec),
+  pickDirectory: (input?: { title?: string; defaultPath?: string }): Promise<string | null> =>
+    ipcRenderer.invoke(IPC.pickDirectory, input),
+  defaultProjectDir: (): Promise<string> => ipcRenderer.invoke(IPC.defaultProjectDir),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
   onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),

@@ -125,6 +125,13 @@ export const IPC = {
   prefsImportSettings: 'prefs:import-settings',
   scheduleGet: 'schedule:get',
   scheduleSet: 'schedule:set',
+  /** Open a native directory picker. Used by Settings → Storage to let the
+   *  user choose the default folder for new `.seoproject` files. */
+  pickDirectory: 'app:pick-directory',
+  /** Returns the resolved default project save directory — the user's
+   *  `projectSaveDir` pref when set, otherwise the OS Documents folder.
+   *  Used by Settings → Storage to display the active path. */
+  defaultProjectDir: 'app:default-project-dir',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -949,6 +956,10 @@ export interface FreeCrawlApi {
   /** Save / update the schedule for the currently-loaded project. Passing
    *  `null` removes the schedule entirely. */
   scheduleSet(spec: ScheduleSpec | null): Promise<ScheduleEntry | null>;
+  /** Open a native directory picker. Returns the chosen path or null on cancel. */
+  pickDirectory(input?: { title?: string; defaultPath?: string }): Promise<string | null>;
+  /** Resolved default save directory for new projects (Documents fallback when unset). */
+  defaultProjectDir(): Promise<string>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onLogsBatch(cb: (entries: LogEntry[]) => void): () => void;
   onLogsBusy(cb: (busy: boolean) => void): () => void;

@@ -1,4 +1,5 @@
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../store.js';
 import { usePerfMeter } from '../hooks/usePerfMeter.js';
 import { useMemoryMonitor } from '../hooks/useMemoryMonitor.js';
@@ -101,6 +102,7 @@ function lagClass(lagMs: number): string {
 }
 
 export function StatsBar() {
+  const { t } = useTranslation();
   const progress = useAppStore((s) => s.progress);
   const error = useAppStore((s) => s.error);
   const setError = useAppStore((s) => s.setError);
@@ -123,15 +125,15 @@ export function StatsBar() {
 
   return (
     <div className="flex shrink-0 items-center gap-5 border-t border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
-      <Stat label="Discovered" value={progress?.discovered ?? 0} />
-      <Stat label="Crawled" value={progress?.crawled ?? 0} />
-      <Stat label="Pending" value={progress?.pending ?? 0} />
-      <Stat label="Failed" value={progress?.failed ?? 0} />
-      <Stat label="URL/s" value={progress?.urlsPerSecond?.toFixed(1) ?? '0.0'} />
-      <Stat label="Avg resp" value={`${progress?.avgResponseTimeMs ?? 0}ms`} />
-      <Stat label="Elapsed" value={elapsedStr} />
+      <Stat label={t('stats.discovered')} value={progress?.discovered ?? 0} />
+      <Stat label={t('stats.crawled')} value={progress?.crawled ?? 0} />
+      <Stat label={t('stats.pending')} value={progress?.pending ?? 0} />
+      <Stat label={t('stats.failed')} value={progress?.failed ?? 0} />
+      <Stat label={t('stats.urlPerSec')} value={progress?.urlsPerSecond?.toFixed(1) ?? '0.0'} />
+      <Stat label={t('stats.avgResp')} value={`${progress?.avgResponseTimeMs ?? 0}ms`} />
+      <Stat label={t('stats.elapsed')} value={elapsedStr} />
       <Stat
-        label="FPS"
+        label={t('stats.fps')}
         value={perf.fps}
         valueClassName={fpsClass(perf.fps)}
         title={
@@ -144,7 +146,7 @@ export function StatsBar() {
       />
       {perf.heapMb !== null && (
         <Stat
-          label="Heap"
+          label={t('stats.heap')}
           value={`${perf.heapMb} MB`}
           valueClassName={heapClass(perf.heapMb)}
           title="Renderer JS heap. >500 MB = warm, >1 GB = likely a listener / cache leak"
@@ -153,27 +155,27 @@ export function StatsBar() {
       {mem && (
         <>
           <Stat
-            label="RSS"
+            label={t('stats.rss')}
             value={formatBytes(mem.rss)}
             valueClassName={rssClass(mem.rss, mem.systemTotal)}
             title={`Main-process resident set size (Electron + workers). System total: ${formatBytes(mem.systemTotal)}.`}
           />
           <Stat
-            label="Sys Free"
+            label={t('stats.sysFree')}
             value={formatBytes(mem.systemFree)}
             valueClassName={systemFreeClass(mem.systemFree, mem.systemTotal)}
             title={`OS-reported free memory. < 10% of system total triggers swap; pause the crawl before that. System total: ${formatBytes(mem.systemTotal)}.`}
           />
           {perUrlCost !== null && (
             <Stat
-              label="Per URL"
+              label={t('stats.perUrl')}
               value={formatBytes(perUrlCost)}
               title={`Average bytes of RSS per crawled URL (${mem.urlsCrawled.toLocaleString()} URLs). Includes Electron overhead, so the marginal cost on real-world large crawls is typically lower.`}
             />
           )}
           {capacity !== null && (
             <Stat
-              label="Capacity"
+              label={t('stats.capacity')}
               value={formatCount(capacity)}
               title={`Estimated additional URLs that fit in remaining system memory at the current per-URL cost. Calc: systemFree / perUrlCost. Treat as an upper bound — sustained throughput is usually CPU-bound first.`}
             />
@@ -181,7 +183,7 @@ export function StatsBar() {
         </>
       )}
       <Stat
-        label="Lag"
+        label={t('stats.lag')}
         value={`${perf.inputLagMs}ms`}
         valueClassName={lagClass(perf.inputLagMs)}
         title={
@@ -198,18 +200,18 @@ export function StatsBar() {
           progress.paused ? (
             <span className="inline-flex items-center gap-1.5">
               <span className="h-2 w-2 rounded-full bg-amber-500" />
-              <span className="text-amber-400">Paused</span>
+              <span className="text-amber-400">{t('stats.paused')}</span>
             </span>
           ) : (
             <span className="inline-flex items-center gap-1.5">
               <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
-              <span className="text-emerald-400">Running</span>
+              <span className="text-emerald-400">{t('stats.running')}</span>
             </span>
           )
         ) : (
           <span className="inline-flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-surface-600" />
-            <span className="text-surface-500">Idle</span>
+            <span className="text-surface-500">{t('stats.idle')}</span>
           </span>
         )}
         {error && (
@@ -218,7 +220,7 @@ export function StatsBar() {
             onClick={() => setError(null)}
             title={error}
           >
-            ⚠ {error.length > 60 ? error.slice(0, 60) + '…' : error} (dismiss)
+            ⚠ {error.length > 60 ? error.slice(0, 60) + '…' : error} ({t('stats.dismiss')})
           </button>
         )}
       </div>

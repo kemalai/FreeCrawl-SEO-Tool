@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { X, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type { CrawlUrlRow, ExportTabularSection, UrlCategory } from '@freecrawl/shared-types';
 import { TAB_ORDER, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId } from '../tabs/columns.js';
+import { translateLabel } from '../i18n/labels.js';
 
 type Format = 'csv' | 'xlsx';
 
@@ -76,6 +78,8 @@ export function ExportDialog({
   defaultTab,
   selectedIds,
 }: ExportDialogProps) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const tabs = useMemo(() => buildExportableTabs(), []);
   const initialTabKey: TabKey = useMemo(() => {
     return tabs.find((t) => t.key === defaultTab)?.key ?? tabs[0]?.key ?? 'internal';
@@ -178,19 +182,19 @@ export function ExportDialog({
 
   const submit = async () => {
     if (orderedColumnList.length === 0) {
-      setStatus('Pick at least one column.');
+      setStatus(t('export.errorNoColumn', { defaultValue: 'Pick at least one column.' }));
       return;
     }
     if (pickedTabs.size === 0) {
-      setStatus('Pick at least one table.');
+      setStatus(t('export.errorNoTable', { defaultValue: 'Pick at least one table.' }));
       return;
     }
     setBusy(true);
     setStatus('');
     try {
       const sections: ExportTabularSection[] = tabs
-        .filter((t) => pickedTabs.has(t.key))
-        .map((t) => ({ label: t.label, category: t.category }));
+        .filter((tab) => pickedTabs.has(tab.key))
+        .map((tab) => ({ label: tab.label, category: tab.category }));
       const result = await window.freecrawl.exportTabular({
         format,
         sections,
@@ -206,13 +210,17 @@ export function ExportDialog({
         return;
       }
       setStatus(
-        `Exported ${result.rowsWritten.toLocaleString()} row${result.rowsWritten === 1 ? '' : 's'} to ${result.filePath}`,
+        t('export.successMsg', {
+          defaultValue: 'Exported {{count}} row(s) to {{path}}',
+          count: result.rowsWritten.toLocaleString(),
+          path: result.filePath,
+        }),
       );
       setBusy(false);
       setTimeout(() => onClose(), 700);
     } catch (err) {
       setBusy(false);
-      setStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+      setStatus(t('export.failedPrefix', { defaultValue: 'Export failed' }) + ': ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -226,11 +234,11 @@ export function ExportDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-surface-800 px-4 py-2.5">
-          <div className="text-sm font-semibold text-surface-100">Export</div>
+          <div className="text-sm font-semibold text-surface-100">{t('export.title', { defaultValue: 'Export' })}</div>
           <button
             className="rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-surface-100"
             onClick={onClose}
-            title="Close"
+            title={t('common.close', { defaultValue: 'Close' })}
           >
             <X className="h-4 w-4" />
           </button>
@@ -240,16 +248,16 @@ export function ExportDialog({
           <div className="grid grid-cols-2 gap-4">
             <section>
               <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-surface-400">
-                Tables
+                {t('export.tables', { defaultValue: 'Tables' })}
               </div>
               <div className="rounded border border-surface-800 bg-surface-950/50 p-2">
                 <div className="grid grid-cols-1 gap-1">
-                  {tabs.map((t) => {
-                    const checked = pickedTabs.has(t.key);
-                    const isDefault = t.key === initialTabKey;
+                  {tabs.map((tab) => {
+                    const checked = pickedTabs.has(tab.key);
+                    const isDefault = tab.key === initialTabKey;
                     return (
                       <label
-                        key={t.key}
+                        key={tab.key}
                         className={clsx(
                           'flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-[12px]',
                           checked
@@ -261,12 +269,12 @@ export function ExportDialog({
                           type="checkbox"
                           className="h-3.5 w-3.5"
                           checked={checked}
-                          onChange={() => toggleTab(t.key)}
+                          onChange={() => toggleTab(tab.key)}
                         />
-                        <span className="truncate">{t.label}</span>
+                        <span className="truncate">{translateLabel(tab.label, lang)}</span>
                         {isDefault && (
                           <span className="ml-auto rounded bg-surface-800 px-1 text-[9px] uppercase tracking-wide text-surface-400">
-                            Active
+                            {t('export.active', { defaultValue: 'Active' })}
                           </span>
                         )}
                       </label>
@@ -279,7 +287,7 @@ export function ExportDialog({
             <section className="flex min-h-0 flex-col">
               <div className="mb-1.5 flex items-center justify-between">
                 <div className="text-[11px] font-semibold uppercase tracking-wide text-surface-400">
-                  Columns
+                  {t('urlsTab.columns', { defaultValue: 'Columns' })}
                 </div>
                 <div className="flex gap-1 text-[10px]">
                   <button
@@ -287,14 +295,14 @@ export function ExportDialog({
                     className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800"
                     onClick={checkAllColumns}
                   >
-                    All
+                    {t('export.all', { defaultValue: 'All' })}
                   </button>
                   <button
                     type="button"
                     className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800"
                     onClick={uncheckAllColumns}
                   >
-                    None
+                    {t('export.none', { defaultValue: 'None' })}
                   </button>
                 </div>
               </div>
@@ -318,7 +326,7 @@ export function ExportDialog({
                           checked={checked}
                           onChange={() => toggleColumn(c.key)}
                         />
-                        <span className="truncate">{c.header}</span>
+                        <span className="truncate">{translateLabel(c.header, lang)}</span>
                         <span className="ml-auto truncate font-mono text-[10px] text-surface-500">
                           {c.key}
                         </span>
@@ -333,7 +341,7 @@ export function ExportDialog({
           <div className="mt-4 flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
               <span className="text-[11px] font-semibold uppercase tracking-wide text-surface-400">
-                Format
+                {t('export.format', { defaultValue: 'Format' })}
               </span>
               <label className="flex cursor-pointer items-center gap-1 text-[12px] text-surface-200">
                 <input
@@ -363,7 +371,7 @@ export function ExportDialog({
                   onChange={(e) => setUseSelection(e.target.checked)}
                 />
                 <span>
-                  Selected rows only{' '}
+                  {t('export.selectedOnly', { defaultValue: 'Selected rows only' })}{' '}
                   <span className="text-surface-500">
                     ({selectionCount.toLocaleString()})
                   </span>
@@ -374,7 +382,7 @@ export function ExportDialog({
 
           {format === 'csv' && pickedTabs.size > 1 && (
             <div className="mt-2 rounded border border-amber-700/40 bg-amber-900/20 px-2 py-1 text-[11px] text-amber-200">
-              Multiple tables + CSV → you'll be asked to pick a folder; one file is written per table.
+              {t('export.multiCsvNote', { defaultValue: 'Multiple tables + CSV → you\'ll be asked to pick a folder; one file is written per table.' })}
             </div>
           )}
 
@@ -392,7 +400,7 @@ export function ExportDialog({
             className="rounded border border-surface-700 px-3 py-1 text-[12px] text-surface-300 hover:bg-surface-800"
             disabled={busy}
           >
-            Cancel
+            {t('common.cancel', { defaultValue: 'Cancel' })}
           </button>
           <button
             type="button"
@@ -405,7 +413,7 @@ export function ExportDialog({
             )}
           >
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            Export
+            {t('export.title', { defaultValue: 'Export' })}
           </button>
         </div>
       </div>

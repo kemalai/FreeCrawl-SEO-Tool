@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
 import { LogsView } from './LogsView.js';
 import './styles.css';
+import './i18n/index.js';
 
 // The Logs popup window loads the same renderer bundle with `?logs=1` —
 // we branch at the entry point so only the LogsView component mounts

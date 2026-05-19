@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X, FolderOpen, RefreshCw } from 'lucide-react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type {
   CompareCategory,
   CompareDiffRow,
@@ -14,22 +15,24 @@ interface Props {
 
 interface CategoryDef {
   key: CompareCategory;
-  label: string;
+  labelKey: string;
+  fallback: string;
 }
 
 const CATEGORIES: CategoryDef[] = [
-  { key: 'added', label: 'Added' },
-  { key: 'removed', label: 'Removed' },
-  { key: 'status', label: 'Status Changed' },
-  { key: 'title', label: 'Title Changed' },
-  { key: 'meta', label: 'Meta Description Changed' },
-  { key: 'h1', label: 'H1 Changed' },
-  { key: 'canonical', label: 'Canonical Changed' },
-  { key: 'indexability', label: 'Indexability Changed' },
-  { key: 'response_time', label: 'Response Time Δ' },
+  { key: 'added', labelKey: 'compare.added', fallback: 'Added' },
+  { key: 'removed', labelKey: 'compare.removed', fallback: 'Removed' },
+  { key: 'status', labelKey: 'compare.statusChanged', fallback: 'Status Changed' },
+  { key: 'title', labelKey: 'compare.titleChanged', fallback: 'Title Changed' },
+  { key: 'meta', labelKey: 'compare.metaChanged', fallback: 'Meta Description Changed' },
+  { key: 'h1', labelKey: 'compare.h1Changed', fallback: 'H1 Changed' },
+  { key: 'canonical', labelKey: 'compare.canonicalChanged', fallback: 'Canonical Changed' },
+  { key: 'indexability', labelKey: 'compare.indexabilityChanged', fallback: 'Indexability Changed' },
+  { key: 'response_time', labelKey: 'compare.responseTimeDelta', fallback: 'Response Time Δ' },
 ];
 
 export function CompareDialog({ open, onClose }: Props) {
+  const { t } = useTranslation();
   const [result, setResult] = useState<CompareLoadResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [active, setActive] = useState<CompareCategory>('added');
@@ -89,14 +92,14 @@ export function CompareDialog({ open, onClose }: Props) {
       >
         <div className="flex items-center border-b border-surface-800 px-4 py-2.5">
           <div className="text-sm font-semibold tracking-wide text-surface-100">
-            Compare Crawls
+            {t('compare.title', { defaultValue: 'Compare Crawls' })}
           </div>
           {result && (
             <div className="ml-3 truncate text-[11px] text-surface-400">
-              <span className="text-surface-500">A (current)</span>{' '}
-              {result.totalA.toLocaleString()} URLs ·{' '}
+              <span className="text-surface-500">{t('compare.aCurrent', { defaultValue: 'A (current)' })}</span>{' '}
+              {result.totalA.toLocaleString()} {t('compare.urlsUnit', { defaultValue: 'URLs' })} ·{' '}
               <span className="text-surface-500">B</span>{' '}
-              {result.totalB.toLocaleString()} URLs · {result.filePath}
+              {result.totalB.toLocaleString()} {t('compare.urlsUnit', { defaultValue: 'URLs' })} · {result.filePath}
             </div>
           )}
           <div className="ml-auto flex items-center gap-1">
@@ -104,19 +107,19 @@ export function CompareDialog({ open, onClose }: Props) {
               className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
               onClick={pick}
               disabled={loading}
-              title="Pick a different project file"
+              title={t('compare.pickDifferent', { defaultValue: 'Pick a different project file' })}
             >
               {loading ? (
                 <RefreshCw className="h-3 w-3 animate-spin" />
               ) : (
                 <FolderOpen className="h-3 w-3" />
               )}
-              {loading ? 'Comparing…' : 'Open Other Project'}
+              {loading ? t('compare.comparing', { defaultValue: 'Comparing…' }) : t('compare.openOther', { defaultValue: 'Open Other Project' })}
             </button>
             <button
               className="rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-surface-100"
               onClick={onClose}
-              title="Close (Esc)"
+              title={t('scheduled.closeEsc', { defaultValue: 'Close (Esc)' })}
             >
               <X className="h-4 w-4" />
             </button>
@@ -131,7 +134,7 @@ export function CompareDialog({ open, onClose }: Props) {
 
         {!result && !error && !loading && (
           <div className="flex flex-1 items-center justify-center text-[12px] text-surface-500">
-            Pick a `.seoproject` file to diff against the current crawl.
+            {t('compare.pickPrompt', { defaultValue: 'Pick a `.seoproject` file to diff against the current crawl.' })}
           </div>
         )}
 
@@ -154,7 +157,7 @@ export function CompareDialog({ open, onClose }: Props) {
                       )}
                       onClick={() => setActive(c.key)}
                     >
-                      <span>{c.label}</span>
+                      <span>{t(c.labelKey, { defaultValue: c.fallback })}</span>
                       <span className="font-mono text-[10px] text-surface-400">
                         {count.toLocaleString()}
                       </span>
@@ -166,11 +169,14 @@ export function CompareDialog({ open, onClose }: Props) {
 
             <div className="flex flex-1 flex-col min-w-0">
               <div className="border-b border-surface-800 px-4 py-2 text-[11px] text-surface-400">
-                {sample.length.toLocaleString()} of{' '}
-                {(result.counts[active] ?? 0).toLocaleString()} entries shown
+                {t('compare.entriesShown', {
+                  defaultValue: '{{shown}} of {{total}} entries shown',
+                  shown: sample.length.toLocaleString(),
+                  total: (result.counts[active] ?? 0).toLocaleString(),
+                })}
                 {result.counts[active] > sample.length && (
                   <span className="ml-1 text-surface-500">
-                    (truncated — export CSV for the full set)
+                    {t('compare.truncated', { defaultValue: '(truncated — export CSV for the full set)' })}
                   </span>
                 )}
               </div>
@@ -178,9 +184,9 @@ export function CompareDialog({ open, onClose }: Props) {
                 <table className="w-full text-[11px]">
                   <thead className="sticky top-0 bg-surface-900">
                     <tr className="text-surface-400">
-                      <th className="w-1/2 py-1.5 px-3 text-left font-medium">URL</th>
-                      <th className="w-1/4 py-1.5 px-3 text-left font-medium">Before</th>
-                      <th className="w-1/4 py-1.5 px-3 text-left font-medium">After</th>
+                      <th className="w-1/2 py-1.5 px-3 text-left font-medium">{t('compare.urlHeader', { defaultValue: 'URL' })}</th>
+                      <th className="w-1/4 py-1.5 px-3 text-left font-medium">{t('compare.beforeHeader', { defaultValue: 'Before' })}</th>
+                      <th className="w-1/4 py-1.5 px-3 text-left font-medium">{t('compare.afterHeader', { defaultValue: 'After' })}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -190,7 +196,7 @@ export function CompareDialog({ open, onClose }: Props) {
                           colSpan={3}
                           className="px-3 py-3 text-center text-[11px] italic text-surface-500"
                         >
-                          No diffs in this category.
+                          {t('compare.noDiffs', { defaultValue: 'No diffs in this category.' })}
                         </td>
                       </tr>
                     )}

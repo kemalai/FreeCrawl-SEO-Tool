@@ -1,4 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import {
+  SUPPORTED_LANGUAGES,
+  changeLanguage,
+  type SupportedLanguage,
+} from '../i18n/index.js';
+import { translateLabel } from '../i18n/labels.js';
 import {
   X,
   ListChecks,
@@ -21,6 +28,9 @@ import {
   FileText,
   AlertTriangle,
   Wrench,
+  FolderOpen,
+  Lock,
+  Languages,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -145,7 +155,10 @@ type SectionKey =
   | 'issues'
   | 'advanced'
   | 'cookies'
-  | 'per-host-ua';
+  | 'per-host-ua'
+  | 'storage'
+  | 'privacy'
+  | 'language';
 
 interface SectionDef {
   key: SectionKey;
@@ -281,6 +294,24 @@ const SECTIONS: SectionDef[] = [
     label: 'Per-Host UA',
     icon: Send,
     keywords: 'per host user agent subdomain mobile desktop pattern wildcard',
+  },
+  {
+    key: 'storage',
+    label: 'Storage',
+    icon: FolderOpen,
+    keywords: 'storage save folder directory project location path documents disk',
+  },
+  {
+    key: 'privacy',
+    label: 'Privacy',
+    icon: Lock,
+    keywords: 'privacy telemetry analytics anonymous opt in out tracking data',
+  },
+  {
+    key: 'language',
+    label: 'Language',
+    icon: Languages,
+    keywords: 'language dil locale i18n internationalization english turkish ingilizce türkçe tr en',
   },
 ];
 
@@ -701,6 +732,9 @@ export function SettingsDialog({ open, onClose }: Props) {
               {active === 'per-host-ua' && (
                 <PerHostUaPanel form={form} update={update} />
               )}
+              {active === 'storage' && <StoragePanel />}
+              {active === 'privacy' && <PrivacyPanel />}
+              {active === 'language' && <LanguagePanel />}
             </div>
           </div>
         </div>
@@ -841,13 +875,13 @@ function PresetsPanel({
   exportSettings: () => Promise<void>;
   importSettings: () => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        One-click profiles for common crawl scenarios. Clicking a preset overwrites the affected
-        fields only — your URL list, custom rules, filters, and extraction rules are preserved.
+        {t('settingsPanels.presets.intro', { defaultValue: 'One-click profiles for common crawl scenarios. Clicking a preset overwrites the affected fields only — your URL list, custom rules, filters, and extraction rules are preserved.' })}
       </p>
       <div className="space-y-2">
         {PRESETS.map((p) => (
@@ -870,18 +904,16 @@ function PresetsPanel({
               className="rounded border border-blue-700/60 bg-blue-900/30 px-3 py-1 text-[11px] text-blue-200 hover:bg-blue-900/50"
               onClick={() => apply(p)}
             >
-              Apply
+              {t('common.apply', { defaultValue: 'Apply' })}
             </button>
           </div>
         ))}
       </div>
 
       <div className="mt-5 border-t border-surface-800 pt-4">
-        <div className="mb-2 text-[12px] font-medium text-surface-100">Import / Export</div>
+        <div className="mb-2 text-[12px] font-medium text-surface-100">{t('settingsPanels.presets.importExport', { defaultValue: 'Import / Export' })}</div>
         <p className="mb-2 text-[11px] text-surface-400">
-          Save the current settings to a JSON file (e.g. for sharing with a teammate or version
-          control), or load a previously-exported settings file. Importing replaces the current
-          form with the file's contents — press Save at the bottom to persist.
+          {t('settingsPanels.presets.importExportIntro', { defaultValue: "Save the current settings to a JSON file (e.g. for sharing with a teammate or version control), or load a previously-exported settings file. Importing replaces the current form with the file's contents — press Save at the bottom to persist." })}
         </p>
         <div className="flex gap-2">
           <button
@@ -891,16 +923,16 @@ function PresetsPanel({
               setMessage(null);
               try {
                 await exportSettings();
-                setMessage('Settings exported.');
+                setMessage(t('settingsPanels.presets.exported', { defaultValue: 'Settings exported.' }));
               } catch (e) {
-                setMessage(`Export failed: ${(e as Error).message}`);
+                setMessage(t('settingsPanels.presets.exportFailed', { defaultValue: 'Export failed: {{msg}}', msg: (e as Error).message }));
               } finally {
                 setBusy(false);
               }
             }}
             disabled={busy}
           >
-            Export…
+            {t('settingsPanels.presets.exportBtn', { defaultValue: 'Export…' })}
           </button>
           <button
             className="rounded border border-surface-700 px-3 py-1 text-[11px] hover:bg-surface-800 disabled:opacity-50"
@@ -909,34 +941,34 @@ function PresetsPanel({
               setMessage(null);
               try {
                 await importSettings();
-                setMessage('Settings imported.');
+                setMessage(t('settingsPanels.presets.imported', { defaultValue: 'Settings imported.' }));
               } catch (e) {
-                setMessage(`Import failed: ${(e as Error).message}`);
+                setMessage(t('settingsPanels.presets.importFailed', { defaultValue: 'Import failed: {{msg}}', msg: (e as Error).message }));
               } finally {
                 setBusy(false);
               }
             }}
             disabled={busy}
           >
-            Import…
+            {t('settingsPanels.presets.importBtn', { defaultValue: 'Import…' })}
           </button>
           {message && <span className="self-center text-[10px] text-surface-400">{message}</span>}
         </div>
       </div>
 
       <p className="mt-3 text-[10px] text-surface-500">
-        After clicking Apply or Import, review each panel to verify the values, then press Save at
-        the bottom to persist.
+        {t('settingsPanels.presets.outro', { defaultValue: 'After clicking Apply or Import, review each panel to verify the values, then press Save at the bottom to persist.' })}
       </p>
     </>
   );
 }
 
 function ModePanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Choose how the crawler discovers URLs. Spider follows links from a start URL; List fetches a fixed set.
+        {t('settingsPanels.mode.intro', { defaultValue: 'Choose how the crawler discovers URLs. Spider follows links from a start URL; List fetches a fixed set.' })}
       </p>
       <label className="mb-2 flex flex-col gap-1">
         <FieldLabel
@@ -969,18 +1001,18 @@ function ModePanel({ form, update }: PanelProps) {
 }
 
 function CrawlerPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Traversal limits and crawl-scope toggles. Screaming Frog equivalents shown in
-        parentheses.
+        {t('settingsPanels.crawler.intro', { defaultValue: 'Traversal limits and crawl-scope toggles. Screaming Frog equivalents shown in parentheses.' })}
       </p>
 
       <div className="mb-4 rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
-        <span className="font-medium">Looking for crawl speed?</span> Thread count, requests
-        per second, per-request delay, and retries live in the{' '}
-        <span className="font-medium">Speed</span> section — that&apos;s where you cap how fast
-        the crawler hits a server.
+        <span className="font-medium">{t('settingsPanels.crawler.speedHintPrefix', { defaultValue: 'Looking for crawl speed?' })}</span>{' '}
+        {t('settingsPanels.crawler.speedHintBody', { defaultValue: 'Thread count, requests per second, per-request delay, and retries live in the' })}{' '}
+        <span className="font-medium">{t('settingsPanels.crawler.speedHintLink', { defaultValue: 'Speed' })}</span>{' '}
+        {t('settingsPanels.crawler.speedHintSuffix', { defaultValue: "section — that's where you cap how fast the crawler hits a server." })}
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -1051,9 +1083,7 @@ function CrawlerPanel({ form, update }: PanelProps) {
 }
 
 function SpeedPanel({ form, update }: PanelProps) {
-  // Mirror inputs of the values for the helper-text math; if they aren't
-  // valid numbers we surface "—" instead of NaN. Cheap to recompute on
-  // every render — these strings are short.
+  const { t } = useTranslation();
   const conc = Number.parseInt(form.maxConcurrency, 10);
   const rps = Number.parseInt(form.maxRps, 10);
   const delay = Number.parseInt(form.crawlDelayMs, 10);
@@ -1063,13 +1093,11 @@ function SpeedPanel({ form, update }: PanelProps) {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Control crawl throughput. Increasing parallelism speeds the crawl, but every extra request
-        adds load on the target server — pick numbers a host that you don't own can absorb without
-        rate-limiting / 429s.
+        {t('settingsPanels.speed.intro', { defaultValue: "Control crawl throughput. Increasing parallelism speeds the crawl, but every extra request adds load on the target server — pick numbers a host that you don't own can absorb without rate-limiting / 429s." })}
       </p>
 
       <div className="mb-4 rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
-        <div className="mb-0.5 font-medium">Effective ceiling</div>
+        <div className="mb-0.5 font-medium">{t('settingsPanels.speed.effectiveCeiling', { defaultValue: 'Effective ceiling' })}</div>
         <div className="text-blue-300/90">
           {effectiveRps !== null ? (
             <>
@@ -1153,10 +1181,11 @@ function SpeedPanel({ form, update }: PanelProps) {
 }
 
 function RequestsPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        HTTP headers sent with every request.
+        {t('settingsPanels.requests.intro', { defaultValue: 'HTTP headers sent with every request.' })}
       </p>
       <Text
         label="User-Agent"
@@ -1186,10 +1215,11 @@ function RequestsPanel({ form, update }: PanelProps) {
 }
 
 function FiltersPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        URL allowlist/blocklist. Patterns are JavaScript regex tested against the full URL.
+        {t('settingsPanels.filters.intro', { defaultValue: 'URL allowlist/blocklist. Patterns are JavaScript regex tested against the full URL.' })}
       </p>
       <Area
         label="Include Patterns (regex, one per line — empty = all allowed)"
@@ -1214,15 +1244,15 @@ function FiltersPanel({ form, update }: PanelProps) {
 }
 
 function CustomSearchPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Flag pages whose body contains any of these terms. Two modes per
-        line:
+        {t('settingsPanels.customSearch.intro1', { defaultValue: 'Flag pages whose body contains any of these terms. Two modes per line:' })}
         <span className="ml-1 font-mono text-surface-200">/pattern/flags</span>{' '}
-        for regex,
-        <span className="ml-1 font-mono text-surface-200">anything else</span>{' '}
-        for literal case-insensitive substring.
+        {t('settingsPanels.customSearch.intro2', { defaultValue: 'for regex,' })}
+        <span className="ml-1 font-mono text-surface-200">{t('settingsPanels.customSearch.anythingElse', { defaultValue: 'anything else' })}</span>{' '}
+        {t('settingsPanels.customSearch.intro3', { defaultValue: 'for literal case-insensitive substring.' })}
       </p>
       <Area
         label="Search Terms (one per line; /…/ = regex, plain = literal)"
@@ -1238,6 +1268,7 @@ function CustomSearchPanel({ form, update }: PanelProps) {
 }
 
 function UrlRewritingPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   const [previewState, setPreviewState] = useState<{
     pending: boolean;
     result?: string | null;
@@ -1307,7 +1338,7 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Normalisation applied before URLs are deduplicated and queued.
+        {t('settingsPanels.urlRewriting.intro', { defaultValue: 'Normalisation applied before URLs are deduplicated and queued.' })}
       </p>
       <div className="grid grid-cols-2 gap-2">
         <Bool
@@ -1485,6 +1516,7 @@ const DEFAULT_RULE: CustomExtractionRule = {
 };
 
 function CustomExtractionPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   const rules = form.customExtractionRules;
   const setRules = (next: CustomExtractionRule[]) => update('customExtractionRules', next);
   const updateRule = (i: number, patch: Partial<CustomExtractionRule>) => {
@@ -1495,13 +1527,12 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Up to 10 custom extraction rules. Each runs against every crawled
-        HTML page; results are stored on the URL row and visible in the
-        URL Details panel under <strong>Extraction</strong>.
+        {t('settingsPanels.customExtraction.intro1', { defaultValue: 'Up to 10 custom extraction rules. Each runs against every crawled HTML page; results are stored on the URL row and visible in the URL Details panel under' })}{' '}
+        <strong>{t('settingsPanels.customExtraction.extractionLabel', { defaultValue: 'Extraction' })}</strong>.
       </p>
 
       {rules.length === 0 && (
-        <p className="mb-3 text-[11px] italic text-surface-500">No rules — click "Add Rule" to start.</p>
+        <p className="mb-3 text-[11px] italic text-surface-500">{t('settingsPanels.customExtraction.empty', { defaultValue: 'No rules — click "Add Rule" to start.' })}</p>
       )}
 
       {rules.map((r, i) => (
@@ -1511,7 +1542,7 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
         >
           <div className="mb-2 flex items-center justify-between">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-              Rule #{i + 1}
+              {t('settingsGroups.ruleN', { defaultValue: 'Rule #{{n}}', n: i + 1 })}
             </div>
             <button
               className="rounded p-1 text-surface-500 hover:bg-surface-800 hover:text-red-400"
@@ -1669,12 +1700,13 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
 }
 
 function WebhookPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Webhook fired once when each crawl finishes. Single <code>POST</code>{' '}
-        with a JSON summary (start URL, duration, total URLs, status mix,
-        every non-zero issue count). Empty disables.
+        {t('settingsPanels.webhook.intro1', { defaultValue: 'Webhook fired once when each crawl finishes. Single' })}{' '}
+        <code>POST</code>{' '}
+        {t('settingsPanels.webhook.intro2', { defaultValue: 'with a JSON summary (start URL, duration, total URLs, status mix, every non-zero issue count). Empty disables.' })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
@@ -1686,9 +1718,7 @@ function WebhookPanel({ form, update }: PanelProps) {
           example="https://hooks.slack.com/services/T0/B0/abc, https://your-server.example/freecrawl-hook"
         />
         <p className="mt-1 text-[10px] text-surface-500">
-          Compatible with Slack incoming webhooks (the JSON shape is rich
-          enough for Slack to render plain text), Zapier "Catch Hook"
-          triggers, Discord webhooks, and custom HTTP endpoints.
+          {t('settingsPanels.webhook.outro', { defaultValue: 'Compatible with Slack incoming webhooks (the JSON shape is rich enough for Slack to render plain text), Zapier "Catch Hook" triggers, Discord webhooks, and custom HTTP endpoints.' })}
         </p>
       </div>
     </>
@@ -1696,15 +1726,14 @@ function WebhookPanel({ form, update }: PanelProps) {
 }
 
 function AuthPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   const auth = form.auth;
   const setAuth = (patch: Partial<HttpAuth>) =>
     update('auth', { ...auth, ...patch });
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        HTTP authentication applied on every request. Useful for staging
-        environments behind Basic auth, or APIs that require a Bearer
-        token. Digest is not supported (challenge-response state machine).
+        {t('settingsPanels.auth.intro', { defaultValue: 'HTTP authentication applied on every request. Useful for staging environments behind Basic auth, or APIs that require a Bearer token. Digest is not supported (challenge-response state machine).' })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
@@ -1761,11 +1790,11 @@ function AuthPanel({ form, update }: PanelProps) {
 }
 
 function NetworkPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Network-level controls: proxy override, file-extension exclusion,
-        redirect hop cap.
+        {t('settingsPanels.network.intro', { defaultValue: 'Network-level controls: proxy override, file-extension exclusion, redirect hop cap.' })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
@@ -1780,7 +1809,7 @@ function NetworkPanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          Saved Proxy Profiles
+          {t('settingsGroups.savedProxyProfiles', { defaultValue: 'Saved Proxy Profiles' })}
         </div>
         <p className="mb-2 text-[10px] text-surface-500">
           Save multiple `(name, URL)` pairs and switch between them via
@@ -1884,18 +1913,17 @@ function NetworkPanel({ form, update }: PanelProps) {
 }
 
 function DuplicatesPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Near-duplicate detection. After every crawl, body text is hashed
-        with a 64-bit SimHash, and pages whose hashes lie within the
-        configured Hamming distance of each other are clustered as
-        near-duplicates. Surfaced under <strong>Issues → Content → Near-Duplicate</strong>.
+        {t('settingsPanels.duplicates.intro', { defaultValue: 'Near-duplicate detection. After every crawl, body text is hashed with a 64-bit SimHash, and pages whose hashes lie within the configured Hamming distance of each other are clustered as near-duplicates. Surfaced under' })}{' '}
+        <strong>{t('settingsPanels.duplicates.path', { defaultValue: 'Issues → Content → Near-Duplicate' })}</strong>.
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          Threshold
+          {t('settingsGroups.threshold', { defaultValue: 'Threshold' })}
         </div>
         <Num
           label="Max Hamming distance (0 = exact only, 12 = very loose, 0 disables)"
@@ -1913,7 +1941,7 @@ function DuplicatesPanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          Scope
+          {t('settingsGroups.scope', { defaultValue: 'Scope' })}
         </div>
         <Bool
           label="Only cluster indexable pages"
@@ -1941,16 +1969,16 @@ function DuplicatesPanel({ form, update }: PanelProps) {
 }
 
 function HardwarePanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Resource caps for the crawler process. Useful for keeping the
-        machine usable while crawling large sites (1M+ URLs).
+        {t('settingsPanels.hardware.intro', { defaultValue: 'Resource caps for the crawler process. Useful for keeping the machine usable while crawling large sites (1M+ URLs).' })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          Memory
+          {t('settingsGroups.memory', { defaultValue: 'Memory' })}
         </div>
         <Num
           label="Memory soft limit (MB) — 0 = unlimited"
@@ -1968,7 +1996,7 @@ function HardwarePanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          Queue
+          {t('settingsGroups.queue', { defaultValue: 'Queue' })}
         </div>
         <Num
           label="Max in-memory queue size — 0 = unlimited"
@@ -1987,7 +2015,7 @@ function HardwarePanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          CPU
+          {t('settingsGroups.cpu', { defaultValue: 'CPU' })}
         </div>
         <label className="mb-2 flex flex-col gap-1">
           <FieldLabel
@@ -2023,17 +2051,16 @@ function HardwarePanel({ form, update }: PanelProps) {
 }
 
 function ContentPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        How crawled HTML is stored on disk. Disable body snapshots to keep
-        the project file small when you don't need the View Source detail
-        tab; tighten the cap for sites with adversarially-large pages.
+        {t('settingsPanels.content.intro', { defaultValue: "How crawled HTML is stored on disk. Disable body snapshots to keep the project file small when you don't need the View Source detail tab; tighten the cap for sites with adversarially-large pages." })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          Body Snapshots
+          {t('settingsGroups.bodySnapshots', { defaultValue: 'Body Snapshots' })}
         </div>
         <Bool
           label="Store raw HTML body per page"
@@ -2057,13 +2084,11 @@ function ContentPanel({ form, update }: PanelProps) {
 }
 
 function CrawlAnalysisPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Per-pass post-crawl analysis toggles. Each pass runs after the
-        HTTP fetch phase finishes and feeds different issue filters. Skip
-        passes you don't need to shave wall-clock on large crawls; the
-        related issue counters quietly read as 0 until the pass runs.
+        {t('settingsPanels.crawlAnalysis.intro', { defaultValue: "Per-pass post-crawl analysis toggles. Each pass runs after the HTTP fetch phase finishes and feeds different issue filters. Skip passes you don't need to shave wall-clock on large crawls; the related issue counters quietly read as 0 until the pass runs." })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3 space-y-2">
@@ -2109,35 +2134,31 @@ function CrawlAnalysisPanel({ form, update }: PanelProps) {
 }
 
 function IssuesPanel() {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Per-issue check on/off toggles.
+        {t('settingsPanels.issues.intro', { defaultValue: 'Per-issue check on/off toggles.' })}
       </p>
       <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
-        <strong>Coming in V2.</strong> Today every issue check runs
-        unconditionally and surfaces in the sidebar. The plan is to let
-        you silence specific checks per-project (e.g. disable
-        "Description = Title" on a CMS that's known to do it
-        intentionally). Until that ships, hide rows you don't care about
-        by collapsing the sidebar group, or filter them out via the
-        Advanced filter on each tab.
+        <strong>{t('settingsPanels.issues.v2Prefix', { defaultValue: 'Coming in V2.' })}</strong>{' '}
+        {t('settingsPanels.issues.v2Body', { defaultValue: 'Today every issue check runs unconditionally and surfaces in the sidebar. The plan is to let you silence specific checks per-project (e.g. disable "Description = Title" on a CMS that\'s known to do it intentionally). Until that ships, hide rows you don\'t care about by collapsing the sidebar group, or filter them out via the Advanced filter on each tab.' })}
       </div>
     </>
   );
 }
 
 function AdvancedPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Lower-level caps and link-follow toggles. Defaults are tuned for
-        typical SEO audits — only touch these if you know why.
+        {t('settingsPanels.advanced.intro', { defaultValue: 'Lower-level caps and link-follow toggles. Defaults are tuned for typical SEO audits — only touch these if you know why.' })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          Link & Response Caps
+          {t('settingsGroups.linkResponseCaps', { defaultValue: 'Link & Response Caps' })}
         </div>
         <Num
           label="Max links per page (issue threshold)"
@@ -2164,7 +2185,7 @@ function AdvancedPanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          URL Structure Thresholds
+          {t('settingsGroups.urlStructureThresholds', { defaultValue: 'URL Structure Thresholds' })}
         </div>
         <Num
           label="Max URL length (chars)"
@@ -2191,7 +2212,7 @@ function AdvancedPanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3 space-y-2">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          Link Follow Behaviour
+          {t('settingsGroups.linkFollowBehaviour', { defaultValue: 'Link Follow Behaviour' })}
         </div>
         <Bool
           label="Follow canonical targets"
@@ -2223,13 +2244,11 @@ function AdvancedPanel({ form, update }: PanelProps) {
 }
 
 function CookiesPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Cookie policy applied to every fetch. The crawler is otherwise
-        stateless across requests; this setting controls whether
-        Set-Cookie response headers are recorded for the cookie-flag
-        issue checks (Missing Secure / HttpOnly / SameSite).
+        {t('settingsPanels.cookies.intro', { defaultValue: 'Cookie policy applied to every fetch. The crawler is otherwise stateless across requests; this setting controls whether Set-Cookie response headers are recorded for the cookie-flag issue checks (Missing Secure / HttpOnly / SameSite).' })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
@@ -2265,26 +2284,24 @@ function CookiesPanel({ form, update }: PanelProps) {
 }
 
 function PerHostUaPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
   const rules = form.perHostUserAgents;
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        Override the User-Agent on a per-host basis. Useful when crawling
-        a mobile subdomain with the mobile-Googlebot UA in the same run
-        as the desktop site, or when a CDN serves a different page based
-        on the requester's UA. The first matching pattern wins; the
-        global User-Agent (Requests tab) is the fallback.
+        {t('settingsPanels.perHostUa.intro', { defaultValue: "Override the User-Agent on a per-host basis. Useful when crawling a mobile subdomain with the mobile-Googlebot UA in the same run as the desktop site, or when a CDN serves a different page based on the requester's UA. The first matching pattern wins; the global User-Agent (Requests tab) is the fallback." })}
       </p>
       <div className="mb-3 rounded border border-surface-800 bg-surface-950/40 p-3">
         <p className="mb-2 text-[10px] text-surface-500">
-          Pattern syntax: exact host (<code>m.example.com</code>) or
-          leading wildcard (<code>*.example.com</code>) — the wildcard
-          form matches any subdomain but <em>not</em> the apex.
+          {t('settingsPanels.perHostUa.syntax1', { defaultValue: 'Pattern syntax: exact host' })}{' '}(<code>m.example.com</code>){' '}
+          {t('settingsPanels.perHostUa.syntax2', { defaultValue: 'or leading wildcard' })}{' '}(<code>*.example.com</code>) {' '}
+          {t('settingsPanels.perHostUa.syntax3', { defaultValue: '— the wildcard form matches any subdomain but' })}{' '}
+          <em>{t('settingsPanels.perHostUa.notApex', { defaultValue: 'not' })}</em>{' '}{t('settingsPanels.perHostUa.theApex', { defaultValue: 'the apex.' })}
         </p>
         <div className="space-y-2">
           {rules.length === 0 && (
             <div className="rounded border border-dashed border-surface-700 px-3 py-4 text-center text-[11px] text-surface-500">
-              No per-host overrides yet — add one below.
+              {t('settingsPanels.perHostUa.empty', { defaultValue: 'No per-host overrides yet — add one below.' })}
             </div>
           )}
           {rules.map((r, i) => (
@@ -2350,9 +2367,10 @@ function FieldLabel({
   example?: string;
   className?: string;
 }) {
+  const { i18n } = useTranslation();
   return (
     <span className={clsx('flex items-center gap-1 text-[10px] text-surface-400', className)}>
-      <span>{label}</span>
+      <span>{translateLabel(label, i18n.language)}</span>
       <InfoTip info={info} example={example} />
     </span>
   );
@@ -2458,13 +2476,222 @@ function Bool({
         onChange={(e) => onChange(e.target.checked)}
         className="mt-0.5"
       />
-      <div className="flex flex-col gap-0.5">
-        <span className="flex items-center gap-1">
-          <span className="text-[12px] text-surface-100">{label}</span>
-          <InfoTip info={info} example={example} />
-        </span>
-        {hint && <span className="text-[10px] text-surface-500">{hint}</span>}
-      </div>
+      <BoolLabel label={label} info={info} example={example} hint={hint} />
     </label>
+  );
+}
+
+function BoolLabel({
+  label,
+  info,
+  example,
+  hint,
+}: {
+  label: string;
+  info?: string;
+  example?: string;
+  hint?: string;
+}) {
+  const { i18n } = useTranslation();
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="flex items-center gap-1">
+        <span className="text-[12px] text-surface-100">{translateLabel(label, i18n.language)}</span>
+        <InfoTip info={info} example={example} />
+      </span>
+      {hint && <span className="text-[10px] text-surface-500">{hint}</span>}
+    </div>
+  );
+}
+
+/**
+ * V1 Faz 9 — Storage panel. Lets the user pick a default folder for new
+ * `.seoproject` files. Saved immediately to app prefs (not the per-crawl
+ * `CrawlConfig`), so there's no Save/Cancel cycle and no dependency on
+ * the surrounding form state.
+ *
+ * When the override is blank the OS Documents folder is used. The panel
+ * shows the resolved path so the user always sees where new projects
+ * will land, regardless of whether they've customised it.
+ */
+function StoragePanel() {
+  const { t } = useTranslation();
+  const [override, setOverride] = useState<string>(() => {
+    const raw = window.freecrawl.prefsGet('projectSaveDir');
+    return typeof raw === 'string' ? raw : '';
+  });
+  const [resolved, setResolved] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.freecrawl.defaultProjectDir().then((p) => {
+      if (!cancelled) setResolved(p);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [override]);
+
+  async function browse() {
+    const chosen = await window.freecrawl.pickDirectory({
+      title: 'Choose Default Project Folder',
+      defaultPath: resolved || undefined,
+    });
+    if (!chosen) return;
+    setOverride(chosen);
+    window.freecrawl.prefsSet('projectSaveDir', chosen);
+  }
+
+  function reset() {
+    setOverride('');
+    window.freecrawl.prefsDelete('projectSaveDir');
+  }
+
+  const isCustom = override.trim().length > 0;
+
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settings.storage.intro')}
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.storage.defaultSaveFolder')}
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            className="flex-1 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+            placeholder={t('settings.storage.placeholder')}
+            value={override}
+            readOnly
+            spellCheck={false}
+          />
+          <button
+            className="rounded border border-surface-700 px-3 py-1 text-[11px] text-surface-200 hover:bg-surface-800 hover:text-surface-100"
+            onClick={browse}
+          >
+            {t('common.browse')}
+          </button>
+          {isCustom && (
+            <button
+              className="rounded border border-surface-700 px-3 py-1 text-[11px] text-surface-400 hover:bg-surface-800 hover:text-surface-100"
+              onClick={reset}
+              title={t('settings.storage.resetTitle')}
+            >
+              {t('common.reset')}
+            </button>
+          )}
+        </div>
+        <p className="mt-2 text-[10px] text-surface-500">
+          {t('settings.storage.resolvedPath')}:{' '}
+          <span className="text-surface-300">{resolved || '…'}</span>
+        </p>
+      </div>
+
+      <div className="rounded border border-surface-800 bg-surface-950/40 p-3 text-[11px] text-surface-400">
+        {t('settings.storage.note')}
+      </div>
+    </>
+  );
+}
+
+/**
+ * V1 Faz 9 — Privacy panel. Single toggle for anonymous telemetry opt-in.
+ * No telemetry backend is wired up yet (default off, no events fire);
+ * this preference is kept so future opt-in metrics ship with consent
+ * already gathered and the default remains opt-out.
+ */
+function PrivacyPanel() {
+  const { t } = useTranslation();
+  const [telemetryOptIn, setTelemetryOptIn] = useState<boolean>(() => {
+    return window.freecrawl.prefsGet('telemetryOptIn') === true;
+  });
+
+  function toggle(v: boolean) {
+    setTelemetryOptIn(v);
+    window.freecrawl.prefsSet('telemetryOptIn', v);
+  }
+
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settings.privacy.intro')}
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.privacy.telemetryHeading')}
+        </div>
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            checked={telemetryOptIn}
+            onChange={(e) => toggle(e.target.checked)}
+            className="mt-0.5"
+          />
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[12px] text-surface-100">
+              {t('settings.privacy.telemetryLabel')}
+            </span>
+            <span className="text-[10px] text-surface-500">
+              {t('settings.privacy.telemetryHelp')}
+            </span>
+          </div>
+        </label>
+      </div>
+
+      <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
+        {t('settings.privacy.statusNote')}
+      </div>
+    </>
+  );
+}
+
+/**
+ * V1 Faz 8 — UI language switcher. Persists the choice under the
+ * `uiLanguage` app pref via `changeLanguage` and applies it instantly
+ * through react-i18next.
+ */
+function LanguagePanel() {
+  const { t, i18n } = useTranslation();
+  const current = (i18n.language?.split('-')[0] ?? 'en') as SupportedLanguage;
+
+  function pick(lng: SupportedLanguage) {
+    if (lng === current) return;
+    changeLanguage(lng);
+  }
+
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settings.language.intro')}
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.language.label')}
+        </div>
+        <div className="flex flex-col gap-2">
+          {SUPPORTED_LANGUAGES.map((lng) => (
+            <label key={lng} className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="ui-language"
+                checked={current === lng}
+                onChange={() => pick(lng)}
+              />
+              <span className="text-[12px] text-surface-100">
+                {t(`settings.language.${lng}`)}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
+        {t('settings.language.note')}
+      </div>
+    </>
   );
 }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { X, Clock, AlertTriangle } from 'lucide-react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type { ScheduleEntry, ScheduleSpec } from '@freecrawl/shared-types';
 
 interface Props {
@@ -77,6 +78,16 @@ function formatDateTime(ms: number | null): string {
 }
 
 export function ScheduledCrawlDialog({ open, onClose }: Props) {
+  const { t } = useTranslation();
+  const dayNames = [
+    t('scheduled.daySun', { defaultValue: 'Sun' }),
+    t('scheduled.dayMon', { defaultValue: 'Mon' }),
+    t('scheduled.dayTue', { defaultValue: 'Tue' }),
+    t('scheduled.dayWed', { defaultValue: 'Wed' }),
+    t('scheduled.dayThu', { defaultValue: 'Thu' }),
+    t('scheduled.dayFri', { defaultValue: 'Fri' }),
+    t('scheduled.daySat', { defaultValue: 'Sat' }),
+  ];
   const [entry, setEntry] = useState<ScheduleEntry | null>(null);
   const [form, setForm] = useState<FormState>(DEFAULT_FORM);
   const [saving, setSaving] = useState(false);
@@ -129,7 +140,7 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
 
   async function clearSchedule() {
     if (!entry) return;
-    if (!window.confirm('Remove the scheduled crawl for this project?')) return;
+    if (!window.confirm(t('scheduled.confirmRemove', { defaultValue: 'Remove the scheduled crawl for this project?' }))) return;
     setSaving(true);
     setError(null);
     try {
@@ -149,9 +160,9 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
   const showDayOfWeek = form.cadence === 'weekly';
 
   const nextFiresHint = useMemo(() => {
-    if (!form.enabled) return 'Disabled — set "Enabled" and Save to arm the schedule.';
-    return 'Save to compute the next fire time. The schedule only fires while FreeCrawl is open.';
-  }, [form.enabled]);
+    if (!form.enabled) return t('scheduled.hintDisabled', { defaultValue: 'Disabled — set "Enabled" and Save to arm the schedule.' });
+    return t('scheduled.hintEnabled', { defaultValue: 'Save to compute the next fire time. The schedule only fires while FreeCrawl is open.' });
+  }, [form.enabled, t]);
 
   if (!open) return null;
 
@@ -167,12 +178,12 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
         <div className="flex items-center border-b border-surface-800 px-4 py-2.5">
           <Clock className="h-4 w-4 text-surface-300" />
           <div className="ml-2 text-sm font-semibold tracking-wide text-surface-100">
-            Scheduled Crawl
+            {t('scheduled.title', { defaultValue: 'Scheduled Crawl' })}
           </div>
           <button
             className="ml-auto rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-surface-100"
             onClick={onClose}
-            title="Close (Esc)"
+            title={t('scheduled.closeEsc', { defaultValue: 'Close (Esc)' })}
           >
             <X className="h-4 w-4" />
           </button>
@@ -183,10 +194,9 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
             <div className="flex items-start gap-2">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <div>
-                The schedule fires only while FreeCrawl is open on this
-                project. For triggers that survive an app restart, run
+                {t('scheduled.warningPrefix', { defaultValue: 'The schedule fires only while FreeCrawl is open on this project. For triggers that survive an app restart, run' })}
                 <code className="mx-1 rounded bg-surface-950 px-1 font-mono">freecrawl</code>
-                (the CLI) from Windows Task Scheduler / macOS launchd / cron.
+                {t('scheduled.warningSuffix', { defaultValue: '(the CLI) from Windows Task Scheduler / macOS launchd / cron.' })}
               </div>
             </div>
           </div>
@@ -198,28 +208,28 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
               onChange={(e) => update('enabled', e.target.checked)}
               className="h-3.5 w-3.5 accent-blue-500"
             />
-            <span className="font-medium text-surface-100">Enabled</span>
+            <span className="font-medium text-surface-100">{t('scheduled.enabled', { defaultValue: 'Enabled' })}</span>
           </label>
 
           <div className="mt-3 grid grid-cols-2 gap-3">
             <label className="flex flex-col gap-1">
-              <span className="text-[11px] text-surface-400">Cadence</span>
+              <span className="text-[11px] text-surface-400">{t('scheduled.cadence', { defaultValue: 'Cadence' })}</span>
               <select
                 className="h-7 rounded border border-surface-700 bg-surface-950 px-2 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
                 value={form.cadence}
                 onChange={(e) => update('cadence', e.target.value as Cadence)}
               >
-                <option value="hourly">Hourly</option>
-                <option value="daily">Daily</option>
-                <option value="weekly">Weekly</option>
-                <option value="custom">Custom interval</option>
+                <option value="hourly">{t('scheduled.hourly', { defaultValue: 'Hourly' })}</option>
+                <option value="daily">{t('scheduled.daily', { defaultValue: 'Daily' })}</option>
+                <option value="weekly">{t('scheduled.weekly', { defaultValue: 'Weekly' })}</option>
+                <option value="custom">{t('scheduled.customInterval', { defaultValue: 'Custom interval' })}</option>
               </select>
             </label>
 
             {showInterval && (
               <label className="flex flex-col gap-1">
                 <span className="text-[11px] text-surface-400">
-                  Interval (minutes, min {MIN_CUSTOM_INTERVAL})
+                  {t('scheduled.intervalMinutes', { defaultValue: 'Interval (minutes, min {{min}})', min: MIN_CUSTOM_INTERVAL })}
                 </span>
                 <input
                   type="number"
@@ -235,7 +245,7 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
             {showTimeOfDay && (
               <>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[11px] text-surface-400">Hour (0–23)</span>
+                  <span className="text-[11px] text-surface-400">{t('scheduled.hour', { defaultValue: 'Hour (0–23)' })}</span>
                   <input
                     type="number"
                     min={0}
@@ -246,7 +256,7 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
                   />
                 </label>
                 <label className="flex flex-col gap-1">
-                  <span className="text-[11px] text-surface-400">Minute (0–59)</span>
+                  <span className="text-[11px] text-surface-400">{t('scheduled.minute', { defaultValue: 'Minute (0–59)' })}</span>
                   <input
                     type="number"
                     min={0}
@@ -261,9 +271,9 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
 
             {showDayOfWeek && (
               <label className="col-span-2 flex flex-col gap-1">
-                <span className="text-[11px] text-surface-400">Day of week</span>
+                <span className="text-[11px] text-surface-400">{t('scheduled.dayOfWeek', { defaultValue: 'Day of week' })}</span>
                 <div className="flex flex-wrap gap-1">
-                  {DAY_NAMES.map((label, idx) => (
+                  {dayNames.map((label, idx) => (
                     <button
                       key={label}
                       type="button"
@@ -285,15 +295,15 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
 
           <div className="mt-3 rounded border border-surface-800 bg-surface-950/60 px-3 py-2">
             <div className="grid grid-cols-2 gap-y-1 text-[11px]">
-              <span className="text-surface-400">Next fire</span>
+              <span className="text-surface-400">{t('scheduled.nextFire', { defaultValue: 'Next fire' })}</span>
               <span className="font-mono text-surface-200">
                 {entry ? formatDateTime(entry.status.nextFiresAt) : '—'}
               </span>
-              <span className="text-surface-400">Last fired</span>
+              <span className="text-surface-400">{t('scheduled.lastFired', { defaultValue: 'Last fired' })}</span>
               <span className="font-mono text-surface-200">
                 {entry ? formatDateTime(entry.status.lastFiredAt) : '—'}
               </span>
-              <span className="text-surface-400">Last status</span>
+              <span className="text-surface-400">{t('scheduled.lastStatus', { defaultValue: 'Last status' })}</span>
               <span
                 className={clsx(
                   'font-mono',
@@ -324,7 +334,7 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
               disabled={saving}
               className="rounded border border-red-700/60 px-2.5 py-1 text-[11px] text-red-300 hover:bg-red-900/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Remove
+              {t('common.remove', { defaultValue: 'Remove' })}
             </button>
           )}
           <div className="ml-auto flex items-center gap-2">
@@ -334,7 +344,7 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
               disabled={saving}
               className="rounded border border-surface-700 px-2.5 py-1 text-[11px] text-surface-300 hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Cancel
+              {t('common.cancel', { defaultValue: 'Cancel' })}
             </button>
             <button
               type="button"
@@ -342,7 +352,7 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
               disabled={!dirty || saving}
               className="rounded bg-blue-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {saving ? 'Saving…' : 'Save'}
+              {saving ? t('scheduled.saving', { defaultValue: 'Saving…' }) : t('common.save', { defaultValue: 'Save' })}
             </button>
           </div>
         </div>

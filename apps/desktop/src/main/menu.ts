@@ -1,6 +1,7 @@
 import { Menu, BrowserWindow, app, shell, type MenuItemConstructorOptions } from 'electron';
 import { basename } from 'node:path';
 import { IPC, type MenuEvent } from '@freecrawl/shared-types';
+import { getMenuLabels, type MenuLang } from './menu-i18n.js';
 
 function send(event: MenuEvent): void {
   const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
@@ -27,19 +28,22 @@ export interface AppMenuHandlers {
    * update available with "Open release page" button / network error).
    */
   onCheckForUpdates: () => void;
+  /** UI language for menu labels. Falls back to `en` when missing. */
+  lang?: MenuLang;
 }
 
 export function buildAppMenu(handlers: AppMenuHandlers): Menu {
+  const L = getMenuLabels(handlers.lang ?? 'en');
   const recentSubmenu: MenuItemConstructorOptions[] =
     handlers.recentProjects.length === 0
-      ? [{ label: '(empty)', enabled: false }]
+      ? [{ label: L.emptyRecent, enabled: false }]
       : [
           ...handlers.recentProjects.slice(0, 10).map<MenuItemConstructorOptions>((p) => ({
             label: `${basename(p)}  —  ${p}`,
             click: () => handlers.onOpenRecent(p),
           })),
           { type: 'separator' as const },
-          { label: 'Clear Recent', click: () => handlers.onClearRecent() },
+          { label: L.clearRecent, click: () => handlers.onClearRecent() },
         ];
   const isMac = process.platform === 'darwin';
 
@@ -63,62 +67,61 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         ] as MenuItemConstructorOptions[])
       : []),
     {
-      label: 'File',
+      label: L.file,
       submenu: [
-        { label: 'New Project', accelerator: 'CmdOrCtrl+N', click: () => send('new-project') },
+        { label: L.newProject, accelerator: 'CmdOrCtrl+N', click: () => send('new-project') },
         {
-          label: 'Open Project…',
+          label: L.openProject,
           accelerator: 'CmdOrCtrl+O',
           click: () => handlers.onOpenProject(),
         },
-        { label: 'Open Recent', submenu: recentSubmenu },
-        { label: 'Clear Crawl Data', click: () => send('clear-crawl') },
+        { label: L.openRecent, submenu: recentSubmenu },
+        { label: L.clearCrawlData, click: () => send('clear-crawl') },
         { type: 'separator' },
         {
-          label: 'Export Current View as CSV',
+          label: L.exportCsv,
           accelerator: 'CmdOrCtrl+E',
           click: () => send('export-csv'),
         },
         {
-          label: 'Export Current View as JSON…',
+          label: L.exportJson,
           accelerator: 'CmdOrCtrl+Shift+E',
           click: () => send('export-json'),
         },
         {
-          label: 'Export Current View as XML…',
+          label: L.exportXml,
           click: () => send('export-xml'),
         },
         {
-          label: 'Generate XML Sitemap…',
+          label: L.generateSitemap,
           click: () => send('generate-sitemap'),
         },
         {
-          label: 'Export HTML Report…',
+          label: L.exportHtmlReport,
           click: () => send('export-html-report'),
         },
         {
-          label: 'Bulk Export…',
+          label: L.bulkExport,
           click: () => send('export-bulk'),
         },
         { type: 'separator' },
         {
-          label: 'Compare With Project…',
+          label: L.compareWith,
           click: () => send('compare-with-project'),
         },
         {
-          label: 'Scheduled Crawl…',
-          toolTip:
-            'Set up an in-app recurring crawl for the currently-open project. Fires only while FreeCrawl is open; use the CLI + OS scheduler for triggers that survive restarts.',
+          label: L.scheduledCrawl,
+          toolTip: L.scheduledCrawlTooltip,
           click: () => send('open-scheduled-crawl'),
         },
         {
-          label: 'Save Project As…',
+          label: L.saveProjectAs,
           accelerator: 'CmdOrCtrl+Shift+S',
           click: () => send('save-project-as'),
         },
         { type: 'separator' },
         {
-          label: 'Settings…',
+          label: L.settings,
           accelerator: 'CmdOrCtrl+,',
           click: () => send('open-settings'),
         },
@@ -127,21 +130,21 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
       ],
     },
     {
-      label: 'View',
+      label: L.view,
       submenu: [
         {
-          label: 'Overview Sidebar',
+          label: L.overviewSidebar,
           accelerator: 'CmdOrCtrl+B',
           click: () => send('toggle-sidebar'),
         },
         {
-          label: 'Detail Panel',
+          label: L.detailPanel,
           accelerator: 'CmdOrCtrl+D',
           click: () => send('toggle-detail-panel'),
         },
         { type: 'separator' },
         {
-          label: 'Show Visualization Tab',
+          label: L.showVisualization,
           accelerator: 'CmdOrCtrl+G',
           click: () => send('open-visualization'),
         },
@@ -152,73 +155,70 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         { role: 'zoomIn' },
         { role: 'zoomOut' },
         { type: 'separator' },
-        { role: 'togglefullscreen', label: 'Fullscreen' },
+        { role: 'togglefullscreen', label: L.fullscreen },
       ],
     },
     {
-      label: 'Reports',
+      label: L.reports,
       submenu: [
         {
-          label: 'Reports…',
+          label: L.reportsItem,
           accelerator: 'CmdOrCtrl+R',
           click: () => send('open-reports'),
         },
       ],
     },
     {
-      label: 'Help',
+      label: L.help,
       submenu: [
         {
-          label: 'Documentation',
+          label: L.documentation,
           click: () => void shell.openExternal('https://github.com/kemalai/FreeCrawl-SEO-Tool'),
         },
         { type: 'separator' },
         {
-          label: 'Show Logs…',
+          label: L.showLogs,
           accelerator: 'CmdOrCtrl+L',
           click: () => handlers.onOpenLogs(),
         },
         {
-          label: 'Open Logs Folder',
-          toolTip: 'Open the directory where rotated log files are persisted on disk',
+          label: L.openLogsFolder,
+          toolTip: L.openLogsFolderTooltip,
           click: () => handlers.onOpenLogsFolder(),
         },
         {
-          label: 'Robots.txt Tester…',
+          label: L.robotsTester,
           click: () => send('open-robots-tester'),
         },
         {
-          label: 'Sitemap Validator…',
+          label: L.sitemapValidator,
           click: () => send('open-sitemap-validator'),
         },
         { type: 'separator' },
         {
-          label: 'Reset Diagnostic Warnings',
-          toolTip: 'Re-enable popup warnings you previously dismissed with "Don\'t show again"',
+          label: L.resetDiagnostics,
+          toolTip: L.resetDiagnosticsTooltip,
           click: () => handlers.onResetDiagnosticDialogs(),
         },
         { type: 'separator' },
         {
-          label: 'Delete Domain Data…',
-          toolTip:
-            'GDPR-aligned per-domain wipe. Removes every URL row whose host matches the entered domain plus every dependent record (links, headers, images, source snapshots).',
+          label: L.deleteDomainData,
+          toolTip: L.deleteDomainDataTooltip,
           click: () => send('delete-domain-data'),
         },
         {
-          label: 'Clear All Data…',
-          toolTip:
-            'Wipe the entire active project (URLs, links, images, headers, source snapshots, sitemaps). Cannot be undone — Save Project As… first if you want a backup.',
+          label: L.clearAllData,
+          toolTip: L.clearAllDataTooltip,
           click: () => send('clear-all-data'),
         },
         { type: 'separator' },
         {
-          label: 'Check for Updates…',
-          toolTip:
-            'Fetch the latest GitHub release and compare it with your installed version. No background polling — runs only when you click.',
+          label: L.checkForUpdates,
+          toolTip: L.checkForUpdatesTooltip,
           click: () => handlers.onCheckForUpdates(),
         },
         { type: 'separator' },
-        { label: 'About FreeCrawl SEO', click: () => send('about') },
+        { label: L.about, click: () => send('about') },
       ],
     },
   ];

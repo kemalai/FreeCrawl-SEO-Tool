@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ChevronsUpDown, Columns3, Download, Filter, X } from 'lucide-react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type { AdvancedFilter, CrawlUrlRow } from '@freecrawl/shared-types';
 import { useAppStore, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId, type ColumnSpec } from './columns.js';
@@ -10,6 +11,7 @@ import { AdvancedFilterDialog } from '../components/AdvancedFilterDialog.js';
 import { ErrorBoundary } from '../components/ErrorBoundary.js';
 import { ExportDialog } from '../components/ExportDialog.js';
 import { InfoTip } from '../components/InfoTip.js';
+import { translateLabel } from '../i18n/labels.js';
 
 const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
@@ -45,6 +47,8 @@ function saveHiddenColumns(tab: TabKey, hidden: Set<string>): void {
 }
 
 export function UrlsTab() {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const activeTab = useAppStore((s) => s.activeTab);
   const activeCategory = useAppStore((s) => s.activeCategory);
   const selectedUrlId = useAppStore((s) => s.selectedUrlId);
@@ -523,7 +527,7 @@ export function UrlsTab() {
       <div className="flex shrink-0 items-center gap-2 border-b border-surface-800 bg-surface-900/30 px-3 py-1.5">
         <input
           className="input w-96"
-          placeholder="Search URLs / titles…"
+          placeholder={t('urlsTab.searchPlaceholder', { defaultValue: 'Search URLs / titles…' })}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           spellCheck={false}
@@ -537,10 +541,10 @@ export function UrlsTab() {
               ? 'border-accent-500/60 bg-accent-500/15 text-accent-300 hover:bg-accent-500/25'
               : 'border-surface-700 text-surface-300 hover:bg-surface-800',
           )}
-          title="Advanced filter"
+          title={t('urlsTab.advancedFilterTitle', { defaultValue: 'Advanced filter' })}
         >
           <Filter className="h-3.5 w-3.5" />
-          <span>Advanced</span>
+          <span>{t('urlsTab.advanced', { defaultValue: 'Advanced' })}</span>
           {activeClauseCount > 0 && (
             <span className="rounded bg-accent-500/20 px-1 font-mono text-[10px]">
               {activeClauseCount}
@@ -552,7 +556,7 @@ export function UrlsTab() {
             type="button"
             onClick={() => setFilter(null)}
             className="inline-flex items-center gap-1 rounded border border-surface-700 px-1.5 py-1 text-[11px] text-surface-400 hover:bg-surface-800 hover:text-surface-200"
-            title="Clear advanced filter"
+            title={t('urlsTab.clearAdvancedFilter', { defaultValue: 'Clear advanced filter' })}
           >
             <X className="h-3 w-3" />
           </button>
@@ -575,12 +579,12 @@ export function UrlsTab() {
             )}
             title={
               allColumns.length === 0
-                ? 'This tab has no toggleable columns'
-                : 'Show/hide columns'
+                ? t('urlsTab.noToggleableColumns', { defaultValue: 'This tab has no toggleable columns' })
+                : t('urlsTab.showHideColumns', { defaultValue: 'Show/hide columns' })
             }
           >
             <Columns3 className="h-3.5 w-3.5" />
-            <span>Columns</span>
+            <span>{t('urlsTab.columns', { defaultValue: 'Columns' })}</span>
             {hiddenColumns.size > 0 && (
               <span className="rounded bg-accent-500/20 px-1 font-mono text-[10px]">
                 {allColumns.length - hiddenColumns.size}/{allColumns.length}
@@ -606,10 +610,10 @@ export function UrlsTab() {
               ? 'cursor-not-allowed border-surface-800 text-surface-600'
               : 'border-surface-700 text-surface-300 hover:bg-surface-800',
           )}
-          title={lazy.total === 0 ? 'No data to export' : 'Export this table'}
+          title={lazy.total === 0 ? t('urlsTab.noDataToExport', { defaultValue: 'No data to export' }) : t('urlsTab.exportThisTable', { defaultValue: 'Export this table' })}
         >
           <Download className="h-3.5 w-3.5" />
-          <span>Export</span>
+          <span>{t('urlsTab.export', { defaultValue: 'Export' })}</span>
         </button>
       </div>
 
@@ -672,9 +676,9 @@ export function UrlsTab() {
                     next.add(columnId(c));
                     setHiddenColumns(next);
                   }}
-                  title={c.header + ' (click to select · drag to multi-select · right-click to hide)'}
+                  title={translateLabel(c.header, lang) + ' ' + t('urlsTab.columnHeaderHint', { defaultValue: '(click to select · drag to multi-select · right-click to hide)' })}
                 >
-                  <span className="cursor-pointer truncate">{c.header}</span>
+                  <span className="cursor-pointer truncate">{translateLabel(c.header, lang)}</span>
                   {(c.info || c.example) && (
                     <span
                       className="shrink-0"
@@ -855,7 +859,7 @@ export function UrlsTab() {
             className="pointer-events-none absolute inset-0 flex items-center justify-center"
             style={{ top: HEADER_HEIGHT }}
           >
-            <div className="text-xs text-surface-500">Loading…</div>
+            <div className="text-xs text-surface-500">{t('common.loading', { defaultValue: 'Loading…' })}</div>
           </div>
         )}
         {lazy.total === 0 && !lazy.isLoading && (
@@ -864,7 +868,7 @@ export function UrlsTab() {
             style={{ top: HEADER_HEIGHT }}
           >
             <div className="max-w-md text-center">
-              <div className="mb-1 text-sm font-semibold text-surface-300">No URLs to show</div>
+              <div className="mb-1 text-sm font-semibold text-surface-300">{t('urlsTab.noUrlsToShow', { defaultValue: 'No URLs to show' })}</div>
               <div className="text-xs text-surface-500">
                 Start a crawl or choose a different category.
               </div>
@@ -937,6 +941,8 @@ function ColumnPickerPopover({
   onChange: (next: Set<string>) => void;
   onClose: () => void;
 }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const popRef = useRef<HTMLDivElement | null>(null);
   // Outside-click closes the popover. We attach to mousedown so the
   // listener fires before any click handler inside the table can fire
@@ -983,24 +989,24 @@ function ColumnPickerPopover({
     >
       <div className="flex items-center justify-between border-b border-surface-800 px-3 py-2">
         <div className="text-[12px] font-semibold text-surface-100">
-          Columns ({visibleCount}/{allColumns.length})
+          {t('urlsTab.columns', { defaultValue: 'Columns' })} ({visibleCount}/{allColumns.length})
         </div>
         <div className="flex items-center gap-1 text-[10px]">
           <button
             type="button"
             onClick={() => onChange(new Set())}
             className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800"
-            title="Make every column visible"
+            title={t('urlsTab.makeAllVisible', { defaultValue: 'Make every column visible' })}
           >
-            Show all
+            {t('urlsTab.showAll', { defaultValue: 'Show all' })}
           </button>
           <button
             type="button"
             onClick={() => onChange(new Set(allColumns.map((c) => columnId(c))))}
             className="rounded border border-surface-700 px-1.5 py-0.5 text-surface-300 hover:bg-surface-800"
-            title="Hide every column except Row #"
+            title={t('urlsTab.hideAllExceptRow', { defaultValue: 'Hide every column except Row #' })}
           >
-            Hide all
+            {t('urlsTab.hideAll', { defaultValue: 'Hide all' })}
           </button>
         </div>
       </div>
@@ -1019,7 +1025,7 @@ function ColumnPickerPopover({
                 onChange={() => toggle(id)}
                 className="h-3 w-3 accent-blue-500"
               />
-              <span className="truncate">{c.header}</span>
+              <span className="truncate">{translateLabel(c.header, lang)}</span>
             </label>
           );
         })}

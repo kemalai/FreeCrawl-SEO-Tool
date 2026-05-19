@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type { ImageRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip } from '../components/InfoTip.js';
+import { translateLabel } from '../i18n/labels.js';
 
 const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
@@ -17,6 +19,8 @@ const PAGE_SIZE = 5000;
 type SortKey = 'src' | 'alt' | 'width' | 'height' | 'occurrences';
 
 export function ImagesTab() {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const activeCategory = useAppStore((s) => s.activeCategory);
   const dataVersion = useAppStore((s) => s.dataVersion);
   const progress = useAppStore((s) => s.progress);
@@ -140,19 +144,19 @@ export function ImagesTab() {
       <div className="flex shrink-0 items-center gap-2 border-b border-surface-800 bg-surface-900/30 px-3 py-1.5">
         <input
           className="input w-96"
-          placeholder="Search image URLs / alt…"
+          placeholder={t('imagesTab.searchPlaceholder', { defaultValue: 'Search image URLs / alt…' })}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           spellCheck={false}
         />
         {missingAltOnly && (
           <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
-            Missing Alt only
+            {t('imagesTab.missingAltOnly', { defaultValue: 'Missing Alt only' })}
           </span>
         )}
         <div className="ml-auto text-[11px] text-surface-500">
-          <span className="font-mono text-surface-200">{total.toLocaleString()}</span> images
-          <span className="ml-2 text-surface-600">({sorted.length.toLocaleString()} loaded)</span>
+          <span className="font-mono text-surface-200">{total.toLocaleString()}</span> {t('imagesTab.imagesUnit', { defaultValue: 'images' })}
+          <span className="ml-2 text-surface-600">({t('imagesTab.loaded', { defaultValue: '{{n}} loaded', n: sorted.length.toLocaleString() })})</span>
         </div>
       </div>
 
@@ -170,7 +174,7 @@ export function ImagesTab() {
                 flex: `0 0 ${ROW_NUM_WIDTH}px`,
               }}
             >
-              Row
+              {t('imagesTab.row', { defaultValue: 'Row' })}
             </div>
             {columns.map((c) => (
               <div
@@ -180,7 +184,7 @@ export function ImagesTab() {
                 onClick={() => handleSort(c.key)}
               >
                 <span className={clsx('truncate', c.align === 'right' && 'ml-auto')}>
-                  {c.label}
+                  {translateLabel(c.label, lang)}
                 </span>
                 {(c.info || c.example) && (
                   <span
@@ -316,7 +320,7 @@ export function ImagesTab() {
             style={{ top: HEADER_HEIGHT }}
           >
             <div className="max-w-md text-center">
-              <div className="mb-1 text-sm font-semibold text-surface-300">No images</div>
+              <div className="mb-1 text-sm font-semibold text-surface-300">{t('imagesTab.noImages', { defaultValue: 'No images' })}</div>
               <div className="text-xs text-surface-500">
                 {missingAltOnly
                   ? 'No images without alt text.'

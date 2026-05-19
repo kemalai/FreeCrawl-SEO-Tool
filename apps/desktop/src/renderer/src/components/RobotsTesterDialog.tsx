@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
 import type { RobotsTestResult, RobotsValidationIssue } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export function RobotsTesterDialog({ open, onClose }: Props) {
+  const { t } = useTranslation();
   const config = useAppStore((s) => s.config);
   const [url, setUrl] = useState('');
   const [userAgent, setUserAgent] = useState(config.userAgent);
@@ -110,12 +112,12 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
       >
         <div className="flex items-center border-b border-surface-800 px-4 py-2.5">
           <div className="text-sm font-semibold tracking-wide text-surface-100">
-            Robots.txt Tester
+            {t('robots.title', { defaultValue: 'Robots.txt Tester' })}
           </div>
           <button
             className="ml-auto rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-surface-100"
             onClick={onClose}
-            title="Close (Esc)"
+            title={t('scheduled.closeEsc', { defaultValue: 'Close (Esc)' })}
           >
             <X className="h-4 w-4" />
           </button>
@@ -123,7 +125,7 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
 
         <div className="flex-1 overflow-auto px-5 py-4 text-[12px]">
           <label className="mb-3 flex flex-col gap-1">
-            <span className="text-[10px] text-surface-400">URL to test</span>
+            <span className="text-[10px] text-surface-400">{t('robots.urlToTest', { defaultValue: 'URL to test' })}</span>
             <input
               type="text"
               className="rounded border border-surface-700 bg-surface-950 px-2 py-1.5 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
@@ -139,7 +141,7 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
           </label>
 
           <label className="mb-3 flex flex-col gap-1">
-            <span className="text-[10px] text-surface-400">User-Agent</span>
+            <span className="text-[10px] text-surface-400">{t('robots.userAgent', { defaultValue: 'User-Agent' })}</span>
             <input
               type="text"
               className="rounded border border-surface-700 bg-surface-950 px-2 py-1.5 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
@@ -157,7 +159,7 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
                 onChange={(e) => setUseCustom(e.target.checked)}
                 className="h-3 w-3"
               />
-              Test against a custom robots.txt (draft mode)
+              {t('robots.customMode', { defaultValue: 'Test against a custom robots.txt (draft mode)' })}
             </label>
             <button
               type="button"
@@ -165,7 +167,7 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
               onClick={() => void loadFromFile()}
               disabled={running}
             >
-              Load from file…
+              {t('robots.loadFromFile', { defaultValue: 'Load from file…' })}
             </button>
           </div>
 
@@ -173,7 +175,7 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
             <>
               <label className="mb-3 flex flex-col gap-1">
                 <span className="text-[10px] text-surface-400">
-                  Custom robots.txt body (parsed — no fetch)
+                  {t('robots.customBodyLabel', { defaultValue: 'Custom robots.txt body (parsed — no fetch)' })}
                 </span>
                 <textarea
                   className="h-40 w-full resize-y rounded border border-surface-700 bg-surface-950 px-2 py-1.5 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
@@ -193,7 +195,7 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
               onClick={runTest}
               disabled={running || !url.trim()}
             >
-              {running ? 'Testing…' : useCustom ? 'Test (custom)' : 'Test'}
+              {running ? t('robots.testing', { defaultValue: 'Testing…' }) : useCustom ? t('robots.testCustom', { defaultValue: 'Test (custom)' }) : t('robots.test', { defaultValue: 'Test' })}
             </button>
             {result?.robotsUrl && (
               <span className="text-[10px] text-surface-500">
@@ -217,12 +219,12 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
               >
                 {result.allowed ? (
                   <span>
-                    ✓ <strong>Allowed</strong> by robots.txt for User-Agent{' '}
+                    ✓ <strong>{t('robots.allowed', { defaultValue: 'Allowed' })}</strong> {t('robots.byRobotsFor', { defaultValue: 'by robots.txt for User-Agent' })}{' '}
                     <code className="font-mono">{userAgent}</code>
                   </span>
                 ) : (
                   <span>
-                    ✗ <strong>Disallowed</strong> by robots.txt for User-Agent{' '}
+                    ✗ <strong>{t('robots.disallowed', { defaultValue: 'Disallowed' })}</strong> {t('robots.byRobotsFor', { defaultValue: 'by robots.txt for User-Agent' })}{' '}
                     <code className="font-mono">{userAgent}</code>
                   </span>
                 )}
@@ -235,14 +237,14 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
               )}
 
               <div className="grid grid-cols-2 gap-2 text-[11px]">
-                <Stat label="Crawl-Delay" value={result.crawlDelay !== null ? `${result.crawlDelay}s` : '—'} />
-                <Stat label="Sitemaps declared" value={String(result.sitemaps.length)} />
+                <Stat label={t('robots.crawlDelay', { defaultValue: 'Crawl-Delay' })} value={result.crawlDelay !== null ? `${result.crawlDelay}s` : '—'} />
+                <Stat label={t('robots.sitemapsDeclared', { defaultValue: 'Sitemaps declared' })} value={String(result.sitemaps.length)} />
               </div>
 
               {result.sitemaps.length > 0 && (
                 <details className="text-[11px] text-surface-300">
                   <summary className="cursor-pointer text-surface-400 hover:text-surface-100">
-                    Sitemaps ({result.sitemaps.length})
+                    {t('robots.sitemapsHeader', { defaultValue: 'Sitemaps' })} ({result.sitemaps.length})
                   </summary>
                   <ul className="mt-1 space-y-0.5 pl-4 font-mono">
                     {result.sitemaps.map((s) => (
@@ -257,7 +259,7 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
               {result.body !== null && (
                 <details className="text-[11px] text-surface-300">
                   <summary className="cursor-pointer text-surface-400 hover:text-surface-100">
-                    robots.txt body ({result.body.length} chars)
+                    {t('robots.bodyHeader', { defaultValue: 'robots.txt body' })} ({t('robots.charsCount', { defaultValue: '{{n}} chars', n: result.body.length })})
                   </summary>
                   <pre className="mt-1 max-h-72 overflow-auto whitespace-pre-wrap rounded border border-surface-800 bg-surface-950 p-2 font-mono text-[10px] text-surface-200">
                     {result.body}
@@ -273,7 +275,7 @@ export function RobotsTesterDialog({ open, onClose }: Props) {
             className="rounded border border-surface-700 px-3 py-1 text-[11px] hover:bg-surface-800"
             onClick={onClose}
           >
-            Close
+            {t('common.close', { defaultValue: 'Close' })}
           </button>
         </div>
       </div>
@@ -297,17 +299,18 @@ function ValidationPanel({
   issues: RobotsValidationIssue[];
   bodyEmpty: boolean;
 }) {
+  const { t } = useTranslation();
   if (bodyEmpty) {
     return (
       <div className="mb-3 rounded border border-surface-800 bg-surface-950 px-2 py-1.5 text-[10px] text-surface-500">
-        Paste a draft robots.txt above to lint syntax.
+        {t('robots.lintPrompt', { defaultValue: 'Paste a draft robots.txt above to lint syntax.' })}
       </div>
     );
   }
   if (issues.length === 0) {
     return (
       <div className="mb-3 rounded border border-emerald-700/60 bg-emerald-900/20 px-2 py-1.5 text-[11px] text-emerald-200">
-        ✓ No syntax issues detected.
+        ✓ {t('robots.noIssues', { defaultValue: 'No syntax issues detected.' })}
       </div>
     );
   }
@@ -317,11 +320,11 @@ function ValidationPanel({
     <div className="mb-3 rounded border border-amber-700/60 bg-amber-900/15">
       <div className="flex items-center gap-3 border-b border-amber-700/30 px-2 py-1 text-[10px] text-amber-300">
         <span>
-          {errors > 0 && <span className="font-medium">{errors} error{errors === 1 ? '' : 's'}</span>}
+          {errors > 0 && <span className="font-medium">{t('robots.errorCount', { defaultValue: '{{n}} error(s)', n: errors })}</span>}
           {errors > 0 && warnings > 0 && <span> · </span>}
           {warnings > 0 && (
             <span className="font-medium text-amber-200/80">
-              {warnings} warning{warnings === 1 ? '' : 's'}
+              {t('robots.warningCount', { defaultValue: '{{n}} warning(s)', n: warnings })}
             </span>
           )}
         </span>

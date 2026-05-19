@@ -9,6 +9,7 @@ import {
 } from 'react';
 import clsx from 'clsx';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { useTranslation } from 'react-i18next';
 import type { LogEntry, LogLevel } from '@freecrawl/shared-types';
 
 const LEVEL_ORDER: LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -87,6 +88,7 @@ const Row = memo(
 );
 
 export function LogsView() {
+  const { t } = useTranslation();
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [minLevel, setMinLevel] = useState<LogLevel>('info');
   const [filter, setFilter] = useState('');
@@ -220,11 +222,11 @@ export function LogsView() {
     <div className="flex h-screen flex-col bg-surface-950 text-surface-100">
       <div className="flex items-center gap-2 border-b border-surface-800 bg-surface-900 px-3 py-2">
         <div className="text-xs font-semibold uppercase tracking-wide text-surface-400">
-          Logs
+          {t('logs.title', { defaultValue: 'Logs' })}
         </div>
         <div className="mx-2 h-5 w-px bg-surface-800" />
         <label className="flex items-center gap-1.5 text-[11px] text-surface-400">
-          Level
+          {t('logs.level', { defaultValue: 'Level' })}
           <select
             className="rounded border border-surface-700 bg-surface-900 px-2 py-1 text-[11px] text-surface-100"
             value={minLevel}
@@ -239,7 +241,7 @@ export function LogsView() {
         </label>
         <input
           className="flex-1 rounded border border-surface-700 bg-surface-900 px-2 py-1 text-[11px]"
-          placeholder="Filter messages / sources…"
+          placeholder={t('logs.filterPlaceholder', { defaultValue: 'Filter messages / sources…' })}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           spellCheck={false}
@@ -250,20 +252,20 @@ export function LogsView() {
             checked={autoScroll}
             onChange={(e) => setAutoScroll(e.target.checked)}
           />
-          Auto-scroll
+          {t('logs.autoScroll', { defaultValue: 'Auto-scroll' })}
         </label>
         <button
           className="rounded border border-surface-700 px-2 py-1 text-[11px] hover:bg-surface-800"
           onClick={copyAll}
-          title="Copy visible entries to clipboard"
+          title={t('logs.copyTitle', { defaultValue: 'Copy visible entries to clipboard' })}
         >
-          Copy
+          {t('logs.copy', { defaultValue: 'Copy' })}
         </button>
         <button
           className="rounded border border-red-800/60 px-2 py-1 text-[11px] text-red-300 hover:bg-red-900/30"
           onClick={clearAll}
         >
-          Clear
+          {t('logs.clear', { defaultValue: 'Clear' })}
         </button>
       </div>
 
@@ -273,7 +275,7 @@ export function LogsView() {
         style={{ contain: 'strict' }}
       >
         {visible.length === 0 ? (
-          <div className="p-6 text-center text-surface-500">No log entries.</div>
+          <div className="p-6 text-center text-surface-500">{t('logs.empty', { defaultValue: 'No log entries.' })}</div>
         ) : (
           <div
             style={{
@@ -294,11 +296,16 @@ export function LogsView() {
 
       <div className="flex shrink-0 items-center gap-3 border-t border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-500">
         <span>
-          Showing <span className="font-mono text-surface-100">{visible.length}</span> /{' '}
-          <span className="font-mono text-surface-100">{entries.length}</span> entries
+          {t('logs.showingPrefix', { defaultValue: 'Showing' })}{' '}
+          <span className="font-mono text-surface-100">{visible.length}</span> /{' '}
+          <span className="font-mono text-surface-100">{entries.length}</span>{' '}
+          {t('logs.entriesSuffix', { defaultValue: 'entries' })}
         </span>
         <span className="ml-auto text-surface-600">
-          Live tail keeps the last {MAX_ENTRIES.toLocaleString()} entries — full history persisted to disk (Help → Open Logs Folder).
+          {t('logs.tailHint', {
+            defaultValue: 'Live tail keeps the last {{n}} entries — full history persisted to disk (Help → Open Logs Folder).',
+            n: MAX_ENTRIES.toLocaleString(),
+          })}
         </span>
       </div>
     </div>

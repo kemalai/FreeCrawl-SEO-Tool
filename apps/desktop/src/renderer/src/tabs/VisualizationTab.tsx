@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { RefreshCw, Sparkles, Settings2, RotateCcw, Download } from 'lucide-react';
 import cytoscape, { type Core } from 'cytoscape';
+import { useTranslation } from 'react-i18next';
 import type {
   AnchorTextRow,
   GraphSnapshotResult,
   Indexability,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
+import { translateLabel } from '../i18n/labels.js';
 
 /**
  * User-tunable layout knobs. Persisted in prefs under the
@@ -200,6 +202,8 @@ function nodeSize(inlinks: number, scale = 1): number {
 type LabelMode = 'hover' | 'top' | 'always';
 
 export function VisualizationTab() {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   // React to data refreshes so the graph re-snapshots when a new crawl
   // populates URLs (or the active project is swapped).
   const dataVersion = useAppStore((s) => s.dataVersion);
@@ -540,33 +544,33 @@ export function VisualizationTab() {
         </div>
         <div className="ml-2 flex flex-wrap items-center gap-2 text-[11px]">
           <label className="flex items-center gap-1 text-surface-400">
-            Layout:
+            {t('viz.layout', { defaultValue: 'Layout:' })}
             <select
               className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
               value={layout}
               onChange={(e) => setLayout(e.target.value as LayoutKind)}
             >
               {LAYOUTS.map((l) => (
-                <option key={l.key} value={l.key} title={l.hint}>
-                  {l.label}
+                <option key={l.key} value={l.key} title={translateLabel(l.hint, lang)}>
+                  {translateLabel(l.label, lang)}
                 </option>
               ))}
             </select>
           </label>
           <label className="flex items-center gap-1 text-surface-400">
-            Color:
+            {t('viz.color', { defaultValue: 'Color:' })}
             <select
               className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
               value={colorMode}
               onChange={(e) => setColorMode(e.target.value as ColorMode)}
             >
-              <option value="status">By Status</option>
-              <option value="depth">By Depth</option>
-              <option value="indexability">By Indexability</option>
+              <option value="status">{t('viz.byStatus', { defaultValue: 'By Status' })}</option>
+              <option value="depth">{t('viz.byDepth', { defaultValue: 'By Depth' })}</option>
+              <option value="indexability">{t('viz.byIndexability', { defaultValue: 'By Indexability' })}</option>
             </select>
           </label>
           <label className="flex items-center gap-1 text-surface-400">
-            Nodes:
+            {t('viz.nodes', { defaultValue: 'Nodes:' })}
             <select
               className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
               value={String(nodeLimit)}
@@ -582,24 +586,24 @@ export function VisualizationTab() {
             </select>
           </label>
           <label className="flex items-center gap-1 text-surface-400">
-            Labels:
+            {t('viz.labels', { defaultValue: 'Labels:' })}
             <select
               className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
               value={labelMode}
               onChange={(e) => setLabelMode(e.target.value as LabelMode)}
-              title="Hover = on demand · Top 20 = only the most-linked hubs · All = every node"
+              title={t('viz.labelsTooltip', { defaultValue: 'Hover = on demand · Top 20 = only the most-linked hubs · All = every node' })}
             >
-              <option value="hover">Hover Only</option>
-              <option value="top">Top 20</option>
-              <option value="always">All</option>
+              <option value="hover">{t('viz.hoverOnly', { defaultValue: 'Hover Only' })}</option>
+              <option value="top">{t('viz.top20', { defaultValue: 'Top 20' })}</option>
+              <option value="always">{t('viz.all', { defaultValue: 'All' })}</option>
             </select>
           </label>
           <button
             className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
             onClick={() => cyRef.current?.fit(undefined, 30)}
-            title="Fit graph to view"
+            title={t('viz.fitTitle', { defaultValue: 'Fit graph to view' })}
           >
-            Fit
+            {t('viz.fit', { defaultValue: 'Fit' })}
           </button>
           <button
             className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
@@ -611,7 +615,7 @@ export function VisualizationTab() {
             ) : (
               <RefreshCw className="h-3 w-3" />
             )}
-            Reload
+            {t('viz.reload', { defaultValue: 'Reload' })}
           </button>
           <div className="relative">
             <button
@@ -622,8 +626,8 @@ export function VisualizationTab() {
                   : 'border-surface-700 text-surface-200 hover:border-blue-500 hover:bg-surface-800'
               }`}
               onClick={() => setTunerOpen((v) => !v)}
-              title="Layout tuning"
-              aria-label="Layout tuning"
+              title={t('viz.layoutTuning', { defaultValue: 'Layout tuning' })}
+              aria-label={t('viz.layoutTuning', { defaultValue: 'Layout tuning' })}
             >
               <Settings2 className="h-3 w-3" />
             </button>
@@ -645,11 +649,11 @@ export function VisualizationTab() {
                   : 'border-surface-700 text-surface-200 hover:border-blue-500 hover:bg-surface-800'
               }`}
               onClick={() => setExportMenuOpen((v) => !v)}
-              title="Export graph"
-              aria-label="Export graph"
+              title={t('viz.exportGraph', { defaultValue: 'Export graph' })}
+              aria-label={t('viz.exportGraph', { defaultValue: 'Export graph' })}
             >
               <Download className="h-3 w-3" />
-              Export
+              {t('viz.export', { defaultValue: 'Export' })}
             </button>
             {exportMenuOpen && (
               <div
@@ -663,7 +667,7 @@ export function VisualizationTab() {
                     setExportMenuOpen(false);
                   }}
                 >
-                  PNG (high-DPI raster)
+                  {t('viz.exportPng', { defaultValue: 'PNG (high-DPI raster)' })}
                 </button>
                 <button
                   className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
@@ -672,7 +676,7 @@ export function VisualizationTab() {
                     setExportMenuOpen(false);
                   }}
                 >
-                  SVG (vector — Illustrator/Figma)
+                  {t('viz.exportSvg', { defaultValue: 'SVG (vector — Illustrator/Figma)' })}
                 </button>
                 <button
                   className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
@@ -681,7 +685,7 @@ export function VisualizationTab() {
                     setExportMenuOpen(false);
                   }}
                 >
-                  Standalone HTML (shareable)
+                  {t('viz.exportHtml', { defaultValue: 'Standalone HTML (shareable)' })}
                 </button>
               </div>
             )}
@@ -708,13 +712,16 @@ export function VisualizationTab() {
           )}
           {graph && (
             <div className="pointer-events-none absolute left-3 top-3 rounded bg-surface-900/80 px-2 py-1 text-[10px] text-surface-300">
-              {graph.nodes.length.toLocaleString()} nodes ·{' '}
-              {graph.edges.length.toLocaleString()} edges
+              {t('viz.nodesEdgesCount', {
+                defaultValue: '{{nodes}} nodes · {{edges}} edges',
+                nodes: graph.nodes.length.toLocaleString(),
+                edges: graph.edges.length.toLocaleString(),
+              })}
             </div>
           )}
           {graph && (
             <div className="pointer-events-none absolute right-3 top-3 rounded bg-surface-900/80 px-2 py-1 text-[10px] text-surface-400">
-              Hover = neighbours · Click = select · Empty click = clear · Double-click node = open · Double-click canvas = fit
+              {t('viz.interactionHint', { defaultValue: 'Hover = neighbours · Click = select · Empty click = clear · Double-click node = open · Double-click canvas = fit' })}
             </div>
           )}
           {hover && (
@@ -724,12 +731,12 @@ export function VisualizationTab() {
           )}
           {loading && !graph && (
             <div className="absolute inset-0 flex items-center justify-center text-[12px] text-surface-500">
-              Loading graph…
+              {t('viz.loadingGraph', { defaultValue: 'Loading graph…' })}
             </div>
           )}
           {!loading && graph && graph.nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center text-[12px] text-surface-500">
-              No URLs crawled yet — start a crawl to populate the graph.
+              {t('viz.emptyGraph', { defaultValue: 'No URLs crawled yet — start a crawl to populate the graph.' })}
             </div>
           )}
         </div>
@@ -737,13 +744,13 @@ export function VisualizationTab() {
         <aside className="flex w-72 flex-col border-l border-surface-800 bg-surface-950/40">
           <div className="border-b border-surface-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-surface-400">
             <div className="flex items-center gap-1">
-              <Sparkles className="h-3 w-3" /> Top Anchor Texts
+              <Sparkles className="h-3 w-3" /> {t('viz.topAnchorTexts', { defaultValue: 'Top Anchor Texts' })}
             </div>
           </div>
           <div className="flex-1 overflow-auto p-2 leading-snug">
             {anchors.length === 0 && (
               <div className="px-2 py-3 text-[11px] italic text-surface-500">
-                No internal-link anchors collected yet.
+                {t('viz.anchorsEmpty', { defaultValue: 'No internal-link anchors collected yet.' })}
               </div>
             )}
             {anchors.length > 0 && (
@@ -788,6 +795,7 @@ function TuningPopover({
   reload: () => void;
   close: () => void;
 }) {
+  const { t } = useTranslation();
   const popRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const onDocDown = (e: MouseEvent) => {
@@ -811,78 +819,78 @@ function TuningPopover({
       onClick={(e) => e.stopPropagation()}
     >
       <div className="mb-2 flex items-center justify-between">
-        <div className="text-[12px] font-semibold text-surface-100">Layout Tuning</div>
+        <div className="text-[12px] font-semibold text-surface-100">{t('viz.layoutTuning', { defaultValue: 'Layout Tuning' })}</div>
         <button
           className="flex items-center gap-1 rounded border border-surface-700 px-2 py-0.5 text-[10px] text-surface-300 hover:bg-surface-800"
           onClick={reset}
-          title="Reset to defaults"
+          title={t('viz.resetToDefaults', { defaultValue: 'Reset to defaults' })}
         >
           <RotateCcw className="h-3 w-3" />
-          Reset
+          {t('common.reset', { defaultValue: 'Reset' })}
         </button>
       </div>
 
       <Slider
-        label="Node size"
+        label={t('viz.nodeSize', { defaultValue: 'Node size' })}
         value={tuning.nodeSizeScale}
         min={0.4}
         max={3}
         step={0.1}
         format={(v) => `${v.toFixed(1)}×`}
         onChange={(v) => patch({ nodeSizeScale: v })}
-        hint="Scales every dot's radius. Lower = tighter graph, higher = easier to click but more overlap."
+        hint={t('viz.nodeSizeHint', { defaultValue: "Scales every dot's radius. Lower = tighter graph, higher = easier to click but more overlap." })}
       />
       <Slider
-        label="Node distance (repulsion)"
+        label={t('viz.nodeDistance', { defaultValue: 'Node distance (repulsion)' })}
         value={tuning.repulsionScale}
         min={0.2}
         max={5}
         step={0.1}
         format={(v) => `${v.toFixed(1)}×`}
         onChange={(v) => patch({ repulsionScale: v })}
-        hint="How strongly nodes push each other apart. Higher = more breathing room. Force-Directed only."
+        hint={t('viz.repulsionHint', { defaultValue: 'How strongly nodes push each other apart. Higher = more breathing room. Force-Directed only.' })}
       />
       <Slider
-        label="Edge length"
+        label={t('viz.edgeLength', { defaultValue: 'Edge length' })}
         value={tuning.edgeLengthScale}
         min={0.3}
         max={4}
         step={0.1}
         format={(v) => `${v.toFixed(1)}×`}
         onChange={(v) => patch({ edgeLengthScale: v })}
-        hint="Target rest-length for connections. Higher = longer edges. Force-Directed only."
+        hint={t('viz.edgeLengthHint', { defaultValue: 'Target rest-length for connections. Higher = longer edges. Force-Directed only.' })}
       />
       <Slider
-        label="Cluster spacing"
+        label={t('viz.clusterSpacing', { defaultValue: 'Cluster spacing' })}
         value={tuning.componentSpacingScale}
         min={0.3}
         max={4}
         step={0.1}
         format={(v) => `${v.toFixed(1)}×`}
         onChange={(v) => patch({ componentSpacingScale: v })}
-        hint="Gap between disconnected sub-graphs. Higher = isolated clusters spread further apart."
+        hint={t('viz.clusterSpacingHint', { defaultValue: 'Gap between disconnected sub-graphs. Higher = isolated clusters spread further apart.' })}
       />
       <Slider
-        label="Edge opacity"
+        label={t('viz.edgeOpacity', { defaultValue: 'Edge opacity' })}
         value={tuning.edgeOpacity}
         min={0.05}
         max={1}
         step={0.05}
         format={(v) => `${Math.round(v * 100)}%`}
         onChange={(v) => patch({ edgeOpacity: v })}
-        hint="Lower = less visual noise on dense graphs."
+        hint={t('viz.edgeOpacityHint', { defaultValue: 'Lower = less visual noise on dense graphs.' })}
       />
 
       <div className="mt-3 flex items-center justify-between gap-2 border-t border-surface-800 pt-2">
         <div className="text-[10px] text-surface-500">
-          Some changes need a layout re-run.
+          {t('viz.changesNeedRerun', { defaultValue: 'Some changes need a layout re-run.' })}
         </div>
         <button
           className="flex items-center gap-1 rounded bg-blue-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-blue-500"
           onClick={() => reload()}
         >
           <RefreshCw className="h-3 w-3" />
-          Re-run layout
+          {t('viz.rerunLayout', { defaultValue: 'Re-run layout' })}
         </button>
       </div>
     </div>

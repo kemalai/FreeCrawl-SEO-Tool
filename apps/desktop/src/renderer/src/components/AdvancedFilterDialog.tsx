@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
+import { useTranslation } from 'react-i18next';
+import { translateLabel } from '../i18n/labels.js';
 import type {
   AdvancedFilter,
   FilterClause,
@@ -84,6 +86,8 @@ export function AdvancedFilterDialog({
   onClose: () => void;
   onApply: (filter: AdvancedFilter | null) => void;
 }) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [groups, setGroups] = useState<FilterGroup[]>(() =>
     initial && initial.groups.length > 0 ? clone(initial.groups) : [emptyGroup()],
   );
@@ -174,11 +178,11 @@ export function AdvancedFilterDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-surface-800 px-4 py-2.5">
-          <div className="text-sm font-semibold text-surface-100">Advanced Table Search</div>
+          <div className="text-sm font-semibold text-surface-100">{t('filter.title', { defaultValue: 'Advanced Table Search' })}</div>
           <button
             className="rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-surface-100"
             onClick={onClose}
-            title="Close"
+            title={t('common.close', { defaultValue: 'Close' })}
           >
             <X className="h-4 w-4" />
           </button>
@@ -189,13 +193,13 @@ export function AdvancedFilterDialog({
             <div key={gi} className="rounded border border-surface-800 bg-surface-950/50 p-3">
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-[10px] font-semibold uppercase tracking-wide text-surface-500">
-                  {gi === 0 ? 'Where' : 'Or Where'}
+                  {gi === 0 ? t('filter.where', { defaultValue: 'Where' }) : t('filter.orWhere', { defaultValue: 'Or Where' })}
                 </span>
                 {groups.length > 1 && (
                   <button
                     className="rounded p-1 text-surface-500 hover:bg-surface-800 hover:text-red-300"
                     onClick={() => deleteGroup(gi)}
-                    title="Remove group"
+                    title={t('filter.removeGroup', { defaultValue: 'Remove group' })}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -207,6 +211,7 @@ export function AdvancedFilterDialog({
                     key={ci}
                     clause={clause}
                     showAndLabel={ci > 0}
+                    lang={lang}
                     onChange={(patch) => updateClause(gi, ci, patch)}
                     onDelete={() => deleteClause(gi, ci)}
                   />
@@ -216,9 +221,9 @@ export function AdvancedFilterDialog({
                 <button
                   className="inline-flex items-center gap-1 rounded border border-accent-500/50 bg-accent-500/10 px-2 py-1 text-[11px] text-accent-300 hover:bg-accent-500/20"
                   onClick={() => addClause(gi)}
-                  title="Add another AND condition to this group"
+                  title={t('filter.addAnd', { defaultValue: 'Add another AND condition to this group' })}
                 >
-                  <Plus className="h-3 w-3" /> AND
+                  <Plus className="h-3 w-3" /> {t('filter.and', { defaultValue: 'AND' })}
                 </button>
               </div>
             </div>
@@ -228,9 +233,9 @@ export function AdvancedFilterDialog({
             <button
               className="inline-flex items-center gap-1 rounded border border-emerald-500/50 bg-emerald-500/10 px-2.5 py-1 text-[11px] text-emerald-300 hover:bg-emerald-500/20"
               onClick={addGroup}
-              title="Add an OR group"
+              title={t('filter.addOr', { defaultValue: 'Add an OR group' })}
             >
-              <Plus className="h-3 w-3" /> OR
+              <Plus className="h-3 w-3" /> {t('filter.or', { defaultValue: 'OR' })}
             </button>
           </div>
         </div>
@@ -240,20 +245,20 @@ export function AdvancedFilterDialog({
             className="inline-flex items-center gap-1 rounded border border-red-700/50 bg-red-900/30 px-2.5 py-1 text-[11px] text-red-300 hover:bg-red-900/50"
             onClick={reset}
           >
-            Reset
+            {t('common.reset', { defaultValue: 'Reset' })}
           </button>
           <div className="flex items-center gap-2">
             <button
               className="rounded border border-surface-700 px-3 py-1 text-[11px] text-surface-300 hover:bg-surface-800"
               onClick={onClose}
             >
-              Cancel
+              {t('common.cancel', { defaultValue: 'Cancel' })}
             </button>
             <button
               className="rounded bg-accent-500 px-3 py-1 text-[11px] font-medium text-white hover:bg-accent-600"
               onClick={apply}
             >
-              OK
+              {t('common.ok', { defaultValue: 'OK' })}
             </button>
           </div>
         </div>
@@ -265,14 +270,17 @@ export function AdvancedFilterDialog({
 function ClauseRow({
   clause,
   showAndLabel,
+  lang,
   onChange,
   onDelete,
 }: {
   clause: FilterClause;
   showAndLabel: boolean;
+  lang: string;
   onChange: (patch: Partial<FilterClause>) => void;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation();
   const numeric = isNumericField(clause.field);
   const operators = numeric ? NUMERIC_OPS : TEXT_OPS;
   const needsValue = !NO_VALUE_OPS.includes(clause.operator);
@@ -285,7 +293,7 @@ function ClauseRow({
           showAndLabel ? 'text-surface-500' : 'text-transparent',
         )}
       >
-        {showAndLabel ? 'And' : '—'}
+        {showAndLabel ? t('filter.andRow', { defaultValue: 'And' }) : '—'}
       </span>
       <select
         className="input w-52"
@@ -304,7 +312,7 @@ function ClauseRow({
       >
         {FIELDS.map((f) => (
           <option key={f.value} value={f.value}>
-            {f.label}
+            {translateLabel(f.label, lang)}
           </option>
         ))}
       </select>
@@ -315,7 +323,7 @@ function ClauseRow({
       >
         {operators.map((o) => (
           <option key={o.value} value={o.value}>
-            {o.label}
+            {translateLabel(o.label, lang)}
           </option>
         ))}
       </select>
@@ -323,18 +331,18 @@ function ClauseRow({
         <input
           className="input flex-1"
           type={numeric ? 'number' : 'text'}
-          placeholder={numeric ? '0' : 'Enter search query'}
+          placeholder={numeric ? '0' : t('filter.searchPlaceholder', { defaultValue: 'Enter search query' })}
           value={clause.value}
           onChange={(e) => onChange({ value: e.target.value })}
           spellCheck={false}
         />
       ) : (
-        <div className="flex-1 text-[11px] text-surface-600">(no value required)</div>
+        <div className="flex-1 text-[11px] text-surface-600">{t('filter.noValue', { defaultValue: '(no value required)' })}</div>
       )}
       <button
         className="rounded p-1 text-surface-500 hover:bg-surface-800 hover:text-red-300"
         onClick={onDelete}
-        title="Remove condition"
+        title={t('filter.removeCondition', { defaultValue: 'Remove condition' })}
       >
         <Trash2 className="h-3.5 w-3.5" />
       </button>

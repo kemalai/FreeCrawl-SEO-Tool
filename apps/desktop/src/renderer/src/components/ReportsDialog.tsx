@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type {
   PagesPerDirectoryRow,
   StatusCodeHistogramRow,
@@ -174,10 +175,64 @@ const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
 };
 
 export function ReportsDialog({ open, onClose }: Props) {
+  const { t } = useTranslation();
   const [kind, setKind] = useState<ReportKind>('pages-per-dir');
   const [depth, setDepth] = useState(1);
   const [rows, setRows] = useState<ReportRow[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // Localised label maps. Memoised on `t` so they only rebuild when the
+  // language changes, not on every render.
+  const reportLabels = useMemo<Record<ReportKind, string>>(() => ({
+    'pages-per-dir': t('reports.report.pagesPerDir', { defaultValue: REPORT_LABELS['pages-per-dir'] }),
+    'status-codes': t('reports.report.statusCodes', { defaultValue: REPORT_LABELS['status-codes'] }),
+    'indexability-distribution': t('reports.report.indexabilityDistribution', { defaultValue: REPORT_LABELS['indexability-distribution'] }),
+    'content-kind-distribution': t('reports.report.contentKindDistribution', { defaultValue: REPORT_LABELS['content-kind-distribution'] }),
+    depth: t('reports.report.depth', { defaultValue: REPORT_LABELS.depth }),
+    'response-time': t('reports.report.responseTime', { defaultValue: REPORT_LABELS['response-time'] }),
+    'slowest-urls': t('reports.report.slowestUrls', { defaultValue: REPORT_LABELS['slowest-urls'] }),
+    'most-inlinks': t('reports.report.mostInlinks', { defaultValue: REPORT_LABELS['most-inlinks'] }),
+    'least-inlinks': t('reports.report.leastInlinks', { defaultValue: REPORT_LABELS['least-inlinks'] }),
+    'most-outlinks': t('reports.report.mostOutlinks', { defaultValue: REPORT_LABELS['most-outlinks'] }),
+    'biggest-pages': t('reports.report.biggestPages', { defaultValue: REPORT_LABELS['biggest-pages'] }),
+    'deepest-urls': t('reports.report.deepestUrls', { defaultValue: REPORT_LABELS['deepest-urls'] }),
+    'external-domain-health': t('reports.report.externalDomainHealth', { defaultValue: REPORT_LABELS['external-domain-health'] }),
+    'analytics-coverage': t('reports.report.analyticsCoverage', { defaultValue: REPORT_LABELS['analytics-coverage'] }),
+    'link-positions': t('reports.report.linkPositions', { defaultValue: REPORT_LABELS['link-positions'] }),
+    'image-weight': t('reports.report.imageWeight', { defaultValue: REPORT_LABELS['image-weight'] }),
+    'inlinks-histogram': t('reports.report.inlinksHistogram', { defaultValue: REPORT_LABELS['inlinks-histogram'] }),
+    'word-count-histogram': t('reports.report.wordCountHistogram', { defaultValue: REPORT_LABELS['word-count-histogram'] }),
+    'url-length-histogram': t('reports.report.urlLengthHistogram', { defaultValue: REPORT_LABELS['url-length-histogram'] }),
+    'word-count-per-dir': t('reports.report.wordCountPerDir', { defaultValue: REPORT_LABELS['word-count-per-dir'] }),
+    'sitemap-orphans': t('reports.report.sitemapOrphans', { defaultValue: REPORT_LABELS['sitemap-orphans'] }),
+    'server-headers': t('reports.report.serverHeaders', { defaultValue: REPORT_LABELS['server-headers'] }),
+    'top-words': t('reports.report.topWords', { defaultValue: REPORT_LABELS['top-words'] }),
+  }), [t]);
+  const keyLabels = useMemo<Record<ReportKind, string>>(() => ({
+    'pages-per-dir': t('reports.keyDirectory', { defaultValue: 'Directory' }),
+    'status-codes': t('reports.keyStatus', { defaultValue: 'Status' }),
+    'indexability-distribution': t('reports.keyIndexability', { defaultValue: 'Indexability' }),
+    'content-kind-distribution': t('reports.keyContentType', { defaultValue: 'Content Type' }),
+    depth: t('reports.keyDepth', { defaultValue: 'Depth' }),
+    'response-time': t('reports.keyBucket', { defaultValue: 'Bucket' }),
+    'slowest-urls': 'URL',
+    'most-inlinks': 'URL',
+    'least-inlinks': 'URL',
+    'most-outlinks': 'URL',
+    'biggest-pages': 'URL',
+    'deepest-urls': 'URL',
+    'external-domain-health': t('reports.keyDomain', { defaultValue: 'Domain' }),
+    'analytics-coverage': t('reports.keyTracker', { defaultValue: 'Tracker' }),
+    'link-positions': t('reports.keyPosition', { defaultValue: 'Position' }),
+    'image-weight': 'URL',
+    'inlinks-histogram': t('reports.keyBucket', { defaultValue: 'Bucket' }),
+    'word-count-histogram': t('reports.keyBucket', { defaultValue: 'Bucket' }),
+    'url-length-histogram': t('reports.keyBucket', { defaultValue: 'Bucket' }),
+    'word-count-per-dir': t('reports.keyDirectory', { defaultValue: 'Directory' }),
+    'sitemap-orphans': 'URL',
+    'server-headers': t('reports.keyServer', { defaultValue: 'Server' }),
+    'top-words': t('reports.keyWord', { defaultValue: 'Word' }),
+  }), [t]);
 
   useEffect(() => {
     if (!open) return;
@@ -409,12 +464,12 @@ export function ReportsDialog({ open, onClose }: Props) {
       >
         <div className="flex items-center border-b border-surface-800 px-4 py-2.5">
           <div className="text-sm font-semibold tracking-wide text-surface-100">
-            {REPORT_LABELS[kind]}
+            {reportLabels[kind]}
           </div>
           <button
             className="ml-auto rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-surface-100"
             onClick={onClose}
-            title="Close (Esc)"
+            title={t('scheduled.closeEsc', { defaultValue: 'Close (Esc)' })}
           >
             <X className="h-4 w-4" />
           </button>
@@ -422,44 +477,26 @@ export function ReportsDialog({ open, onClose }: Props) {
 
         <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-4 py-2 text-[11px]">
           <label className="flex items-center gap-1.5">
-            <span className="text-surface-400">Report</span>
+            <span className="text-surface-400">{t('reports.reportLabel', { defaultValue: 'Report' })}</span>
             <select
               className="rounded border border-surface-700 bg-surface-950 px-2 py-0.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
               value={kind}
               onChange={(e) => setKind(e.target.value as ReportKind)}
             >
-              <option value="pages-per-dir">Pages per Directory</option>
-              <option value="status-codes">Status Code Histogram</option>
-              <option value="depth">Depth Histogram</option>
-              <option value="response-time">Response Time Histogram</option>
-              <option value="slowest-urls">Slowest URLs (Top 25)</option>
-              <option value="most-inlinks">Most-Linked URLs (Top 25)</option>
-              <option value="least-inlinks">Least-Linked URLs (Bottom 25, indexable)</option>
-              <option value="most-outlinks">Most-Outlinking URLs (Top 25)</option>
-              <option value="biggest-pages">Biggest Pages (Top 25)</option>
-              <option value="deepest-urls">Deepest URLs (Top 25)</option>
-              <option value="external-domain-health">External Domain Health</option>
-              <option value="analytics-coverage">Analytics Tracker Coverage</option>
-              <option value="link-positions">Internal Link Positions</option>
-              <option value="image-weight">Image Weight per Page (Top 25)</option>
-              <option value="inlinks-histogram">Inlinks Histogram</option>
-              <option value="word-count-histogram">Word Count Histogram</option>
-              <option value="url-length-histogram">URL Length Histogram</option>
-              <option value="word-count-per-dir">Word Count per Directory</option>
-              <option value="sitemap-orphans">Sitemap Orphans (Top 1000)</option>
-              <option value="server-headers">Server Stack</option>
-              <option value="top-words">Top Words (Title + Meta + H1)</option>
+              {(Object.keys(reportLabels) as ReportKind[]).map((k) => (
+                <option key={k} value={k}>{reportLabels[k]}</option>
+              ))}
             </select>
           </label>
           {(kind === 'pages-per-dir' || kind === 'word-count-per-dir') && (
             <label className="flex items-center gap-1.5">
-              <span className="text-surface-400">Group at depth</span>
+              <span className="text-surface-400">{t('reports.groupAtDepth', { defaultValue: 'Group at depth' })}</span>
               <select
                 className="rounded border border-surface-700 bg-surface-950 px-2 py-0.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
                 value={depth}
                 onChange={(e) => setDepth(Number.parseInt(e.target.value, 10))}
               >
-                <option value={1}>1 (top-level)</option>
+                <option value={1}>{t('reports.depthTopLevel', { defaultValue: '1 (top-level)' })}</option>
                 <option value={2}>2</option>
                 <option value={3}>3</option>
                 <option value={4}>4</option>
@@ -468,24 +505,28 @@ export function ReportsDialog({ open, onClose }: Props) {
           )}
           <span className="ml-auto text-surface-500">
             {loading
-              ? 'Loading…'
-              : `${rows.length.toLocaleString()} rows · ${total.toLocaleString()} URLs`}
+              ? t('common.loading', { defaultValue: 'Loading…' })
+              : t('reports.summary', {
+                  defaultValue: '{{rows}} rows · {{urls}} URLs',
+                  rows: rows.length.toLocaleString(),
+                  urls: total.toLocaleString(),
+                })}
           </span>
         </div>
 
         <div className="flex-1 overflow-auto px-4 py-3 text-[11px]">
           {rows.length === 0 && !loading && (
             <div className="p-6 text-center text-surface-500">
-              No data — run a crawl first.
+              {t('reports.noData', { defaultValue: 'No data — run a crawl first.' })}
             </div>
           )}
           {rows.length > 0 && (
             <table className="w-full">
               <thead className="sticky top-0 bg-surface-900">
                 <tr className="text-surface-400">
-                  <th className="w-2/3 py-1 pr-3 text-left font-medium">{KEY_LABELS[kind]}</th>
-                  <th className="w-24 py-1 pr-3 text-right font-medium">Count</th>
-                  <th className="py-1 text-left font-medium">Share</th>
+                  <th className="w-2/3 py-1 pr-3 text-left font-medium">{keyLabels[kind]}</th>
+                  <th className="w-24 py-1 pr-3 text-right font-medium">{t('reports.count', { defaultValue: 'Count' })}</th>
+                  <th className="py-1 text-left font-medium">{t('reports.share', { defaultValue: 'Share' })}</th>
                 </tr>
               </thead>
               <tbody>
@@ -534,7 +575,7 @@ export function ReportsDialog({ open, onClose }: Props) {
             className="rounded border border-surface-700 px-3 py-1 text-[11px] hover:bg-surface-800"
             onClick={onClose}
           >
-            Close
+            {t('common.close', { defaultValue: 'Close' })}
           </button>
         </div>
       </div>

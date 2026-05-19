@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/desktop",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "description": "FreeCrawl SEO â€” desktop application",
   "main": "./out/main/index.js",
@@ -24,9 +24,11 @@
     "@types/cytoscape": "^3.21.9",
     "clsx": "^2.1.1",
     "cytoscape": "^3.33.2",
+    "i18next": "^26.2.0",
     "lucide-react": "^0.544.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-i18next": "^17.0.8",
     "react-resizable-panels": "^2.1.9",
     "zustand": "^5.0.2"
   },

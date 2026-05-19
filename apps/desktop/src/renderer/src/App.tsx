@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
+import { useTranslation } from 'react-i18next';
 import { TopBar } from './components/TopBar.js';
 import { StatsBar } from './components/StatsBar.js';
 import { TabsBar } from './components/TabsBar.js';
@@ -21,6 +22,7 @@ import type { MenuEvent } from '@freecrawl/shared-types';
 import { clearCrawlWithConfirm } from './utils/clearCrawl.js';
 
 export function App() {
+  const { t } = useTranslation();
   const activeTab = useAppStore((s) => s.activeTab);
   const sidebarOpen = useAppStore((s) => s.sidebarOpen);
   const detailPanelOpen = useAppStore((s) => s.detailPanelOpen);
@@ -70,16 +72,19 @@ export function App() {
         const filePath = fileWithPath.path;
         if (!filePath) {
           setDropFlash(
-            `Couldn't read the dropped path for ${file.name}. Use File → Open Project instead.`,
+            t('app.dropMissingPath', {
+              defaultValue: "Couldn't read the dropped path for {{name}}. Use File → Open Project instead.",
+              name: file.name,
+            }),
           );
           setTimeout(() => setDropFlash(null), 4000);
           return;
         }
         const result = await window.freecrawl.projectOpen(filePath);
         if (result) {
-          setDropFlash(`Opened project: ${result.filePath}`);
+          setDropFlash(t('app.dropOpenedProject', { defaultValue: 'Opened project: {{path}}', path: result.filePath }));
         } else {
-          setDropFlash(`Failed to open project: ${file.name}`);
+          setDropFlash(t('app.dropFailedProject', { defaultValue: 'Failed to open project: {{name}}', name: file.name }));
         }
         setTimeout(() => setDropFlash(null), 4000);
         return;
@@ -99,13 +104,17 @@ export function App() {
         else if (u) urls.push('https://' + u);
       }
       if (urls.length === 0) {
-        setDropFlash(`No URLs found in ${file.name}.`);
+        setDropFlash(t('app.dropNoUrls', { defaultValue: 'No URLs found in {{name}}.', name: file.name }));
         setTimeout(() => setDropFlash(null), 4000);
         return;
       }
       setConfig({ mode: 'list', urlList: urls, startUrl: urls[0] ?? '' });
       setSettingsOpen(true);
-      setDropFlash(`Loaded ${urls.length} URLs from ${file.name} into List mode.`);
+      setDropFlash(t('app.dropLoadedUrls', {
+        defaultValue: 'Loaded {{count}} URLs from {{name}} into List mode.',
+        count: urls.length,
+        name: file.name,
+      }));
       setTimeout(() => setDropFlash(null), 4000);
     }
     const dropHandler = (e: DragEvent): void => {
@@ -117,7 +126,7 @@ export function App() {
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', dropHandler);
     };
-  }, [setConfig, setSettingsOpen]);
+  }, [t, setConfig, setSettingsOpen]);
 
   // Redirect react-resizable-panels' persistence away from localStorage and
   // into our JSON prefs file so layout survives Clear (which wipes crawl
@@ -152,11 +161,12 @@ export function App() {
       if (status.pendingCount === 0) return;
       window.setTimeout(() => {
         const proceed = window.confirm(
-          `FreeCrawl detected a previous crawl that didn't finish cleanly:\n\n` +
-            `  Start URL: ${status.seedUrl}\n` +
-            `  Pending URLs: ${status.pendingCount.toLocaleString()}\n\n` +
-            `Resume the crawl from where it stopped?\n\n` +
-            `Click OK to resume, Cancel to discard the recovery state and start fresh.`,
+          t('app.crashRecovery', {
+            defaultValue:
+              "FreeCrawl detected a previous crawl that didn't finish cleanly:\n\n  Start URL: {{seed}}\n  Pending URLs: {{pending}}\n\nResume the crawl from where it stopped?\n\nClick OK to resume, Cancel to discard the recovery state and start fresh.",
+            seed: status.seedUrl,
+            pending: status.pendingCount.toLocaleString(),
+          }),
         );
         if (proceed) {
           void window.freecrawl.crashRecoveryResume();
@@ -216,25 +226,34 @@ export function App() {
           break;
         case 'delete-domain-data': {
           const domain = window.prompt(
-            'GDPR Domain Wipe — enter the host to delete (case-insensitive, exact match).\n\nExamples: example.com  ·  blog.example.com\n\nThis cannot be undone. Save Project As… first to keep a backup.',
+            t('app.deleteDomainPrompt', {
+              defaultValue:
+                'GDPR Domain Wipe — enter the host to delete (case-insensitive, exact match).\n\nExamples: example.com  ·  blog.example.com\n\nThis cannot be undone. Save Project As… first to keep a backup.',
+            }),
             '',
           );
           if (!domain || !domain.trim()) break;
           const target = domain.trim();
           if (
             !window.confirm(
-              `Delete every URL hosted on "${target}", along with its links, headers, images, and source snapshots?\n\nThis action cannot be undone.`,
+              t('app.deleteDomainConfirm', {
+                defaultValue:
+                  'Delete every URL hosted on "{{host}}", along with its links, headers, images, and source snapshots?\n\nThis action cannot be undone.',
+                host: target,
+              }),
             )
           ) {
             break;
           }
           void window.freecrawl.dataDeleteByDomain({ domain: target }).then((res) => {
             window.alert(
-              `Deleted ${res.urlsDeleted.toLocaleString()} URL row${
-                res.urlsDeleted === 1 ? '' : 's'
-              } from ${target} (and ${res.linksDeleted.toLocaleString()} associated link${
-                res.linksDeleted === 1 ? '' : 's'
-              }).`,
+              t('app.deleteDomainResult', {
+                defaultValue:
+                  'Deleted {{urls}} URL row(s) from {{host}} (and {{links}} associated link(s)).',
+                urls: res.urlsDeleted.toLocaleString(),
+                host: target,
+                links: res.linksDeleted.toLocaleString(),
+              }),
             );
           });
           break;
@@ -242,7 +261,10 @@ export function App() {
         case 'clear-all-data': {
           if (
             !window.confirm(
-              'Clear ALL data in the active project?\n\nEvery URL, link, image, header, source snapshot, sitemap, and issue will be wiped. This cannot be undone — Save Project As… first if you want a backup.',
+              t('app.clearAllConfirm', {
+                defaultValue:
+                  'Clear ALL data in the active project?\n\nEvery URL, link, image, header, source snapshot, sitemap, and issue will be wiped. This cannot be undone — Save Project As… first if you want a backup.',
+              }),
             )
           ) {
             break;
@@ -293,6 +315,7 @@ export function App() {
       offData();
     };
   }, [
+    t,
     setProgress,
     setSummary,
     setError,

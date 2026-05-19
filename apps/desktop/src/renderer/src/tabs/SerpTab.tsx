@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { useTranslation } from 'react-i18next';
 import type { CrawlUrlRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
@@ -22,6 +23,7 @@ const DESC_CHAR_HARD_CAP = 200;
 type SortMode = 'inlinks' | 'url' | 'title-length-desc' | 'desc-length-desc';
 
 export function SerpTab() {
+  const { t } = useTranslation();
   const dataVersion = useAppStore((s) => s.dataVersion);
   const progress = useAppStore((s) => s.progress);
   const setSelectedUrlId = useAppStore((s) => s.setSelectedUrlId);
@@ -83,31 +85,35 @@ export function SerpTab() {
         style={{ height: HEADER_HEIGHT }}
       >
         <div className="text-[12px] font-semibold tracking-wide text-surface-100">
-          SERP Preview
+          {t('serpTab.title', { defaultValue: 'SERP Preview' })}
         </div>
         <input
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Filter by URL or title…"
+          placeholder={t('serpTab.filterPlaceholder', { defaultValue: 'Filter by URL or title…' })}
           className="h-6 w-72 rounded border border-surface-700 bg-surface-950 px-2 text-[11px] text-surface-100 placeholder-surface-500 focus:border-blue-500 focus:outline-none"
         />
         <label className="flex items-center gap-1 text-[11px] text-surface-400">
-          Sort:
+          {t('serpTab.sort', { defaultValue: 'Sort:' })}
           <select
             className="h-6 rounded border border-surface-700 bg-surface-950 px-2 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
             value={sortMode}
             onChange={(e) => setSortMode(e.target.value as SortMode)}
           >
-            <option value="inlinks">Inlinks (most-linked first)</option>
-            <option value="url">URL (alphabetical)</option>
-            <option value="title-length-desc">Longest title first</option>
-            <option value="desc-length-desc">Longest description first</option>
+            <option value="inlinks">{t('serpTab.sortInlinks', { defaultValue: 'Inlinks (most-linked first)' })}</option>
+            <option value="url">{t('serpTab.sortUrl', { defaultValue: 'URL (alphabetical)' })}</option>
+            <option value="title-length-desc">{t('serpTab.sortTitleLen', { defaultValue: 'Longest title first' })}</option>
+            <option value="desc-length-desc">{t('serpTab.sortDescLen', { defaultValue: 'Longest description first' })}</option>
           </select>
         </label>
         <div className="ml-auto text-[11px] text-surface-500">
-          {rows.length.toLocaleString()} of {total.toLocaleString()} indexable pages
-          {total > rows.length && ' (first ' + PAGE_SIZE.toLocaleString() + ')'}
+          {t('serpTab.summary', {
+            defaultValue: '{{shown}} of {{total}} indexable pages',
+            shown: rows.length.toLocaleString(),
+            total: total.toLocaleString(),
+          })}
+          {total > rows.length && ' ' + t('serpTab.firstN', { defaultValue: '(first {{n}})', n: PAGE_SIZE.toLocaleString() })}
         </div>
       </div>
 
@@ -118,8 +124,8 @@ export function SerpTab() {
         {rows.length === 0 && (
           <div className="flex h-full items-center justify-center text-[12px] text-surface-500">
             {total === 0
-              ? 'No indexable HTML pages with a title yet — run a crawl to populate SERP previews.'
-              : 'No pages match the current filter.'}
+              ? t('serpTab.emptyNoData', { defaultValue: 'No indexable HTML pages with a title yet — run a crawl to populate SERP previews.' })
+              : t('serpTab.emptyNoMatch', { defaultValue: 'No pages match the current filter.' })}
           </div>
         )}
         {rows.length > 0 && (
