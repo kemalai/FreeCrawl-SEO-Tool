@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.5] — 2026-05-19
+
+### Added
+- Integrations panel (Settings → Integrations) — securely store API keys and OAuth credentials for OpenAI, Anthropic, Ollama, PageSpeed, Ahrefs, Moz, Semrush, Majestic, and Google services.
+- Rendering Mode setting — Text Only or Old AJAX Crawling Scheme (`_escaped_fragment_`); JavaScript rendering is reserved for V2.
+- Quick User-Agent preset switcher (Settings → Requests) — one click between Googlebot, Chrome, and Bingbot profiles.
+- Broken Links tab now has an Export button — writes every broken link to CSV, honouring the active internal/external filter.
+- Broken Links tab now supports cell selection, drag-select, Ctrl+C copy, and a right-click menu (copy cells, copy/open source & target URLs).
+
+### Changed
+- Near-duplicate detection now fingerprints the main content area only — site-wide nav/header/footer no longer makes distinct pages look like duplicates.
+
 ## [0.5.2] — 2026-05-19
 
 ### Fixed
