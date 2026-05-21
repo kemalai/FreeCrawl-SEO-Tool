@@ -28,6 +28,8 @@ import {
   type ExportJsonResult,
   type ExportXmlInput,
   type ExportXmlResult,
+  type ExportBrokenLinksInput,
+  type ExportBrokenLinksResult,
   type ExportTabularInput,
   type ExportTabularResult,
   type DataDeleteByDomainInput,
@@ -90,6 +92,7 @@ import {
 import {
   Crawler,
   exportUrlsToCsv,
+  exportBrokenLinksToCsv,
   exportUrlsToJson,
   exportUrlsToXml,
   exportTabular,
@@ -107,6 +110,11 @@ import {
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
 import { isMenuLang, type MenuLang } from './menu-i18n.js';
+import {
+  getState as getIntegrationsState,
+  setCredentials as setIntegrationCredentials,
+  clearCredentials as clearIntegrationCredentials,
+} from './credentials.js';
 import * as logger from './logger.js';
 import { dbReaderPool, callReaderOrFallback } from './db-reader-pool.js';
 import { dbWriterPool } from './db-writer-pool.js';
@@ -1837,6 +1845,20 @@ function registerIpc(): void {
     return app.getPath('documents');
   });
 
+  // V1 Faz 7 — integration credential store. Secrets are encrypted at
+  // rest with safeStorage; the renderer only ever sees the redacted
+  // state map (secret values blanked, non-secret values round-tripped).
+  ipcMain.handle(IPC.integrationsGetAll, () => getIntegrationsState());
+  ipcMain.handle(
+    IPC.integrationsSet,
+    (_e, id: string, fields: Record<string, string>) => {
+      return setIntegrationCredentials(id, fields);
+    },
+  );
+  ipcMain.handle(IPC.integrationsClear, (_e, id: string) => {
+    return clearIntegrationCredentials(id);
+  });
+
   // Stream new entries to the logs window in coalesced batches. A heavy
   // crawl emits 100–300 logs/s; sending each as its own IPC message
   // saturated the renderer's event loop and caused visible UI stutters
@@ -2538,6 +2560,30 @@ function registerIpc(): void {
       const { rowsWritten } = await exportUrlsToXml(getDb(), filePath, {
         selectedIds: input.selectedIds,
         category: input.category,
+      });
+      return { filePath, rowsWritten };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.exportBrokenLinks,
+    async (
+      _e,
+      input: ExportBrokenLinksInput,
+    ): Promise<ExportBrokenLinksResult> => {
+      let filePath = input.filePath;
+      if (!filePath) {
+        const res = await dialog.showSaveDialog(mainWindow!, {
+          defaultPath: 'freecrawl-broken-links.csv',
+          filters: [{ name: 'CSV', extensions: ['csv'] }],
+        });
+        if (res.canceled || !res.filePath) {
+          return { filePath: '', rowsWritten: 0 };
+        }
+        filePath = res.filePath;
+      }
+      const { rowsWritten } = await exportBrokenLinksToCsv(getDb(), filePath, {
+        internal: input.internal,
       });
       return { filePath, rowsWritten };
     },

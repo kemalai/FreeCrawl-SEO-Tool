@@ -4,6 +4,18 @@
     "urls": "URL'ler",
     "percentOfTotal": "Toplamın %"
   },
+  "integrations": {
+    "intro": "Harici servisleri kendi kimlik bilgilerinle bağla. API anahtarları ve secret'lar işletim sisteminin güvenli depolaması ile şifreli saklanır ve bu makineden asla çıkmaz.",
+    "byocNote": "Google entegrasyonları \"kendi client'ını getir\" modeli kullanır — kendi Google Cloud OAuth client'ını oluşturup ID/secret'ını yapıştırırsın; ortak bir FreeCrawl uygulaması veya doğrulama gerekmez.",
+    "connected": "Yapılandırıldı",
+    "notConfigured": "Ayarlanmadı",
+    "savedPlaceholder": "Kayıtlı — değiştirmek için yaz",
+    "optional": "(isteğe bağlı)",
+    "getCredentials": "Kimlik bilgisi al",
+    "saved": "Kaydedildi.",
+    "cleared": "Kaldırıldı.",
+    "confirmClear": "Bu entegrasyonun saklanan tüm kimlik bilgileri kaldırılsın mı?"
+  },
   "common": {
     "save": "Kaydet",
     "cancel": "İptal",
@@ -302,13 +314,21 @@
       "speedHintPrefix": "Crawl hızı mı arıyorsun?",
       "speedHintBody": "Thread sayısı, saniyedeki istek, istek-başına gecikme ve yeniden denemeler şurada yaşar:",
       "speedHintLink": "Hız",
-      "speedHintSuffix": "bölümü — crawler'ın sunucuya ne hızda vurduğunu orada kıs."
+      "speedHintSuffix": "bölümü — crawler'ın sunucuya ne hızda vurduğunu orada kıs.",
+      "renderingMode": "Render Modu",
+      "renderTextOnly": "Yalnızca Metin (varsayılan)",
+      "renderAjax": "Eski AJAX Crawl Şeması (_escaped_fragment_)",
+      "renderJs": "JavaScript Render (V2'de gelecek)"
     },
     "speed": {
       "intro": "Crawl throughput'unu kontrol et. Paralelliği artırmak crawl'u hızlandırır, ama her ek istek hedef sunucuya yük bindirir — sahip olmadığın bir host'un rate-limit / 429 olmadan emebileceği sayılar seç.",
       "effectiveCeiling": "Etkin tavan"
     },
-    "requests": { "intro": "Her istekle gönderilen HTTP başlıkları." },
+    "requests": {
+      "intro": "Her istekle gönderilen HTTP başlıkları.",
+      "uaPreset": "Hızlı User-Agent ön ayarı",
+      "uaCustom": "Özel / bir ön ayar seç…"
+    },
     "filters": { "intro": "URL izin/yasak listesi. Kalıplar URL'nin tamamına karşı test edilen JavaScript regex'tir." },
     "customSearch": {
       "intro1": "Gövdesinde bu terimlerden herhangi birini içeren sayfaları işaretle. Satır başına iki mod:",
@@ -488,7 +508,11 @@
     "copyUrl": "URL'yi Kopyala",
     "copyUrls": "{{n}} URL Kopyala",
     "copyValue": "Değeri Kopyala",
-    "openInBrowser": "Tarayıcıda Aç"
+    "openInBrowser": "Tarayıcıda Aç",
+    "copySourceUrl": "Kaynak URL'yi Kopyala",
+    "copyTargetUrl": "Hedef URL'yi Kopyala",
+    "openSourceUrl": "Kaynak URL'yi Aç",
+    "openTargetUrl": "Hedef URL'yi Aç"
   },
   "diag": {
     "fromHeaders": "Yanıt başlıklarından",
@@ -601,7 +625,8 @@
     "externalOnly": "Yalnızca Harici",
     "linksUnit": "kırık link",
     "noBrokenLinks": "Kırık link yok",
-    "noBrokenLinksHint": "Kırık linkleri görmek için harici linkleri de içeren bir crawl çalıştır."
+    "noBrokenLinksHint": "Kırık linkleri görmek için harici linkleri de içeren bir crawl çalıştır.",
+    "cellsSelected": "{{n}} hücre seçili"
   },
   "urlsTab": {
     "searchPlaceholder": "URL / başlık ara…",

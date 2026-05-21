@@ -11,6 +11,8 @@ import {
   type ExportJsonResult,
   type ExportXmlInput,
   type ExportXmlResult,
+  type ExportBrokenLinksInput,
+  type ExportBrokenLinksResult,
   type ExportTabularInput,
   type ExportTabularResult,
   type DataDeleteByDomainInput,
@@ -64,6 +66,7 @@ import {
   type SettingsImportResult,
   type ScheduleEntry,
   type ScheduleSpec,
+  type IntegrationsState,
   type OverviewCounts,
   type SitemapGenerateInput,
   type SitemapGenerateResult,
@@ -136,6 +139,10 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.exportJson, input),
   exportXml: (input: ExportXmlInput): Promise<ExportXmlResult> =>
     ipcRenderer.invoke(IPC.exportXml, input),
+  exportBrokenLinks: (
+    input: ExportBrokenLinksInput,
+  ): Promise<ExportBrokenLinksResult> =>
+    ipcRenderer.invoke(IPC.exportBrokenLinks, input),
   exportTabular: (input: ExportTabularInput): Promise<ExportTabularResult> =>
     ipcRenderer.invoke(IPC.exportTabular, input),
   dataDeleteByDomain: (
@@ -242,6 +249,14 @@ const api: FreeCrawlApi = {
   pickDirectory: (input?: { title?: string; defaultPath?: string }): Promise<string | null> =>
     ipcRenderer.invoke(IPC.pickDirectory, input),
   defaultProjectDir: (): Promise<string> => ipcRenderer.invoke(IPC.defaultProjectDir),
+  integrationsGetAll: (): Promise<IntegrationsState> =>
+    ipcRenderer.invoke(IPC.integrationsGetAll),
+  integrationsSet: (
+    id: string,
+    fields: Record<string, string>,
+  ): Promise<IntegrationsState> => ipcRenderer.invoke(IPC.integrationsSet, id, fields),
+  integrationsClear: (id: string): Promise<IntegrationsState> =>
+    ipcRenderer.invoke(IPC.integrationsClear, id),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
   onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),

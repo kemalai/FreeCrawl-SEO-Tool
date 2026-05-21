@@ -300,6 +300,57 @@ export interface ParsedPage {
   hasNofollow: boolean;
 }
 
+/**
+ * Extract the page's main-content text for duplicate fingerprinting —
+ * the "content area based" duplicate check (boilerplate detection).
+ *
+ * Site-wide chrome (navigation, header, footer, sidebars) is identical
+ * across every page of a template-driven site. Hashing the full
+ * `<body>` makes two otherwise-distinct pages look like near-duplicates
+ * just because they share a big navbar + footer. Stripping the
+ * boilerplate before computing the SimHash / content hash focuses the
+ * comparison on what actually differs — the real content.
+ *
+ * Strategy, first non-empty match wins:
+ *  1. `<main>` / `[role="main"]` — the explicit semantic content region
+ *  2. `<article>` — common on blog / news / product pages
+ *  3. `<body>` with `<nav>` / `<header>` / `<footer>` / `<aside>` (and
+ *     their ARIA-role equivalents) removed
+ *  4. full `<body>` text — last resort for pages with no structure
+ *
+ * Returns whitespace-collapsed, trimmed text. Only the duplicate
+ * fingerprint uses this; `wordCount` / readability stay on the full
+ * body so existing thin-content thresholds don't shift.
+ */
+function extractMainContentText($: cheerio.CheerioAPI): string {
+  const collapse = (s: string): string => s.replace(/\s+/g, ' ').trim();
+
+  const main = $('main, [role="main"]').first();
+  if (main.length > 0) {
+    const t = collapse(main.text());
+    if (t.length > 0) return t;
+  }
+
+  const article = $('article').first();
+  if (article.length > 0) {
+    const t = collapse(article.text());
+    if (t.length > 0) return t;
+  }
+
+  // Clone so `.remove()` doesn't mutate the live tree the rest of the
+  // parser still reads from.
+  const body = $('body').clone();
+  body
+    .find(
+      'nav, header, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"], [role="complementary"]',
+    )
+    .remove();
+  const stripped = collapse(body.text());
+  if (stripped.length > 0) return stripped;
+
+  return collapse($('body').text());
+}
+
 export function parseHtml(
   html: string,
   pageUrl: string,
@@ -710,8 +761,12 @@ export function parseHtml(
   const analyticsTrackers = detectAnalyticsTrackers($, html);
 
   // Content fingerprint for the post-crawl duplicate clustering pass.
-  // Uses the same trimmed body text as wordCount so the work is reused.
-  const { simhash, contentHash } = computeContentFingerprint(text);
+  // Computed from the main-content region (boilerplate stripped) so two
+  // pages that share a big nav/footer template but differ in body
+  // content aren't falsely clustered as near-duplicates.
+  const { simhash, contentHash } = computeContentFingerprint(
+    extractMainContentText($),
+  );
 
   // Custom Extraction — runs after all standard fields so the cheerio
   // tree is fully populated. Per-rule failures are isolated; the worst

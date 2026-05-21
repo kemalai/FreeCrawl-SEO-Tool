@@ -390,3 +390,35 @@ export async function resolveStartUrl(
   // the crawler will surface a network error with that URL.
   return normalizeUrl(httpsUrl);
 }
+
+/**
+ * Old AJAX Crawling Scheme transform — Google's deprecated
+ * `_escaped_fragment_` protocol, kept for the `renderingMode: 'ajax'`
+ * config option.
+ *
+ * A hashbang URL carries its state after `#!`:
+ *   `https://example.com/page#!section=about`
+ * Fragments are never sent to the server, so an AJAX app served the
+ * snapshot from an `?_escaped_fragment_=` query instead:
+ *   `https://example.com/page?_escaped_fragment_=section=about`
+ *
+ * Rules:
+ *  - Only URLs containing `#!` are rewritten; everything else is
+ *    returned unchanged.
+ *  - The fragment payload (everything after `#!`) becomes the
+ *    `_escaped_fragment_` value, appended with `&` when the URL
+ *    already has a query string, `?` otherwise.
+ *  - A bare `#!` with no payload yields an empty `_escaped_fragment_=`.
+ *
+ * No JS is executed — this is purely a URL rewrite applied at fetch
+ * time. The crawler keeps the original hashbang URL as the row key;
+ * only the network request uses the transformed form.
+ */
+export function toEscapedFragmentUrl(url: string): string {
+  const idx = url.indexOf('#!');
+  if (idx === -1) return url;
+  const base = url.slice(0, idx);
+  const fragment = url.slice(idx + 2);
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}_escaped_fragment_=${fragment}`;
+}

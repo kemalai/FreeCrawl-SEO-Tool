@@ -31,6 +31,8 @@ import {
   FolderOpen,
   Lock,
   Languages,
+  Plug,
+  ExternalLink,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -39,8 +41,10 @@ import type {
   CrawlMode,
   CustomExtractionRule,
   HttpAuth,
+  IntegrationDef,
+  IntegrationsState,
 } from '@freecrawl/shared-types';
-import { DEFAULT_CRAWL_CONFIG } from '@freecrawl/shared-types';
+import { DEFAULT_CRAWL_CONFIG, INTEGRATIONS } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip, type FieldInfo } from './InfoTip.js';
 
@@ -133,6 +137,8 @@ interface FormState {
   perHostUserAgents: { hostPattern: string; userAgent: string }[];
   proxyProfiles: { name: string; url: string }[];
   proxyProfileActive: string;
+  // Faz 10 — page rendering strategy
+  renderingMode: 'text' | 'ajax';
 }
 
 type SectionKey =
@@ -156,6 +162,7 @@ type SectionKey =
   | 'advanced'
   | 'cookies'
   | 'per-host-ua'
+  | 'integrations'
   | 'storage'
   | 'privacy'
   | 'language';
@@ -296,6 +303,13 @@ const SECTIONS: SectionDef[] = [
     keywords: 'per host user agent subdomain mobile desktop pattern wildcard',
   },
   {
+    key: 'integrations',
+    label: 'Integrations',
+    icon: Plug,
+    keywords:
+      'integrations api key oauth google search console analytics gsc ga4 pagespeed ahrefs moz semrush majestic openai anthropic claude ollama sheets bigquery credentials',
+  },
+  {
     key: 'storage',
     label: 'Storage',
     icon: FolderOpen,
@@ -381,6 +395,7 @@ function configToForm(c: CrawlConfig): FormState {
     perHostUserAgents: (c.perHostUserAgents ?? []).map((r) => ({ ...r })),
     proxyProfiles: (c.proxyProfiles ?? []).map((p) => ({ ...p })),
     proxyProfileActive: c.proxyProfileActive ?? '',
+    renderingMode: c.renderingMode ?? 'text',
   };
 }
 
@@ -576,6 +591,7 @@ export function SettingsDialog({ open, onClose }: Props) {
         .map((p) => ({ name: p.name.trim(), url: p.url.trim() }))
         .filter((p) => p.name && p.url),
       proxyProfileActive: form.proxyProfileActive.trim(),
+      renderingMode: form.renderingMode,
     });
     onClose();
   }
@@ -732,6 +748,7 @@ export function SettingsDialog({ open, onClose }: Props) {
               {active === 'per-host-ua' && (
                 <PerHostUaPanel form={form} update={update} />
               )}
+              {active === 'integrations' && <IntegrationsPanel />}
               {active === 'storage' && <StoragePanel />}
               {active === 'privacy' && <PrivacyPanel />}
               {active === 'language' && <LanguagePanel />}
@@ -786,6 +803,28 @@ const UA_GOOGLEBOT_DESKTOP =
   'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
 const UA_GOOGLEBOT_MOBILE =
   'Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+const UA_CHROME_DESKTOP =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36';
+const UA_CHROME_MOBILE =
+  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36';
+const UA_BINGBOT =
+  'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)';
+const UA_FREECRAWL = DEFAULT_CRAWL_CONFIG.userAgent;
+
+/**
+ * Quick-switch User-Agent presets. Picking one fills the User-Agent
+ * field below — the user can still hand-edit afterwards. The first
+ * entry is a no-op placeholder so the select can show "Custom / pick a
+ * preset…" while the field holds an unrecognised string.
+ */
+const UA_PRESETS: { label: string; ua: string }[] = [
+  { label: 'Googlebot — Smartphone', ua: UA_GOOGLEBOT_MOBILE },
+  { label: 'Googlebot — Desktop', ua: UA_GOOGLEBOT_DESKTOP },
+  { label: 'Chrome — Desktop', ua: UA_CHROME_DESKTOP },
+  { label: 'Chrome — Mobile (Pixel)', ua: UA_CHROME_MOBILE },
+  { label: 'Bingbot', ua: UA_BINGBOT },
+  { label: 'FreeCrawl SEO (default)', ua: UA_FREECRAWL },
+];
 
 const PRESETS: PresetDef[] = [
   {
@@ -1078,6 +1117,31 @@ function CrawlerPanel({ form, update }: PanelProps) {
           example="On (default) — cheap I/O, high SEO value."
         />
       </div>
+
+      <div className="mt-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <label className="flex flex-col gap-1">
+          <FieldLabel
+            label={t('settingsPanels.crawler.renderingMode', { defaultValue: 'Rendering Mode' })}
+            info="Text Only fetches the raw HTML response as-is — fast and deterministic. Old AJAX Crawling Scheme rewrites hashbang (#!) URLs to Google's deprecated ?_escaped_fragment_= form so a pre-rendering server returns the snapshot. Full JavaScript rendering is a V2 item."
+            example="Text Only for server-rendered / static sites; Old AJAX only for legacy hashbang SPAs."
+          />
+          <select
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+            value={form.renderingMode}
+            onChange={(e) => update('renderingMode', e.target.value as 'text' | 'ajax')}
+          >
+            <option value="text">
+              {t('settingsPanels.crawler.renderTextOnly', { defaultValue: 'Text Only (default)' })}
+            </option>
+            <option value="ajax">
+              {t('settingsPanels.crawler.renderAjax', { defaultValue: 'Old AJAX Crawling Scheme (_escaped_fragment_)' })}
+            </option>
+            <option value="js" disabled>
+              {t('settingsPanels.crawler.renderJs', { defaultValue: 'JavaScript Rendering (coming in V2)' })}
+            </option>
+          </select>
+        </label>
+      </div>
     </>
   );
 }
@@ -1187,6 +1251,29 @@ function RequestsPanel({ form, update }: PanelProps) {
       <p className="mb-3 text-[11px] text-surface-400">
         {t('settingsPanels.requests.intro', { defaultValue: 'HTTP headers sent with every request.' })}
       </p>
+      <label className="mb-2 flex flex-col gap-1">
+        <FieldLabel
+          label={t('settingsPanels.requests.uaPreset', { defaultValue: 'Quick User-Agent preset' })}
+          info="Picking a preset fills the User-Agent field below — you can still hand-edit it afterwards. Switch between Googlebot Smartphone / Desktop to compare how a site responds to mobile vs desktop crawlers."
+          example="Googlebot — Smartphone matches Google's mobile-first indexing crawler."
+        />
+        <select
+          className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+          value={UA_PRESETS.find((p) => p.ua === form.userAgent)?.ua ?? ''}
+          onChange={(e) => {
+            if (e.target.value) update('userAgent', e.target.value);
+          }}
+        >
+          <option value="">
+            {t('settingsPanels.requests.uaCustom', { defaultValue: 'Custom / pick a preset…' })}
+          </option>
+          {UA_PRESETS.map((p) => (
+            <option key={p.label} value={p.ua}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+      </label>
       <Text
         label="User-Agent"
         value={form.userAgent}
@@ -2500,6 +2587,248 @@ function BoolLabel({
         <InfoTip info={info} example={example} />
       </span>
       {hint && <span className="text-[10px] text-surface-500">{hint}</span>}
+    </div>
+  );
+}
+
+/**
+ * V1 Faz 7 — Integrations panel. The credential-management foundation:
+ * lists every integration from the `INTEGRATIONS` catalog grouped by
+ * category, lets the user paste API keys / OAuth client credentials,
+ * and stores them safeStorage-encrypted via the credential-store IPC.
+ *
+ * Secret field values never come back from the main process — a
+ * configured secret renders as a "saved" placeholder; typing replaces
+ * it. The actual provider API calls land in follow-up work; this panel
+ * is the storage + status surface they will read from.
+ */
+const INTEGRATION_CATEGORIES: { key: IntegrationDef['category']; label: string }[] = [
+  { key: 'ai', label: 'AI' },
+  { key: 'performance', label: 'Performance' },
+  { key: 'seo', label: 'SEO Data' },
+  { key: 'google', label: 'Google' },
+];
+
+const AUTH_TYPE_LABEL: Record<IntegrationDef['authType'], string> = {
+  'api-key': 'API Key',
+  'oauth-byoc': 'OAuth (your own client)',
+  'service-account': 'Service Account',
+  local: 'Local',
+};
+
+function IntegrationsPanel() {
+  const { t } = useTranslation();
+  const [state, setState] = useState<IntegrationsState | null>(null);
+  // Per-integration → per-field draft text. Only fields the user has
+  // actually typed into are tracked; a save sends just these so an
+  // untouched "saved" secret is never overwritten.
+  const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    void window.freecrawl.integrationsGetAll().then(setState);
+  }, []);
+
+  const setDraft = (id: string, key: string, value: string) => {
+    setDrafts((d) => ({ ...d, [id]: { ...(d[id] ?? {}), [key]: value } }));
+  };
+
+  const save = async (id: string) => {
+    const fields = drafts[id];
+    if (!fields || Object.keys(fields).length === 0) return;
+    setBusy(id);
+    try {
+      const next = await window.freecrawl.integrationsSet(id, fields);
+      setState(next);
+      setDrafts((d) => ({ ...d, [id]: {} }));
+      setNotice((n) => ({ ...n, [id]: t('integrations.saved', { defaultValue: 'Saved.' }) }));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const clear = async (id: string) => {
+    if (!window.confirm(t('integrations.confirmClear', { defaultValue: 'Remove all stored credentials for this integration?' }))) {
+      return;
+    }
+    setBusy(id);
+    try {
+      const next = await window.freecrawl.integrationsClear(id);
+      setState(next);
+      setDrafts((d) => ({ ...d, [id]: {} }));
+      setNotice((n) => ({ ...n, [id]: t('integrations.cleared', { defaultValue: 'Removed.' }) }));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('integrations.intro', { defaultValue: 'Connect external services with your own credentials. API keys and secrets are encrypted at rest using your operating system\'s secure storage and never leave this machine.' })}
+      </p>
+      <div className="mb-3 rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
+        {t('integrations.byocNote', { defaultValue: 'Google integrations use a "bring your own client" model — you create your own Google Cloud OAuth client and paste its ID/secret, so no shared FreeCrawl app or verification is involved.' })}
+      </div>
+
+      {INTEGRATION_CATEGORIES.map((cat) => {
+        const items = INTEGRATIONS.filter((i) => i.category === cat.key);
+        if (items.length === 0) return null;
+        return (
+          <div key={cat.key} className="mb-4">
+            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+              {cat.label}
+            </div>
+            <div className="space-y-2">
+              {items.map((def) => (
+                <IntegrationCard
+                  key={def.id}
+                  def={def}
+                  state={state?.[def.id]}
+                  draft={drafts[def.id] ?? {}}
+                  busy={busy === def.id}
+                  notice={notice[def.id]}
+                  onDraft={(k, v) => setDraft(def.id, k, v)}
+                  onSave={() => void save(def.id)}
+                  onClear={() => void clear(def.id)}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function IntegrationCard({
+  def,
+  state,
+  draft,
+  busy,
+  notice,
+  onDraft,
+  onSave,
+  onClear,
+}: {
+  def: IntegrationDef;
+  state: IntegrationsState[string] | undefined;
+  draft: Record<string, string>;
+  busy: boolean;
+  notice: string | undefined;
+  onDraft: (key: string, value: string) => void;
+  onSave: () => void;
+  onClear: () => void;
+}) {
+  const { t } = useTranslation();
+  const configured = state?.configured ?? false;
+  const hasDraft = Object.values(draft).some((v) => v.length > 0);
+
+  return (
+    <div className="rounded border border-surface-800 bg-surface-950/40 p-3">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-[12px] font-medium text-surface-100">{def.name}</span>
+        <span className="rounded bg-surface-800 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-surface-400">
+          {AUTH_TYPE_LABEL[def.authType]}
+        </span>
+        <span
+          className={clsx(
+            'ml-auto rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide',
+            configured
+              ? 'bg-emerald-900/40 text-emerald-300'
+              : 'bg-surface-800 text-surface-500',
+          )}
+        >
+          {configured
+            ? t('integrations.connected', { defaultValue: 'Configured' })
+            : t('integrations.notConfigured', { defaultValue: 'Not set' })}
+        </span>
+      </div>
+      <p className="mb-2 text-[11px] text-surface-400">{def.description}</p>
+
+      <div className="space-y-2">
+        {def.fields.map((field) => {
+          const fieldState = state?.fields[field.key];
+          const savedSecret = field.secret && (fieldState?.set ?? false);
+          // Non-secret fields show their stored value until edited;
+          // secret fields show a "saved" placeholder and only carry a
+          // draft once the user types.
+          const value =
+            field.key in draft
+              ? draft[field.key]!
+              : field.secret
+                ? ''
+                : (fieldState?.value ?? '');
+          const placeholder = savedSecret
+            ? t('integrations.savedPlaceholder', { defaultValue: 'Saved — type to replace' })
+            : (field.placeholder ?? '');
+          return (
+            <label key={field.key} className="flex flex-col gap-0.5">
+              <span className="text-[10px] text-surface-400">
+                {field.label}
+                {field.optional && (
+                  <span className="ml-1 text-surface-600">
+                    {t('integrations.optional', { defaultValue: '(optional)' })}
+                  </span>
+                )}
+              </span>
+              {field.multiline ? (
+                <textarea
+                  className="h-20 resize-y rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  value={value}
+                  placeholder={placeholder}
+                  onChange={(e) => onDraft(field.key, e.target.value)}
+                  spellCheck={false}
+                />
+              ) : (
+                <input
+                  type={field.secret ? 'password' : 'text'}
+                  className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  value={value}
+                  placeholder={placeholder}
+                  onChange={(e) => onDraft(field.key, e.target.value)}
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+              )}
+            </label>
+          );
+        })}
+      </div>
+
+      <p className="mt-2 text-[10px] leading-relaxed text-surface-500">{def.setupHint}</p>
+
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          className="rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={onSave}
+          disabled={busy || !hasDraft}
+        >
+          {t('common.save', { defaultValue: 'Save' })}
+        </button>
+        {configured && (
+          <button
+            type="button"
+            className="rounded border border-red-700/60 px-2.5 py-1 text-[11px] text-red-300 hover:bg-red-900/20 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={onClear}
+            disabled={busy}
+          >
+            {t('common.remove', { defaultValue: 'Remove' })}
+          </button>
+        )}
+        <a
+          href={def.helpUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="ml-auto inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300"
+        >
+          {t('integrations.getCredentials', { defaultValue: 'Get credentials' })}
+          <ExternalLink className="h-3 w-3" />
+        </a>
+      </div>
+      {notice && <div className="mt-1.5 text-[10px] text-emerald-400">{notice}</div>}
     </div>
   );
 }

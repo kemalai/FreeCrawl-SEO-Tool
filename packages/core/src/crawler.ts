@@ -20,6 +20,7 @@ import {
   isUrlMalformed,
   resolveStartUrl,
   compileUrlRegexRewrites,
+  toEscapedFragmentUrl,
 } from './url-utils.js';
 import { parseHtml, estimatePixelWidth } from './html-parser.js';
 import { analyseCookies, extractSetCookies } from './cookies.js';
@@ -2400,7 +2401,15 @@ export class Crawler extends EventEmitter {
         // the right place to mark the timestamp. Per-attempt so a retry's
         // TTFB doesn't include the failed first attempt's overhead.
         const tStart = Date.now();
-        const res = await undiciFetch(url, {
+        // Old AJAX Crawling Scheme — when enabled, hashbang URLs are
+        // fetched in their `?_escaped_fragment_=` form so a pre-rendering
+        // server returns the snapshot HTML. The DB row keeps the original
+        // `url`; only the network request uses the transformed address.
+        const fetchUrl =
+          this.config.renderingMode === 'ajax'
+            ? toEscapedFragmentUrl(url)
+            : url;
+        const res = await undiciFetch(fetchUrl, {
           method: 'GET',
           headers: defaultRequestHeaders(
             this.resolveUserAgent(url),

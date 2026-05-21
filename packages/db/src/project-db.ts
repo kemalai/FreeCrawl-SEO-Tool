@@ -3608,6 +3608,52 @@ export class ProjectDb {
     }
   }
 
+  /**
+   * Yield every broken link (target status 4xx/5xx) for CSV export —
+   * the unbounded counterpart of `queryBrokenLinks`, which paginates
+   * for the table view. `internal` filters to same-site / off-site
+   * targets; `all` walks everything. Same JOIN + ordering as the table
+   * so the export matches what the user sees.
+   */
+  *iterateBrokenLinks(
+    internal: 'all' | 'internal' | 'external' = 'all',
+  ): IterableIterator<BrokenLinkRow> {
+    const where: string[] = ['t.status_code >= 400 AND t.status_code < 600'];
+    if (internal === 'internal') where.push('l.is_internal = 1');
+    else if (internal === 'external') where.push('l.is_internal = 0');
+    const rows = this.db
+      .prepare(
+        `SELECT f.url AS from_url, f.status_code AS from_status,
+                l.to_url AS to_url, t.status_code AS to_status,
+                l.anchor, l.rel, l.is_internal
+         FROM links l
+         JOIN urls f ON l.from_url_id = f.id
+         JOIN urls t ON l.to_url = t.url
+         WHERE ${where.join(' AND ')}
+         ORDER BY t.status_code DESC, f.id, l.id`,
+      )
+      .all() as unknown as {
+      from_url: string;
+      from_status: number | null;
+      to_url: string;
+      to_status: number | null;
+      anchor: string | null;
+      rel: string | null;
+      is_internal: number;
+    }[];
+    for (const r of rows) {
+      yield {
+        fromUrl: r.from_url,
+        fromStatusCode: r.from_status,
+        toUrl: r.to_url,
+        toStatusCode: r.to_status,
+        anchor: r.anchor,
+        rel: r.rel,
+        isInternal: r.is_internal === 1,
+      };
+    }
+  }
+
   *iterateUrlsByIds(ids: number[]): IterableIterator<CrawlUrlRow> {
     if (ids.length === 0) return;
     const placeholders = ids.map(() => '?').join(',');

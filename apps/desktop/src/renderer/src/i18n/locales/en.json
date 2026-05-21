@@ -4,6 +4,18 @@
     "urls": "URLs",
     "percentOfTotal": "% of Total"
   },
+  "integrations": {
+    "intro": "Connect external services with your own credentials. API keys and secrets are encrypted at rest using your operating system's secure storage and never leave this machine.",
+    "byocNote": "Google integrations use a \"bring your own client\" model — you create your own Google Cloud OAuth client and paste its ID/secret, so no shared FreeCrawl app or verification is involved.",
+    "connected": "Configured",
+    "notConfigured": "Not set",
+    "savedPlaceholder": "Saved — type to replace",
+    "optional": "(optional)",
+    "getCredentials": "Get credentials",
+    "saved": "Saved.",
+    "cleared": "Removed.",
+    "confirmClear": "Remove all stored credentials for this integration?"
+  },
   "common": {
     "save": "Save",
     "cancel": "Cancel",
@@ -303,13 +315,21 @@
       "speedHintPrefix": "Looking for crawl speed?",
       "speedHintBody": "Thread count, requests per second, per-request delay, and retries live in the",
       "speedHintLink": "Speed",
-      "speedHintSuffix": "section — that's where you cap how fast the crawler hits a server."
+      "speedHintSuffix": "section — that's where you cap how fast the crawler hits a server.",
+      "renderingMode": "Rendering Mode",
+      "renderTextOnly": "Text Only (default)",
+      "renderAjax": "Old AJAX Crawling Scheme (_escaped_fragment_)",
+      "renderJs": "JavaScript Rendering (coming in V2)"
     },
     "speed": {
       "intro": "Control crawl throughput. Increasing parallelism speeds the crawl, but every extra request adds load on the target server — pick numbers a host that you don't own can absorb without rate-limiting / 429s.",
       "effectiveCeiling": "Effective ceiling"
     },
-    "requests": { "intro": "HTTP headers sent with every request." },
+    "requests": {
+      "intro": "HTTP headers sent with every request.",
+      "uaPreset": "Quick User-Agent preset",
+      "uaCustom": "Custom / pick a preset…"
+    },
     "filters": { "intro": "URL allowlist/blocklist. Patterns are JavaScript regex tested against the full URL." },
     "customSearch": {
       "intro1": "Flag pages whose body contains any of these terms. Two modes per line:",
@@ -489,7 +509,11 @@
     "copyUrl": "Copy URL",
     "copyUrls": "Copy {{n}} URLs",
     "copyValue": "Copy Value",
-    "openInBrowser": "Open in Browser"
+    "openInBrowser": "Open in Browser",
+    "copySourceUrl": "Copy Source URL",
+    "copyTargetUrl": "Copy Target URL",
+    "openSourceUrl": "Open Source URL",
+    "openTargetUrl": "Open Target URL"
   },
   "diag": {
     "fromHeaders": "From the response headers",
@@ -602,7 +626,8 @@
     "externalOnly": "External only",
     "linksUnit": "broken links",
     "noBrokenLinks": "No broken links",
-    "noBrokenLinksHint": "Run a crawl that includes external links to see broken links."
+    "noBrokenLinksHint": "Run a crawl that includes external links to see broken links.",
+    "cellsSelected": "{{n}} cell(s) selected"
   },
   "urlsTab": {
     "searchPlaceholder": "Search URLs / titles…",

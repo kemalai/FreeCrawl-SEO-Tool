@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/cli",
-  "version": "0.5.2",
+  "version": "0.5.5",
   "private": true,
   "type": "module",
   "bin": {

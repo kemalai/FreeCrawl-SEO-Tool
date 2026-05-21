@@ -68,3 +68,50 @@ export async function exportUrlsToCsv(
 
   return { rowsWritten };
 }
+
+/** Fixed column order for the Broken Links CSV export. */
+const BROKEN_LINK_CSV_HEADER = [
+  'Source URL',
+  'Source Status',
+  'Target URL',
+  'Target Status',
+  'Anchor',
+  'Rel',
+  'Type',
+] as const;
+
+/**
+ * Stream every broken link (target 4xx/5xx) to a CSV file. Mirrors the
+ * Broken Links tab grid; `internal` scopes the export the same way the
+ * tab's sidebar filter does. Streamed row-by-row so a large set never
+ * builds a big string in memory.
+ */
+export async function exportBrokenLinksToCsv(
+  db: ProjectDb,
+  filePath: string,
+  options: { internal?: 'all' | 'internal' | 'external' } = {},
+): Promise<{ rowsWritten: number }> {
+  let rowsWritten = 0;
+  const header = BROKEN_LINK_CSV_HEADER.join(',') + '\n';
+
+  const generator = async function* (): AsyncGenerator<string> {
+    yield '﻿' + header;
+    for (const row of db.iterateBrokenLinks(options.internal ?? 'all')) {
+      const cells = [
+        row.fromUrl,
+        row.fromStatusCode,
+        row.toUrl,
+        row.toStatusCode,
+        row.anchor,
+        row.rel,
+        row.isInternal ? 'internal' : 'external',
+      ];
+      rowsWritten++;
+      yield cells.map(escapeCsv).join(',') + '\n';
+    }
+  };
+
+  await pipeline(Readable.from(generator()), createWriteStream(filePath, { encoding: 'utf8' }));
+
+  return { rowsWritten };
+}

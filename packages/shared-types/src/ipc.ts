@@ -11,6 +11,7 @@ import type {
   UrlCategory,
   UrlDetail,
 } from './crawl.js';
+import type { IntegrationsState } from './integrations.js';
 
 export const IPC = {
   crawlStart: 'crawl:start',
@@ -39,6 +40,9 @@ export const IPC = {
   exportCsv: 'export:csv',
   exportJson: 'export:json',
   exportXml: 'export:xml',
+  /** Export the Broken Links tab to a CSV file. Honours the tab's
+   *  internal/external scope filter. */
+  exportBrokenLinks: 'export:broken-links',
   /** New unified tabular export with column selection + multi-tab support
    * (CSV / XLSX). Backs the in-table "Export" button. */
   exportTabular: 'export:tabular',
@@ -125,6 +129,13 @@ export const IPC = {
   prefsImportSettings: 'prefs:import-settings',
   scheduleGet: 'schedule:get',
   scheduleSet: 'schedule:set',
+  /** Faz 7 — integration credential store (safeStorage-encrypted).
+   *  `integrationsGetAll` returns the redacted state map (secret values
+   *  never leave the main process); `set` merges the supplied fields;
+   *  `clear` wipes every field of one integration. */
+  integrationsGetAll: 'integrations:get-all',
+  integrationsSet: 'integrations:set',
+  integrationsClear: 'integrations:clear',
   /** Open a native directory picker. Used by Settings → Storage to let the
    *  user choose the default folder for new `.seoproject` files. */
   pickDirectory: 'app:pick-directory',
@@ -267,6 +278,19 @@ export interface ExportXmlInput {
 }
 
 export interface ExportXmlResult {
+  filePath: string;
+  rowsWritten: number;
+}
+
+export interface ExportBrokenLinksInput {
+  /** Optional pre-resolved output path (skips the save dialog). */
+  filePath?: string;
+  /** Scope filter — matches the Broken Links tab's sidebar filter. */
+  internal?: 'all' | 'internal' | 'external';
+}
+
+export interface ExportBrokenLinksResult {
+  /** Empty when the user cancelled the save dialog. */
   filePath: string;
   rowsWritten: number;
 }
@@ -898,6 +922,7 @@ export interface FreeCrawlApi {
   exportCsv(input: ExportCsvInput): Promise<ExportCsvResult>;
   exportJson(input: ExportJsonInput): Promise<ExportJsonResult>;
   exportXml(input: ExportXmlInput): Promise<ExportXmlResult>;
+  exportBrokenLinks(input: ExportBrokenLinksInput): Promise<ExportBrokenLinksResult>;
   exportTabular(input: ExportTabularInput): Promise<ExportTabularResult>;
   dataDeleteByDomain(
     input: DataDeleteByDomainInput,
@@ -956,6 +981,14 @@ export interface FreeCrawlApi {
   /** Save / update the schedule for the currently-loaded project. Passing
    *  `null` removes the schedule entirely. */
   scheduleSet(spec: ScheduleSpec | null): Promise<ScheduleEntry | null>;
+  /** Faz 7 — read the redacted credential state of every integration.
+   *  Secret field values are never returned, only a `set` flag. */
+  integrationsGetAll(): Promise<IntegrationsState>;
+  /** Save (merge) credential fields for one integration. Only the
+   *  supplied fields are written; omitted fields keep their stored value. */
+  integrationsSet(id: string, fields: Record<string, string>): Promise<IntegrationsState>;
+  /** Wipe every stored credential field of one integration. */
+  integrationsClear(id: string): Promise<IntegrationsState>;
   /** Open a native directory picker. Returns the chosen path or null on cancel. */
   pickDirectory(input?: { title?: string; defaultPath?: string }): Promise<string | null>;
   /** Resolved default save directory for new projects (Documents fallback when unset). */

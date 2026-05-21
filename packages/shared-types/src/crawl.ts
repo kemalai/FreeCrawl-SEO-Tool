@@ -890,6 +890,18 @@ export interface CrawlConfig {
   /** Materialise the heavy `urls_issues` counters (Dead External Domain,
    * Duplicate URL post-norm, Canonical Chain Multi-hop). */
   analyseIssues: boolean;
+  /**
+   * Page-rendering strategy for the fetch layer.
+   *  - `text`  (default) — fetch the raw HTML response as-is. Fast,
+   *    deterministic, covers server-rendered + static sites.
+   *  - `ajax`  — Old AJAX Crawling Scheme. Hashbang URLs (`…#!key=value`)
+   *    are rewritten to Google's deprecated `?_escaped_fragment_=` form
+   *    before fetch, so a pre-rendering server returns the snapshot HTML.
+   *    No JS execution — just the URL transform.
+   * Full JavaScript rendering (a headless-browser pass) is a V2 item and
+   * intentionally absent from this union.
+   */
+  renderingMode: 'text' | 'ajax';
 }
 
 export interface HttpAuth {
@@ -1527,4 +1539,5 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   perHostUserAgents: [],
   proxyProfiles: [],
   proxyProfileActive: '',
+  renderingMode: 'text',
 };
