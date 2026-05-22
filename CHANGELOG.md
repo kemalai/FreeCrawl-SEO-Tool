@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.6] — 2026-05-22
+
+### Added
+- Google PageSpeed Insights integration — a new PageSpeed tab runs on-demand Lighthouse audits (mobile + desktop) for the crawled pages you select.
+- Broken Links tab now also shows a "unique broken URLs" count — a stable figure that doesn't swing with how many pages a crawl reached.
+
+### Fixed
+- Re-crawling a URL no longer duplicates its link and image rows, which had been inflating broken-link and image counts.
+- macOS — closing the main window no longer prevents reopening it from the dock.
+- The Logs window no longer drags down the main window's frame rate while it is open.
+- Bulk actions (delete / re-spider / copy) on very large URL selections no longer fail.
+- Scheduled crawls no longer fire twice in a row when a crawl outlasts its interval.
+- "Check for Updates" now downloads the installer instead of the portable build.
+- Various crawler and UI stability fixes.
+
 ## [0.5.5] — 2026-05-19
 
 ### Added
