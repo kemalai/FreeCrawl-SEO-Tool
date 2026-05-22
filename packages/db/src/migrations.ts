@@ -1242,6 +1242,56 @@ const MIGRATIONS: Migration[] = [
         );
     },
   },
+  {
+    version: 55,
+    name: 'add_pagespeed_results_table',
+    // V1 Faz 7 — Google PageSpeed Insights integration. Audit results
+    // live in their own table rather than as `urls` columns: PSI is run
+    // on-demand against a user-selected subset (never the whole crawl),
+    // each URL can have up to two rows (mobile + desktop), and keeping
+    // it separate avoids widening the already-very-wide `urls` table.
+    //
+    //   url         — the audited page URL (joins back to `urls.url`).
+    //   strategy    — 'mobile' | 'desktop' form factor.
+    //   performance — Lighthouse Performance score 0–100 (null if N/A).
+    //   lcp/fcp/tbt/speed_index — lab timing metrics in milliseconds.
+    //   cls         — Cumulative Layout Shift (unitless).
+    //   status      — 'ok' when the audit completed, 'error' otherwise.
+    //   error       — failure reason when status='error'.
+    //   fetched_at  — ISO timestamp of the audit.
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS pagespeed_results (
+          url         TEXT NOT NULL,
+          strategy    TEXT NOT NULL,
+          performance INTEGER,
+          lcp         REAL,
+          cls         REAL,
+          fcp         REAL,
+          tbt         REAL,
+          speed_index REAL,
+          status      TEXT NOT NULL,
+          error       TEXT,
+          fetched_at  TEXT NOT NULL,
+          PRIMARY KEY (url, strategy)
+        );
+      `);
+    },
+  },
+  {
+    version: 56,
+    name: 'add_image_usages_from_index',
+    // `image_usages` had an index on `image_id` but none on
+    // `from_url_id`. The per-URL write path now deletes a page's prior
+    // `image_usages` rows before re-inserting (so a re-crawl doesn't
+    // duplicate them) — without this index that DELETE would full-scan
+    // the table on every URL write, turning a re-crawl into O(n²).
+    up: (db) => {
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_image_usages_from ON image_usages(from_url_id);',
+      );
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

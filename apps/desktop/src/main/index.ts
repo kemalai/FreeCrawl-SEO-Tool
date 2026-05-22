@@ -88,6 +88,11 @@ import {
   type UrlCertInfoResult,
   type UrlsQueryInput,
   type UrlsQueryResult,
+  type PagespeedQueryInput,
+  type PagespeedQueryResult,
+  type PagespeedRunInput,
+  type PagespeedRunResult,
+  type PagespeedStrategy,
 } from '@freecrawl/shared-types';
 import {
   Crawler,
@@ -114,7 +119,9 @@ import {
   getState as getIntegrationsState,
   setCredentials as setIntegrationCredentials,
   clearCredentials as clearIntegrationCredentials,
+  resolveCredentials,
 } from './credentials.js';
+import { runPagespeedBatch, type PagespeedBatchItem } from './pagespeed.js';
 import * as logger from './logger.js';
 import { dbReaderPool, callReaderOrFallback } from './db-reader-pool.js';
 import { dbWriterPool } from './db-writer-pool.js';
@@ -141,6 +148,10 @@ let mainWindow: BrowserWindow | null = null;
 let logsWindow: BrowserWindow | null = null;
 let db: ProjectDb | null = null;
 let activeCrawler: Crawler | null = null;
+/** Faz 7 — PageSpeed run guard. Only one PSI batch may run at a time;
+ *  `pagespeedCancelRequested` is the cooperative cancel flag. */
+let pagespeedRunActive = false;
+let pagespeedCancelRequested = false;
 /** Most-recent CrawlConfig — needed by the crash-recovery resume
  * flow so we can re-create the Crawler with the same knobs the user
  * had set, without re-prompting. Hydrated lazily from `project_meta`
@@ -213,6 +224,11 @@ function flushPrefs(): void {
     clearTimeout(prefsWriteTimer);
     prefsWriteTimer = null;
   }
+  // Never write a cache that was never loaded — `prefsCache` is still
+  // the empty default. This guards the rejected second instance: its
+  // `before-quit` → `performShutdown` runs `flushPrefs`, and writing
+  // `{}` here would clobber the running first instance's saved prefs.
+  if (!prefsLoaded) return;
   try {
     writeFileSync(prefsFilePath(), JSON.stringify(prefsCache, null, 2), 'utf8');
   } catch {
@@ -872,7 +888,18 @@ function pickInstallerAsset(assets: GitHubReleaseAsset[]): GitHubReleaseAsset | 
     (a) => a && typeof a.name === 'string' && !a.name.endsWith('.blockmap'),
   );
   if (process.platform === 'win32') {
-    return list.find((a) => /\.exe$/i.test(a.name)) ?? null;
+    // The Windows release ships two `.exe` assets — the NSIS installer
+    // (`…Setup….exe`) and the standalone portable build
+    // (`…-portable.exe`). "Check for Updates" must offer the installer:
+    // prefer the `Setup` asset, fall back to any non-portable `.exe`,
+    // and only as a last resort take whatever `.exe` exists.
+    const exes = list.filter((a) => /\.exe$/i.test(a.name));
+    return (
+      exes.find((a) => /setup/i.test(a.name)) ??
+      exes.find((a) => !/portable/i.test(a.name)) ??
+      exes[0] ??
+      null
+    );
   }
   if (process.platform === 'darwin') {
     const isArm = process.arch === 'arm64';
@@ -1276,6 +1303,13 @@ function createWindow(): void {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
+      // Keep the renderer's frame loop at full rate even when the window
+      // loses focus — otherwise focusing the Logs window throttles this
+      // window's requestAnimationFrame, dropping its FPS and starving
+      // the freeze-watchdog's renderer heartbeat (it then logs a false
+      // STALL:RENDERER). The Logs window already sets this; the main
+      // window needs it for the same reason.
+      backgroundThrottling: false,
     },
   });
 
@@ -1857,6 +1891,117 @@ function registerIpc(): void {
   );
   ipcMain.handle(IPC.integrationsClear, (_e, id: string) => {
     return clearIntegrationCredentials(id);
+  });
+
+  // V1 Faz 7 — Google PageSpeed Insights. `pagespeedQuery` lists the
+  // crawled internal HTML pages joined with any stored audit results;
+  // `pagespeedRun` audits a user-selected subset (the slow part — PSI
+  // takes ~10–30 s per URL — so it streams `pagespeedProgress` events
+  // and can be cancelled mid-run).
+  ipcMain.handle(
+    IPC.pagespeedQuery,
+    async (_e, input: PagespeedQueryInput): Promise<PagespeedQueryResult> => {
+      const params = {
+        limit: input.limit,
+        offset: input.offset,
+        search: input.search,
+        filter: input.filter,
+      };
+      return callReaderOrFallback<PagespeedQueryResult>(
+        'queryPagespeed',
+        [params],
+        () => getDb().queryPagespeed(params),
+      );
+    },
+  );
+
+  ipcMain.handle(
+    IPC.pagespeedRun,
+    async (_e, input: PagespeedRunInput): Promise<PagespeedRunResult> => {
+      if (pagespeedRunActive) {
+        return { completed: 0, failed: 0, cancelled: true };
+      }
+      const urls = Array.from(
+        new Set(
+          (input.urls ?? []).filter(
+            (u): u is string => typeof u === 'string' && u.length > 0,
+          ),
+        ),
+      );
+      if (urls.length === 0) {
+        return { completed: 0, failed: 0, cancelled: false };
+      }
+      const strategies: PagespeedStrategy[] =
+        input.strategy === 'both' ? ['mobile', 'desktop'] : [input.strategy];
+      const items: PagespeedBatchItem[] = [];
+      for (const url of urls) {
+        for (const strategy of strategies) items.push({ url, strategy });
+      }
+      const apiKeyRaw = resolveCredentials('pagespeed')['apiKey'];
+      const apiKey =
+        apiKeyRaw && apiKeyRaw.trim().length > 0 ? apiKeyRaw.trim() : undefined;
+
+      pagespeedRunActive = true;
+      pagespeedCancelRequested = false;
+      // Pin writes to the project that was active when the run started —
+      // a PSI run can last minutes, and resolving `getDb()` per result
+      // would leak audits into a different project if the user opens
+      // one mid-run.
+      const runDb = getDb();
+      logger.log(
+        'info',
+        'pagespeed',
+        `run started — ${items.length} audit(s): ${urls.length} URL(s) × ${strategies.length} strategy${
+          apiKey ? ' (keyed)' : ' (keyless — low rate limit)'
+        }`,
+      );
+      try {
+        const result = await runPagespeedBatch({
+          items,
+          apiKey,
+          isCancelled: () => pagespeedCancelRequested,
+          onResult: (url, strategy, metrics) => {
+            try {
+              runDb.upsertPagespeedResult(url, strategy, metrics);
+            } catch (err) {
+              logger.log(
+                'error',
+                'pagespeed',
+                `DB write failed for ${url}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            }
+          },
+          onProgress: (done, total, currentUrl) => {
+            mainWindow?.webContents.send(IPC.pagespeedProgress, {
+              done,
+              total,
+              currentUrl,
+              running: true,
+            });
+          },
+        });
+        mainWindow?.webContents.send(IPC.pagespeedProgress, {
+          done: result.completed + result.failed,
+          total: items.length,
+          currentUrl: null,
+          running: false,
+        });
+        fireDataChanged();
+        return result;
+      } finally {
+        pagespeedRunActive = false;
+        pagespeedCancelRequested = false;
+      }
+    },
+  );
+
+  ipcMain.handle(IPC.pagespeedCancel, () => {
+    if (pagespeedRunActive) {
+      pagespeedCancelRequested = true;
+      logger.log('info', 'pagespeed', 'run cancellation requested');
+    }
   });
 
   // Stream new entries to the logs window in coalesced batches. A heavy
@@ -3403,7 +3548,15 @@ void app.whenReady().then(async () => {
   });
 });
 
-app.on('window-all-closed', () => {
+// Full teardown — DB, worker pools, watchdog, MCP bridge, prefs flush.
+// This lives in `before-quit`, NOT `window-all-closed`: on macOS the app
+// stays resident after its window closes (standard platform behaviour),
+// and terminating the worker pools there would make a later reopen from
+// the dock throw `cannot init after terminate()`. Runs exactly once.
+let shutdownComplete = false;
+function performShutdown(): void {
+  if (shutdownComplete) return;
+  shutdownComplete = true;
   activeCrawler?.stop();
   stopScheduler();
   // Tear down the MCP bridge first so any in-flight HTTP calls fail
@@ -3428,5 +3581,16 @@ app.on('window-all-closed', () => {
   // Flush the disk log stream before exit so the last lines aren't lost
   // if the OS kills the process during a Quit-All cycle.
   logger.flushFileLogging();
+}
+
+app.on('before-quit', () => {
+  performShutdown();
+});
+
+app.on('window-all-closed', () => {
+  // Stop any active crawl when the UI goes away, but keep the DB and
+  // worker pools alive so macOS reopen-from-dock works. The full
+  // teardown happens in `before-quit`.
+  activeCrawler?.stop();
   if (process.platform !== 'darwin') app.quit();
 });

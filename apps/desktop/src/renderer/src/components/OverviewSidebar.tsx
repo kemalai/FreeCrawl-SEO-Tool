@@ -29,6 +29,13 @@ export function OverviewSidebar() {
   const progressCrawled = useAppStore((s) => s.progress?.crawled ?? 0);
   const activeCategory = useAppStore((s) => s.activeCategory);
   const navigateToCategory = useAppStore((s) => s.navigateToCategory);
+  // Monotonic guard shared by the polling effect and the progress-driven
+  // refetch — both call overviewGet(), and on the multi-worker reader
+  // pool a slower response can resolve after a fresher one. Applying
+  // results strictly in issue order stops a stale count overwriting a
+  // newer one.
+  const overviewSeqRef = useRef(0);
+  const overviewAppliedRef = useRef(0);
   const [expanded, setExpanded] = useState<Set<string>>(
     new Set([
       'summary',
@@ -62,9 +69,13 @@ export function OverviewSidebar() {
       // overlapping calls just queue up and starve other IPCs.
       if (inFlight) return;
       inFlight = true;
+      const seq = ++overviewSeqRef.current;
       try {
         const o = await window.freecrawl.overviewGet();
-        if (!cancelled) setOverview(o);
+        if (!cancelled && seq > overviewAppliedRef.current) {
+          overviewAppliedRef.current = seq;
+          setOverview(o);
+        }
       } finally {
         inFlight = false;
       }
@@ -113,7 +124,13 @@ export function OverviewSidebar() {
     const bucket = Math.floor(progressCrawled / 50);
     if (bucket === lastRefetchAtRef.current) return;
     lastRefetchAtRef.current = bucket;
-    void window.freecrawl.overviewGet().then((o) => setOverview(o));
+    const seq = ++overviewSeqRef.current;
+    void window.freecrawl.overviewGet().then((o) => {
+      if (seq > overviewAppliedRef.current) {
+        overviewAppliedRef.current = seq;
+        setOverview(o);
+      }
+    });
   }, [progressCrawled, progressRunning, setOverview]);
 
   const toggle = (k: string) => {

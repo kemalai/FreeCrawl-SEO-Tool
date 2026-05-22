@@ -144,17 +144,24 @@ export function computeNextFire(
   now: number,
   lastFiredAt: number | null,
 ): number {
-  if (spec.cadence === 'hourly') {
-    const base = lastFiredAt ?? now;
-    return base + 60 * 60 * 1000;
-  }
-  if (spec.cadence === 'custom') {
+  if (spec.cadence === 'hourly' || spec.cadence === 'custom') {
     const interval =
-      Math.max(MIN_CUSTOM_INTERVAL_MIN, spec.intervalMinutes ?? MIN_CUSTOM_INTERVAL_MIN) *
-      60 *
-      1000;
-    const base = lastFiredAt ?? now;
-    return base + interval;
+      spec.cadence === 'hourly'
+        ? 60 * 60 * 1000
+        : Math.max(
+            MIN_CUSTOM_INTERVAL_MIN,
+            spec.intervalMinutes ?? MIN_CUSTOM_INTERVAL_MIN,
+          ) *
+          60 *
+          1000;
+    // Advance from the last fire, but never return a time in the past:
+    // if a crawl ran longer than the interval, `base + interval` would
+    // already be behind `now` and the next tick would fire immediately,
+    // back-to-back with no gap. Step forward by whole intervals until
+    // the result is in the future.
+    let next = (lastFiredAt ?? now) + interval;
+    while (next <= now) next += interval;
+    return next;
   }
   // Daily / weekly — pin to time-of-day in local timezone. We always
   // advance by at least 1 minute past `now` to avoid an immediate

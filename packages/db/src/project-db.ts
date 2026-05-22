@@ -15,6 +15,9 @@ import type {
   InlinkRow,
   OutlinkRow,
   OverviewCounts,
+  PagespeedMetrics,
+  PagespeedRow,
+  PagespeedStrategy,
   UrlCategory,
   UrlDetail,
 } from '@freecrawl/shared-types';
@@ -671,7 +674,8 @@ export class ProjectDb {
          DELETE FROM project_meta;
          DELETE FROM urls_issues;
          DELETE FROM crawl_queue;
-         DELETE FROM host_certs;`,
+         DELETE FROM host_certs;
+         DELETE FROM pagespeed_results;`,
       );
     });
     // Reclaim freed pages back to the OS so the project file size
@@ -792,6 +796,27 @@ export class ProjectDb {
           WHERE id NOT IN (SELECT DISTINCT image_id FROM image_usages)`,
       );
 
+      // PageSpeed audit rows are keyed by URL string (no FK to `urls`),
+      // so wipe them by the same host match — otherwise a GDPR delete
+      // leaves stale PSI data that would re-attach if the URL is
+      // re-crawled later.
+      this.db
+        .prepare(
+          `DELETE FROM pagespeed_results
+            WHERE LOWER(
+              SUBSTR(
+                url,
+                INSTR(url, '://') + 3,
+                CASE
+                  WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
+                    THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
+                  ELSE LENGTH(url)
+                END
+              )
+            ) = ?`,
+        )
+        .run(target);
+
       return { urlsDeleted, linksDeleted };
     });
   }
@@ -901,6 +926,19 @@ export class ProjectDb {
         }
       }
       if (urlId) {
+        // Re-crawl safety. A URL can be fetched more than once — manual
+        // "Re-Spider", crash-recovery resume, or re-running a crawl
+        // without Clear. `insertLinks` / `insertImages` are plain
+        // INSERTs, so without clearing the page's previous rows first
+        // every re-fetch would DUPLICATE its link + image-usage rows,
+        // inflating broken-link counts and every other link/image
+        // metric. Delete unconditionally (a no-op on a first crawl, both
+        // DELETEs are index-backed) so the page's link + image set
+        // always reflects the latest fetch.
+        this.db.prepare('DELETE FROM links WHERE from_url_id = ?').run(urlId);
+        this.db
+          .prepare('DELETE FROM image_usages WHERE from_url_id = ?')
+          .run(urlId);
         if (payload.links.length > 0) {
           this.insertLinks(urlId, payload.links, payload.fromDepth);
         }
@@ -934,7 +972,21 @@ export class ProjectDb {
    * depth at which each pending URL was discovered.
    */
   deleteUrl(id: number): void {
-    this.db.prepare('DELETE FROM urls WHERE id = ?').run(id);
+    // `urls_issues` and `pagespeed_results` have no FK to `urls`, so the
+    // `ON DELETE CASCADE` that cleans links/headers/images doesn't reach
+    // them — wipe them explicitly or a deleted URL leaves orphan rows
+    // that inflate `getIssueCounts()` and re-attach stale audit data on
+    // re-crawl. The `pagespeed_results` delete must run before the parent
+    // `urls` row vanishes (it resolves the URL string from `urls`).
+    this.runInTransaction(() => {
+      this.db
+        .prepare(
+          'DELETE FROM pagespeed_results WHERE url = (SELECT url FROM urls WHERE id = ?)',
+        )
+        .run(id);
+      this.db.prepare('DELETE FROM urls_issues WHERE url_id = ?').run(id);
+      this.db.prepare('DELETE FROM urls WHERE id = ?').run(id);
+    });
   }
 
   markUrlForRecrawl(id: number): void {
@@ -952,33 +1004,73 @@ export class ProjectDb {
 
   markUrlsForRecrawl(ids: number[]): void {
     if (ids.length === 0) return;
-    const placeholders = ids.map(() => '?').join(',');
-    this.db
-      .prepare(
-        `UPDATE urls SET
-           status_code = NULL,
-           status_text = NULL,
-           indexability = 'indexable',
-           indexability_reason = NULL
-         WHERE id IN (${placeholders}) AND is_external = 0`,
-      )
-      .run(...ids);
+    // Chunk the id list — a multi-row table selection can exceed SQLite's
+    // ~32 K bound-parameter limit, which would throw `too many SQL
+    // variables` and fail the whole operation.
+    const CHUNK = 500;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const slice = ids.slice(i, i + CHUNK);
+      const placeholders = slice.map(() => '?').join(',');
+      this.db
+        .prepare(
+          `UPDATE urls SET
+             status_code = NULL,
+             status_text = NULL,
+             indexability = 'indexable',
+             indexability_reason = NULL
+           WHERE id IN (${placeholders}) AND is_external = 0`,
+        )
+        .run(...slice);
+    }
   }
 
   deleteUrls(ids: number[]): void {
     if (ids.length === 0) return;
-    const placeholders = ids.map(() => '?').join(',');
-    this.db.prepare(`DELETE FROM urls WHERE id IN (${placeholders})`).run(...ids);
+    // Chunk to stay under SQLite's bound-parameter limit; wrap in one
+    // transaction so the urls + urls_issues + pagespeed_results deletes
+    // are atomic. `urls_issues` / `pagespeed_results` have no FK to
+    // `urls` (see `deleteUrl`), so they're wiped explicitly.
+    const CHUNK = 500;
+    this.runInTransaction(() => {
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const slice = ids.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => '?').join(',');
+        this.db
+          .prepare(
+            `DELETE FROM pagespeed_results
+              WHERE url IN (SELECT url FROM urls WHERE id IN (${placeholders}))`,
+          )
+          .run(...slice);
+        this.db
+          .prepare(`DELETE FROM urls_issues WHERE url_id IN (${placeholders})`)
+          .run(...slice);
+        this.db
+          .prepare(`DELETE FROM urls WHERE id IN (${placeholders})`)
+          .run(...slice);
+      }
+    });
   }
 
-  /** Look up the URL strings for a batch of ids (preserves DB order). */
+  /** Look up the URL strings for a batch of ids, in ascending id order. */
   getUrlsByIds(ids: number[]): string[] {
     if (ids.length === 0) return [];
-    const placeholders = ids.map(() => '?').join(',');
-    const rows = this.db
-      .prepare(`SELECT url FROM urls WHERE id IN (${placeholders})`)
-      .all(...ids) as unknown as { url: string }[];
-    return rows.map((r) => r.url);
+    // Sort then chunk: each chunk query is `ORDER BY id`, so the
+    // concatenated result stays globally id-ordered while staying under
+    // SQLite's bound-parameter limit.
+    const CHUNK = 500;
+    const sorted = [...ids].sort((a, b) => a - b);
+    const out: string[] = [];
+    for (let i = 0; i < sorted.length; i += CHUNK) {
+      const slice = sorted.slice(i, i + CHUNK);
+      const placeholders = slice.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(
+          `SELECT url FROM urls WHERE id IN (${placeholders}) ORDER BY id`,
+        )
+        .all(...slice) as unknown as { url: string }[];
+      for (const r of rows) out.push(r.url);
+    }
+    return out;
   }
 
   getUrlRowById(id: number): { url: string; depth: number; isExternal: number } | null {
@@ -2444,7 +2536,7 @@ export class ProjectDb {
     offset: number;
     internal?: 'all' | 'internal' | 'external';
     search?: string;
-  }): { rows: BrokenLinkRow[]; total: number } {
+  }): { rows: BrokenLinkRow[]; total: number; uniqueTargets: number } {
     const where: string[] = ['t.status_code >= 400 AND t.status_code < 600'];
     const args: (string | number)[] = [];
     const internal = params.internal ?? 'all';
@@ -2458,13 +2550,13 @@ export class ProjectDb {
     const whereSql = `WHERE ${where.join(' AND ')}`;
     const totalRow = this.db
       .prepare(
-        `SELECT COUNT(*) AS c
+        `SELECT COUNT(*) AS c, COUNT(DISTINCT l.to_url) AS u
          FROM links l
          JOIN urls f ON l.from_url_id = f.id
          JOIN urls t ON l.to_url = t.url
          ${whereSql}`,
       )
-      .get(...args) as { c: number };
+      .get(...args) as { c: number; u: number };
     const rowsDb = this.db
       .prepare(
         `SELECT f.url AS from_url, f.status_code AS from_status,
@@ -2488,6 +2580,7 @@ export class ProjectDb {
     }[];
     return {
       total: totalRow.c,
+      uniqueTargets: totalRow.u,
       rows: rowsDb.map((r) => ({
         fromUrl: r.from_url,
         fromStatusCode: r.from_status,
@@ -2496,6 +2589,132 @@ export class ProjectDb {
         anchor: r.anchor,
         rel: r.rel,
         isInternal: r.is_internal === 1,
+      })),
+    };
+  }
+
+  /**
+   * Faz 7 — store one PageSpeed Insights audit result. Keyed by
+   * (url, strategy); re-running an audit overwrites the previous row.
+   */
+  upsertPagespeedResult(
+    url: string,
+    strategy: PagespeedStrategy,
+    m: PagespeedMetrics,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO pagespeed_results
+           (url, strategy, performance, lcp, cls, fcp, tbt, speed_index,
+            status, error, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(url, strategy) DO UPDATE SET
+           performance = excluded.performance,
+           lcp = excluded.lcp,
+           cls = excluded.cls,
+           fcp = excluded.fcp,
+           tbt = excluded.tbt,
+           speed_index = excluded.speed_index,
+           status = excluded.status,
+           error = excluded.error,
+           fetched_at = excluded.fetched_at`,
+      )
+      .run(
+        url,
+        strategy,
+        m.performance,
+        m.lcp,
+        m.cls,
+        m.fcp,
+        m.tbt,
+        m.speedIndex,
+        m.status,
+        m.error,
+        m.fetchedAt,
+      );
+  }
+
+  /**
+   * Faz 7 — candidate query for the PageSpeed tab. Returns crawled
+   * internal HTML 2xx pages (the universe PSI can be run against)
+   * left-joined with any stored mobile + desktop audit results.
+   */
+  queryPagespeed(params: {
+    limit: number;
+    offset: number;
+    search?: string;
+    filter?: 'all' | 'tested' | 'untested';
+  }): { rows: PagespeedRow[]; total: number } {
+    const where: string[] = [
+      "u.is_external = 0 AND u.content_kind = 'html'",
+      'u.status_code >= 200 AND u.status_code < 300',
+    ];
+    const args: (string | number)[] = [];
+    if (params.search) {
+      where.push('u.url LIKE ?');
+      args.push(`%${params.search}%`);
+    }
+    const filter = params.filter ?? 'all';
+    if (filter === 'tested') {
+      where.push('(pm.url IS NOT NULL OR pd.url IS NOT NULL)');
+    } else if (filter === 'untested') {
+      where.push('pm.url IS NULL AND pd.url IS NULL');
+    }
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const joinSql = `
+      FROM urls u
+      LEFT JOIN pagespeed_results pm ON pm.url = u.url AND pm.strategy = 'mobile'
+      LEFT JOIN pagespeed_results pd ON pd.url = u.url AND pd.strategy = 'desktop'`;
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
+      .get(...args) as { c: number };
+
+    const rowsDb = this.db
+      .prepare(
+        `SELECT u.url AS url, u.status_code AS status_code,
+                pm.performance AS m_perf, pm.lcp AS m_lcp, pm.cls AS m_cls,
+                pm.fcp AS m_fcp, pm.tbt AS m_tbt, pm.speed_index AS m_si,
+                pm.status AS m_status, pm.error AS m_error, pm.fetched_at AS m_fetched,
+                pd.performance AS d_perf, pd.lcp AS d_lcp, pd.cls AS d_cls,
+                pd.fcp AS d_fcp, pd.tbt AS d_tbt, pd.speed_index AS d_si,
+                pd.status AS d_status, pd.error AS d_error, pd.fetched_at AS d_fetched
+         ${joinSql}
+         ${whereSql}
+         ORDER BY u.inlinks DESC, u.url ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...args, params.limit, params.offset) as unknown as Record<
+      string,
+      unknown
+    >[];
+
+    const metrics = (
+      r: Record<string, unknown>,
+      p: string,
+    ): PagespeedMetrics | null => {
+      const status = r[`${p}_status`];
+      if (typeof status !== 'string') return null;
+      return {
+        performance: (r[`${p}_perf`] as number | null) ?? null,
+        lcp: (r[`${p}_lcp`] as number | null) ?? null,
+        cls: (r[`${p}_cls`] as number | null) ?? null,
+        fcp: (r[`${p}_fcp`] as number | null) ?? null,
+        tbt: (r[`${p}_tbt`] as number | null) ?? null,
+        speedIndex: (r[`${p}_si`] as number | null) ?? null,
+        status: status === 'ok' ? 'ok' : 'error',
+        error: (r[`${p}_error`] as string | null) ?? null,
+        fetchedAt: (r[`${p}_fetched`] as string | null) ?? '',
+      };
+    };
+
+    return {
+      total: totalRow.c,
+      rows: rowsDb.map((r) => ({
+        url: r['url'] as string,
+        statusCode: (r['status_code'] as number | null) ?? null,
+        mobile: metrics(r, 'm'),
+        desktop: metrics(r, 'd'),
       })),
     };
   }
@@ -3656,12 +3875,20 @@ export class ProjectDb {
 
   *iterateUrlsByIds(ids: number[]): IterableIterator<CrawlUrlRow> {
     if (ids.length === 0) return;
-    const placeholders = ids.map(() => '?').join(',');
-    const rows = this.db
-      .prepare(`SELECT * FROM urls WHERE id IN (${placeholders}) ORDER BY id`)
-      .all(...ids) as unknown as UrlRowDb[];
-    for (const row of rows) {
-      yield this.rowFromDb(row);
+    // Sort then chunk: keeps the yielded rows globally id-ordered while
+    // staying under SQLite's ~32 K bound-parameter limit (a large table
+    // selection can otherwise throw `too many SQL variables`).
+    const CHUNK = 500;
+    const sorted = [...ids].sort((a, b) => a - b);
+    for (let i = 0; i < sorted.length; i += CHUNK) {
+      const slice = sorted.slice(i, i + CHUNK);
+      const placeholders = slice.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(`SELECT * FROM urls WHERE id IN (${placeholders}) ORDER BY id`)
+        .all(...slice) as unknown as UrlRowDb[];
+      for (const row of rows) {
+        yield this.rowFromDb(row);
+      }
     }
   }
 

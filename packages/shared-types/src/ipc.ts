@@ -12,6 +12,10 @@ import type {
   UrlDetail,
 } from './crawl.js';
 import type { IntegrationsState } from './integrations.js';
+import type {
+  PagespeedRow,
+  PagespeedRunStrategy,
+} from './pagespeed.js';
 
 export const IPC = {
   crawlStart: 'crawl:start',
@@ -143,6 +147,16 @@ export const IPC = {
    *  `projectSaveDir` pref when set, otherwise the OS Documents folder.
    *  Used by Settings → Storage to display the active path. */
   defaultProjectDir: 'app:default-project-dir',
+  /** Faz 7 — Google PageSpeed Insights integration.
+   *  `pagespeedQuery` lists crawled internal HTML pages joined with any
+   *  stored audit results; `pagespeedRun` audits a user-selected set of
+   *  URLs (the slow part — emits `pagespeedProgress` as it goes);
+   *  `pagespeedCancel` stops an in-flight run early. */
+  pagespeedQuery: 'pagespeed:query',
+  pagespeedRun: 'pagespeed:run',
+  pagespeedCancel: 'pagespeed:cancel',
+  /** main → renderer: live progress of an in-flight PageSpeed run. */
+  pagespeedProgress: 'pagespeed:progress',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -220,7 +234,13 @@ export interface BrokenLinksQueryInput {
 
 export interface BrokenLinksQueryResult {
   rows: BrokenLinkRow[];
+  /** Total broken-link rows (each = one from→to link instance). Scales
+   *  with how many pages the crawl reached. */
   total: number;
+  /** Distinct broken target URLs. Far more stable across crawls than
+   *  `total` — one broken URL counts once no matter how many pages link
+   *  to it. */
+  uniqueTargets: number;
 }
 
 export interface ExportCsvInput {
@@ -887,6 +907,54 @@ export interface UrlRewritePreviewResult {
   parseError?: string;
 }
 
+/**
+ * Inputs for the PageSpeed tab's candidate query. Returns crawled
+ * internal HTML pages (the universe PSI can be run against) left-joined
+ * with any audit results already stored for them.
+ */
+export interface PagespeedQueryInput {
+  limit: number;
+  offset: number;
+  /** Substring match against the URL. */
+  search?: string;
+  /** `all` (default), `tested` (has ≥1 stored result), `untested`. */
+  filter?: 'all' | 'tested' | 'untested';
+}
+
+export interface PagespeedQueryResult {
+  rows: PagespeedRow[];
+  /** Total candidate rows matching the filter (before pagination). */
+  total: number;
+}
+
+export interface PagespeedRunInput {
+  /** URLs to audit — taken from the candidate rows in the tab. */
+  urls: string[];
+  /** Which form factor(s) to audit. `both` doubles the API calls. */
+  strategy: PagespeedRunStrategy;
+}
+
+export interface PagespeedRunResult {
+  /** Number of (url × strategy) audits that completed successfully. */
+  completed: number;
+  /** Number that returned an error (URL unreachable, quota, etc.). */
+  failed: number;
+  /** True when the user cancelled the run before it finished. */
+  cancelled: boolean;
+}
+
+/** main → renderer live progress while a PageSpeed run is in flight. */
+export interface PagespeedProgress {
+  /** Audits finished so far (success + failure). */
+  done: number;
+  /** Total audits in this run (urls × strategy count). */
+  total: number;
+  /** URL currently being audited, or null between items. */
+  currentUrl: string | null;
+  /** False once the run has fully stopped. */
+  running: boolean;
+}
+
 export interface LogEntry {
   /** Monotonic sequence id, increments on every log call this session. */
   id: number;
@@ -993,6 +1061,17 @@ export interface FreeCrawlApi {
   pickDirectory(input?: { title?: string; defaultPath?: string }): Promise<string | null>;
   /** Resolved default save directory for new projects (Documents fallback when unset). */
   defaultProjectDir(): Promise<string>;
+  /** Faz 7 — list crawled internal HTML pages joined with their stored
+   *  PageSpeed Insights audit results. */
+  pagespeedQuery(input: PagespeedQueryInput): Promise<PagespeedQueryResult>;
+  /** Run a PageSpeed Insights audit over the given URLs. Resolves when
+   *  the whole run finishes; subscribe to `onPagespeedProgress` for
+   *  live progress. */
+  pagespeedRun(input: PagespeedRunInput): Promise<PagespeedRunResult>;
+  /** Request cancellation of an in-flight PageSpeed run. */
+  pagespeedCancel(): Promise<void>;
+  /** Live progress of an in-flight PageSpeed run. */
+  onPagespeedProgress(cb: (p: PagespeedProgress) => void): () => void;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onLogsBatch(cb: (entries: LogEntry[]) => void): () => void;
   onLogsBusy(cb: (busy: boolean) => void): () => void;

@@ -72,7 +72,7 @@ class ParserPool {
       size ?? Math.max(2, Math.min(8, cpuCount - 2));
     for (let i = 0; i < target; i++) {
       try {
-        this.workers.push(this.spawnWorker(i));
+        this.workers.push(this.spawnWorker());
       } catch (err) {
         logger.log(
           'warn',
@@ -140,35 +140,50 @@ class ParserPool {
 
   // ── private ──────────────────────────────────────────────────────
 
-  private spawnWorker(index: number): Worker {
+  private spawnWorker(): Worker {
     const w = new Worker(WORKER_PATH);
     w.on('message', (msg: ResponseMessage) => this.handleResponse(msg));
     w.on('error', (err) => {
-      logger.log('error', 'main', `parser-worker[${index}] error: ${err.message}`);
+      logger.log('error', 'main', `parser-worker error: ${err.message}`);
     });
     w.on('exit', (code) => {
       if (this.terminated) return;
-      if (code === 0) return;
+      // Resolve this worker's CURRENT slot by identity — never trust a
+      // captured index. An init-time spawn failure leaves the array
+      // shorter than the logical worker count, so a captured index
+      // would point at the wrong slot (or past the end).
+      const slot = this.workers.indexOf(w);
+      if (slot < 0) return; // already replaced / removed
+      if (code === 0) {
+        // Clean exit — drop the slot so `parse()` never dispatches to it.
+        this.workers.splice(slot, 1);
+        return;
+      }
       logger.log(
         'warn',
         'main',
-        `parser-worker[${index}] exited (code=${code}) — respawning`,
+        `parser-worker exited (code=${code}) — respawning`,
       );
-      const respawn = this.tryRespawn(index);
-      if (respawn) this.workers[index] = respawn;
+      const respawn = this.tryRespawn();
+      if (respawn) {
+        this.workers[slot] = respawn;
+      } else {
+        // Respawn failed — remove the dead worker so it is never picked.
+        this.workers.splice(slot, 1);
+      }
     });
     return w;
   }
 
-  private tryRespawn(index: number): Worker | null {
+  private tryRespawn(): Worker | null {
     if (this.terminated) return null;
     try {
-      return this.spawnWorker(index);
+      return this.spawnWorker();
     } catch (err) {
       logger.log(
         'error',
         'main',
-        `parser-worker[${index}] respawn failed: ${
+        `parser-worker respawn failed: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );

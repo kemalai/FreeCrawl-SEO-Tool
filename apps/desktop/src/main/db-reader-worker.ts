@@ -69,6 +69,7 @@ const ALLOWED_METHODS = new Set<string>([
   'queryUrls',
   'queryImages',
   'queryBrokenLinks',
+  'queryPagespeed',
   'getOverviewCounts',
   'getOverviewCountsAsync',
   'getSummary',

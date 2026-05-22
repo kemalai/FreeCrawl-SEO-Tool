@@ -16,6 +16,7 @@ import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
 import { SerpTab } from './tabs/SerpTab.js';
+import { PageSpeedTab } from './tabs/PageSpeedTab.js';
 import { VisualizationTab } from './tabs/VisualizationTab.js';
 import { useAppStore } from './store.js';
 import type { MenuEvent } from '@freecrawl/shared-types';
@@ -157,9 +158,11 @@ export function App() {
     // behind the main window on some Windows configurations — leaves
     // the user staring at an "unresponsive" UI: the URL input can't
     // be clicked because a hidden modal is blocking the renderer.
+    let recoveryTimer: number | undefined;
+    let recoveryCancelled = false;
     void window.freecrawl.crashRecoveryStatus().then((status) => {
-      if (status.pendingCount === 0) return;
-      window.setTimeout(() => {
+      if (recoveryCancelled || status.pendingCount === 0) return;
+      recoveryTimer = window.setTimeout(() => {
         const proceed = window.confirm(
           t('app.crashRecovery', {
             defaultValue:
@@ -308,6 +311,10 @@ export function App() {
       }
     });
     return () => {
+      // Cancel the deferred crash-recovery prompt so it can't fire a
+      // `window.confirm` after this component has unmounted.
+      recoveryCancelled = true;
+      if (recoveryTimer !== undefined) window.clearTimeout(recoveryTimer);
       off1();
       off2();
       off3();
@@ -357,6 +364,8 @@ export function App() {
                   <BrokenLinksTab />
                 ) : activeTab === 'serp' ? (
                   <SerpTab />
+                ) : activeTab === 'pagespeed' ? (
+                  <PageSpeedTab />
                 ) : activeTab === 'visualization' ? (
                   <VisualizationTab />
                 ) : (

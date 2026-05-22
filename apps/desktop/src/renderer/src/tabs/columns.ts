@@ -605,6 +605,7 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
   images: [],
   'broken-links': [],
   serp: [],
+  pagespeed: [],
   visualization: [],
   canonicals: [
     COL.url,

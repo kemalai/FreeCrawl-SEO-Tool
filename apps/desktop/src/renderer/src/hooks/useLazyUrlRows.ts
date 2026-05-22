@@ -104,6 +104,31 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     [opts.category, opts.search, opts.sortBy, opts.sortDir, opts.filter],
   );
 
+  // Single entry point for writing a chunk into the cache. Guarantees
+  // `chunkOrder` tracks every chunk present in `chunks` — the live tick
+  // previously called `chunks.set` directly, leaving untracked chunks
+  // the LRU could never evict (a slow heap leak on long live crawls,
+  // and `chunkOrder` undercounting so eviction kicked in too late).
+  const storeChunk = useCallback(
+    (idx: number, rows: CrawlUrlRow[]): void => {
+      const isNew = !chunks.current.has(idx);
+      chunks.current.set(idx, rows);
+      if (isNew) chunkOrder.current.push(idx);
+      // Evict chunks not currently visible once the cache exceeds cap.
+      while (chunkOrder.current.length > MAX_CACHED_CHUNKS) {
+        const evict = chunkOrder.current.shift();
+        if (evict === undefined) break;
+        const { first, last } = activeRange.current;
+        if (evict >= first && evict <= last) {
+          chunkOrder.current.push(evict);
+          continue;
+        }
+        chunks.current.delete(evict);
+      }
+    },
+    [],
+  );
+
   // Shape change (tab/sort/filter switch): clear immediately and load
   // fresh data in parallel. Showing the previous tab's rows under the
   // new tab's header is the wrong UX — "Internal" rows visible while
@@ -133,8 +158,7 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
         const [{ total: t }, ...newChunks] = await Promise.all([metaPromise, ...chunkPromises]);
         if (cancelled || token !== resetToken.current) return;
         for (const ch of newChunks) {
-          chunks.current.set(ch.idx, ch.rows);
-          chunkOrder.current.push(ch.idx);
+          storeChunk(ch.idx, ch.rows);
         }
         setTotal(t);
         setVersion((v) => v + 1);
@@ -193,7 +217,7 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
           try {
             const { rows } = await queryChunk(i);
             if (cancelled || token !== resetToken.current) return;
-            chunks.current.set(i, rows);
+            storeChunk(i, rows);
           } catch {
             /* ignore */
           }
@@ -258,26 +282,14 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
       try {
         const { rows, total: t } = await queryChunk(chunkIdx);
         if (token !== resetToken.current) return;
-        chunks.current.set(chunkIdx, rows);
-        chunkOrder.current.push(chunkIdx);
-        // Evict chunks not currently visible once cache exceeds cap.
-        while (chunkOrder.current.length > MAX_CACHED_CHUNKS) {
-          const evict = chunkOrder.current.shift();
-          if (evict === undefined) break;
-          const { first, last } = activeRange.current;
-          if (evict >= first && evict <= last) {
-            chunkOrder.current.push(evict);
-            continue;
-          }
-          chunks.current.delete(evict);
-        }
+        storeChunk(chunkIdx, rows);
         setTotal(t);
         setVersion((v) => v + 1);
       } finally {
         fetching.current.delete(chunkIdx);
       }
     },
-    [queryChunk],
+    [queryChunk, storeChunk],
   );
 
   const ensureRange = useCallback(

@@ -83,6 +83,11 @@ import {
   type UrlsQueryInput,
   type UrlsQueryResult,
   type MemoryStats,
+  type PagespeedQueryInput,
+  type PagespeedQueryResult,
+  type PagespeedRunInput,
+  type PagespeedRunResult,
+  type PagespeedProgress,
 } from '@freecrawl/shared-types';
 
 function subscribe<T>(
@@ -257,6 +262,13 @@ const api: FreeCrawlApi = {
   ): Promise<IntegrationsState> => ipcRenderer.invoke(IPC.integrationsSet, id, fields),
   integrationsClear: (id: string): Promise<IntegrationsState> =>
     ipcRenderer.invoke(IPC.integrationsClear, id),
+  pagespeedQuery: (input: PagespeedQueryInput): Promise<PagespeedQueryResult> =>
+    ipcRenderer.invoke(IPC.pagespeedQuery, input),
+  pagespeedRun: (input: PagespeedRunInput): Promise<PagespeedRunResult> =>
+    ipcRenderer.invoke(IPC.pagespeedRun, input),
+  pagespeedCancel: (): Promise<void> => ipcRenderer.invoke(IPC.pagespeedCancel),
+  onPagespeedProgress: (cb) =>
+    subscribe<PagespeedProgress>(IPC.pagespeedProgress, cb),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
   onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),

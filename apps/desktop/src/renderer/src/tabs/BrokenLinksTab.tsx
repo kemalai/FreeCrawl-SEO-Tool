@@ -96,6 +96,21 @@ function cellValue(row: BrokenLinkRow, colIdx: number): string {
   }
 }
 
+/** True when the row set shifted enough to invalidate index-keyed
+ *  cell selection (a live-crawl poll can insert / reorder rows). */
+function brokenRowsChanged(
+  prev: BrokenLinkRow[],
+  next: BrokenLinkRow[],
+): boolean {
+  if (prev.length !== next.length) return true;
+  for (let i = 0; i < next.length; i++) {
+    const p = prev[i];
+    const n = next[i];
+    if (!p || !n || p.fromUrl !== n.fromUrl || p.toUrl !== n.toUrl) return true;
+  }
+  return false;
+}
+
 export function BrokenLinksTab() {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -104,6 +119,10 @@ export function BrokenLinksTab() {
   const progress = useAppStore((s) => s.progress);
   const [rows, setRows] = useState<BrokenLinkRow[]>([]);
   const [total, setTotal] = useState(0);
+  // Distinct broken target URLs — stable across crawls of different
+  // sizes, unlike the row `total` which scales with how many pages the
+  // crawl reached.
+  const [uniqueTargets, setUniqueTargets] = useState(0);
   const [search, setSearch] = useState('');
   const [exporting, setExporting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -148,8 +167,22 @@ export function BrokenLinksTab() {
         internal,
       });
       if (cancelled) return;
+      // A live-crawl poll can insert / reorder broken-link rows. The
+      // cell selection is index-keyed ("rowIdx:colIdx"), so once the row
+      // set shifts the old keys point at different rows — drop the
+      // selection rather than highlight / copy the wrong cells.
+      if (
+        selectedRef.current.size > 0 &&
+        brokenRowsChanged(rowsRef.current, res.rows)
+      ) {
+        setSelected(new Set());
+        setMenu(null);
+        anchorRef.current = null;
+        dragRef.current = null;
+      }
       setRows(res.rows);
       setTotal(res.total);
+      setUniqueTargets(res.uniqueTargets);
     };
     void load();
     const cadence = progress?.running ? POLL_MS_RUNNING : POLL_MS_IDLE;
@@ -310,6 +343,8 @@ export function BrokenLinksTab() {
         )}
         <div className="ml-auto text-[11px] text-surface-500">
           <span className="font-mono text-surface-200">{total.toLocaleString()}</span> {t('brokenTab.linksUnit', { defaultValue: 'broken links' })}
+          <span className="mx-1 text-surface-700">·</span>
+          <span className="font-mono text-surface-200">{uniqueTargets.toLocaleString()}</span> {t('brokenTab.uniqueUnit', { defaultValue: 'unique URLs' })}
           <span className="ml-2 text-surface-600">({t('imagesTab.loaded', { defaultValue: '{{n}} loaded', n: rows.length.toLocaleString() })})</span>
         </div>
         <button
@@ -454,7 +489,13 @@ export function BrokenLinksTab() {
           </span>
         )}
         <span>
-          Total:{' '}
+          {t('brokenTab.uniqueLabel', { defaultValue: 'Unique broken URLs' })}:{' '}
+          <span className="font-mono tabular-nums text-surface-200">
+            {uniqueTargets.toLocaleString()}
+          </span>
+        </span>
+        <span>
+          {t('brokenTab.totalLabel', { defaultValue: 'Total rows' })}:{' '}
           <span className="font-mono tabular-nums text-surface-200">
             {total.toLocaleString()}
           </span>

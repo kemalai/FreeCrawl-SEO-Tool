@@ -219,6 +219,16 @@ export function VisualizationTab() {
   const [hover, setHover] = useState<string | null>(null);
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const [tuning, setTuning] = useState<VisTuning>(() => loadTuning());
+  // Debounced copy that drives the expensive cytoscape rebuild. A tuning
+  // slider drag fires onChange on every step; rebuilding the graph and
+  // re-running the cose layout on each step thrashes the view. The
+  // slider itself stays instant (bound to `tuning`) — the graph settles
+  // ~250 ms after the last change.
+  const [debouncedTuning, setDebouncedTuning] = useState<VisTuning>(tuning);
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedTuning(tuning), 250);
+    return () => clearTimeout(id);
+  }, [tuning]);
   const [tunerOpen, setTunerOpen] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
 
@@ -249,17 +259,24 @@ export function VisualizationTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeLimit, dataVersion]);
 
+  // Monotonic token so a slow graphSnapshot (e.g. a large `nodeLimit`)
+  // can't resolve after a newer request and render a graph that no
+  // longer matches the controls. Covers both the effect and the
+  // Reload / Tuning buttons.
+  const loadTokenRef = useRef(0);
   async function loadGraph() {
+    const token = ++loadTokenRef.current;
     setLoading(true);
     try {
       const [g, a] = await Promise.all([
         window.freecrawl.graphSnapshot({ nodeLimit }),
         window.freecrawl.topAnchorTexts(120),
       ]);
+      if (token !== loadTokenRef.current) return;
       setGraph(g);
       setAnchors(a);
     } finally {
-      setLoading(false);
+      if (token === loadTokenRef.current) setLoading(false);
     }
   }
 
@@ -287,7 +304,7 @@ export function VisualizationTab() {
           statusCode: n.statusCode ?? '',
           inlinks: n.inlinks,
           color: colorFn(n),
-          size: nodeSize(n.inlinks, tuning.nodeSizeScale),
+          size: nodeSize(n.inlinks, debouncedTuning.nodeSizeScale),
           isTop: topIds.has(String(n.id)) ? 1 : 0,
         },
       })),
@@ -318,15 +335,15 @@ export function VisualizationTab() {
       padding: 30,
     };
     if (layout === 'cose') {
-      layoutCfg.nodeRepulsion = () => 1_000_000 * tuning.repulsionScale;
-      layoutCfg.idealEdgeLength = () => 400 * tuning.edgeLengthScale;
+      layoutCfg.nodeRepulsion = () => 1_000_000 * debouncedTuning.repulsionScale;
+      layoutCfg.idealEdgeLength = () => 400 * debouncedTuning.edgeLengthScale;
       layoutCfg.edgeElasticity = () => 20;
       layoutCfg.gravity = 0;
       layoutCfg.gravityRange = 5.0;
       layoutCfg.gravityCompound = 0;
       layoutCfg.numIter = 6000;
       layoutCfg.nodeOverlap = 200;
-      layoutCfg.componentSpacing = 400 * tuning.componentSpacingScale;
+      layoutCfg.componentSpacing = 400 * debouncedTuning.componentSpacingScale;
       layoutCfg.nestingFactor = 1.2;
       layoutCfg.initialTemp = 2000;
       layoutCfg.coolingFactor = 0.995;
@@ -412,7 +429,7 @@ export function VisualizationTab() {
             'target-arrow-color': '#525252',
             'target-arrow-shape': 'triangle',
             'arrow-scale': 0.6,
-            opacity: tuning.edgeOpacity,
+            opacity: debouncedTuning.edgeOpacity,
           },
         },
         {
@@ -534,7 +551,7 @@ export function VisualizationTab() {
       cy.destroy();
       cyRef.current = null;
     };
-  }, [graph, layout, colorMode, labelMode, tuning]);
+  }, [graph, layout, colorMode, labelMode, debouncedTuning]);
 
   return (
     <div className="flex h-full w-full flex-col bg-surface-950">

@@ -43,7 +43,7 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 <td width="50%" valign="top">
 
 ### 🔍 Analysis
-- **150+ SEO issue checks** across 24 top-level tabs
+- **150+ SEO issue checks** across 25 top-level tabs
 - Near-duplicate clustering (SimHash + LSH) + exact-duplicate content hash
 - Full hreflang validation (reciprocity, self-ref, inconsistent lang)
 - OpenGraph / Twitter Card / JSON-LD / AMP / **Web App Manifest** parsing
@@ -53,6 +53,7 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 - **Active vs passive mixed content** split
 - Readability (Flesch, Flesch–Kincaid, Gunning Fog)
 - Custom CSS + Regex extraction (10 rules) + `/regex/` literal Custom Search
+- **PageSpeed Insights** — on-demand Lighthouse audits (mobile + desktop) per URL
 
 </td>
 </tr>
@@ -439,9 +440,9 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development.** All 24 analysis tabs, advanced search, 150+ issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, **in-app scheduled crawl**, **multi-language UI (EN + TR)**, **`.seoproject` file association**, in-app logs, and diagnostic popups are working. Cross-platform installers (Windows `.exe` + portable, macOS `.dmg`, Linux `.AppImage` / `.deb` / `.rpm`). Live-streaming UX with **first row in ~1 s**.
+> **Active development.** All 25 analysis tabs, advanced search, 150+ issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, **Google PageSpeed Insights integration**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, **in-app scheduled crawl**, **multi-language UI (EN + TR)**, **`.seoproject` file association**, in-app logs, and diagnostic popups are working. Cross-platform installers (Windows `.exe` + portable, macOS `.dmg`, Linux `.AppImage` / `.deb` / `.rpm`). Live-streaming UX with **first row in ~1 s**.
 >
-> **Upcoming:** plugin system, JavaScript rendering, log analyzer, PageSpeed API integration.
+> **Upcoming:** plugin system, JavaScript rendering, log analyzer.
 
 <br />
 

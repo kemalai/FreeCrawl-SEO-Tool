@@ -1314,7 +1314,23 @@ function detectAnalyticsTrackers(
   rawHtml: string,
 ): AnalyticsTracker[] {
   const found = new Map<string, AnalyticsTracker>();
-  const add = (name: string, id: string | null = null): void => {
+  const add = (
+    name: string,
+    id: string | null = null,
+    allowMultiple = false,
+  ): void => {
+    // `allowMultiple` trackers (e.g. GA4) keep a separate entry per
+    // distinct id — two GA4 property tags on one page is a real
+    // misconfiguration the "Multiple GA4" issue filter needs to see.
+    // Without this the name-keyed map collapses them into one entry and
+    // the filter can never fire.
+    if (allowMultiple && id !== null) {
+      const key = `${name}|${id}`;
+      if (!found.has(key)) found.set(key, { name, id });
+      // Drop a prior id-less placeholder for this tracker, if any.
+      found.delete(name);
+      return;
+    }
     const existing = found.get(name);
     // Keep the more specific (id-bearing) record if we see the same tracker twice.
     if (!existing || (existing.id === null && id !== null)) {
@@ -1348,10 +1364,13 @@ function detectAnalyticsTrackers(
   // them as a separate tracker since Google deprecated UA in July 2023.
   for (const src of scriptSrcs) {
     const m = src.match(/gtag\/js\?id=(G-[A-Z0-9]+)/i);
-    if (m && m[1]) add('Google Analytics 4', m[1].toUpperCase());
+    if (m && m[1]) add('Google Analytics 4', m[1].toUpperCase(), true);
   }
-  const ga4Inline = inlineBlob.match(/['"](G-[A-Z0-9]{6,})['"]/);
-  if (ga4Inline && ga4Inline[1]) add('Google Analytics 4', ga4Inline[1].toUpperCase());
+  // Match every distinct inline `G-…` id, not just the first — a page
+  // wiring up two GA4 properties typically lists both inline.
+  for (const m of inlineBlob.matchAll(/['"](G-[A-Z0-9]{6,})['"]/g)) {
+    if (m[1]) add('Google Analytics 4', m[1].toUpperCase(), true);
+  }
   const uaInline = inlineBlob.match(/UA-\d{4,10}-\d{1,4}/);
   if (uaInline) add('Google Analytics (UA)', uaInline[0]);
 
