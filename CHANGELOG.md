@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.6.0] — 2026-05-25
+
+### Added
+- Google Search Console integration — pull clicks / impressions / CTR / position per crawled page and overlay them on the URL list.
+- Google Search Console URL Inspection — fetch coverage verdict, last-crawl time, and canonical decisions for batches of pages.
+- Google Analytics 4 integration — join GA4 sessions / users / engagement / avg session duration onto each crawled URL.
+- AI tab — run OpenAI, Anthropic, or local Ollama prompts per URL with shared variables ({url}/{title}/{description}/{h1}/{body}).
+- SEO Authority tab — unified Ahrefs / Majestic / Moz / Semrush per-URL metrics behind a single provider dropdown.
+- Google Sheets export — File menu writes the active category to a fresh Sheet and copies the link to clipboard.
+- BigQuery export — service-account streaming insert into a timestamped table inside the `freecrawl_seo` dataset.
+- Analytics sub-tab in the detail panel — combined GSC + GA4 + URL Inspection card view for the selected URL.
+- Reports → "Orphan Pages (Cross-Source)" — surfaces URLs that PSI / GSC / GA4 / sitemap know about but the crawl never reached.
+- Encrypted project snapshots — File menu now saves and opens AES-256-GCM-encrypted `.seoproject.enc` snapshots protected by a password.
+- Images tab — Export button writes every image row to CSV honouring the active missing-alt filter and search box.
+- CLI: ready-made GitHub Actions and GitLab CI templates that crawl a target on schedule and fail the pipeline on broken-URL thresholds.
+
+### Changed
+- PageSpeed Insights now requires a free API key — Google's keyless shared quota is 0/day so the tab gates the Run button and shows an "Add API Key…" call-to-action when no key is configured.
+- PageSpeed failure handling surfaces the exact Google error inline (QUOTA / RATE / TIMEOUT / NET tag plus a hover-tooltip), and the batch log lists the top distinct errors instead of just a failed count.
+- Memory limit setting now actively pauses and auto-resumes the crawler when RSS crosses the configured threshold instead of being a display-only value.
+
+### Fixed
+- Ahrefs integration — the v3 combined `/site-explorer/overview` endpoint was removed by Ahrefs, replaced with a parallel fan-out across the four per-metric endpoints with partial-success tolerance.
+- Semrush integration — `type=url_overview` was renamed to `type=url_rank` and the now-mandatory `export_columns` parameter is supplied.
+- Various crawler, UI, and integration stability fixes.
+
 ## [0.5.6] — 2026-05-22
 
 ### Added
