@@ -1292,6 +1292,123 @@ const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 57,
+    name: 'add_gsc_results_table',
+    // V1 Faz 7 — Google Search Console integration. Per-page clicks /
+    // impressions / CTR / position pulled from the Search Console API,
+    // keyed by the page URL so the Search Console tab can LEFT JOIN it
+    // onto the crawled `urls`. Like `pagespeed_results` this lives in
+    // its own table — the data is fetched on demand for a date range,
+    // wholesale-replaced on each pull, and not part of the crawl.
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS gsc_results (
+          url         TEXT PRIMARY KEY,
+          clicks      INTEGER NOT NULL DEFAULT 0,
+          impressions INTEGER NOT NULL DEFAULT 0,
+          ctr         REAL NOT NULL DEFAULT 0,
+          position    REAL NOT NULL DEFAULT 0,
+          fetched_at  TEXT NOT NULL
+        );
+      `);
+    },
+  },
+  {
+    version: 58,
+    name: 'add_ga4_results_table',
+    // V1 Faz 7 — Google Analytics 4 integration. Per-page sessions /
+    // users / pageviews / engagement-rate / avg-session-duration pulled
+    // from the GA4 Data API on demand for a date range. Lives in its
+    // own table for the same reasons as `pagespeed_results` /
+    // `gsc_results` — wholesale-replaced per pull, not part of the
+    // crawl, joined onto the crawled `urls` via the page URL.
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ga4_results (
+          url                  TEXT PRIMARY KEY,
+          sessions             INTEGER NOT NULL DEFAULT 0,
+          users                INTEGER NOT NULL DEFAULT 0,
+          pageviews            INTEGER NOT NULL DEFAULT 0,
+          engagement_rate      REAL NOT NULL DEFAULT 0,
+          avg_session_duration REAL NOT NULL DEFAULT 0,
+          fetched_at           TEXT NOT NULL
+        );
+      `);
+    },
+  },
+  {
+    version: 59,
+    name: 'add_ai_results_table',
+    // V1 Faz 7 — AI integrations (OpenAI / Anthropic / Ollama). One row
+    // per (url, provider) — re-running a prompt overwrites the prior
+    // response for that URL on that provider. Status/error live in the
+    // same row so an AI tab cell can render either a successful
+    // response or the failure reason without joining a second table.
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS ai_results (
+          url        TEXT NOT NULL,
+          provider   TEXT NOT NULL,
+          model      TEXT NOT NULL,
+          response   TEXT NOT NULL,
+          tokens_in  INTEGER,
+          tokens_out INTEGER,
+          status     TEXT NOT NULL,
+          error      TEXT,
+          fetched_at TEXT NOT NULL,
+          PRIMARY KEY (url, provider)
+        );
+      `);
+    },
+  },
+  {
+    version: 60,
+    name: 'add_seo_results_table',
+    // V1 Faz 7 — third-party SEO authority providers (Ahrefs / Majestic /
+    // Moz / Semrush). Per-URL metrics stored as a JSON blob since each
+    // provider returns a different metric set; the SEO tab parses
+    // shape based on the `provider` column.
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS seo_results (
+          url        TEXT NOT NULL,
+          provider   TEXT NOT NULL,
+          metrics    TEXT,
+          status     TEXT NOT NULL,
+          error      TEXT,
+          fetched_at TEXT NOT NULL,
+          PRIMARY KEY (url, provider)
+        );
+      `);
+    },
+  },
+  {
+    version: 61,
+    name: 'add_gsc_inspection_table',
+    // V1 Faz 7 — Google Search Console URL Inspection API results.
+    // Separate from `gsc_results` (Search Analytics) because inspection
+    // is per-URL with a hard 2 K/day quota and its own response shape:
+    // verdict / coverageState / lastCrawlTime / robotsTxtState /
+    // indexingState / canonical info.
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS gsc_inspection_results (
+          url               TEXT PRIMARY KEY,
+          verdict           TEXT,
+          coverage_state    TEXT,
+          robots_txt_state  TEXT,
+          indexing_state    TEXT,
+          last_crawl_time   TEXT,
+          google_canonical  TEXT,
+          user_canonical    TEXT,
+          status            TEXT NOT NULL,
+          error             TEXT,
+          fetched_at        TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

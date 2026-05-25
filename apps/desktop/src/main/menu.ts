@@ -104,6 +104,14 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: L.bulkExport,
           click: () => send('export-bulk'),
         },
+        {
+          label: L.exportSheets,
+          click: () => send('export-sheets'),
+        },
+        {
+          label: L.exportBigquery,
+          click: () => send('export-bigquery'),
+        },
         { type: 'separator' },
         {
           label: L.compareWith,
@@ -118,6 +126,16 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: L.saveProjectAs,
           accelerator: 'CmdOrCtrl+Shift+S',
           click: () => send('save-project-as'),
+        },
+        {
+          label: L.saveProjectEncrypted,
+          toolTip: L.saveProjectEncryptedTooltip,
+          click: () => send('save-project-encrypted'),
+        },
+        {
+          label: L.openProjectEncrypted,
+          toolTip: L.openProjectEncryptedTooltip,
+          click: () => send('open-project-encrypted'),
         },
         { type: 'separator' },
         {

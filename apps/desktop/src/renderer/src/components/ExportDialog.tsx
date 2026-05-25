@@ -43,6 +43,10 @@ const TAB_CATEGORY: Record<TabKey, UrlCategory> = {
   'broken-links': 'all',
   serp: 'tab:serp',
   pagespeed: 'all',
+  'search-console': 'all',
+  analytics: 'all',
+  ai: 'all',
+  seo: 'all',
   visualization: 'all',
 };
 

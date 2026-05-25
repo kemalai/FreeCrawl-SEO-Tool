@@ -1,0 +1,73 @@
+# FreeCrawl SEO — example GitHub Actions workflow
+#
+# Runs the headless CLI against your site on every push and on a daily
+# schedule, fails the build if more than N broken links are discovered,
+# and uploads the JSON / CSV crawl as a build artifact. Adapt
+# `TARGET_URL` and `BROKEN_LINK_THRESHOLD` to your site.
+#
+# Save this file as `.github/workflows/freecrawl-audit.yml` in your
+# repo. No FreeCrawl install required on the runner — `npx` pulls the
+# CLI from the source clone.
+
+name: FreeCrawl SEO Audit
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *" # 04:00 UTC daily
+  workflow_dispatch:
+
+env:
+  TARGET_URL: https://example.com
+  MAX_URLS: "5000"
+  BROKEN_LINK_THRESHOLD: "10"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: kemalai/FreeCrawl-SEO-Tool
+          path: freecrawl
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: freecrawl/package-lock.json
+
+      - name: Install + build CLI
+        working-directory: freecrawl
+        run: |
+          npm ci
+          npm run build:cli
+
+      - name: Crawl ${{ env.TARGET_URL }}
+        working-directory: freecrawl
+        run: |
+          node apps/cli/dist/index.js "$TARGET_URL" \
+            --max "$MAX_URLS" \
+            --out "$GITHUB_WORKSPACE/crawl.json"
+
+      - name: Fail on too many broken links
+        run: |
+          BROKEN=$(node -e "
+            const r = require('$GITHUB_WORKSPACE/crawl.json');
+            const n = r.filter(u => u.statusCode >= 400 && u.statusCode < 600).length;
+            console.log(n);
+          ")
+          echo "Broken-URL count: $BROKEN (threshold: $BROKEN_LINK_THRESHOLD)"
+          if [ "$BROKEN" -gt "$BROKEN_LINK_THRESHOLD" ]; then
+            echo "::error::Broken-URL count $BROKEN exceeds threshold $BROKEN_LINK_THRESHOLD"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: freecrawl-audit-${{ github.run_number }}
+          path: crawl.json
+          retention-days: 30

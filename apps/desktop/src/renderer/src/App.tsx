@@ -12,11 +12,16 @@ import { ReportsDialog } from './components/ReportsDialog.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { CompareDialog } from './components/CompareDialog.js';
 import { ScheduledCrawlDialog } from './components/ScheduledCrawlDialog.js';
+import { PasswordPromptDialog } from './components/PasswordPromptDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
 import { SerpTab } from './tabs/SerpTab.js';
 import { PageSpeedTab } from './tabs/PageSpeedTab.js';
+import { SearchConsoleTab } from './tabs/SearchConsoleTab.js';
+import { AnalyticsTab } from './tabs/AnalyticsTab.js';
+import { AiTab } from './tabs/AiTab.js';
+import { SeoTab } from './tabs/SeoTab.js';
 import { VisualizationTab } from './tabs/VisualizationTab.js';
 import { useAppStore } from './store.js';
 import type { MenuEvent } from '@freecrawl/shared-types';
@@ -44,6 +49,12 @@ export function App() {
   const [compareOpen, setCompareOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [dropFlash, setDropFlash] = useState<string | null>(null);
+  const [passwordPrompt, setPasswordPrompt] = useState<
+    | {
+        mode: 'save' | 'open';
+      }
+    | null
+  >(null);
 
   // Drag & drop URL list — drop a `.txt` / `.csv` of URLs anywhere on the
   // window to populate List mode + open Settings so the user can review
@@ -284,6 +295,63 @@ export function App() {
         case 'export-bulk':
           void window.freecrawl.exportBulk();
           break;
+        case 'export-sheets': {
+          const cat = useAppStore.getState().activeCategory;
+          void window.freecrawl
+            .exportSheets({ category: cat })
+            .then((res) => {
+              if (res.ok && res.url) {
+                window.alert(
+                  t('app.sheetsExportOk', {
+                    defaultValue:
+                      'Exported {{rows}} row(s) to Google Sheets:\n\n{{url}}\n\nThe link is in your clipboard.',
+                    rows: res.rowsWritten.toLocaleString(),
+                    url: res.url,
+                  }),
+                );
+                void navigator.clipboard.writeText(res.url).catch(() => undefined);
+              } else {
+                window.alert(
+                  t('app.sheetsExportFail', {
+                    defaultValue:
+                      'Google Sheets export failed: {{error}}\n\nMake sure you have connected your Google account in Settings → Integrations (Google Sheets).',
+                    error: res.error ?? 'unknown error',
+                  }),
+                );
+              }
+            });
+          break;
+        }
+        case 'export-bigquery': {
+          const cat = useAppStore.getState().activeCategory;
+          void window.freecrawl
+            .exportBigquery({ category: cat })
+            .then((res) => {
+              if (res.ok && res.consoleUrl && res.tableRef) {
+                window.alert(
+                  t('app.bigqueryExportOk', {
+                    defaultValue:
+                      'Exported {{rows}} row(s) to BigQuery:\n\n{{ref}}\n\nOpen in console:\n{{url}}\n\nThe link is in your clipboard.',
+                    rows: res.rowsWritten.toLocaleString(),
+                    ref: res.tableRef,
+                    url: res.consoleUrl,
+                  }),
+                );
+                void navigator.clipboard
+                  .writeText(res.consoleUrl)
+                  .catch(() => undefined);
+              } else {
+                window.alert(
+                  t('app.bigqueryExportFail', {
+                    defaultValue:
+                      'BigQuery export failed: {{error}}\n\nMake sure you have pasted a service-account JSON and GCP project ID in Settings → Integrations (Google BigQuery), and that the service account has BigQuery Data Editor on the project.',
+                    error: res.error ?? 'unknown error',
+                  }),
+                );
+              }
+            });
+          break;
+        }
         case 'open-reports':
           setReportsOpen(true);
           break;
@@ -301,6 +369,12 @@ export function App() {
           break;
         case 'save-project-as':
           void window.freecrawl.projectSaveAs();
+          break;
+        case 'save-project-encrypted':
+          setPasswordPrompt({ mode: 'save' });
+          break;
+        case 'open-project-encrypted':
+          setPasswordPrompt({ mode: 'open' });
           break;
         case 'open-visualization':
           setActiveTab('visualization');
@@ -366,6 +440,14 @@ export function App() {
                   <SerpTab />
                 ) : activeTab === 'pagespeed' ? (
                   <PageSpeedTab />
+                ) : activeTab === 'search-console' ? (
+                  <SearchConsoleTab />
+                ) : activeTab === 'analytics' ? (
+                  <AnalyticsTab />
+                ) : activeTab === 'ai' ? (
+                  <AiTab />
+                ) : activeTab === 'seo' ? (
+                  <SeoTab />
                 ) : activeTab === 'visualization' ? (
                   <VisualizationTab />
                 ) : (
@@ -409,6 +491,59 @@ export function App() {
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <CompareDialog open={compareOpen} onClose={() => setCompareOpen(false)} />
       <ScheduledCrawlDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)} />
+      <PasswordPromptDialog
+        open={passwordPrompt !== null}
+        title={
+          passwordPrompt?.mode === 'save'
+            ? t('encryptedSnapshot.saveTitle', { defaultValue: 'Save Encrypted Snapshot' })
+            : t('encryptedSnapshot.openTitle', { defaultValue: 'Open Encrypted Project' })
+        }
+        message={
+          passwordPrompt?.mode === 'save'
+            ? t('encryptedSnapshot.saveMessage', {
+                defaultValue:
+                  'Choose a password to encrypt the snapshot. Keep it safe — without the password the file cannot be recovered.',
+              })
+            : t('encryptedSnapshot.openMessage', {
+                defaultValue:
+                  'Enter the password used to encrypt this snapshot.',
+              })
+        }
+        confirm={passwordPrompt?.mode === 'save'}
+        submitLabel={
+          passwordPrompt?.mode === 'save'
+            ? t('encryptedSnapshot.saveSubmit', { defaultValue: 'Encrypt & Save…' })
+            : t('encryptedSnapshot.openSubmit', { defaultValue: 'Decrypt & Open…' })
+        }
+        onCancel={() => setPasswordPrompt(null)}
+        onSubmit={(password) => {
+          const mode = passwordPrompt?.mode;
+          setPasswordPrompt(null);
+          if (mode === 'save') {
+            void window.freecrawl.projectSaveEncrypted(password).then((res) => {
+              if (res && 'error' in res) {
+                window.alert(
+                  t('encryptedSnapshot.saveFailed', {
+                    defaultValue: 'Encrypted save failed: {{error}}',
+                    error: res.error,
+                  }),
+                );
+              }
+            });
+          } else if (mode === 'open') {
+            void window.freecrawl.projectOpenEncrypted(password).then((res) => {
+              if (res && 'error' in res) {
+                window.alert(
+                  t('encryptedSnapshot.openFailed', {
+                    defaultValue: 'Open encrypted project failed: {{error}}',
+                    error: res.error,
+                  }),
+                );
+              }
+            });
+          }
+        }}
+      />
     </div>
   );
 }

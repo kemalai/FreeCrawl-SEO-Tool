@@ -16,6 +16,19 @@ import type {
   PagespeedRow,
   PagespeedRunStrategy,
 } from './pagespeed.js';
+import type {
+  GoogleAuthState,
+  GoogleAuthResult,
+  GscSite,
+  GscRow,
+  GscFetchMeta,
+  Ga4Property,
+  Ga4Row,
+  Ga4FetchMeta,
+  UrlAnalyticsDetail,
+} from './google.js';
+import type { AiProvider, AiRow } from './ai.js';
+import type { SeoProvider, SeoRow } from './seo.js';
 
 export const IPC = {
   crawlStart: 'crawl:start',
@@ -27,6 +40,14 @@ export const IPC = {
   projectSaveAs: 'project:save-as',
   projectOpen: 'project:open',
   projectCurrentPath: 'project:current-path',
+  /** V1 #4 — Save an AES-256-GCM-encrypted snapshot of the active
+   *  `.seoproject` file. Renderer provides the password; main shows a
+   *  save dialog for the destination `.seoproject.enc` path. */
+  projectSaveEncrypted: 'project:save-encrypted',
+  /** V1 #4 — Open an encrypted snapshot. Renderer provides the password;
+   *  main shows an open dialog for the source `.seoproject.enc`, asks
+   *  for a destination `.seoproject` path, decrypts, and opens it. */
+  projectOpenEncrypted: 'project:open-encrypted',
   crawlProgress: 'crawl:progress',
   crawlDone: 'crawl:done',
   crawlError: 'crawl:error',
@@ -47,6 +68,9 @@ export const IPC = {
   /** Export the Broken Links tab to a CSV file. Honours the tab's
    *  internal/external scope filter. */
   exportBrokenLinks: 'export:broken-links',
+  /** Export the Images tab to CSV. Honours the missing-alt scope
+   *  filter so what the user sees is what they get. */
+  exportImages: 'export:images',
   /** New unified tabular export with column selection + multi-tab support
    * (CSV / XLSX). Backs the in-table "Export" button. */
   exportTabular: 'export:tabular',
@@ -157,6 +181,62 @@ export const IPC = {
   pagespeedCancel: 'pagespeed:cancel',
   /** main → renderer: live progress of an in-flight PageSpeed run. */
   pagespeedProgress: 'pagespeed:progress',
+  /** Faz 7 — Google OAuth keystone (shared by Search Console, GA4,
+   *  Sheets). `googleAuthStart` opens the consent screen in the browser
+   *  and catches the loopback redirect; `googleAuthStatus` reports the
+   *  stored connection; `googleAuthRevoke` deletes the tokens. */
+  googleAuthStart: 'google:auth-start',
+  googleAuthStatus: 'google:auth-status',
+  googleAuthRevoke: 'google:auth-revoke',
+  /** Faz 7 — Google Search Console. `gscListSites` lists the connected
+   *  account's verified properties; `gscFetch` pulls per-page clicks /
+   *  impressions / CTR / position for a date range; `gscQuery` lists
+   *  crawled pages joined with that stored data. */
+  gscListSites: 'gsc:list-sites',
+  gscFetch: 'gsc:fetch',
+  gscQuery: 'gsc:query',
+  /** Faz 7 — Google Analytics 4. `ga4ListProperties` lists the connected
+   *  account's GA4 properties; `ga4Fetch` pulls per-page sessions /
+   *  users / pageviews / engagement / avg-duration; `ga4Query` lists
+   *  crawled pages joined with that stored data. */
+  ga4ListProperties: 'ga4:list-properties',
+  ga4Fetch: 'ga4:fetch',
+  ga4Query: 'ga4:query',
+  /** Faz 7 — AI integrations (OpenAI / Anthropic / Ollama). `aiRun`
+   *  applies a prompt template to each selected URL and stores the
+   *  response; `aiQuery` lists crawled pages joined with the latest
+   *  result for the selected provider; `aiCancel` aborts an in-flight
+   *  run; `aiProgress` streams live progress. */
+  aiRun: 'ai:run',
+  aiCancel: 'ai:cancel',
+  aiQuery: 'ai:query',
+  aiProgress: 'ai:progress',
+  /** Faz 7 — third-party SEO authority providers (Ahrefs / Majestic /
+   *  Moz / Semrush). Same shape as the AI run: pick a provider, fetch
+   *  per-URL metrics, store them, list joined with crawled pages. */
+  seoRun: 'seo:run',
+  seoCancel: 'seo:cancel',
+  seoQuery: 'seo:query',
+  seoProgress: 'seo:progress',
+  /** Faz 7 — GSC URL Inspection API. `gscInspectRun` inspects the
+   *  selected URLs against the chosen Search Console property and
+   *  stores the index/coverage verdict per URL. */
+  gscInspectRun: 'gsc:inspect-run',
+  gscInspectCancel: 'gsc:inspect-cancel',
+  gscInspectProgress: 'gsc:inspect-progress',
+  /** Faz 7 — Google Sheets export. Writes a category's rows to a new
+   *  spreadsheet on the connected account's Drive and returns the URL. */
+  exportSheets: 'export:sheets',
+  /** Faz 7 — Google BigQuery export. Service-account auth (no OAuth);
+   *  creates a timestamped table in the user's project and streams the
+   *  category's rows in via `tabledata.insertAll`. */
+  exportBigquery: 'export:bigquery',
+  /** Detail Panel — combined per-URL Analytics view (GSC + GA4 + GSC
+   *  URL Inspection) for the selected URL. */
+  urlAnalyticsGet: 'urls:analytics',
+  /** Cross-source orphan-pages report — URLs seen in sitemap / GSC /
+   *  GA4 but not in the crawled `urls` table. */
+  reportsOrphanCrossSource: 'reports:orphan-cross-source',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -260,10 +340,14 @@ export type MenuEvent =
   | 'export-xml'
   | 'export-html-report'
   | 'export-bulk'
+  | 'export-sheets'
+  | 'export-bigquery'
   | 'delete-domain-data'
   | 'clear-all-data'
   | 'compare-with-project'
   | 'save-project-as'
+  | 'save-project-encrypted'
+  | 'open-project-encrypted'
   | 'open-visualization'
   | 'generate-sitemap'
   | 'open-robots-tester'
@@ -310,6 +394,23 @@ export interface ExportBrokenLinksInput {
 }
 
 export interface ExportBrokenLinksResult {
+  /** Empty when the user cancelled the save dialog. */
+  filePath: string;
+  rowsWritten: number;
+}
+
+export interface ExportImagesInput {
+  /** Optional pre-resolved output path (skips the save dialog). */
+  filePath?: string;
+  /** When true, export only images with no `alt` attribute. Mirrors
+   *  the Images tab's "Missing Alt only" sidebar filter. */
+  missingAltOnly?: boolean;
+  /** Free-text URL/alt filter (substring match, case-insensitive).
+   *  Mirrors the tab's search box. */
+  search?: string;
+}
+
+export interface ExportImagesResult {
   /** Empty when the user cancelled the save dialog. */
   filePath: string;
   rowsWritten: number;
@@ -758,6 +859,13 @@ export interface SitemapOrphanRow {
   sourceSitemap: string | null;
 }
 
+/** One row of the cross-source orphan-pages report. */
+export interface OrphanCrossSourceRow {
+  url: string;
+  /** Which truth sources mentioned this URL — `sitemap`, `gsc`, `ga4`. */
+  sources: string[];
+}
+
 /** One row in the Server Stack report — `Server` response-header rollup. */
 export interface ServerHeaderRow {
   server: string;
@@ -955,6 +1063,200 @@ export interface PagespeedProgress {
   running: boolean;
 }
 
+/** Result of `gscListSites` — the connected account's GSC properties. */
+export interface GscListSitesResult {
+  ok: boolean;
+  error: string | null;
+  sites: GscSite[];
+}
+
+export interface GscFetchInput {
+  /** Search Console property to pull from (`siteUrl` from `GscSite`). */
+  property: string;
+  /** Trailing window in days (Search Console data lags ~2-3 days). */
+  days: 7 | 28 | 90;
+}
+
+export interface GscFetchResult {
+  ok: boolean;
+  error: string | null;
+  /** Page rows stored from this pull. */
+  rowCount: number;
+  meta: GscFetchMeta | null;
+}
+
+export interface GscQueryInput {
+  limit: number;
+  offset: number;
+  search?: string;
+  /** `all` (default), `with-data` (has GSC impressions), `without-data`. */
+  filter?: 'all' | 'with-data' | 'without-data';
+}
+
+export interface GscQueryResult {
+  rows: GscRow[];
+  /** Total candidate rows matching the filter (before pagination). */
+  total: number;
+  /** Metadata about the stored pull, or null when none has run. */
+  meta: GscFetchMeta | null;
+}
+
+export interface Ga4ListPropertiesResult {
+  ok: boolean;
+  error: string | null;
+  properties: Ga4Property[];
+}
+
+export interface Ga4FetchInput {
+  /** Property resource name (`properties/<id>`). */
+  property: string;
+  /** Friendly label persisted into the fetch meta for the UI. */
+  propertyName: string;
+  days: 7 | 28 | 90;
+}
+
+export interface Ga4FetchResult {
+  ok: boolean;
+  error: string | null;
+  rowCount: number;
+  meta: Ga4FetchMeta | null;
+}
+
+export interface Ga4QueryInput {
+  limit: number;
+  offset: number;
+  search?: string;
+  filter?: 'all' | 'with-data' | 'without-data';
+}
+
+export interface Ga4QueryResult {
+  rows: Ga4Row[];
+  total: number;
+  meta: Ga4FetchMeta | null;
+}
+
+export interface AiRunInput {
+  /** Provider to send the prompt to. */
+  provider: AiProvider;
+  /** Optional model override; blank uses the provider's default. */
+  model?: string;
+  /** Prompt template — `{url}` / `{title}` / `{description}` / `{h1}` /
+   *  `{body}` are substituted per-URL at run time. */
+  prompt: string;
+  /** URLs to run against (taken from the candidate rows in the tab). */
+  urls: string[];
+}
+
+export interface AiRunResult {
+  /** URL × prompts that completed successfully. */
+  completed: number;
+  failed: number;
+  cancelled: boolean;
+}
+
+/** main → renderer live progress while an AI run is in flight. */
+export interface AiProgress {
+  done: number;
+  total: number;
+  currentUrl: string | null;
+  running: boolean;
+}
+
+export interface AiQueryInput {
+  limit: number;
+  offset: number;
+  search?: string;
+  /** Which provider's results to surface in the table. */
+  provider: AiProvider;
+  /** `all` (default), `with-data`, `without-data`, `error`. */
+  filter?: 'all' | 'with-data' | 'without-data' | 'error';
+}
+
+export interface AiQueryResult {
+  rows: AiRow[];
+  total: number;
+}
+
+export interface SeoRunInput {
+  provider: SeoProvider;
+  urls: string[];
+}
+
+export interface SeoRunResult {
+  completed: number;
+  failed: number;
+  cancelled: boolean;
+}
+
+export interface SeoProgress {
+  done: number;
+  total: number;
+  currentUrl: string | null;
+  running: boolean;
+}
+
+export interface SeoQueryInput {
+  limit: number;
+  offset: number;
+  search?: string;
+  provider: SeoProvider;
+  filter?: 'all' | 'with-data' | 'without-data' | 'error';
+}
+
+export interface SeoQueryResult {
+  rows: SeoRow[];
+  total: number;
+}
+
+export interface GscInspectRunInput {
+  /** Search Console property the URLs belong to. */
+  property: string;
+  urls: string[];
+}
+
+export interface GscInspectRunResult {
+  completed: number;
+  failed: number;
+  cancelled: boolean;
+}
+
+export interface GscInspectProgress {
+  done: number;
+  total: number;
+  currentUrl: string | null;
+  running: boolean;
+}
+
+export interface ExportSheetsInput {
+  /** Category to export — same enum the Bulk Export uses. */
+  category: UrlCategory;
+  /** Optional title for the new spreadsheet. Falls back to the
+   *  category label + current date. */
+  title?: string;
+}
+
+export interface ExportSheetsResult {
+  ok: boolean;
+  error: string | null;
+  /** Browser URL of the new spreadsheet on success. */
+  url: string | null;
+  rowsWritten: number;
+}
+
+export interface ExportBigqueryInput {
+  category: UrlCategory;
+}
+
+export interface ExportBigqueryResult {
+  ok: boolean;
+  error: string | null;
+  /** GCP console URL pointing at the new table on success. */
+  consoleUrl: string | null;
+  /** Fully-qualified table reference, e.g. `myproj.freecrawl_seo.urls_1716391000`. */
+  tableRef: string | null;
+  rowsWritten: number;
+}
+
 export interface LogEntry {
   /** Monotonic sequence id, increments on every log call this session. */
   id: number;
@@ -976,6 +1278,12 @@ export interface FreeCrawlApi {
   projectSaveAs(): Promise<{ filePath: string; bytesWritten: number } | null>;
   projectOpen(filePath?: string): Promise<{ filePath: string } | null>;
   projectCurrentPath(): Promise<string | null>;
+  projectSaveEncrypted(
+    password: string,
+  ): Promise<{ filePath: string; bytesWritten: number } | { error: string } | null>;
+  projectOpenEncrypted(
+    password: string,
+  ): Promise<{ filePath: string } | { error: string } | null>;
   urlsQuery(input: UrlsQueryInput): Promise<UrlsQueryResult>;
   urlDetailGet(input: UrlDetailInput): Promise<UrlDetail | null>;
   urlSourceGet(input: UrlSourceInput): Promise<UrlSourceResult>;
@@ -991,6 +1299,7 @@ export interface FreeCrawlApi {
   exportJson(input: ExportJsonInput): Promise<ExportJsonResult>;
   exportXml(input: ExportXmlInput): Promise<ExportXmlResult>;
   exportBrokenLinks(input: ExportBrokenLinksInput): Promise<ExportBrokenLinksResult>;
+  exportImages(input: ExportImagesInput): Promise<ExportImagesResult>;
   exportTabular(input: ExportTabularInput): Promise<ExportTabularResult>;
   dataDeleteByDomain(
     input: DataDeleteByDomainInput,
@@ -1037,6 +1346,8 @@ export interface FreeCrawlApi {
     input: WordCountPerDirectoryInput,
   ): Promise<WordCountPerDirectoryRow[]>;
   reportsSitemapOrphans(limit?: number): Promise<SitemapOrphanRow[]>;
+  /** Cross-source orphan URLs — sitemap ∪ GSC ∪ GA4 minus crawled. */
+  reportsOrphanCrossSource(limit?: number): Promise<OrphanCrossSourceRow[]>;
   reportsServerHeaders(): Promise<ServerHeaderRow[]>;
   reportsTopWords(input: TopWordsInput): Promise<TopWordsRow[]>;
   /** Heartbeat: renderer reports its latest input-lag sample (ms). */
@@ -1072,6 +1383,56 @@ export interface FreeCrawlApi {
   pagespeedCancel(): Promise<void>;
   /** Live progress of an in-flight PageSpeed run. */
   onPagespeedProgress(cb: (p: PagespeedProgress) => void): () => void;
+  /** Faz 7 — start the interactive Google OAuth consent flow for one
+   *  integration. Resolves once the user finishes (or cancels) in the
+   *  browser. */
+  googleAuthStart(integrationId: string): Promise<GoogleAuthResult>;
+  /** Read the stored OAuth connection state of one Google integration. */
+  googleAuthStatus(integrationId: string): Promise<GoogleAuthState>;
+  /** Disconnect — wipe the stored OAuth tokens for one integration. */
+  googleAuthRevoke(integrationId: string): Promise<GoogleAuthState>;
+  /** List the connected account's Search Console properties. */
+  gscListSites(): Promise<GscListSitesResult>;
+  /** Pull per-page Search Console metrics for the given property + range. */
+  gscFetch(input: GscFetchInput): Promise<GscFetchResult>;
+  /** List crawled pages joined with their stored Search Console metrics. */
+  gscQuery(input: GscQueryInput): Promise<GscQueryResult>;
+  /** List the connected account's Google Analytics 4 properties. */
+  ga4ListProperties(): Promise<Ga4ListPropertiesResult>;
+  /** Pull per-page GA4 metrics for the given property + range. */
+  ga4Fetch(input: Ga4FetchInput): Promise<Ga4FetchResult>;
+  /** List crawled pages joined with their stored GA4 metrics. */
+  ga4Query(input: Ga4QueryInput): Promise<Ga4QueryResult>;
+  /** Run an AI prompt against the given URLs through the chosen
+   *  provider. Resolves when the run finishes; subscribe to
+   *  `onAiProgress` for live updates. */
+  aiRun(input: AiRunInput): Promise<AiRunResult>;
+  /** Request cancellation of an in-flight AI run. */
+  aiCancel(): Promise<void>;
+  /** List crawled pages joined with the latest AI result for the
+   *  selected provider. */
+  aiQuery(input: AiQueryInput): Promise<AiQueryResult>;
+  /** Live progress of an in-flight AI run. */
+  onAiProgress(cb: (p: AiProgress) => void): () => void;
+  /** Faz 7 — run an SEO authority provider against the given URLs. */
+  seoRun(input: SeoRunInput): Promise<SeoRunResult>;
+  seoCancel(): Promise<void>;
+  /** List crawled pages joined with their stored SEO provider metrics. */
+  seoQuery(input: SeoQueryInput): Promise<SeoQueryResult>;
+  onSeoProgress(cb: (p: SeoProgress) => void): () => void;
+  /** Run GSC URL Inspection on the given URLs (rate-limited 2K/day). */
+  gscInspectRun(input: GscInspectRunInput): Promise<GscInspectRunResult>;
+  gscInspectCancel(): Promise<void>;
+  onGscInspectProgress(cb: (p: GscInspectProgress) => void): () => void;
+  /** Export a category's rows to a new Google Sheet. Requires the
+   *  `sheets` Google integration to be connected. */
+  exportSheets(input: ExportSheetsInput): Promise<ExportSheetsResult>;
+  /** Export a category's rows to a new BigQuery table in the configured
+   *  GCP project. Uses the `bigquery` service-account credentials. */
+  exportBigquery(input: ExportBigqueryInput): Promise<ExportBigqueryResult>;
+  /** Read the combined Analytics detail (GSC + GA4 + URL Inspection)
+   *  for one URL. Returns null when the URL hasn't been crawled. */
+  urlAnalyticsGet(url: string): Promise<UrlAnalyticsDetail | null>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onLogsBatch(cb: (entries: LogEntry[]) => void): () => void;
   onLogsBusy(cb: (busy: boolean) => void): () => void;

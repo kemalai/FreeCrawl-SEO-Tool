@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import clsx from 'clsx';
+import { Download } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { ImageRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
@@ -29,6 +30,7 @@ export function ImagesTab() {
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<SortKey>('occurrences');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [exporting, setExporting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Missing-alt filter is driven by the Overview sidebar's Issues section —
@@ -80,6 +82,22 @@ export function ImagesTab() {
     overscan: 30,
     getItemKey: (index) => sorted[index]?.id ?? index,
   });
+
+  // Export every image row (not just the loaded page) to CSV. The
+  // export honours the current search box + missing-alt sidebar filter
+  // so what the user sees is what they get.
+  const handleExport = async () => {
+    if (total === 0 || exporting) return;
+    setExporting(true);
+    try {
+      await window.freecrawl.exportImages({
+        missingAltOnly,
+        search: search || undefined,
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const handleSort = (key: SortKey) => {
     if (sortBy === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
@@ -158,6 +176,25 @@ export function ImagesTab() {
           <span className="font-mono text-surface-200">{total.toLocaleString()}</span> {t('imagesTab.imagesUnit', { defaultValue: 'images' })}
           <span className="ml-2 text-surface-600">({t('imagesTab.loaded', { defaultValue: '{{n}} loaded', n: sorted.length.toLocaleString() })})</span>
         </div>
+        <button
+          type="button"
+          onClick={handleExport}
+          disabled={total === 0 || exporting}
+          className={clsx(
+            'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition',
+            total === 0 || exporting
+              ? 'cursor-not-allowed border-surface-800 text-surface-600'
+              : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+          )}
+          title={
+            total === 0
+              ? t('urlsTab.noDataToExport', { defaultValue: 'No data to export' })
+              : t('urlsTab.exportThisTable', { defaultValue: 'Export this table' })
+          }
+        >
+          <Download className="h-3.5 w-3.5" />
+          <span>{t('urlsTab.export', { defaultValue: 'Export' })}</span>
+        </button>
       </div>
 
       <div ref={scrollRef} className="relative flex-1 select-none overflow-auto">

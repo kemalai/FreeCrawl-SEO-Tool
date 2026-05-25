@@ -156,9 +156,10 @@ export const INTEGRATIONS: IntegrationDef[] = [
     category: 'performance',
     authType: 'api-key',
     description: 'Lighthouse audit scores per URL (mobile + desktop).',
-    fields: [{ ...KEY_FIELD, optional: true, label: 'API Key (optional)' }],
+    fields: [KEY_FIELD],
     helpUrl: 'https://developers.google.com/speed/docs/insights/v5/get-started',
-    setupHint: 'Works without a key at a low rate limit. For higher throughput create a free API key in Google Cloud Console and enable the PageSpeed Insights API.',
+    setupHint:
+      "A free API key is required — Google's keyless shared quota is now 0/day, so anonymous audits no longer work. Create a key in Google Cloud Console (no billing required), enable the PageSpeed Insights API, then paste the key here. Free tier: 25 000 queries/day, 240/min.",
   },
 
   // ---- SEO data ----

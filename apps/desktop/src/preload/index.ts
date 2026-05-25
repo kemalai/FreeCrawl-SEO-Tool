@@ -13,6 +13,8 @@ import {
   type ExportXmlResult,
   type ExportBrokenLinksInput,
   type ExportBrokenLinksResult,
+  type ExportImagesInput,
+  type ExportImagesResult,
   type ExportTabularInput,
   type ExportTabularResult,
   type DataDeleteByDomainInput,
@@ -61,6 +63,7 @@ import {
   type WordCountPerDirectoryInput,
   type WordCountPerDirectoryRow,
   type SitemapOrphanRow,
+  type OrphanCrossSourceRow,
   type SettingsExportInput,
   type SettingsExportResult,
   type SettingsImportResult,
@@ -88,6 +91,36 @@ import {
   type PagespeedRunInput,
   type PagespeedRunResult,
   type PagespeedProgress,
+  type GoogleAuthState,
+  type GoogleAuthResult,
+  type GscListSitesResult,
+  type GscFetchInput,
+  type GscFetchResult,
+  type GscQueryInput,
+  type GscQueryResult,
+  type Ga4ListPropertiesResult,
+  type Ga4FetchInput,
+  type Ga4FetchResult,
+  type Ga4QueryInput,
+  type Ga4QueryResult,
+  type AiRunInput,
+  type AiRunResult,
+  type AiQueryInput,
+  type AiQueryResult,
+  type AiProgress,
+  type SeoRunInput,
+  type SeoRunResult,
+  type SeoQueryInput,
+  type SeoQueryResult,
+  type SeoProgress,
+  type GscInspectRunInput,
+  type GscInspectRunResult,
+  type GscInspectProgress,
+  type ExportSheetsInput,
+  type ExportSheetsResult,
+  type ExportBigqueryInput,
+  type ExportBigqueryResult,
+  type UrlAnalyticsDetail,
 } from '@freecrawl/shared-types';
 
 function subscribe<T>(
@@ -118,6 +151,14 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.projectOpen, filePath),
   projectCurrentPath: (): Promise<string | null> =>
     ipcRenderer.invoke(IPC.projectCurrentPath),
+  projectSaveEncrypted: (
+    password: string,
+  ): Promise<{ filePath: string; bytesWritten: number } | { error: string } | null> =>
+    ipcRenderer.invoke(IPC.projectSaveEncrypted, password),
+  projectOpenEncrypted: (
+    password: string,
+  ): Promise<{ filePath: string } | { error: string } | null> =>
+    ipcRenderer.invoke(IPC.projectOpenEncrypted, password),
   urlsQuery: (input: UrlsQueryInput): Promise<UrlsQueryResult> =>
     ipcRenderer.invoke(IPC.urlsQuery, input),
   urlDetailGet: (input: UrlDetailInput): Promise<UrlDetail | null> =>
@@ -148,6 +189,8 @@ const api: FreeCrawlApi = {
     input: ExportBrokenLinksInput,
   ): Promise<ExportBrokenLinksResult> =>
     ipcRenderer.invoke(IPC.exportBrokenLinks, input),
+  exportImages: (input: ExportImagesInput): Promise<ExportImagesResult> =>
+    ipcRenderer.invoke(IPC.exportImages, input),
   exportTabular: (input: ExportTabularInput): Promise<ExportTabularResult> =>
     ipcRenderer.invoke(IPC.exportTabular, input),
   dataDeleteByDomain: (
@@ -235,6 +278,8 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.reportsWordCountPerDirectory, input),
   reportsSitemapOrphans: (limit?: number): Promise<SitemapOrphanRow[]> =>
     ipcRenderer.invoke(IPC.reportsSitemapOrphans, limit),
+  reportsOrphanCrossSource: (limit?: number): Promise<OrphanCrossSourceRow[]> =>
+    ipcRenderer.invoke(IPC.reportsOrphanCrossSource, limit),
   // Fire-and-forget — `send` not `invoke` because we don't need a
   // response and we want this to be cheap (≤ 1 ms per call, no wait).
   reportRendererLag: (lagMs: number) => {
@@ -269,6 +314,47 @@ const api: FreeCrawlApi = {
   pagespeedCancel: (): Promise<void> => ipcRenderer.invoke(IPC.pagespeedCancel),
   onPagespeedProgress: (cb) =>
     subscribe<PagespeedProgress>(IPC.pagespeedProgress, cb),
+  googleAuthStart: (id: string): Promise<GoogleAuthResult> =>
+    ipcRenderer.invoke(IPC.googleAuthStart, id),
+  googleAuthStatus: (id: string): Promise<GoogleAuthState> =>
+    ipcRenderer.invoke(IPC.googleAuthStatus, id),
+  googleAuthRevoke: (id: string): Promise<GoogleAuthState> =>
+    ipcRenderer.invoke(IPC.googleAuthRevoke, id),
+  gscListSites: (): Promise<GscListSitesResult> =>
+    ipcRenderer.invoke(IPC.gscListSites),
+  gscFetch: (input: GscFetchInput): Promise<GscFetchResult> =>
+    ipcRenderer.invoke(IPC.gscFetch, input),
+  gscQuery: (input: GscQueryInput): Promise<GscQueryResult> =>
+    ipcRenderer.invoke(IPC.gscQuery, input),
+  ga4ListProperties: (): Promise<Ga4ListPropertiesResult> =>
+    ipcRenderer.invoke(IPC.ga4ListProperties),
+  ga4Fetch: (input: Ga4FetchInput): Promise<Ga4FetchResult> =>
+    ipcRenderer.invoke(IPC.ga4Fetch, input),
+  ga4Query: (input: Ga4QueryInput): Promise<Ga4QueryResult> =>
+    ipcRenderer.invoke(IPC.ga4Query, input),
+  aiRun: (input: AiRunInput): Promise<AiRunResult> =>
+    ipcRenderer.invoke(IPC.aiRun, input),
+  aiCancel: (): Promise<void> => ipcRenderer.invoke(IPC.aiCancel),
+  aiQuery: (input: AiQueryInput): Promise<AiQueryResult> =>
+    ipcRenderer.invoke(IPC.aiQuery, input),
+  onAiProgress: (cb) => subscribe<AiProgress>(IPC.aiProgress, cb),
+  seoRun: (input: SeoRunInput): Promise<SeoRunResult> =>
+    ipcRenderer.invoke(IPC.seoRun, input),
+  seoCancel: (): Promise<void> => ipcRenderer.invoke(IPC.seoCancel),
+  seoQuery: (input: SeoQueryInput): Promise<SeoQueryResult> =>
+    ipcRenderer.invoke(IPC.seoQuery, input),
+  onSeoProgress: (cb) => subscribe<SeoProgress>(IPC.seoProgress, cb),
+  gscInspectRun: (input: GscInspectRunInput): Promise<GscInspectRunResult> =>
+    ipcRenderer.invoke(IPC.gscInspectRun, input),
+  gscInspectCancel: (): Promise<void> => ipcRenderer.invoke(IPC.gscInspectCancel),
+  onGscInspectProgress: (cb) =>
+    subscribe<GscInspectProgress>(IPC.gscInspectProgress, cb),
+  exportSheets: (input: ExportSheetsInput): Promise<ExportSheetsResult> =>
+    ipcRenderer.invoke(IPC.exportSheets, input),
+  exportBigquery: (input: ExportBigqueryInput): Promise<ExportBigqueryResult> =>
+    ipcRenderer.invoke(IPC.exportBigquery, input),
+  urlAnalyticsGet: (url: string): Promise<UrlAnalyticsDetail | null> =>
+    ipcRenderer.invoke(IPC.urlAnalyticsGet, url),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
   onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),

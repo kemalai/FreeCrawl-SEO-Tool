@@ -54,6 +54,11 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 - Readability (Flesch, Flesch–Kincaid, Gunning Fog)
 - Custom CSS + Regex extraction (10 rules) + `/regex/` literal Custom Search
 - **PageSpeed Insights** — on-demand Lighthouse audits (mobile + desktop) per URL
+- **Google Search Console + GA4** — clicks / impressions / CTR / position / sessions / users joined onto crawled pages
+- **URL Inspection** — coverage verdict, last-crawl time, canonical decisions in batches
+- **AI per-URL** — OpenAI / Anthropic / local Ollama prompts with shared variables (`{url}`/`{title}`/`{description}`/`{h1}`/`{body}`)
+- **SEO Authority** — Ahrefs / Majestic / Moz / Semrush metrics behind one provider dropdown
+- **Cross-source orphan detection** — pages PSI / GSC / GA4 / sitemap know about but the crawl never reached
 
 </td>
 </tr>
@@ -80,12 +85,14 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 <td valign="top">
 
 ### 📤 Export & Reports
-- **21 reports** — histograms, top/bottom URLs, link positions, top words
+- **22 reports** — histograms, top/bottom URLs, link positions, top words, **cross-source orphan pages**
 - **Export Dialog** with column picker — CSV or **XLSX** (multi-sheet)
-- Bulk export (22 categorised CSVs)
+- Bulk export (22 categorised CSVs) + dedicated **Images CSV export** (honours missing-alt + search)
 - Standalone HTML audit report
 - Sitemap generator (image / hreflang / sharded / gz)
 - Project-vs-project compare diff
+- **Google Sheets** + **BigQuery** direct export (OAuth / service-account)
+- **Encrypted project snapshots** — password-protected `.seoproject.enc` (AES-256-GCM + PBKDF2)
 - **MCP server** for AI agents — **drive crawls live from Claude Code**, poll progress, plus full read-only DB access
 - Webhook on completion + OS notifications
 
@@ -228,6 +235,8 @@ npm run build:cli
 node apps/cli/dist/index.js https://example.com --depth 2 --max 500 --out out.csv
 node apps/cli/dist/index.js --list urls.txt --out out.json     # list mode + JSON
 ```
+
+**CI / CD recipes** — ready-to-use [GitHub Actions](docs/ci/github-actions-example.yml) and [GitLab CI](docs/ci/gitlab-ci-example.yml) examples that crawl your site on a schedule, fail the build when broken-URL count exceeds a threshold, and upload the crawl as an artifact.
 
 </details>
 
@@ -440,9 +449,9 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development.** All 25 analysis tabs, advanced search, 150+ issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, **Google PageSpeed Insights integration**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, **in-app scheduled crawl**, **multi-language UI (EN + TR)**, **`.seoproject` file association**, in-app logs, and diagnostic popups are working. Cross-platform installers (Windows `.exe` + portable, macOS `.dmg`, Linux `.AppImage` / `.deb` / `.rpm`). Live-streaming UX with **first row in ~1 s**.
+> **Active development.** All 30 analysis tabs (Internal, External, Response Codes, URL, Page Titles, Meta Description, H1, H2, Content, Images, Canonicals, Directives, Redirects, Pagination, Hreflang, AMP, Structured Data, Meta Refresh, Custom Extraction, Custom Search, Security, Duplicates, Links, Broken Links, SERP, **PageSpeed, Search Console, GA4, AI, SEO Authority**, Visualization), advanced search, 150+ issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, **Google PageSpeed / Search Console / URL Inspection / GA4 integrations**, **AI per-URL prompts (OpenAI / Anthropic / Ollama)**, **SEO Authority providers (Ahrefs / Majestic / Moz / Semrush)**, **Google Sheets + BigQuery direct export**, **encrypted project snapshots (AES-256-GCM)**, **cross-source orphan detection**, **memory-limit auto-pause watchdog**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, **in-app scheduled crawl**, **multi-language UI (EN + TR)**, **`.seoproject` file association**, in-app logs, and diagnostic popups are working. Cross-platform installers (Windows `.exe` + portable, macOS `.dmg`, Linux `.AppImage` / `.deb` / `.rpm`). Live-streaming UX with **first row in ~1 s**.
 >
-> **Upcoming:** plugin system, JavaScript rendering, log analyzer.
+> **Upcoming (V2):** JavaScript rendering (Chromium pool), Screenshot capture, Log file analyzer, Plugin system, Light theme, Multi-window, Code-signing + auto-update.
 
 <br />
 

@@ -29,10 +29,16 @@ export interface MenuLabels {
   generateSitemap: string;
   exportHtmlReport: string;
   bulkExport: string;
+  exportSheets: string;
+  exportBigquery: string;
   compareWith: string;
   scheduledCrawl: string;
   scheduledCrawlTooltip: string;
   saveProjectAs: string;
+  saveProjectEncrypted: string;
+  saveProjectEncryptedTooltip: string;
+  openProjectEncrypted: string;
+  openProjectEncryptedTooltip: string;
   settings: string;
   view: string;
   overviewSidebar: string;
@@ -73,11 +79,19 @@ const MENU_EN: MenuLabels = {
   generateSitemap: 'Generate XML Sitemap…',
   exportHtmlReport: 'Export HTML Report…',
   bulkExport: 'Bulk Export…',
+  exportSheets: 'Export to Google Sheets…',
+  exportBigquery: 'Export to BigQuery…',
   compareWith: 'Compare With Project…',
   scheduledCrawl: 'Scheduled Crawl…',
   scheduledCrawlTooltip:
     'Set up an in-app recurring crawl for the currently-open project. Fires only while FreeCrawl is open; use the CLI + OS scheduler for triggers that survive restarts.',
   saveProjectAs: 'Save Project As…',
+  saveProjectEncrypted: 'Save Encrypted Snapshot…',
+  saveProjectEncryptedTooltip:
+    'Export the active project to an AES-256-GCM-encrypted .seoproject.enc file protected by a password.',
+  openProjectEncrypted: 'Open Encrypted Project…',
+  openProjectEncryptedTooltip:
+    'Decrypt a .seoproject.enc snapshot with its password and open the recovered project.',
   settings: 'Settings…',
   view: 'View',
   overviewSidebar: 'Overview Sidebar',
@@ -123,11 +137,19 @@ const MENU_TR: MenuLabels = {
   generateSitemap: 'XML Sitemap Oluştur…',
   exportHtmlReport: 'HTML Rapor Dışa Aktar…',
   bulkExport: 'Toplu Dışa Aktarım…',
+  exportSheets: 'Google Sheets\'e Aktar…',
+  exportBigquery: 'BigQuery\'ye Aktar…',
   compareWith: 'Projeyle Karşılaştır…',
   scheduledCrawl: 'Zamanlanmış Crawl…',
   scheduledCrawlTooltip:
     'Şu an açık olan proje için uygulama içi tekrarlayan crawl kur. Yalnızca FreeCrawl açıkken çalışır; yeniden başlatmaya dayanan tetikler için CLI + OS zamanlayıcısını kullan.',
   saveProjectAs: 'Projeyi Farklı Kaydet…',
+  saveProjectEncrypted: 'Şifreli Snapshot Kaydet…',
+  saveProjectEncryptedTooltip:
+    'Aktif projeyi parolayla korunan AES-256-GCM şifreli .seoproject.enc dosyasına dışa aktar.',
+  openProjectEncrypted: 'Şifreli Proje Aç…',
+  openProjectEncryptedTooltip:
+    'Bir .seoproject.enc snapshot\'ını parolasıyla çöz ve kurtarılan projeyi aç.',
   settings: 'Ayarlar…',
   view: 'Görünüm',
   overviewSidebar: 'Genel Bakış Kenar Çubuğu',

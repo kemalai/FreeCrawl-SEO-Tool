@@ -18,7 +18,7 @@ export {
   type AnalyticsTracker,
   type HreflangEntry,
 } from './html-parser.js';
-export { exportUrlsToCsv, exportBrokenLinksToCsv } from './csv-export.js';
+export { exportUrlsToCsv, exportBrokenLinksToCsv, exportImagesToCsv } from './csv-export.js';
 export { exportUrlsToJson, type JsonExportOptions } from './json-export.js';
 export { exportUrlsToXml } from './xml-export.js';
 export {

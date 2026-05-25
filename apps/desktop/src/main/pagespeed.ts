@@ -178,6 +178,28 @@ export async function runPagespeedBatch(
   let failed = 0;
   let cursor = 0;
 
+  // Per-error dedupe so a batch of 2000 URLs that all hit the same
+  // Google quota cap doesn't spam the log with 2000 identical warn
+  // lines. First N occurrences of each distinct error are logged with
+  // the offending URL; further occurrences are silently counted and
+  // summarised in the final batch line.
+  const ERROR_LOG_LIMIT_PER_KIND = 3;
+  const errorCounts = new Map<string, number>();
+  function recordFailure(url: string, message: string): void {
+    const prev = errorCounts.get(message) ?? 0;
+    errorCounts.set(message, prev + 1);
+    if (prev < ERROR_LOG_LIMIT_PER_KIND) {
+      logger.log('warn', 'pagespeed', `${url} — ${message}`);
+      if (prev + 1 === ERROR_LOG_LIMIT_PER_KIND) {
+        logger.log(
+          'warn',
+          'pagespeed',
+          `(further "${message.slice(0, 80)}${message.length > 80 ? '…' : ''}" errors will be summarised at end)`,
+        );
+      }
+    }
+  }
+
   onProgress(0, total, null);
 
   const worker = async (): Promise<void> => {
@@ -205,8 +227,12 @@ export async function runPagespeedBatch(
         );
       }
       done++;
-      if (metrics.status === 'ok') completed++;
-      else failed++;
+      if (metrics.status === 'ok') {
+        completed++;
+      } else {
+        failed++;
+        recordFailure(item.url, metrics.error ?? 'Unknown error');
+      }
       onProgress(done, total, null);
     }
   };
@@ -225,5 +251,30 @@ export async function runPagespeedBatch(
       cancelled ? ', cancelled early' : ''
     } (${done}/${total})`,
   );
+  if (errorCounts.size > 0) {
+    const sorted = [...errorCounts.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [message, count] of sorted) {
+      logger.log(
+        'warn',
+        'pagespeed',
+        `failure summary — ${count}× "${message}"`,
+      );
+    }
+    // Specific advisory when EVERY failure is the keyless quota hit —
+    // tells the user exactly what to do instead of leaving them to
+    // decode Google's error string. Google's keyless shared project
+    // currently has a hard 0/day quota for PSI v5 (see Settings →
+    // Integrations → PageSpeed Insights for a free key).
+    const allQuota =
+      failed > 0 &&
+      sorted.every(([m]) => /quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(m));
+    if (allQuota && !apiKey) {
+      logger.log(
+        'warn',
+        'pagespeed',
+        "Google's keyless PageSpeed quota is currently 0/day — add a free API key under Settings → Integrations → PageSpeed Insights to run audits.",
+      );
+    }
+  }
   return { completed, failed, cancelled };
 }

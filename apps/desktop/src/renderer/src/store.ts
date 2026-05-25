@@ -35,6 +35,10 @@ export type TabKey =
   | 'broken-links'
   | 'serp'
   | 'pagespeed'
+  | 'search-console'
+  | 'analytics'
+  | 'ai'
+  | 'seo'
   | 'visualization';
 
 export const TAB_ORDER: { key: TabKey; label: string }[] = [
@@ -64,6 +68,10 @@ export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'broken-links', label: 'Broken Links' },
   { key: 'serp', label: 'SERP' },
   { key: 'pagespeed', label: 'PageSpeed' },
+  { key: 'search-console', label: 'Search Console' },
+  { key: 'analytics', label: 'GA4' },
+  { key: 'ai', label: 'AI' },
+  { key: 'seo', label: 'SEO Authority' },
   { key: 'visualization', label: 'Visualization' },
 ];
 

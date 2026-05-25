@@ -76,6 +76,7 @@ export function PageSpeedTab() {
   const { t } = useTranslation();
   const dataVersion = useAppStore((s) => s.dataVersion);
   const crawlProgress = useAppStore((s) => s.progress);
+  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
 
   const [rows, setRows] = useState<PagespeedRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -175,7 +176,7 @@ export function PageSpeedTab() {
 
   const runAudit = useCallback(async () => {
     const urls = [...selected];
-    if (urls.length === 0 || running) return;
+    if (urls.length === 0 || running || !hasApiKey) return;
     if (
       auditCount > CONFIRM_THRESHOLD &&
       !window.confirm(
@@ -300,7 +301,15 @@ export function PageSpeedTab() {
             <button
               type="button"
               onClick={() => void runAudit()}
-              disabled={selected.size === 0 || running}
+              disabled={selected.size === 0 || running || !hasApiKey}
+              title={
+                !hasApiKey
+                  ? t('pagespeedTab.runDisabledNoKey', {
+                      defaultValue:
+                        'Add a free PageSpeed Insights API key in Settings → Integrations to enable audits.',
+                    })
+                  : undefined
+              }
               className="h-6 rounded bg-blue-600 px-3 text-[11px] font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-surface-700 disabled:text-surface-500"
             >
               {t('pagespeedTab.run', {
@@ -312,13 +321,26 @@ export function PageSpeedTab() {
         </div>
       </div>
 
-      {/* Keyless-mode banner */}
+      {/* No-key gate. PSI v5's keyless shared quota is 0/day (Google
+            decision, summer 2025) so audits CANNOT run without a key.
+            Banner doubles as a CTA — clicking opens Settings to the
+            Integrations panel pre-focused on PageSpeed Insights. */}
       {!hasApiKey && (
-        <div className="border-b border-amber-700/40 bg-amber-900/20 px-3 py-1 text-[10px] text-amber-200">
-          {t('pagespeedTab.noKeyBanner', {
-            defaultValue:
-              'No PageSpeed API key — audits run keyless at a low rate limit. Add a free key in Settings → Integrations for faster runs.',
-          })}
+        <div className="flex items-center gap-2 border-b border-amber-700/50 bg-amber-900/25 px-3 py-1.5 text-[11px] text-amber-100">
+          <span className="font-semibold">⚠</span>
+          <span className="flex-1">
+            {t('pagespeedTab.noKeyGate', {
+              defaultValue:
+                'PageSpeed Insights needs a free Google API key — keyless audits no longer work (Google quota: 0/day).',
+            })}
+          </span>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="rounded border border-amber-500/60 bg-amber-700/40 px-2 py-0.5 text-[10px] font-medium text-amber-50 hover:bg-amber-700/70"
+          >
+            {t('pagespeedTab.addKeyCta', { defaultValue: 'Add API Key…' })}
+          </button>
         </div>
       )}
 
@@ -479,6 +501,24 @@ function MetricCell({
   );
 }
 
+/** Short, scannable label derived from a PSI failure string. Keeps the
+ *  on-screen real estate small while letting the user spot the failure
+ *  class at a glance. The full message stays in the cell's `title`. */
+function classifyError(message: string | null | undefined): string {
+  if (!message) return 'ERR';
+  const m = message.toLowerCase();
+  if (/quota|resource_exhausted/.test(m)) return 'QUOTA';
+  if (/rate.?limit|too many requests|\b429\b/.test(m)) return 'RATE';
+  if (/timed?\s*out|timeout/.test(m)) return 'TIMEOUT';
+  if (/abort/.test(m)) return 'ABORT';
+  if (/lighthouse/.test(m)) return 'LH';
+  if (/network|fetch failed|enotfound|econnrefused|econnreset/.test(m))
+    return 'NET';
+  if (/\b4\d\d\b/.test(m)) return 'HTTP-4xx';
+  if (/\b5\d\d\b/.test(m)) return 'HTTP-5xx';
+  return 'ERR';
+}
+
 function StrategyCells({ m }: { m: PagespeedMetrics | null }) {
   if (!m) {
     return (
@@ -490,12 +530,14 @@ function StrategyCells({ m }: { m: PagespeedMetrics | null }) {
     );
   }
   if (m.status === 'error') {
+    const label = classifyError(m.error);
     return (
       <div
-        className="flex w-[162px] shrink-0 items-center justify-center text-red-400"
+        className="flex w-[162px] shrink-0 cursor-help items-center justify-center gap-1 text-red-400"
         title={m.error ?? 'Audit failed'}
       >
-        ERR
+        <span className="font-semibold">{label}</span>
+        <span className="text-[9px] text-red-300/70">ⓘ</span>
       </div>
     );
   }

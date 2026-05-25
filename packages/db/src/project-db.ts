@@ -18,6 +18,17 @@ import type {
   PagespeedMetrics,
   PagespeedRow,
   PagespeedStrategy,
+  GscRow,
+  Ga4Row,
+  AiProvider,
+  AiResult,
+  AiRow,
+  SeoMetrics,
+  SeoProvider,
+  SeoResult,
+  SeoRow,
+  GscInspectionResult,
+  UrlAnalyticsDetail,
   UrlCategory,
   UrlDetail,
 } from '@freecrawl/shared-types';
@@ -675,7 +686,12 @@ export class ProjectDb {
          DELETE FROM urls_issues;
          DELETE FROM crawl_queue;
          DELETE FROM host_certs;
-         DELETE FROM pagespeed_results;`,
+         DELETE FROM pagespeed_results;
+         DELETE FROM gsc_results;
+         DELETE FROM ga4_results;
+         DELETE FROM ai_results;
+         DELETE FROM seo_results;
+         DELETE FROM gsc_inspection_results;`,
       );
     });
     // Reclaim freed pages back to the OS so the project file size
@@ -796,26 +812,29 @@ export class ProjectDb {
           WHERE id NOT IN (SELECT DISTINCT image_id FROM image_usages)`,
       );
 
-      // PageSpeed audit rows are keyed by URL string (no FK to `urls`),
-      // so wipe them by the same host match — otherwise a GDPR delete
-      // leaves stale PSI data that would re-attach if the URL is
-      // re-crawled later.
-      this.db
-        .prepare(
-          `DELETE FROM pagespeed_results
-            WHERE LOWER(
-              SUBSTR(
-                url,
-                INSTR(url, '://') + 3,
-                CASE
-                  WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
-                    THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
-                  ELSE LENGTH(url)
-                END
-              )
-            ) = ?`,
-        )
-        .run(target);
+      // PageSpeed + Search Console rows are keyed by URL string (no FK
+      // to `urls`), so wipe them by the same host match — otherwise a
+      // GDPR delete leaves stale data that would re-attach if the URL
+      // is re-crawled later.
+      const hostMatchSql = (table: string): string =>
+        `DELETE FROM ${table}
+          WHERE LOWER(
+            SUBSTR(
+              url,
+              INSTR(url, '://') + 3,
+              CASE
+                WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
+                  THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
+                ELSE LENGTH(url)
+              END
+            )
+          ) = ?`;
+      this.db.prepare(hostMatchSql('pagespeed_results')).run(target);
+      this.db.prepare(hostMatchSql('gsc_results')).run(target);
+      this.db.prepare(hostMatchSql('ga4_results')).run(target);
+      this.db.prepare(hostMatchSql('ai_results')).run(target);
+      this.db.prepare(hostMatchSql('seo_results')).run(target);
+      this.db.prepare(hostMatchSql('gsc_inspection_results')).run(target);
 
       return { urlsDeleted, linksDeleted };
     });
@@ -878,6 +897,17 @@ export class ProjectDb {
   /** True when the caller is already inside a `runInTransaction` frame. */
   isInTransaction(): boolean {
     return this.txDepth > 0;
+  }
+
+  /** Force a passive WAL → main-DB checkpoint so the on-disk
+   *  `.seoproject` file is fully self-contained. Called by the
+   *  encrypted-snapshot exporter before it reads the file bytes. */
+  walCheckpoint(): void {
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    } catch {
+      /* checkpoint can fail if a reader holds the lock — harmless */
+    }
   }
 
   getMeta(key: string): string | null {
@@ -2719,6 +2749,666 @@ export class ProjectDb {
     };
   }
 
+  /**
+   * Faz 7 — wholesale-replace the stored Google Search Console data.
+   * Each GSC pull is a fresh snapshot for a date range, so the old rows
+   * are dropped and the new set inserted in one transaction.
+   */
+  replaceGscResults(
+    rows: {
+      url: string;
+      clicks: number;
+      impressions: number;
+      ctr: number;
+      position: number;
+    }[],
+    fetchedAt: string,
+  ): void {
+    this.runInTransaction(() => {
+      this.db.exec('DELETE FROM gsc_results');
+      const CHUNK = 400;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const slice = rows.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => '(?, ?, ?, ?, ?, ?)').join(',');
+        const args: (string | number)[] = [];
+        for (const r of slice) {
+          args.push(r.url, r.clicks, r.impressions, r.ctr, r.position, fetchedAt);
+        }
+        this.db
+          .prepare(
+            `INSERT OR REPLACE INTO gsc_results
+               (url, clicks, impressions, ctr, position, fetched_at)
+             VALUES ${placeholders}`,
+          )
+          .run(...args);
+      }
+    });
+  }
+
+  /**
+   * Faz 7 — candidate query for the Search Console tab. Crawled internal
+   * HTML 2xx pages left-joined with their stored GSC metrics, ordered
+   * impressions-first so the pages Google shows most surface at the top.
+   */
+  queryGsc(params: {
+    limit: number;
+    offset: number;
+    search?: string;
+    filter?: 'all' | 'with-data' | 'without-data';
+  }): { rows: GscRow[]; total: number } {
+    const where: string[] = [
+      "u.is_external = 0 AND u.content_kind = 'html'",
+      'u.status_code >= 200 AND u.status_code < 300',
+    ];
+    const args: (string | number)[] = [];
+    if (params.search) {
+      where.push('u.url LIKE ?');
+      args.push(`%${params.search}%`);
+    }
+    const filter = params.filter ?? 'all';
+    if (filter === 'with-data') where.push('g.url IS NOT NULL');
+    else if (filter === 'without-data') where.push('g.url IS NULL');
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const joinSql =
+      `FROM urls u
+       LEFT JOIN gsc_results g ON g.url = u.url
+       LEFT JOIN gsc_inspection_results i ON i.url = u.url`;
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
+      .get(...args) as { c: number };
+
+    const rowsDb = this.db
+      .prepare(
+        `SELECT u.url AS url, u.status_code AS status_code,
+                g.clicks AS clicks, g.impressions AS impressions,
+                g.ctr AS ctr, g.position AS position,
+                g.fetched_at AS g_fetched,
+                i.verdict AS i_verdict,
+                i.coverage_state AS i_coverage_state,
+                i.robots_txt_state AS i_robots_txt_state,
+                i.indexing_state AS i_indexing_state,
+                i.last_crawl_time AS i_last_crawl_time,
+                i.google_canonical AS i_google_canonical,
+                i.user_canonical AS i_user_canonical,
+                i.status AS i_status,
+                i.error AS i_error,
+                i.fetched_at AS i_fetched
+         ${joinSql}
+         ${whereSql}
+         ORDER BY g.impressions DESC, u.url ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...args, params.limit, params.offset) as unknown as Record<
+      string,
+      unknown
+    >[];
+
+    return {
+      total: totalRow.c,
+      rows: rowsDb.map((r) => {
+        const gFetched = r['g_fetched'];
+        const iFetched = r['i_fetched'];
+        const iStatus = r['i_status'];
+        return {
+          url: r['url'] as string,
+          statusCode: (r['status_code'] as number | null) ?? null,
+          gsc:
+            typeof gFetched === 'string'
+              ? {
+                  clicks: (r['clicks'] as number | null) ?? 0,
+                  impressions: (r['impressions'] as number | null) ?? 0,
+                  ctr: (r['ctr'] as number | null) ?? 0,
+                  position: (r['position'] as number | null) ?? 0,
+                  fetchedAt: gFetched,
+                }
+              : null,
+          inspection:
+            typeof iFetched === 'string' && typeof iStatus === 'string'
+              ? {
+                  verdict: (r['i_verdict'] as string | null) ?? null,
+                  coverageState: (r['i_coverage_state'] as string | null) ?? null,
+                  robotsTxtState: (r['i_robots_txt_state'] as string | null) ?? null,
+                  indexingState: (r['i_indexing_state'] as string | null) ?? null,
+                  lastCrawlTime: (r['i_last_crawl_time'] as string | null) ?? null,
+                  googleCanonical: (r['i_google_canonical'] as string | null) ?? null,
+                  userCanonical: (r['i_user_canonical'] as string | null) ?? null,
+                  status: iStatus === 'error' ? 'error' : 'ok',
+                  error: (r['i_error'] as string | null) ?? null,
+                  fetchedAt: iFetched,
+                }
+              : null,
+        };
+      }),
+    };
+  }
+
+  /** Combined per-URL Analytics view for the detail panel. Three small
+   *  lookups (GSC Search Analytics + GA4 + GSC URL Inspection) keyed by
+   *  the URL string. Returns null when none of the three is present. */
+  getUrlAnalytics(url: string): UrlAnalyticsDetail | null {
+    const g = this.db
+      .prepare(
+        `SELECT clicks, impressions, ctr, position, fetched_at
+         FROM gsc_results WHERE url = ?`,
+      )
+      .get(url) as
+      | {
+          clicks: number;
+          impressions: number;
+          ctr: number;
+          position: number;
+          fetched_at: string;
+        }
+      | undefined;
+    const a = this.db
+      .prepare(
+        `SELECT sessions, users, pageviews, engagement_rate,
+                avg_session_duration, fetched_at
+         FROM ga4_results WHERE url = ?`,
+      )
+      .get(url) as
+      | {
+          sessions: number;
+          users: number;
+          pageviews: number;
+          engagement_rate: number;
+          avg_session_duration: number;
+          fetched_at: string;
+        }
+      | undefined;
+    const i = this.db
+      .prepare(
+        `SELECT verdict, coverage_state, robots_txt_state, indexing_state,
+                last_crawl_time, google_canonical, user_canonical,
+                status, error, fetched_at
+         FROM gsc_inspection_results WHERE url = ?`,
+      )
+      .get(url) as
+      | {
+          verdict: string | null;
+          coverage_state: string | null;
+          robots_txt_state: string | null;
+          indexing_state: string | null;
+          last_crawl_time: string | null;
+          google_canonical: string | null;
+          user_canonical: string | null;
+          status: string;
+          error: string | null;
+          fetched_at: string;
+        }
+      | undefined;
+    if (!g && !a && !i) return null;
+    return {
+      url,
+      gsc: g
+        ? {
+            clicks: g.clicks ?? 0,
+            impressions: g.impressions ?? 0,
+            ctr: g.ctr ?? 0,
+            position: g.position ?? 0,
+            fetchedAt: g.fetched_at,
+          }
+        : null,
+      ga4: a
+        ? {
+            sessions: a.sessions ?? 0,
+            users: a.users ?? 0,
+            pageviews: a.pageviews ?? 0,
+            engagementRate: a.engagement_rate ?? 0,
+            avgSessionDuration: a.avg_session_duration ?? 0,
+            fetchedAt: a.fetched_at,
+          }
+        : null,
+      inspection: i
+        ? {
+            verdict: i.verdict,
+            coverageState: i.coverage_state,
+            robotsTxtState: i.robots_txt_state,
+            indexingState: i.indexing_state,
+            lastCrawlTime: i.last_crawl_time,
+            googleCanonical: i.google_canonical,
+            userCanonical: i.user_canonical,
+            status: i.status === 'error' ? 'error' : 'ok',
+            error: i.error,
+            fetchedAt: i.fetched_at,
+          }
+        : null,
+    };
+  }
+
+  /** Faz 7 — store one Search Console URL Inspection result. */
+  upsertGscInspection(url: string, result: GscInspectionResult): void {
+    this.db
+      .prepare(
+        `INSERT INTO gsc_inspection_results
+           (url, verdict, coverage_state, robots_txt_state, indexing_state,
+            last_crawl_time, google_canonical, user_canonical,
+            status, error, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(url) DO UPDATE SET
+           verdict = excluded.verdict,
+           coverage_state = excluded.coverage_state,
+           robots_txt_state = excluded.robots_txt_state,
+           indexing_state = excluded.indexing_state,
+           last_crawl_time = excluded.last_crawl_time,
+           google_canonical = excluded.google_canonical,
+           user_canonical = excluded.user_canonical,
+           status = excluded.status,
+           error = excluded.error,
+           fetched_at = excluded.fetched_at`,
+      )
+      .run(
+        url,
+        result.verdict,
+        result.coverageState,
+        result.robotsTxtState,
+        result.indexingState,
+        result.lastCrawlTime,
+        result.googleCanonical,
+        result.userCanonical,
+        result.status,
+        result.error,
+        result.fetchedAt,
+      );
+  }
+
+  /** Faz 7 — store one SEO authority provider result. The metrics blob
+   *  is serialised as JSON since each provider's shape differs. */
+  upsertSeoResult(
+    url: string,
+    provider: SeoProvider,
+    metrics: SeoMetrics | null,
+    status: 'ok' | 'error',
+    error: string | null,
+    fetchedAt: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO seo_results
+           (url, provider, metrics, status, error, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(url, provider) DO UPDATE SET
+           metrics = excluded.metrics,
+           status = excluded.status,
+           error = excluded.error,
+           fetched_at = excluded.fetched_at`,
+      )
+      .run(
+        url,
+        provider,
+        metrics === null ? null : JSON.stringify(metrics),
+        status,
+        error,
+        fetchedAt,
+      );
+  }
+
+  /** Faz 7 — candidate query for the SEO tab. Same shape as `queryAi`. */
+  querySeo(params: {
+    limit: number;
+    offset: number;
+    search?: string;
+    provider: SeoProvider;
+    filter?: 'all' | 'with-data' | 'without-data' | 'error';
+  }): { rows: SeoRow[]; total: number } {
+    const where: string[] = [
+      "u.is_external = 0 AND u.content_kind = 'html'",
+      'u.status_code >= 200 AND u.status_code < 300',
+    ];
+    const args: (string | number)[] = [params.provider];
+    if (params.search) {
+      where.push('u.url LIKE ?');
+      args.push(`%${params.search}%`);
+    }
+    const filter = params.filter ?? 'all';
+    if (filter === 'with-data') {
+      where.push("s.url IS NOT NULL AND s.status = 'ok'");
+    } else if (filter === 'without-data') {
+      where.push('s.url IS NULL');
+    } else if (filter === 'error') {
+      where.push("s.status = 'error'");
+    }
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const joinSql =
+      'FROM urls u LEFT JOIN seo_results s ON s.url = u.url AND s.provider = ?';
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
+      .get(...args) as { c: number };
+
+    const rowsDb = this.db
+      .prepare(
+        `SELECT u.url AS url, u.status_code AS status_code,
+                s.provider AS provider, s.metrics AS metrics,
+                s.status AS status, s.error AS error,
+                s.fetched_at AS fetched_at
+         ${joinSql}
+         ${whereSql}
+         ORDER BY s.fetched_at DESC, u.url ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...args, params.limit, params.offset) as unknown as Record<
+      string,
+      unknown
+    >[];
+
+    return {
+      total: totalRow.c,
+      rows: rowsDb.map((r) => {
+        const fetchedAt = r['fetched_at'];
+        const status = r['status'];
+        let metrics: SeoMetrics | null = null;
+        if (typeof r['metrics'] === 'string') {
+          try {
+            metrics = JSON.parse(r['metrics']) as SeoMetrics;
+          } catch {
+            metrics = null;
+          }
+        }
+        const seo: SeoResult | null =
+          typeof fetchedAt === 'string' && typeof status === 'string'
+            ? {
+                provider: r['provider'] as SeoProvider,
+                metrics,
+                status: status === 'error' ? 'error' : 'ok',
+                error: (r['error'] as string | null) ?? null,
+                fetchedAt,
+              }
+            : null;
+        return {
+          url: r['url'] as string,
+          statusCode: (r['status_code'] as number | null) ?? null,
+          seo,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Faz 7 — wholesale-replace the stored GA4 data. Like the GSC pull,
+   * each refresh is a snapshot for a date range so the old rows are
+   * dropped and the new set inserted in one transaction.
+   */
+  replaceGa4Results(
+    rows: {
+      url: string;
+      sessions: number;
+      users: number;
+      pageviews: number;
+      engagementRate: number;
+      avgSessionDuration: number;
+    }[],
+    fetchedAt: string,
+  ): void {
+    this.runInTransaction(() => {
+      this.db.exec('DELETE FROM ga4_results');
+      const CHUNK = 400;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const slice = rows.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(',');
+        const args: (string | number)[] = [];
+        for (const r of slice) {
+          args.push(
+            r.url,
+            r.sessions,
+            r.users,
+            r.pageviews,
+            r.engagementRate,
+            r.avgSessionDuration,
+            fetchedAt,
+          );
+        }
+        this.db
+          .prepare(
+            `INSERT OR REPLACE INTO ga4_results
+               (url, sessions, users, pageviews, engagement_rate,
+                avg_session_duration, fetched_at)
+             VALUES ${placeholders}`,
+          )
+          .run(...args);
+      }
+    });
+  }
+
+  /**
+   * Faz 7 — candidate query for the GA4 tab. Crawled internal HTML 2xx
+   * pages left-joined with their stored GA4 metrics, ordered by
+   * pageviews desc so the highest-traffic pages surface first.
+   */
+  queryGa4(params: {
+    limit: number;
+    offset: number;
+    search?: string;
+    filter?: 'all' | 'with-data' | 'without-data';
+  }): { rows: Ga4Row[]; total: number } {
+    const where: string[] = [
+      "u.is_external = 0 AND u.content_kind = 'html'",
+      'u.status_code >= 200 AND u.status_code < 300',
+    ];
+    const args: (string | number)[] = [];
+    if (params.search) {
+      where.push('u.url LIKE ?');
+      args.push(`%${params.search}%`);
+    }
+    const filter = params.filter ?? 'all';
+    if (filter === 'with-data') where.push('a.url IS NOT NULL');
+    else if (filter === 'without-data') where.push('a.url IS NULL');
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const joinSql = 'FROM urls u LEFT JOIN ga4_results a ON a.url = u.url';
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
+      .get(...args) as { c: number };
+
+    const rowsDb = this.db
+      .prepare(
+        `SELECT u.url AS url, u.status_code AS status_code,
+                a.sessions AS sessions, a.users AS users,
+                a.pageviews AS pageviews,
+                a.engagement_rate AS engagement_rate,
+                a.avg_session_duration AS avg_session_duration,
+                a.fetched_at AS fetched_at
+         ${joinSql}
+         ${whereSql}
+         ORDER BY a.pageviews DESC, u.url ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...args, params.limit, params.offset) as unknown as Record<
+      string,
+      unknown
+    >[];
+
+    return {
+      total: totalRow.c,
+      rows: rowsDb.map((r) => {
+        const fetchedAt = r['fetched_at'];
+        return {
+          url: r['url'] as string,
+          statusCode: (r['status_code'] as number | null) ?? null,
+          ga4:
+            typeof fetchedAt === 'string'
+              ? {
+                  sessions: (r['sessions'] as number | null) ?? 0,
+                  users: (r['users'] as number | null) ?? 0,
+                  pageviews: (r['pageviews'] as number | null) ?? 0,
+                  engagementRate: (r['engagement_rate'] as number | null) ?? 0,
+                  avgSessionDuration:
+                    (r['avg_session_duration'] as number | null) ?? 0,
+                  fetchedAt,
+                }
+              : null,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Faz 7 — store one AI run result. Keyed by (url, provider); re-running
+   * a prompt for the same page on the same provider overwrites the prior
+   * row so the user always sees the latest answer.
+   */
+  upsertAiResult(
+    url: string,
+    provider: AiProvider,
+    model: string,
+    response: string,
+    tokensIn: number | null,
+    tokensOut: number | null,
+    status: 'ok' | 'error',
+    error: string | null,
+    fetchedAt: string,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO ai_results
+           (url, provider, model, response, tokens_in, tokens_out,
+            status, error, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(url, provider) DO UPDATE SET
+           model = excluded.model,
+           response = excluded.response,
+           tokens_in = excluded.tokens_in,
+           tokens_out = excluded.tokens_out,
+           status = excluded.status,
+           error = excluded.error,
+           fetched_at = excluded.fetched_at`,
+      )
+      .run(
+        url,
+        provider,
+        model,
+        response,
+        tokensIn,
+        tokensOut,
+        status,
+        error,
+        fetchedAt,
+      );
+  }
+
+  /**
+   * Faz 7 — context fed into AI prompt substitution. The `body` column
+   * is the (optional) full-text snapshot stored when `bodySnapshot` is
+   * enabled — null when crawling skipped the body capture for this page.
+   */
+  getAiContext(url: string): {
+    url: string;
+    title: string | null;
+    metaDescription: string | null;
+    h1: string | null;
+    body: string | null;
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT u.url AS url, u.title AS title,
+                u.meta_description AS meta_description,
+                u.h1 AS h1, s.body AS body
+         FROM urls u
+         LEFT JOIN url_sources s ON s.url_id = u.id
+         WHERE u.url = ?`,
+      )
+      .get(url) as
+      | {
+          url: string;
+          title: string | null;
+          meta_description: string | null;
+          h1: string | null;
+          body: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      url: row.url,
+      title: row.title,
+      metaDescription: row.meta_description,
+      h1: row.h1,
+      body: row.body,
+    };
+  }
+
+  /**
+   * Faz 7 — candidate query for the AI tab. Crawled internal HTML 2xx
+   * pages left-joined with the latest AI result for the requested
+   * provider; the filter narrows to with-data / without-data / error.
+   */
+  queryAi(params: {
+    limit: number;
+    offset: number;
+    search?: string;
+    provider: AiProvider;
+    filter?: 'all' | 'with-data' | 'without-data' | 'error';
+  }): { rows: AiRow[]; total: number } {
+    const where: string[] = [
+      "u.is_external = 0 AND u.content_kind = 'html'",
+      'u.status_code >= 200 AND u.status_code < 300',
+    ];
+    const args: (string | number)[] = [params.provider];
+    if (params.search) {
+      where.push('u.url LIKE ?');
+      args.push(`%${params.search}%`);
+    }
+    const filter = params.filter ?? 'all';
+    if (filter === 'with-data') {
+      where.push("a.url IS NOT NULL AND a.status = 'ok'");
+    } else if (filter === 'without-data') {
+      where.push('a.url IS NULL');
+    } else if (filter === 'error') {
+      where.push("a.status = 'error'");
+    }
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const joinSql =
+      'FROM urls u LEFT JOIN ai_results a ON a.url = u.url AND a.provider = ?';
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
+      .get(...args) as { c: number };
+
+    const rowsDb = this.db
+      .prepare(
+        `SELECT u.url AS url, u.status_code AS status_code,
+                a.provider AS provider, a.model AS model,
+                a.response AS response,
+                a.tokens_in AS tokens_in, a.tokens_out AS tokens_out,
+                a.status AS status, a.error AS error,
+                a.fetched_at AS fetched_at
+         ${joinSql}
+         ${whereSql}
+         ORDER BY a.fetched_at DESC, u.url ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...args, params.limit, params.offset) as unknown as Record<
+      string,
+      unknown
+    >[];
+
+    return {
+      total: totalRow.c,
+      rows: rowsDb.map((r) => {
+        const fetchedAt = r['fetched_at'];
+        const status = r['status'];
+        const ai: AiResult | null =
+          typeof fetchedAt === 'string' && typeof status === 'string'
+            ? {
+                provider: r['provider'] as AiProvider,
+                model: (r['model'] as string | null) ?? '',
+                response: (r['response'] as string | null) ?? '',
+                tokensIn: (r['tokens_in'] as number | null) ?? null,
+                tokensOut: (r['tokens_out'] as number | null) ?? null,
+                status: status === 'error' ? 'error' : 'ok',
+                error: (r['error'] as string | null) ?? null,
+                fetchedAt,
+              }
+            : null;
+        return {
+          url: r['url'] as string,
+          statusCode: (r['status_code'] as number | null) ?? null,
+          ai,
+        };
+      }),
+    };
+  }
+
   queryImages(params: {
     limit: number;
     offset: number;
@@ -3834,6 +4524,43 @@ export class ProjectDb {
    * targets; `all` walks everything. Same JOIN + ordering as the table
    * so the export matches what the user sees.
    */
+  /**
+   * Yield every image row for CSV export — the unbounded counterpart of
+   * `queryImages` (which paginates for the table view). Applies the same
+   * `missingAltOnly` + search filters so the export mirrors what the
+   * user sees in the Images tab.
+   */
+  *iterateImages(options: {
+    missingAltOnly?: boolean;
+    search?: string;
+  } = {}): IterableIterator<ImageRow> {
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (options.missingAltOnly) where.push('alt IS NULL');
+    if (options.search) {
+      where.push('(src LIKE ? OR alt LIKE ?)');
+      const like = `%${options.search}%`;
+      args.push(like, like);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM images ${whereSql} ORDER BY occurrences DESC, id`,
+      )
+      .all(...args) as unknown as ImageRowDb[];
+    for (const r of rows) {
+      yield {
+        id: r.id,
+        src: r.src,
+        alt: r.alt,
+        width: r.width,
+        height: r.height,
+        isInternal: r.is_internal === 1,
+        occurrences: r.occurrences,
+      };
+    }
+  }
+
   *iterateBrokenLinks(
     internal: 'all' | 'internal' | 'external' = 'all',
   ): IterableIterator<BrokenLinkRow> {
@@ -4650,6 +5377,43 @@ export class ProjectDb {
       lastmod: string | null;
       sourceSitemap: string | null;
     }[];
+  }
+
+  /**
+   * Cross-source orphan URLs — pages that appear in any external truth
+   * source (XML sitemap, Search Console, or Analytics 4) but are *not*
+   * in the crawled `urls` table, or are stubs with no fetched status.
+   * Each row carries which sources mentioned the URL so the user can
+   * triage why it was missed (sitemap-only = drop or fix internal
+   * linking; GSC + GA4 = real but unreachable from the crawl seed).
+   */
+  orphanPagesCrossSource(
+    limit = 1000,
+  ): { url: string; sources: string[] }[] {
+    const cap = Math.max(1, Math.min(10_000, limit));
+    const rows = this.db
+      .prepare(
+        `WITH src AS (
+           SELECT url, 'sitemap' AS source FROM sitemap_urls
+           UNION ALL
+           SELECT url, 'gsc' AS source FROM gsc_results
+           UNION ALL
+           SELECT url, 'ga4' AS source FROM ga4_results
+         )
+         SELECT s.url AS url,
+                GROUP_CONCAT(DISTINCT s.source) AS sources
+           FROM src s
+           LEFT JOIN urls u ON u.url = s.url
+          WHERE u.url IS NULL OR u.status_code IS NULL
+          GROUP BY s.url
+          ORDER BY s.url
+          LIMIT ?`,
+      )
+      .all(cap) as { url: string; sources: string }[];
+    return rows.map((r) => ({
+      url: r.url,
+      sources: r.sources ? r.sources.split(',').sort() : [],
+    }));
   }
 
   /**

@@ -102,6 +102,7 @@ export class Crawler extends EventEmitter {
   private inFlightFetchControllers = new Set<AbortController>();
   private robots: RobotsChecker | null = null;
   private progressTimer: NodeJS.Timeout | null = null;
+  private memoryWatchdogTimer: NodeJS.Timeout | null = null;
   /** Periodic post-crawl-style recompute of expensive issue counters
    * while the crawl is still running, so the sidebar number is < 30 s
    * stale instead of "0 until crawl ends". The recompute is dispatched
@@ -514,6 +515,39 @@ export class Crawler extends EventEmitter {
 
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
 
+    // Memory-limit watchdog. When `memoryLimitMb > 0`, sample RSS every
+    // 2 s; if the threshold is crossed, pause the crawler so pending
+    // writes drain (PQueue.pause() lets in-flight tasks finish) and
+    // surface a clear `warn`. Auto-resume once RSS drops back below 80 %
+    // of the cap so a transient spike doesn't permanently halt the
+    // crawl — matches the Settings → Memory limit field's documented
+    // behaviour.
+    if (this.config.memoryLimitMb > 0) {
+      let autoPaused = false;
+      const limit = this.config.memoryLimitMb;
+      const resumeAt = Math.floor(limit * 0.8);
+      this.memoryWatchdogTimer = setInterval(() => {
+        if (this.stopped) return;
+        const rssMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+        if (!autoPaused && !this.paused && rssMb >= limit) {
+          this.emit(
+            'warn',
+            `Memory limit reached: RSS ${rssMb} MB ≥ ${limit} MB — crawler paused. ` +
+              `Will resume automatically once RSS drops below ${resumeAt} MB.`,
+          );
+          autoPaused = true;
+          this.pause();
+        } else if (autoPaused && this.paused && rssMb < resumeAt) {
+          this.emit(
+            'info',
+            `Memory dropped to ${rssMb} MB (< ${resumeAt} MB) — resuming crawler.`,
+          );
+          autoPaused = false;
+          this.resume();
+        }
+      }, 2000);
+    }
+
     // I-3 — Periodic materialised issue recompute while the crawl is
     // running. The post-crawl pass at the end will run a final clean
     // recompute; this keeps the sidebar's expensive issue counters
@@ -590,6 +624,8 @@ export class Crawler extends EventEmitter {
     } finally {
       if (this.progressTimer) clearInterval(this.progressTimer);
       this.progressTimer = null;
+      if (this.memoryWatchdogTimer) clearInterval(this.memoryWatchdogTimer);
+      this.memoryWatchdogTimer = null;
       this.stopIssueRecomputeTimer();
       this.stopQueueCheckpointTimer();
     }
@@ -1079,6 +1115,8 @@ export class Crawler extends EventEmitter {
     } finally {
       if (this.progressTimer) clearInterval(this.progressTimer);
       this.progressTimer = null;
+      if (this.memoryWatchdogTimer) clearInterval(this.memoryWatchdogTimer);
+      this.memoryWatchdogTimer = null;
       this.stopIssueRecomputeTimer();
       this.stopQueueCheckpointTimer();
     }

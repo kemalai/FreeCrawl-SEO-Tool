@@ -14,6 +14,7 @@ import type {
   UrlDetail,
   UrlPageImageRow,
   UrlSourceResult,
+  UrlAnalyticsDetail,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { diagnoseStatus, type StatusDiagnosis } from '../utils/statusDiagnosis.js';
@@ -31,7 +32,8 @@ type SubTab =
   | 'cookies'
   | 'structured-data'
   | 'view-source'
-  | 'duplicates';
+  | 'duplicates'
+  | 'analytics';
 
 const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'url-details', label: 'URL Details' },
@@ -47,6 +49,7 @@ const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'structured-data', label: 'Structured Data' },
   { key: 'view-source', label: 'View Source' },
   { key: 'duplicates', label: 'Duplicates' },
+  { key: 'analytics', label: 'Analytics' },
 ];
 
 // Maximum number of URLs we aggregate over in one go. Anything larger is
@@ -67,6 +70,7 @@ const SINGLE_URL_ONLY_TABS: ReadonlySet<SubTab> = new Set([
   'structured-data',
   'view-source',
   'duplicates',
+  'analytics',
 ]);
 
 export function BottomDetailPanel() {
@@ -404,6 +408,153 @@ export function BottomDetailPanel() {
         {detail && subTab === 'duplicates' && (
           <DuplicatesView urlId={detail.row.id} row={detail.row} />
         )}
+        {detail && subTab === 'analytics' && (
+          <AnalyticsView pageUrl={detail.row.url} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AnalyticsView({ pageUrl }: { pageUrl: string }) {
+  const { t } = useTranslation();
+  const [data, setData] = useState<UrlAnalyticsDetail | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const dataVersion = useAppStore((s) => s.dataVersion);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoaded(false);
+    void window.freecrawl.urlAnalyticsGet(pageUrl).then((res) => {
+      if (cancelled) return;
+      setData(res);
+      setLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pageUrl, dataVersion]);
+
+  if (!loaded) {
+    return (
+      <div className="flex h-full items-center justify-center text-[12px] text-surface-500">
+        {t('analyticsView.loading', { defaultValue: 'Loading…' })}
+      </div>
+    );
+  }
+
+  if (!data || (!data.gsc && !data.ga4 && !data.inspection)) {
+    return (
+      <div className="flex h-full items-center justify-center px-6 text-center text-[12px] text-surface-500">
+        {t('analyticsView.empty', {
+          defaultValue:
+            'No Search Console / Analytics 4 / URL Inspection data for this URL yet. Fetch it from the GA4 / Search Console tabs.',
+        })}
+      </div>
+    );
+  }
+
+  const { gsc, ga4, inspection } = data;
+  return (
+    <div className="grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-3">
+      <AnalyticsCard
+        title={t('analyticsView.gscTitle', { defaultValue: 'Search Console' })}
+        empty={t('analyticsView.gscEmpty', { defaultValue: 'No clicks / impressions data yet.' })}
+        present={!!gsc}
+      >
+        {gsc && (
+          <>
+            <AnalyticsRow label="Clicks" value={gsc.clicks.toLocaleString()} />
+            <AnalyticsRow label="Impressions" value={gsc.impressions.toLocaleString()} />
+            <AnalyticsRow label="CTR" value={`${(gsc.ctr * 100).toFixed(1)}%`} />
+            <AnalyticsRow label="Avg position" value={gsc.position.toFixed(1)} />
+          </>
+        )}
+      </AnalyticsCard>
+      <AnalyticsCard
+        title={t('analyticsView.ga4Title', { defaultValue: 'Analytics 4' })}
+        empty={t('analyticsView.ga4Empty', { defaultValue: 'No GA4 traffic data yet.' })}
+        present={!!ga4}
+      >
+        {ga4 && (
+          <>
+            <AnalyticsRow label="Sessions" value={ga4.sessions.toLocaleString()} />
+            <AnalyticsRow label="Users" value={ga4.users.toLocaleString()} />
+            <AnalyticsRow label="Pageviews" value={ga4.pageviews.toLocaleString()} />
+            <AnalyticsRow
+              label="Engagement rate"
+              value={`${(ga4.engagementRate * 100).toFixed(1)}%`}
+            />
+            <AnalyticsRow
+              label="Avg session duration"
+              value={`${Math.round(ga4.avgSessionDuration)} s`}
+            />
+          </>
+        )}
+      </AnalyticsCard>
+      <AnalyticsCard
+        title={t('analyticsView.inspectionTitle', { defaultValue: 'URL Inspection' })}
+        empty={t('analyticsView.inspectionEmpty', {
+          defaultValue: 'No URL Inspection result yet — run it from the Search Console tab.',
+        })}
+        present={!!inspection}
+      >
+        {inspection && (
+          <>
+            <AnalyticsRow label="Verdict" value={inspection.verdict ?? '—'} />
+            <AnalyticsRow label="Coverage" value={inspection.coverageState ?? '—'} />
+            <AnalyticsRow label="Indexing" value={inspection.indexingState ?? '—'} />
+            <AnalyticsRow label="robots.txt" value={inspection.robotsTxtState ?? '—'} />
+            <AnalyticsRow
+              label="Last crawl"
+              value={inspection.lastCrawlTime ?? '—'}
+            />
+            <AnalyticsRow
+              label="Google canonical"
+              value={inspection.googleCanonical ?? '—'}
+            />
+            <AnalyticsRow
+              label="User canonical"
+              value={inspection.userCanonical ?? '—'}
+            />
+          </>
+        )}
+      </AnalyticsCard>
+    </div>
+  );
+}
+
+function AnalyticsCard({
+  title,
+  present,
+  empty,
+  children,
+}: {
+  title: string;
+  present: boolean;
+  empty: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="rounded border border-surface-800 bg-surface-900/40 p-3">
+      <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-surface-300">
+        {title}
+      </div>
+      {present ? (
+        <div className="space-y-1">{children}</div>
+      ) : (
+        <div className="text-[11px] text-surface-500">{empty}</div>
+      )}
+    </div>
+  );
+}
+
+function AnalyticsRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline gap-3 text-[11px]">
+      <div className="w-32 shrink-0 text-surface-500">{label}</div>
+      <div className="min-w-0 flex-1 truncate text-surface-100" title={value}>
+        {value}
       </div>
     </div>
   );

@@ -69,6 +69,55 @@ export async function exportUrlsToCsv(
   return { rowsWritten };
 }
 
+/** Fixed column order for the Images CSV export. Matches the columns
+ *  shown in the Images tab so the file is a 1:1 export of the grid. */
+const IMAGES_CSV_HEADER = [
+  'Image URL',
+  'Alt',
+  'Width',
+  'Height',
+  'Internal',
+  'Occurrences',
+] as const;
+
+/**
+ * Stream every image row to a CSV file. Honours the Images tab's
+ * `missingAltOnly` + `search` filters so the export matches what the
+ * user is currently looking at. Streamed row-by-row so a 100K-image
+ * crawl never builds a giant string in memory.
+ */
+export async function exportImagesToCsv(
+  db: ProjectDb,
+  filePath: string,
+  options: { missingAltOnly?: boolean; search?: string } = {},
+): Promise<{ rowsWritten: number }> {
+  let rowsWritten = 0;
+  const header = IMAGES_CSV_HEADER.join(',') + '\n';
+
+  const generator = async function* (): AsyncGenerator<string> {
+    yield '﻿' + header;
+    for (const row of db.iterateImages({
+      missingAltOnly: options.missingAltOnly,
+      search: options.search,
+    })) {
+      const cells = [
+        row.src,
+        row.alt,
+        row.width,
+        row.height,
+        row.isInternal ? 'internal' : 'external',
+        row.occurrences,
+      ];
+      rowsWritten++;
+      yield cells.map(escapeCsv).join(',') + '\n';
+    }
+  };
+
+  await pipeline(Readable.from(generator()), createWriteStream(filePath, { encoding: 'utf8' }));
+
+  return { rowsWritten };
+}
+
 /** Fixed column order for the Broken Links CSV export. */
 const BROKEN_LINK_CSV_HEADER = [
   'Source URL',

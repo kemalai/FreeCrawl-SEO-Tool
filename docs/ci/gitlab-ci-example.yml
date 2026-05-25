@@ -1,0 +1,49 @@
+# FreeCrawl SEO — example GitLab CI/CD pipeline
+#
+# Runs the headless FreeCrawl CLI against your site, fails the
+# pipeline if more than `$BROKEN_LINK_THRESHOLD` URLs are broken, and
+# stores the JSON crawl as a job artifact. Adapt `TARGET_URL` and the
+# threshold to your project.
+#
+# Save this file as `.gitlab-ci.yml` (or include it as a template).
+# Schedule daily runs via GitLab CI/CD → Schedules.
+
+variables:
+  TARGET_URL: "https://example.com"
+  MAX_URLS: "5000"
+  BROKEN_LINK_THRESHOLD: "10"
+
+stages:
+  - audit
+
+freecrawl-audit:
+  stage: audit
+  image: node:22
+  timeout: 30 minutes
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git ca-certificates
+    - git clone --depth 1 https://github.com/kemalai/FreeCrawl-SEO-Tool.git freecrawl
+    - cd freecrawl
+    - npm ci
+    - npm run build:cli
+  script:
+    - node apps/cli/dist/index.js "$TARGET_URL"
+        --max "$MAX_URLS"
+        --out "$CI_PROJECT_DIR/crawl.json"
+    - >-
+      BROKEN=$(node -e "
+        const r = require('$CI_PROJECT_DIR/crawl.json');
+        const n = r.filter(u => u.statusCode >= 400 && u.statusCode < 600).length;
+        console.log(n);
+      ")
+    - echo "Broken-URL count $BROKEN (threshold $BROKEN_LINK_THRESHOLD)"
+    - >-
+      if [ "$BROKEN" -gt "$BROKEN_LINK_THRESHOLD" ]; then
+        echo "Broken-URL count $BROKEN exceeds threshold $BROKEN_LINK_THRESHOLD" >&2
+        exit 1
+      fi
+  artifacts:
+    paths:
+      - crawl.json
+    expire_in: 30 days
+    when: always

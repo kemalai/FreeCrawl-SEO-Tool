@@ -30,6 +30,8 @@ import {
   type ExportXmlResult,
   type ExportBrokenLinksInput,
   type ExportBrokenLinksResult,
+  type ExportImagesInput,
+  type ExportImagesResult,
   type ExportTabularInput,
   type ExportTabularResult,
   type DataDeleteByDomainInput,
@@ -63,6 +65,7 @@ import {
   type WordCountPerDirectoryInput,
   type WordCountPerDirectoryRow,
   type SitemapOrphanRow,
+  type OrphanCrossSourceRow,
   type SettingsExportInput,
   type SettingsExportResult,
   type SettingsImportResult,
@@ -93,11 +96,42 @@ import {
   type PagespeedRunInput,
   type PagespeedRunResult,
   type PagespeedStrategy,
+  type GoogleAuthState,
+  type GoogleAuthResult,
+  type GscListSitesResult,
+  type GscFetchInput,
+  type GscFetchResult,
+  type GscFetchMeta,
+  type GscQueryInput,
+  type GscQueryResult,
+  type Ga4ListPropertiesResult,
+  type Ga4FetchInput,
+  type Ga4FetchResult,
+  type Ga4FetchMeta,
+  type Ga4QueryInput,
+  type Ga4QueryResult,
+  type AiRunInput,
+  type AiRunResult,
+  type AiQueryInput,
+  type AiQueryResult,
+  type SeoRunInput,
+  type SeoRunResult,
+  type SeoQueryInput,
+  type SeoQueryResult,
+  type GscInspectRunInput,
+  type GscInspectRunResult,
+  type ExportSheetsInput,
+  type ExportSheetsResult,
+  type ExportBigqueryInput,
+  type ExportBigqueryResult,
+  type GscInspectionResult,
+  type UrlAnalyticsDetail,
 } from '@freecrawl/shared-types';
 import {
   Crawler,
   exportUrlsToCsv,
   exportBrokenLinksToCsv,
+  exportImagesToCsv,
   exportUrlsToJson,
   exportUrlsToXml,
   exportTabular,
@@ -122,6 +156,14 @@ import {
   resolveCredentials,
 } from './credentials.js';
 import { runPagespeedBatch, type PagespeedBatchItem } from './pagespeed.js';
+import { startAuth, getAuthState, revokeAuth } from './google-oauth.js';
+import { listSites, querySearchAnalytics, inspectUrl } from './gsc.js';
+import { exportCategoryToSheets } from './sheets-export.js';
+import { exportCategoryToBigQuery } from './bigquery-export.js';
+import { listProperties as ga4ListProperties, runReport as ga4RunReport } from './ga4.js';
+import { runAiBatch, type AiBatchItem } from './ai-batch.js';
+import { resolveModel, defaultConcurrency } from './ai-providers.js';
+import { runSeoBatch } from './seo-batch.js';
 import * as logger from './logger.js';
 import { dbReaderPool, callReaderOrFallback } from './db-reader-pool.js';
 import { dbWriterPool } from './db-writer-pool.js';
@@ -152,6 +194,15 @@ let activeCrawler: Crawler | null = null;
  *  `pagespeedCancelRequested` is the cooperative cancel flag. */
 let pagespeedRunActive = false;
 let pagespeedCancelRequested = false;
+/** Faz 7 — AI run guard. Same shape as the PSI guard. */
+let aiRunActive = false;
+let aiCancelRequested = false;
+/** Faz 7 — SEO provider run guard. */
+let seoRunActive = false;
+let seoCancelRequested = false;
+/** Faz 7 — GSC URL Inspection run guard. */
+let gscInspectRunActive = false;
+let gscInspectCancelRequested = false;
 /** Most-recent CrawlConfig — needed by the crash-recovery resume
  * flow so we can re-create the Crawler with the same knobs the user
  * had set, without re-prompting. Hydrated lazily from `project_meta`
@@ -1745,6 +1796,16 @@ function registerIpc(): void {
       ),
   );
 
+  ipcMain.handle(
+    IPC.reportsOrphanCrossSource,
+    (_e, limit?: number): Promise<OrphanCrossSourceRow[]> =>
+      callReaderOrFallback<OrphanCrossSourceRow[]>(
+        'orphanPagesCrossSource',
+        [limit ?? 1000],
+        () => getDb().orphanPagesCrossSource(limit ?? 1000),
+      ),
+  );
+
   ipcMain.handle(IPC.reportsServerHeaders, () =>
     callReaderOrFallback<ServerHeaderRow[]>('serverHeaderBreakdown', [], () =>
       getDb().serverHeaderBreakdown(),
@@ -2003,6 +2064,635 @@ function registerIpc(): void {
       logger.log('info', 'pagespeed', 'run cancellation requested');
     }
   });
+
+  // V1 Faz 7 — Google OAuth keystone. The interactive consent flow runs
+  // entirely in the main process (loopback HTTP server + system
+  // browser); the renderer only ever sees the redacted GoogleAuthState.
+  ipcMain.handle(
+    IPC.googleAuthStatus,
+    (_e, id: string): GoogleAuthState => getAuthState(id),
+  );
+  ipcMain.handle(
+    IPC.googleAuthStart,
+    async (_e, id: string): Promise<GoogleAuthResult> => {
+      try {
+        const state = await startAuth(id);
+        return { ok: true, error: null, state };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          state: getAuthState(id),
+        };
+      }
+    },
+  );
+  ipcMain.handle(
+    IPC.googleAuthRevoke,
+    (_e, id: string): Promise<GoogleAuthState> => revokeAuth(id),
+  );
+
+  // V1 Faz 7 — Google Search Console. `gscFetch` pulls per-page metrics
+  // for a date range and wholesale-replaces the stored snapshot;
+  // `gscQuery` lists crawled pages joined with that data.
+  ipcMain.handle(
+    IPC.gscListSites,
+    async (): Promise<GscListSitesResult> => {
+      try {
+        return { ok: true, error: null, sites: await listSites() };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          sites: [],
+        };
+      }
+    },
+  );
+  ipcMain.handle(
+    IPC.gscFetch,
+    async (_e, input: GscFetchInput): Promise<GscFetchResult> => {
+      if (!input.property) {
+        return {
+          ok: false,
+          error: 'No Search Console property selected.',
+          rowCount: 0,
+          meta: null,
+        };
+      }
+      // Search Console data lags ~2 days — end the window there and
+      // span `days` back so the range only covers data that exists.
+      const isoDate = (d: Date): string => d.toISOString().slice(0, 10);
+      const end = new Date(Date.now() - 2 * 86_400_000);
+      const start = new Date(end.getTime() - (input.days - 1) * 86_400_000);
+      const startDate = isoDate(start);
+      const endDate = isoDate(end);
+      // Pin the DB to the project active when the pull started.
+      const runDb = getDb();
+      try {
+        const rows = await querySearchAnalytics(
+          input.property,
+          startDate,
+          endDate,
+        );
+        const fetchedAt = new Date().toISOString();
+        runDb.replaceGscResults(rows, fetchedAt);
+        const meta: GscFetchMeta = {
+          property: input.property,
+          startDate,
+          endDate,
+          fetchedAt,
+          rowCount: rows.length,
+        };
+        runDb.setMeta('gscFetchMeta', JSON.stringify(meta));
+        fireDataChanged();
+        logger.log(
+          'info',
+          'gsc',
+          `Search Console pull stored — ${rows.length} page row(s)`,
+        );
+        return { ok: true, error: null, rowCount: rows.length, meta };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          rowCount: 0,
+          meta: null,
+        };
+      }
+    },
+  );
+  ipcMain.handle(
+    IPC.gscQuery,
+    async (_e, input: GscQueryInput): Promise<GscQueryResult> => {
+      const params = {
+        limit: input.limit,
+        offset: input.offset,
+        search: input.search,
+        filter: input.filter,
+      };
+      const result = await callReaderOrFallback<{
+        rows: GscQueryResult['rows'];
+        total: number;
+      }>('queryGsc', [params], () => getDb().queryGsc(params));
+      let meta: GscFetchMeta | null = null;
+      try {
+        const raw = getDb().getMeta('gscFetchMeta');
+        if (raw) meta = JSON.parse(raw) as GscFetchMeta;
+      } catch {
+        /* no / corrupt meta — render without the context line */
+      }
+      return { rows: result.rows, total: result.total, meta };
+    },
+  );
+
+  // V1 Faz 7 — Google Analytics 4. Same shape as GSC: list properties,
+  // fetch a date-range snapshot, query crawled pages joined with the
+  // stored data. Auth runs through the shared OAuth keystone.
+  ipcMain.handle(
+    IPC.ga4ListProperties,
+    async (): Promise<Ga4ListPropertiesResult> => {
+      try {
+        return { ok: true, error: null, properties: await ga4ListProperties() };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          properties: [],
+        };
+      }
+    },
+  );
+  ipcMain.handle(
+    IPC.ga4Fetch,
+    async (_e, input: Ga4FetchInput): Promise<Ga4FetchResult> => {
+      if (!input.property) {
+        return {
+          ok: false,
+          error: 'No GA4 property selected.',
+          rowCount: 0,
+          meta: null,
+        };
+      }
+      // GA4 data is near-realtime — end the range at today.
+      const isoDate = (d: Date): string => d.toISOString().slice(0, 10);
+      const end = new Date();
+      const start = new Date(end.getTime() - (input.days - 1) * 86_400_000);
+      const startDate = isoDate(start);
+      const endDate = isoDate(end);
+      const runDb = getDb();
+      try {
+        const rows = await ga4RunReport(input.property, startDate, endDate);
+        const fetchedAt = new Date().toISOString();
+        runDb.replaceGa4Results(rows, fetchedAt);
+        const meta: Ga4FetchMeta = {
+          property: input.property,
+          propertyName: input.propertyName || input.property,
+          startDate,
+          endDate,
+          fetchedAt,
+          rowCount: rows.length,
+        };
+        runDb.setMeta('ga4FetchMeta', JSON.stringify(meta));
+        fireDataChanged();
+        logger.log(
+          'info',
+          'ga4',
+          `GA4 pull stored — ${rows.length} page row(s)`,
+        );
+        return { ok: true, error: null, rowCount: rows.length, meta };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          rowCount: 0,
+          meta: null,
+        };
+      }
+    },
+  );
+  ipcMain.handle(
+    IPC.ga4Query,
+    async (_e, input: Ga4QueryInput): Promise<Ga4QueryResult> => {
+      const params = {
+        limit: input.limit,
+        offset: input.offset,
+        search: input.search,
+        filter: input.filter,
+      };
+      const result = await callReaderOrFallback<{
+        rows: Ga4QueryResult['rows'];
+        total: number;
+      }>('queryGa4', [params], () => getDb().queryGa4(params));
+      let meta: Ga4FetchMeta | null = null;
+      try {
+        const raw = getDb().getMeta('ga4FetchMeta');
+        if (raw) meta = JSON.parse(raw) as Ga4FetchMeta;
+      } catch {
+        /* no / corrupt meta — render without the context line */
+      }
+      return { rows: result.rows, total: result.total, meta };
+    },
+  );
+
+  // V1 Faz 7 — AI integrations (OpenAI / Anthropic / Ollama). The
+  // renderer hands over a prompt template + URL list; the handler
+  // substitutes per-URL variables from the crawl DB, then drives a
+  // small concurrency pool through the chosen provider.
+  const substitutePrompt = (
+    template: string,
+    ctx: {
+      url: string;
+      title: string | null;
+      metaDescription: string | null;
+      h1: string | null;
+      body: string | null;
+    },
+  ): string => {
+    /** Body cap — keep prompts under control on long pages. */
+    const BODY_MAX = 2000;
+    const body = (ctx.body ?? '').slice(0, BODY_MAX);
+    return template
+      .replace(/\{url\}/g, ctx.url)
+      .replace(/\{title\}/g, ctx.title ?? '')
+      .replace(/\{description\}/g, ctx.metaDescription ?? '')
+      .replace(/\{h1\}/g, ctx.h1 ?? '')
+      .replace(/\{body\}/g, body);
+  };
+
+  ipcMain.handle(
+    IPC.aiRun,
+    async (_e, input: AiRunInput): Promise<AiRunResult> => {
+      if (aiRunActive) {
+        return { completed: 0, failed: 0, cancelled: true };
+      }
+      const urls = Array.from(
+        new Set(
+          (input.urls ?? []).filter(
+            (u): u is string => typeof u === 'string' && u.length > 0,
+          ),
+        ),
+      );
+      if (urls.length === 0 || !input.prompt?.trim()) {
+        return { completed: 0, failed: 0, cancelled: false };
+      }
+      const runDb = getDb();
+      const model = resolveModel(input.provider, input.model);
+      const concurrency = defaultConcurrency(input.provider);
+
+      // Build per-URL prompts up-front so a missing page doesn't get
+      // queued; URLs that aren't in the DB are skipped silently.
+      const items: AiBatchItem[] = [];
+      for (const url of urls) {
+        const ctx = runDb.getAiContext(url);
+        if (!ctx) continue;
+        items.push({
+          url,
+          prompt: substitutePrompt(input.prompt, ctx),
+        });
+      }
+      if (items.length === 0) {
+        return { completed: 0, failed: 0, cancelled: false };
+      }
+
+      aiRunActive = true;
+      aiCancelRequested = false;
+      logger.log(
+        'info',
+        'ai',
+        `${input.provider}/${model} run started — ${items.length} prompt(s) (concurrency=${concurrency})`,
+      );
+      try {
+        const result = await runAiBatch({
+          provider: input.provider,
+          model,
+          concurrency,
+          items,
+          isCancelled: () => aiCancelRequested,
+          onResult: (outcome) => {
+            try {
+              const fetchedAt = new Date().toISOString();
+              if (outcome.ok && outcome.output) {
+                runDb.upsertAiResult(
+                  outcome.url,
+                  input.provider,
+                  outcome.output.model,
+                  outcome.output.text,
+                  outcome.output.tokensIn,
+                  outcome.output.tokensOut,
+                  'ok',
+                  null,
+                  fetchedAt,
+                );
+              } else {
+                runDb.upsertAiResult(
+                  outcome.url,
+                  input.provider,
+                  model,
+                  '',
+                  null,
+                  null,
+                  'error',
+                  outcome.error ?? 'Unknown error',
+                  fetchedAt,
+                );
+              }
+            } catch (err) {
+              logger.log(
+                'error',
+                'ai',
+                `DB write failed for ${outcome.url}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            }
+          },
+          onProgress: (done, total, currentUrl) => {
+            mainWindow?.webContents.send(IPC.aiProgress, {
+              done,
+              total,
+              currentUrl,
+              running: true,
+            });
+          },
+        });
+        mainWindow?.webContents.send(IPC.aiProgress, {
+          done: result.completed + result.failed,
+          total: items.length,
+          currentUrl: null,
+          running: false,
+        });
+        fireDataChanged();
+        return result;
+      } finally {
+        aiRunActive = false;
+        aiCancelRequested = false;
+      }
+    },
+  );
+
+  ipcMain.handle(IPC.aiCancel, () => {
+    if (aiRunActive) {
+      aiCancelRequested = true;
+      logger.log('info', 'ai', 'run cancellation requested');
+    }
+  });
+
+  ipcMain.handle(
+    IPC.aiQuery,
+    async (_e, input: AiQueryInput): Promise<AiQueryResult> => {
+      const params = {
+        limit: input.limit,
+        offset: input.offset,
+        search: input.search,
+        provider: input.provider,
+        filter: input.filter,
+      };
+      return callReaderOrFallback<AiQueryResult>(
+        'queryAi',
+        [params],
+        () => getDb().queryAi(params),
+      );
+    },
+  );
+
+  // V1 Faz 7 — third-party SEO authority providers (Ahrefs / Majestic /
+  // Moz / Semrush). Same shape as the AI run: pin the DB to the active
+  // project, fan URLs through the provider's per-URL endpoint, persist
+  // ok/error rows so partial outages are visible in the UI.
+  ipcMain.handle(
+    IPC.seoRun,
+    async (_e, input: SeoRunInput): Promise<SeoRunResult> => {
+      if (seoRunActive) return { completed: 0, failed: 0, cancelled: true };
+      const urls = Array.from(
+        new Set(
+          (input.urls ?? []).filter(
+            (u): u is string => typeof u === 'string' && u.length > 0,
+          ),
+        ),
+      );
+      if (urls.length === 0) return { completed: 0, failed: 0, cancelled: false };
+      const runDb = getDb();
+      seoRunActive = true;
+      seoCancelRequested = false;
+      logger.log('info', 'seo', `${input.provider} run started — ${urls.length} URL(s)`);
+      try {
+        const result = await runSeoBatch({
+          provider: input.provider,
+          urls,
+          isCancelled: () => seoCancelRequested,
+          onResult: (outcome) => {
+            try {
+              runDb.upsertSeoResult(
+                outcome.url,
+                input.provider,
+                outcome.metrics,
+                outcome.ok ? 'ok' : 'error',
+                outcome.error,
+                new Date().toISOString(),
+              );
+            } catch (err) {
+              logger.log(
+                'error',
+                'seo',
+                `DB write failed for ${outcome.url}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            }
+          },
+          onProgress: (done, total, currentUrl) => {
+            mainWindow?.webContents.send(IPC.seoProgress, {
+              done,
+              total,
+              currentUrl,
+              running: true,
+            });
+          },
+        });
+        mainWindow?.webContents.send(IPC.seoProgress, {
+          done: result.completed + result.failed,
+          total: urls.length,
+          currentUrl: null,
+          running: false,
+        });
+        fireDataChanged();
+        return result;
+      } finally {
+        seoRunActive = false;
+        seoCancelRequested = false;
+      }
+    },
+  );
+  ipcMain.handle(IPC.seoCancel, () => {
+    if (seoRunActive) {
+      seoCancelRequested = true;
+      logger.log('info', 'seo', 'run cancellation requested');
+    }
+  });
+  ipcMain.handle(
+    IPC.seoQuery,
+    async (_e, input: SeoQueryInput): Promise<SeoQueryResult> => {
+      const params = {
+        limit: input.limit,
+        offset: input.offset,
+        search: input.search,
+        provider: input.provider,
+        filter: input.filter,
+      };
+      return callReaderOrFallback<SeoQueryResult>(
+        'querySeo',
+        [params],
+        () => getDb().querySeo(params),
+      );
+    },
+  );
+
+  // V1 Faz 7 — Google Search Console URL Inspection. Sequential — the
+  // API caps at 2 000 calls / day per property; running in parallel
+  // doesn't speed it up materially and risks burning quota on errors.
+  ipcMain.handle(
+    IPC.gscInspectRun,
+    async (_e, input: GscInspectRunInput): Promise<GscInspectRunResult> => {
+      if (gscInspectRunActive) {
+        return { completed: 0, failed: 0, cancelled: true };
+      }
+      const urls = Array.from(
+        new Set(
+          (input.urls ?? []).filter(
+            (u): u is string => typeof u === 'string' && u.length > 0,
+          ),
+        ),
+      );
+      if (!input.property || urls.length === 0) {
+        return { completed: 0, failed: 0, cancelled: false };
+      }
+      const runDb = getDb();
+      gscInspectRunActive = true;
+      gscInspectCancelRequested = false;
+      let completed = 0;
+      let failed = 0;
+      let done = 0;
+      logger.log(
+        'info',
+        'gsc',
+        `URL Inspection run started — ${urls.length} URL(s) for ${input.property}`,
+      );
+      mainWindow?.webContents.send(IPC.gscInspectProgress, {
+        done: 0,
+        total: urls.length,
+        currentUrl: null,
+        running: true,
+      });
+      try {
+        for (const url of urls) {
+          if (gscInspectCancelRequested) break;
+          mainWindow?.webContents.send(IPC.gscInspectProgress, {
+            done,
+            total: urls.length,
+            currentUrl: url,
+            running: true,
+          });
+          const fetchedAt = new Date().toISOString();
+          try {
+            const raw = await inspectUrl(input.property, url);
+            const result: GscInspectionResult = {
+              ...raw,
+              status: 'ok',
+              error: null,
+              fetchedAt,
+            };
+            runDb.upsertGscInspection(url, result);
+            completed++;
+          } catch (err) {
+            runDb.upsertGscInspection(url, {
+              verdict: null,
+              coverageState: null,
+              robotsTxtState: null,
+              indexingState: null,
+              lastCrawlTime: null,
+              googleCanonical: null,
+              userCanonical: null,
+              status: 'error',
+              error: err instanceof Error ? err.message : String(err),
+              fetchedAt,
+            });
+            failed++;
+          }
+          done++;
+        }
+        mainWindow?.webContents.send(IPC.gscInspectProgress, {
+          done,
+          total: urls.length,
+          currentUrl: null,
+          running: false,
+        });
+        fireDataChanged();
+        return {
+          completed,
+          failed,
+          cancelled: gscInspectCancelRequested && done < urls.length,
+        };
+      } finally {
+        gscInspectRunActive = false;
+        gscInspectCancelRequested = false;
+      }
+    },
+  );
+  ipcMain.handle(IPC.gscInspectCancel, () => {
+    if (gscInspectRunActive) {
+      gscInspectCancelRequested = true;
+      logger.log('info', 'gsc', 'URL Inspection cancellation requested');
+    }
+  });
+
+  // V1 Faz 7 — Google Sheets export. Uses the shared OAuth keystone
+  // (the user connects once on the GSC/GA4 flows or via the Sheets
+  // integration card). Creates a fresh spreadsheet per export.
+  ipcMain.handle(
+    IPC.exportSheets,
+    async (_e, input: ExportSheetsInput): Promise<ExportSheetsResult> => {
+      try {
+        const title =
+          input.title?.trim() ||
+          `FreeCrawl — ${input.category} — ${new Date().toISOString().slice(0, 10)}`;
+        const result = await exportCategoryToSheets(getDb(), input.category, title);
+        return {
+          ok: true,
+          error: null,
+          url: result.spreadsheetUrl,
+          rowsWritten: result.rowsWritten,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          url: null,
+          rowsWritten: 0,
+        };
+      }
+    },
+  );
+
+  // V1 Faz 7 — BigQuery export. Service-account auth (JWT-bearer
+  // grant); paste the JSON key + project ID in Settings → Integrations.
+  // V1 closeout — Detail Panel Analytics sub-tab. One read query
+  // merges GSC + GA4 + URL Inspection for the selected URL.
+  ipcMain.handle(
+    IPC.urlAnalyticsGet,
+    async (_e, url: string): Promise<UrlAnalyticsDetail | null> => {
+      if (!url) return null;
+      return callReaderOrFallback<UrlAnalyticsDetail | null>(
+        'getUrlAnalytics',
+        [url],
+        () => getDb().getUrlAnalytics(url),
+      );
+    },
+  );
+
+  ipcMain.handle(
+    IPC.exportBigquery,
+    async (_e, input: ExportBigqueryInput): Promise<ExportBigqueryResult> => {
+      try {
+        const result = await exportCategoryToBigQuery(getDb(), input.category);
+        return {
+          ok: true,
+          error: null,
+          consoleUrl: result.consoleUrl,
+          tableRef: result.tableRef,
+          rowsWritten: result.rowsWritten,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          consoleUrl: null,
+          tableRef: null,
+          rowsWritten: 0,
+        };
+      }
+    },
+  );
 
   // Stream new entries to the logs window in coalesced batches. A heavy
   // crawl emits 100–300 logs/s; sending each as its own IPC message
@@ -2336,6 +3026,134 @@ function registerIpc(): void {
   ipcMain.handle(IPC.projectCurrentPath, (): string | null => {
     return currentProjectPath || null;
   });
+
+  // V1 #4 — Encrypted snapshot export. Flow:
+  //   1. WAL checkpoint so the .seoproject file on disk is consistent.
+  //   2. VACUUM INTO a tmp .seoproject to capture an atomic snapshot of
+  //      the live DB without racing the writer worker.
+  //   3. Ask the user for a destination .seoproject.enc path.
+  //   4. AES-256-GCM encrypt the snapshot, write to dst, delete the tmp.
+  ipcMain.handle(
+    IPC.projectSaveEncrypted,
+    async (
+      _e,
+      password: string,
+    ): Promise<{ filePath: string; bytesWritten: number } | { error: string } | null> => {
+      const win = mainWindow;
+      if (!win) return null;
+      if (typeof password !== 'string' || password.length === 0) {
+        return { error: 'Password is required.' };
+      }
+      loadPrefs();
+      const baseDir = (() => {
+        const raw = prefsCache['projectSaveDir'];
+        if (typeof raw === 'string' && raw.trim().length > 0) return raw;
+        return app.getPath('documents');
+      })();
+      const res = await dialog.showSaveDialog(win, {
+        title: 'Save Encrypted Snapshot…',
+        defaultPath: join(baseDir, 'crawl.seoproject.enc'),
+        filters: [
+          { name: 'FreeCrawl Encrypted Project', extensions: ['enc', 'seoproject.enc'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      if (res.canceled || !res.filePath) return null;
+      const target = res.filePath;
+
+      const tmpPath = join(app.getPath('temp'), `freecrawl-enc-${Date.now()}.seoproject`);
+      try {
+        const database = getDb();
+        try {
+          database.walCheckpoint();
+        } catch {
+          /* checkpoint is best-effort; VACUUM INTO still snapshots consistently */
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawDb = (database as any).db as { exec: (sql: string) => void };
+        const escaped = tmpPath.replace(/'/g, "''");
+        rawDb.exec(`VACUUM INTO '${escaped}'`);
+
+        const { encryptFile } = await import('./project-encryption.js');
+        const result = encryptFile(tmpPath, target, password);
+
+        await dialog.showMessageBox(win, {
+          type: 'info',
+          title: 'Encrypted Snapshot Saved',
+          message: `Encrypted snapshot written: ${(result.bytesWritten / (1024 * 1024)).toFixed(1)} MB.`,
+          detail:
+            `${target}\n\n` +
+            'Keep the password safe — it cannot be recovered. Without it, the file is unreadable.',
+          buttons: ['OK'],
+          noLink: true,
+        });
+        return { filePath: target, bytesWritten: result.bytesWritten };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.log('warn', 'main', `projectSaveEncrypted failed: ${message}`);
+        return { error: message };
+      } finally {
+        try {
+          const { unlinkSync } = await import('node:fs');
+          unlinkSync(tmpPath);
+        } catch {
+          /* best-effort tmp cleanup */
+        }
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.projectOpenEncrypted,
+    async (
+      _e,
+      password: string,
+    ): Promise<{ filePath: string } | { error: string } | null> => {
+      const win = mainWindow;
+      if (!win) return null;
+      if (typeof password !== 'string' || password.length === 0) {
+        return { error: 'Password is required.' };
+      }
+      const open = await dialog.showOpenDialog(win, {
+        title: 'Open Encrypted Project…',
+        properties: ['openFile'],
+        filters: [
+          { name: 'FreeCrawl Encrypted Project', extensions: ['enc', 'seoproject.enc'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      if (open.canceled || open.filePaths.length === 0) return null;
+      const srcPath = open.filePaths[0]!;
+
+      loadPrefs();
+      const baseDir = (() => {
+        const raw = prefsCache['projectSaveDir'];
+        if (typeof raw === 'string' && raw.trim().length > 0) return raw;
+        return app.getPath('documents');
+      })();
+      const save = await dialog.showSaveDialog(win, {
+        title: 'Save Decrypted Project As…',
+        defaultPath: join(baseDir, 'recovered.seoproject'),
+        filters: [
+          { name: 'FreeCrawl Project', extensions: ['seoproject'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      if (save.canceled || !save.filePath) return null;
+      const dstPath = save.filePath;
+
+      try {
+        const { decryptFile } = await import('./project-encryption.js');
+        decryptFile(srcPath, dstPath, password);
+        openProjectAtPath(dstPath);
+        return { filePath: dstPath };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.log('warn', 'main', `projectOpenEncrypted failed: ${message}`);
+        return { error: message };
+      }
+    },
+  );
 
   ipcMain.handle(IPC.confirmClear, async (): Promise<ConfirmClearResult> => {
     const win = mainWindow;
@@ -2729,6 +3547,31 @@ function registerIpc(): void {
       }
       const { rowsWritten } = await exportBrokenLinksToCsv(getDb(), filePath, {
         internal: input.internal,
+      });
+      return { filePath, rowsWritten };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.exportImages,
+    async (
+      _e,
+      input: ExportImagesInput,
+    ): Promise<ExportImagesResult> => {
+      let filePath = input.filePath;
+      if (!filePath) {
+        const res = await dialog.showSaveDialog(mainWindow!, {
+          defaultPath: 'freecrawl-images.csv',
+          filters: [{ name: 'CSV', extensions: ['csv'] }],
+        });
+        if (res.canceled || !res.filePath) {
+          return { filePath: '', rowsWritten: 0 };
+        }
+        filePath = res.filePath;
+      }
+      const { rowsWritten } = await exportImagesToCsv(getDb(), filePath, {
+        missingAltOnly: input.missingAltOnly,
+        search: input.search,
       });
       return { filePath, rowsWritten };
     },

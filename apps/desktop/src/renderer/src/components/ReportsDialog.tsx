@@ -19,6 +19,7 @@ import type {
   TopWordsRow,
   WordCountPerDirectoryRow,
   SitemapOrphanRow,
+  OrphanCrossSourceRow,
 } from '@freecrawl/shared-types';
 
 interface Props {
@@ -48,6 +49,7 @@ type ReportKind =
   | 'url-length-histogram'
   | 'word-count-per-dir'
   | 'sitemap-orphans'
+  | 'orphan-cross-source'
   | 'server-headers'
   | 'top-words';
 
@@ -87,6 +89,7 @@ const REPORT_LABELS: Record<ReportKind, string> = {
   'url-length-histogram': 'URL Length Histogram',
   'word-count-per-dir': 'Word Count per Directory',
   'sitemap-orphans': 'Sitemap Orphans (Top 1000)',
+  'orphan-cross-source': 'Orphan Pages — Sitemap + GSC + GA4 (Top 1000)',
   'server-headers': 'Server Stack (Server Header)',
   'top-words': 'Top Words (Title + Meta + H1, Top 100)',
 };
@@ -113,6 +116,7 @@ const KEY_LABELS: Record<ReportKind, string> = {
   'url-length-histogram': 'Bucket',
   'word-count-per-dir': 'Directory',
   'sitemap-orphans': 'URL',
+  'orphan-cross-source': 'URL',
   'server-headers': 'Server',
   'top-words': 'Word',
 };
@@ -139,6 +143,7 @@ const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
   'url-length-histogram': null,
   'word-count-per-dir': null,
   'sitemap-orphans': null,
+  'orphan-cross-source': null,
   'server-headers': null,
   'top-words': null,
 };
@@ -170,6 +175,7 @@ const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
   'url-length-histogram': (v) => (v ?? 0).toLocaleString(),
   'word-count-per-dir': (v) => (v ?? 0).toLocaleString(),
   'sitemap-orphans': (v) => (v ?? 0).toLocaleString(),
+  'orphan-cross-source': (v) => (v ?? 0).toLocaleString(),
   'server-headers': (v) => (v ?? 0).toLocaleString(),
   'top-words': (v) => (v ?? 0).toLocaleString(),
 };
@@ -205,6 +211,7 @@ export function ReportsDialog({ open, onClose }: Props) {
     'url-length-histogram': t('reports.report.urlLengthHistogram', { defaultValue: REPORT_LABELS['url-length-histogram'] }),
     'word-count-per-dir': t('reports.report.wordCountPerDir', { defaultValue: REPORT_LABELS['word-count-per-dir'] }),
     'sitemap-orphans': t('reports.report.sitemapOrphans', { defaultValue: REPORT_LABELS['sitemap-orphans'] }),
+    'orphan-cross-source': t('reports.report.orphanCrossSource', { defaultValue: REPORT_LABELS['orphan-cross-source'] }),
     'server-headers': t('reports.report.serverHeaders', { defaultValue: REPORT_LABELS['server-headers'] }),
     'top-words': t('reports.report.topWords', { defaultValue: REPORT_LABELS['top-words'] }),
   }), [t]);
@@ -230,6 +237,7 @@ export function ReportsDialog({ open, onClose }: Props) {
     'url-length-histogram': t('reports.keyBucket', { defaultValue: 'Bucket' }),
     'word-count-per-dir': t('reports.keyDirectory', { defaultValue: 'Directory' }),
     'sitemap-orphans': 'URL',
+    'orphan-cross-source': 'URL',
     'server-headers': t('reports.keyServer', { defaultValue: 'Server' }),
     'top-words': t('reports.keyWord', { defaultValue: 'Word' }),
   }), [t]);
@@ -387,6 +395,21 @@ export function ReportsDialog({ open, onClose }: Props) {
                 ]
                   .filter(Boolean)
                   .join(' · ') || '—',
+              })),
+            );
+        } else if (kind === 'orphan-cross-source') {
+          const r = await window.freecrawl.reportsOrphanCrossSource(1000);
+          if (!cancelled)
+            setRows(
+              r.map((x: OrphanCrossSourceRow) => ({
+                key: x.url,
+                count: 1,
+                // `sources` (sitemap / gsc / ga4) goes in the secondary
+                // value column so the user can triage why each URL was
+                // missed by the crawl — sitemap-only often means a
+                // broken internal-link path; GSC + GA4 means real
+                // user-visited pages no crawl path reaches.
+                valueLabel: x.sources.join(' + '),
               })),
             );
         } else if (kind === 'server-headers') {
