@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.6.5] — 2026-05-28
+
+### Added
+- JavaScript rendering via headless Chromium (Playwright) — post-JS DOM capture for SPAs and hydration-only sites, used for link extraction + extraction rules.
+- View Rendered HTML detail sub-tab — compare raw HTTP response against post-JS DOM with side-by-side search and per-render timing badge.
+- Screenshot capture during JS render — full-page, above-the-fold, and 375×667 mobile-viewport PNGs stored next to the project file with a dedicated detail panel sub-tab.
+- LCP candidate detection — identifies the largest above-the-fold element after JS render and stores its CSS selector, dimensions, and resource URL.
+- Mobile Usability audit — re-renders each page on a mobile viewport and checks viewport meta, horizontal overflow, font size, and tap-target spacing.
+- Settings → Rendering panel — viewport, wait conditions, resource blocking, Chromium channel, pre-render JS snippet, screenshot mode, and advanced audit toggles.
+- "Export Crawl Data…" dialog — single menu entry replacing the three "Export Current View as …" items, with Excel `.xlsx` / CSV-UTF-8 / JSON / XML formats and a hierarchical tree picker that lays out top tables and their structural sub-categories under nested folders.
+- Per-tab quick-filter dropdown — Overview sub-categories accessible directly from each tab's toolbar without leaving the view.
+- List ↔ Tree view toggle — switch between flat virtualized table and URL-path hierarchy with collapsible folders.
+- Visualization moved to its own native window — accessible from the new "Visualization" top-level menu (Ctrl+G), free to park on a second monitor.
+- Full Settings dialog Turkish translation coverage — sidebar sections, dialog chrome, and every field label across the 24 panels.
+- Optional offline-ready installers — release builds now ship Playwright Chromium inside the installer so JavaScript rendering works on first launch with no extra download.
+
+### Changed
+- Overview sidebar clicks now auto-switch to the matching top-level tab (e.g. Response Codes → Client Error 4xx jumps to the Response Codes tab) for every structural group and 30+ issue filters.
+- File menu "About FreeCrawl SEO" now opens https://freecrawl.net/ in the default browser instead of doing nothing.
+- Browser pool startup checks the Playwright binary up-front and, if missing, surfaces a single download prompt instead of spamming a warning per URL.
+
+### Fixed
+- Mobile screenshot now actually renders on a 375×667 mobile viewport instead of producing a desktop above-the-fold duplicate.
+- Pre-render JS snippet no longer accumulates across pooled pages — it is registered once at the browser context level so long crawls run the snippet exactly once per navigation.
+- Stop button now cancels in-flight Playwright navigations immediately instead of waiting for the request timeout to elapse.
+- Browser pool no longer crashes the crawler when closed while page acquires are queued — waiters are rejected with a clean error.
+- Screenshot file IPC reader hardened against path-traversal attempts; only PNGs inside the active project's sidecar folder are returned.
+- Body snapshot truncation respects UTF-8 boundaries so the View Source / View Rendered tail no longer ends in a replacement character.
+- Render artefacts (rendered HTML, screenshots, LCP, mobile-usability) are now persisted inline before the URL is considered complete, eliminating a race window with the Clear button.
+- CSV / XLSX exports now neutralise cells beginning with `=`, `+`, `-`, `@`, TAB, or CR to prevent formula-injection attacks via crawled page content.
+- Tree view distinguishes root URLs that differ only by query string or fragment.
+- "Export Crawl Data" single-file mode now rewrites the chosen output path's extension to match the selected format.
+- Quick-filter dropdown shows a placeholder when the active category isn't in the predefined list instead of silently mislabelling itself as the first option.
+
 ## [0.6.0] — 2026-05-25
 
 ### Added
