@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/core",
-  "version": "0.6.0",
+  "version": "0.6.5",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -22,6 +22,7 @@
     "cacheable-lookup": "^7.0.0",
     "cheerio": "^1.0.0",
     "p-queue": "^8.0.1",
+    "playwright": "^1.49.0",
     "robots-parser": "^3.0.1",
     "undici": "^8.0.0"
   },

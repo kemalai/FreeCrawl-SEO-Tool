@@ -898,10 +898,73 @@ export interface CrawlConfig {
    *    are rewritten to Google's deprecated `?_escaped_fragment_=` form
    *    before fetch, so a pre-rendering server returns the snapshot HTML.
    *    No JS execution — just the URL transform.
-   * Full JavaScript rendering (a headless-browser pass) is a V2 item and
-   * intentionally absent from this union.
+   *  - `js` — full JavaScript rendering via Playwright/Chromium. Each URL
+   *    is navigated in a headless browser; post-load DOM is captured
+   *    after `ajaxTimeoutMs` / `waitSelector` settles. Slowest but
+   *    required for SPA / hydration-only content.
    */
-  renderingMode: 'text' | 'ajax';
+  renderingMode: 'text' | 'ajax' | 'js';
+
+  /**
+   * JS render configuration. Only consulted when `renderingMode === 'js'`.
+   * Defaults are wired in `validateCrawlConfig` so unset fields don't
+   * crash older projects that pre-date this block.
+   */
+  jsRender: JsRenderConfig;
+}
+
+/** Per-crawl Playwright settings — surfaces in Settings → Rendering. */
+export interface JsRenderConfig {
+  /** Show the browser window for debugging. Default false. */
+  headless: boolean;
+  /** Viewport width in CSS pixels. Default 1366. */
+  viewportWidth: number;
+  /** Viewport height in CSS pixels. Default 768. */
+  viewportHeight: number;
+  /** Extra wait after navigation for SPA hydration, ms. Default 2000. */
+  ajaxTimeoutMs: number;
+  /** Selector to wait for before extracting DOM. Empty = skip. */
+  waitSelector: string;
+  /** `load` (default), `domcontentloaded`, `networkidle`, `commit`. */
+  waitUntil: 'load' | 'domcontentloaded' | 'networkidle' | 'commit';
+  /** Resource types Playwright should block before they hit the network. */
+  blockResources: {
+    image: boolean;
+    font: boolean;
+    media: boolean;
+    stylesheet: boolean;
+    script: boolean;
+  };
+  /** Chromium channel — '' = bundled Playwright Chromium, or 'chrome'/'msedge'. */
+  browserChannel: '' | 'chrome' | 'msedge' | 'chrome-beta' | 'msedge-beta';
+  /** Inject this JS into the page context BEFORE navigation. */
+  prerenderJs: string;
+  /** Max parallel render tabs. Defaults to crawler maxConcurrency. */
+  maxPages: number;
+  /**
+   * Screenshot capture during JS render:
+   *  - 'none'      — skip (default for speed)
+   *  - 'fullpage'  — `page.screenshot({fullPage:true})`
+   *  - 'fold'      — above-the-fold (viewport-sized) capture
+   *  - 'both'      — fullpage + fold (two files per URL)
+   */
+  screenshotMode: 'none' | 'fullpage' | 'fold' | 'both';
+  /** Additionally capture a mobile-viewport variant (375×667). */
+  mobileScreenshot: boolean;
+  /**
+   * Run a second render pass at a mobile viewport to evaluate Google's
+   * Mobile-Friendly checks (viewport meta, content fits viewport,
+   * legible font size, tap-target spacing). Feeds the new
+   * `mobile_usable` column on the urls table.
+   */
+  mobileUsability: boolean;
+  /**
+   * Detect the largest above-the-fold element after JS render and
+   * store its CSS selector + bounding-box dimensions as an LCP
+   * candidate. Mirrors what PageSpeed Insights reports without
+   * requiring a PSI API call.
+   */
+  lcpCandidate: boolean;
 }
 
 export interface HttpAuth {
@@ -1540,4 +1603,26 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   proxyProfiles: [],
   proxyProfileActive: '',
   renderingMode: 'text',
+  jsRender: {
+    headless: true,
+    viewportWidth: 1366,
+    viewportHeight: 768,
+    ajaxTimeoutMs: 2000,
+    waitSelector: '',
+    waitUntil: 'load',
+    blockResources: {
+      image: false,
+      font: false,
+      media: true,
+      stylesheet: false,
+      script: false,
+    },
+    browserChannel: '',
+    prerenderJs: '',
+    maxPages: 0,
+    screenshotMode: 'none',
+    mobileScreenshot: false,
+    mobileUsability: false,
+    lcpCandidate: false,
+  },
 };

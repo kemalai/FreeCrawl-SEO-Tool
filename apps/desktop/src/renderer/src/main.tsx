@@ -2,18 +2,28 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
 import { LogsView } from './LogsView.js';
+import { VisualizationView } from './VisualizationView.js';
 import './styles.css';
 import './i18n/index.js';
 
-// The Logs popup window loads the same renderer bundle with `?logs=1` —
-// we branch at the entry point so only the LogsView component mounts
-// there (skipping the heavy main App, its stores, and IPC subscriptions).
-const isLogsWindow =
-  typeof window !== 'undefined' && /[?&]logs=1\b/.test(window.location.search);
+// Popup windows load the same renderer bundle with a query flag so the
+// entry point branches on which top-level component to mount. Keeps the
+// heavy main App (its stores + IPC subscriptions) off the popups.
+const search = typeof window !== 'undefined' ? window.location.search : '';
+const isLogsWindow = /[?&]logs=1\b/.test(search);
+const isVisualizationWindow = /[?&]visualization=1\b/.test(search);
 
 const root = document.getElementById('root');
 if (root) {
   createRoot(root).render(
-    <React.StrictMode>{isLogsWindow ? <LogsView /> : <App />}</React.StrictMode>,
+    <React.StrictMode>
+      {isLogsWindow ? (
+        <LogsView />
+      ) : isVisualizationWindow ? (
+        <VisualizationView />
+      ) : (
+        <App />
+      )}
+    </React.StrictMode>,
   );
 }

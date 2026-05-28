@@ -33,6 +33,7 @@ import {
   Languages,
   Plug,
   ExternalLink,
+  Chrome,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -138,7 +139,27 @@ interface FormState {
   proxyProfiles: { name: string; url: string }[];
   proxyProfileActive: string;
   // Faz 10 — page rendering strategy
-  renderingMode: 'text' | 'ajax';
+  renderingMode: 'text' | 'ajax' | 'js';
+  // V2 Faz 1 — JS render controls (only consulted when renderingMode = 'js')
+  jsRenderHeadless: boolean;
+  jsViewportWidth: string;
+  jsViewportHeight: string;
+  jsAjaxTimeoutMs: string;
+  jsWaitSelector: string;
+  jsWaitUntil: 'load' | 'domcontentloaded' | 'networkidle' | 'commit';
+  jsBlockImages: boolean;
+  jsBlockFonts: boolean;
+  jsBlockMedia: boolean;
+  jsBlockStylesheets: boolean;
+  jsBlockScripts: boolean;
+  jsBrowserChannel: '' | 'chrome' | 'msedge' | 'chrome-beta' | 'msedge-beta';
+  jsPrerenderJs: string;
+  jsMaxPages: string;
+  // V2 Faz 1 Increment 3+4 — screenshot capture + mobile usability + LCP
+  jsScreenshotMode: 'none' | 'fullpage' | 'fold' | 'both';
+  jsMobileScreenshot: boolean;
+  jsMobileUsability: boolean;
+  jsLcpCandidate: boolean;
 }
 
 type SectionKey =
@@ -163,6 +184,7 @@ type SectionKey =
   | 'cookies'
   | 'per-host-ua'
   | 'integrations'
+  | 'rendering'
   | 'storage'
   | 'privacy'
   | 'language';
@@ -310,6 +332,13 @@ const SECTIONS: SectionDef[] = [
       'integrations api key oauth google search console analytics gsc ga4 pagespeed ahrefs moz semrush majestic openai anthropic claude ollama sheets bigquery credentials',
   },
   {
+    key: 'rendering',
+    label: 'Rendering',
+    icon: Chrome,
+    keywords:
+      'rendering javascript js render playwright chromium browser headless headful viewport mobile desktop ajax timeout wait selector resource block image font script media css spa hydration',
+  },
+  {
     key: 'storage',
     label: 'Storage',
     icon: FolderOpen,
@@ -396,6 +425,24 @@ function configToForm(c: CrawlConfig): FormState {
     proxyProfiles: (c.proxyProfiles ?? []).map((p) => ({ ...p })),
     proxyProfileActive: c.proxyProfileActive ?? '',
     renderingMode: c.renderingMode ?? 'text',
+    jsRenderHeadless: c.jsRender?.headless ?? true,
+    jsViewportWidth: String(c.jsRender?.viewportWidth ?? 1366),
+    jsViewportHeight: String(c.jsRender?.viewportHeight ?? 768),
+    jsAjaxTimeoutMs: String(c.jsRender?.ajaxTimeoutMs ?? 2000),
+    jsWaitSelector: c.jsRender?.waitSelector ?? '',
+    jsWaitUntil: c.jsRender?.waitUntil ?? 'load',
+    jsBlockImages: c.jsRender?.blockResources?.image ?? false,
+    jsBlockFonts: c.jsRender?.blockResources?.font ?? false,
+    jsBlockMedia: c.jsRender?.blockResources?.media ?? true,
+    jsBlockStylesheets: c.jsRender?.blockResources?.stylesheet ?? false,
+    jsBlockScripts: c.jsRender?.blockResources?.script ?? false,
+    jsBrowserChannel: c.jsRender?.browserChannel ?? '',
+    jsPrerenderJs: c.jsRender?.prerenderJs ?? '',
+    jsMaxPages: String(c.jsRender?.maxPages ?? 0),
+    jsScreenshotMode: c.jsRender?.screenshotMode ?? 'none',
+    jsMobileScreenshot: c.jsRender?.mobileScreenshot ?? false,
+    jsMobileUsability: c.jsRender?.mobileUsability ?? false,
+    jsLcpCandidate: c.jsRender?.lcpCandidate ?? false,
   };
 }
 
@@ -426,6 +473,8 @@ function num(v: string, fallback: number): number {
 }
 
 export function SettingsDialog({ open, onClose }: Props) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
   const [form, setForm] = useState<FormState>(() => configToForm(config));
@@ -484,7 +533,10 @@ export function SettingsDialog({ open, onClose }: Props) {
    */
   function resetToDefaults() {
     const ok = window.confirm(
-      'Reset ALL crawl settings to their defaults?\n\nThis clears include/exclude patterns, custom search & extraction rules, URL rewrites, auth, proxy profiles, per-host user-agents, and webhook URL. Nothing is saved until you click Save — Cancel still discards.',
+      t('settings.resetConfirm', {
+        defaultValue:
+          'Reset ALL crawl settings to their defaults?\n\nThis clears include/exclude patterns, custom search & extraction rules, URL rewrites, auth, proxy profiles, per-host user-agents, and webhook URL. Nothing is saved until you click Save — Cancel still discards.',
+      }),
     );
     if (!ok) return;
     setForm(configToForm(DEFAULT_CRAWL_CONFIG));
@@ -592,6 +644,40 @@ export function SettingsDialog({ open, onClose }: Props) {
         .filter((p) => p.name && p.url),
       proxyProfileActive: form.proxyProfileActive.trim(),
       renderingMode: form.renderingMode,
+      jsRender: {
+        headless: form.jsRenderHeadless,
+        viewportWidth:
+          Number.parseInt(form.jsViewportWidth, 10) > 0
+            ? Number.parseInt(form.jsViewportWidth, 10)
+            : 1366,
+        viewportHeight:
+          Number.parseInt(form.jsViewportHeight, 10) > 0
+            ? Number.parseInt(form.jsViewportHeight, 10)
+            : 768,
+        ajaxTimeoutMs:
+          Number.parseInt(form.jsAjaxTimeoutMs, 10) >= 0
+            ? Number.parseInt(form.jsAjaxTimeoutMs, 10)
+            : 2000,
+        waitSelector: form.jsWaitSelector.trim(),
+        waitUntil: form.jsWaitUntil,
+        blockResources: {
+          image: form.jsBlockImages,
+          font: form.jsBlockFonts,
+          media: form.jsBlockMedia,
+          stylesheet: form.jsBlockStylesheets,
+          script: form.jsBlockScripts,
+        },
+        browserChannel: form.jsBrowserChannel,
+        prerenderJs: form.jsPrerenderJs,
+        maxPages:
+          Number.parseInt(form.jsMaxPages, 10) >= 0
+            ? Number.parseInt(form.jsMaxPages, 10)
+            : 0,
+        screenshotMode: form.jsScreenshotMode,
+        mobileScreenshot: form.jsMobileScreenshot,
+        mobileUsability: form.jsMobileUsability,
+        lcpCandidate: form.jsLcpCandidate,
+      },
     });
     onClose();
   }
@@ -608,11 +694,13 @@ export function SettingsDialog({ open, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center border-b border-surface-800 px-4 py-2.5">
-          <div className="text-sm font-semibold tracking-wide text-surface-100">Settings</div>
+          <div className="text-sm font-semibold tracking-wide text-surface-100">
+            {t('settings.title', { defaultValue: 'Settings' })}
+          </div>
           <button
             className="ml-auto rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-surface-100"
             onClick={onClose}
-            title="Close (Esc)"
+            title={t('settings.closeTooltip', { defaultValue: 'Close (Esc)' })}
           >
             <X className="h-4 w-4" />
           </button>
@@ -626,7 +714,7 @@ export function SettingsDialog({ open, onClose }: Props) {
                 <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-surface-500" />
                 <input
                   className="w-full rounded border border-surface-700 bg-surface-950 py-1 pl-7 pr-2 text-[11px] text-surface-100 placeholder-surface-500 focus:border-blue-500 focus:outline-none"
-                  placeholder="Search..."
+                  placeholder={t('settings.searchPlaceholder', { defaultValue: 'Search…' })}
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   spellCheck={false}
@@ -635,7 +723,9 @@ export function SettingsDialog({ open, onClose }: Props) {
             </div>
             <nav className="flex-1 overflow-auto py-1">
               {visibleSections.length === 0 && (
-                <div className="px-3 py-2 text-[11px] text-surface-500">No matches</div>
+                <div className="px-3 py-2 text-[11px] text-surface-500">
+                  {t('settings.noMatches', { defaultValue: 'No matches' })}
+                </div>
               )}
               {visibleSections.map((s) => {
                 const Icon = s.icon;
@@ -652,7 +742,7 @@ export function SettingsDialog({ open, onClose }: Props) {
                     onClick={() => setActive(s.key)}
                   >
                     <Icon className="h-3.5 w-3.5" />
-                    <span>{s.label}</span>
+                    <span>{translateLabel(s.label, lang)}</span>
                   </button>
                 );
               })}
@@ -662,8 +752,9 @@ export function SettingsDialog({ open, onClose }: Props) {
           {/* Content */}
           <div className="flex flex-1 flex-col min-w-0">
             <div className="border-b border-surface-800 px-5 py-2 text-[11px] text-surface-400">
-              Settings <span className="mx-1 text-surface-600">›</span>
-              <span className="text-surface-200">{activeDef.label}</span>
+              {t('settings.title', { defaultValue: 'Settings' })}{' '}
+              <span className="mx-1 text-surface-600">›</span>
+              <span className="text-surface-200">{translateLabel(activeDef.label, lang)}</span>
             </div>
             <div className="flex-1 overflow-auto px-5 py-4 text-[12px]">
               {active === 'presets' && (
@@ -749,6 +840,9 @@ export function SettingsDialog({ open, onClose }: Props) {
                 <PerHostUaPanel form={form} update={update} />
               )}
               {active === 'integrations' && <IntegrationsPanel />}
+              {active === 'rendering' && (
+                <RenderingPanel form={form} update={update} />
+              )}
               {active === 'storage' && <StoragePanel />}
               {active === 'privacy' && <PrivacyPanel />}
               {active === 'language' && <LanguagePanel />}
@@ -760,22 +854,25 @@ export function SettingsDialog({ open, onClose }: Props) {
           <button
             className="rounded border border-surface-700 px-3 py-1 text-[11px] text-surface-300 hover:bg-surface-800 hover:text-surface-100"
             onClick={resetToDefaults}
-            title="Reset every crawl setting to its factory default (you still have to Save)"
+            title={t('settings.resetTooltip', {
+              defaultValue:
+                'Reset every crawl setting to its factory default (you still have to Save)',
+            })}
           >
-            Reset to Defaults
+            {t('settings.resetToDefaults', { defaultValue: 'Reset to Defaults' })}
           </button>
           <div className="flex items-center gap-2">
             <button
               className="rounded border border-surface-700 px-3 py-1 text-[11px] hover:bg-surface-800"
               onClick={onClose}
             >
-              Cancel
+              {t('settings.cancel', { defaultValue: 'Cancel' })}
             </button>
             <button
               className="rounded bg-blue-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-500"
               onClick={save}
             >
-              Save
+              {t('settings.save', { defaultValue: 'Save' })}
             </button>
           </div>
         </div>
@@ -1011,7 +1108,7 @@ function ModePanel({ form, update }: PanelProps) {
       </p>
       <label className="mb-2 flex flex-col gap-1">
         <FieldLabel
-          label="Crawl Mode"
+          label={t('settingsPanels.mode.crawlMode', { defaultValue: 'Crawl Mode' })}
           info="Spider follows links from the start URL across the chosen scope. List fetches a fixed set of URLs once with no link-following."
           example="Spider for full site audits; List for re-checking a known set of pages."
         />
@@ -1020,13 +1117,17 @@ function ModePanel({ form, update }: PanelProps) {
           value={form.mode}
           onChange={(e) => update('mode', e.target.value as CrawlMode)}
         >
-          <option value="spider">Spider — start URL + follow links</option>
-          <option value="list">List — fetch a fixed URL list, no link follow</option>
+          <option value="spider">
+            {t('settingsPanels.mode.spiderOption', { defaultValue: 'Spider — start URL + follow links' })}
+          </option>
+          <option value="list">
+            {t('settingsPanels.mode.listOption', { defaultValue: 'List — fetch a fixed URL list, no link follow' })}
+          </option>
         </select>
       </label>
       {form.mode === 'list' && (
         <Area
-          label="URL List (one URL per line)"
+          label={t('settingsPanels.mode.urlList', { defaultValue: 'URL List (one URL per line)' })}
           value={form.urlListText}
           onChange={(v) => update('urlListText', v)}
           rows={10}
@@ -1056,21 +1157,21 @@ function CrawlerPanel({ form, update }: PanelProps) {
 
       <div className="grid grid-cols-2 gap-3">
         <Num
-          label="Crawl Depth Limit (Max Depth)"
+          label={t('settingsPanels.crawler.maxDepth', { defaultValue: 'Crawl Depth Limit (Max Depth)' })}
           value={form.maxDepth}
           onChange={(v) => update('maxDepth', v)}
           info="Hop count from the start URL. Start URL is depth 0; its outlinks are depth 1, theirs depth 2, and so on. Screaming Frog: 'Limit Crawl Depth' (Configuration → Spider → Limits)."
           example="10 covers most sites; 3 limits crawls to top-of-funnel pages only."
         />
         <Num
-          label="Crawl Total Limit (Max URLs)"
+          label={t('settingsPanels.crawler.maxUrls', { defaultValue: 'Crawl Total Limit (Max URLs)' })}
           value={form.maxUrls}
           onChange={(v) => update('maxUrls', v)}
           info="Hard cap on total URLs crawled. The crawl stops as soon as this is reached. Screaming Frog: 'Limit Crawl Total'."
           example="1000000 (1M) for a full site audit; 5000 for spot checks."
         />
         <Num
-          label="Response Timeout (ms)"
+          label={t('settingsPanels.crawler.requestTimeoutMs', { defaultValue: 'Response Timeout (ms)' })}
           value={form.requestTimeoutMs}
           onChange={(v) => update('requestTimeoutMs', v)}
           info="Per-request abort threshold. Pages that take longer than this are recorded as network errors. Screaming Frog: 'Response Timeout (secs)' (Configuration → Spider → Advanced) — that one's in seconds, this is in milliseconds."
@@ -1080,39 +1181,39 @@ function CrawlerPanel({ form, update }: PanelProps) {
 
       <div className="mt-4 grid grid-cols-2 gap-2">
         <Bool
-          label="Always Follow Redirects"
+          label={t('settingsPanels.crawler.followRedirects', { defaultValue: 'Always Follow Redirects' })}
           checked={form.followRedirects}
           onChange={(v) => update('followRedirects', v)}
           info="Crawl 3xx redirect targets. Each hop is its own row; the chain is reconstructed in the Response Codes view. Screaming Frog: 'Always Follow Redirects' (Configuration → Spider → Advanced)."
           example="On for normal audits; off when you only want to inspect raw 3xx behaviour."
         />
         <Bool
-          label="Respect robots.txt"
+          label={t('settingsPanels.crawler.respectRobotsTxt', { defaultValue: 'Respect robots.txt' })}
           checked={form.respectRobotsTxt}
           onChange={(v) => update('respectRobotsTxt', v)}
           info="Honor Disallow rules + crawl-delay declared in /robots.txt for the configured User-Agent. Screaming Frog: 'Respect robots.txt' (Configuration → robots.txt)."
           example="On (default). Off only when crawling sites you own and need to bypass."
         />
         <Bool
-          label="Check External Links"
+          label={t('settingsPanels.crawler.crawlExternal', { defaultValue: 'Check External Links' })}
           checked={form.crawlExternal}
           onChange={(v) => update('crawlExternal', v)}
           info="Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."
           example="On for outbound link audits; off for fast internal-only crawls."
         />
         <Bool
-          label="Follow / Store Nofollow Links"
+          label={t('settingsPanels.crawler.storeNofollow', { defaultValue: 'Follow / Store Nofollow Links' })}
           checked={form.storeNofollowLinks}
           onChange={(v) => update('storeNofollowLinks', v)}
-          hint="Default off — Screaming Frog 'Respect Nofollow' behaviour"
+          hint={t('settingsPanels.crawler.storeNofollowHint', { defaultValue: "Default off — Screaming Frog 'Respect Nofollow' behaviour" })}
           info='Persist rel="nofollow" links in the link graph. When off, nofollow links are dropped entirely (not counted in outlinks, not probed as externals). Screaming Frog inverse: turning this ON ≈ unchecking "Follow Internal/External Nofollow".'
           example="On if you need nofollow attribute audits; off keeps the link graph cleaner."
         />
         <Bool
-          label="Auto-Discover XML Sitemaps"
+          label={t('settingsPanels.crawler.discoverSitemaps', { defaultValue: 'Auto-Discover XML Sitemaps' })}
           checked={form.discoverSitemaps}
           onChange={(v) => update('discoverSitemaps', v)}
-          hint="Reads sitemap.xml from robots.txt + default paths at crawl start"
+          hint={t('settingsPanels.crawler.discoverSitemapsHint', { defaultValue: 'Reads sitemap.xml from robots.txt + default paths at crawl start' })}
           info="Fetches /robots.txt sitemap directives + /sitemap.xml fallbacks. Powers the 'Non-Indexable in Sitemap' issue filter. Screaming Frog: 'Auto Discover XML Sitemaps via robots.txt' (Configuration → Spider → Crawl)."
           example="On (default) — cheap I/O, high SEO value."
         />
@@ -1128,7 +1229,9 @@ function CrawlerPanel({ form, update }: PanelProps) {
           <select
             className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
             value={form.renderingMode}
-            onChange={(e) => update('renderingMode', e.target.value as 'text' | 'ajax')}
+            onChange={(e) =>
+              update('renderingMode', e.target.value as 'text' | 'ajax' | 'js')
+            }
           >
             <option value="text">
               {t('settingsPanels.crawler.renderTextOnly', { defaultValue: 'Text Only (default)' })}
@@ -1136,10 +1239,18 @@ function CrawlerPanel({ form, update }: PanelProps) {
             <option value="ajax">
               {t('settingsPanels.crawler.renderAjax', { defaultValue: 'Old AJAX Crawling Scheme (_escaped_fragment_)' })}
             </option>
-            <option value="js" disabled>
-              {t('settingsPanels.crawler.renderJs', { defaultValue: 'JavaScript Rendering (coming in V2)' })}
+            <option value="js">
+              {t('settingsPanels.crawler.renderJs', { defaultValue: 'JavaScript Rendering (Playwright)' })}
             </option>
           </select>
+          {form.renderingMode === 'js' ? (
+            <p className="mt-1 text-[11px] text-amber-300">
+              {t('settingsPanels.crawler.renderJsHint', {
+                defaultValue:
+                  'JS rendering uses a headless Chromium per page — significantly slower than text mode. Configure viewport, wait conditions, and resource blocking in the Rendering tab.',
+              })}
+            </p>
+          ) : null}
         </label>
       </div>
     </>
@@ -1179,37 +1290,39 @@ function SpeedPanel({ form, update }: PanelProps) {
       </div>
 
       <Num
-        label="Max Concurrency (parallel workers)"
+        label={t('settingsPanels.speed.maxConcurrency', { defaultValue: 'Max Concurrency (parallel workers)' })}
         value={form.maxConcurrency}
         onChange={(v) => update('maxConcurrency', v)}
         info="Number of HTTP requests in flight at any one time. Equivalent to Screaming Frog's 'Max Threads'. Higher = faster crawl + more load on the target server."
         example="20 default; 50 on fast first-party servers; 5 if the site rate-limits or returns 429s."
       />
       <Num
-        label="Max URL/s (rate limit)"
+        label={t('settingsPanels.speed.maxRps', { defaultValue: 'Max URL/s (rate limit)' })}
         value={form.maxRps}
         onChange={(v) => update('maxRps', v)}
         info="Hard ceiling on requests per second across all workers combined. Equivalent to Screaming Frog's 'Max URL/s'. Acts as a token bucket — even with high concurrency the crawler waits between bursts to stay below this rate."
         example="20 for typical sites; 5 to be polite on shared hosting; 60+ when crawling your own infra."
       />
       <Num
-        label="Per-Worker Delay (ms after each request)"
+        label={t('settingsPanels.speed.crawlDelayMs', { defaultValue: 'Per-Worker Delay (ms after each request)' })}
         value={form.crawlDelayMs}
         onChange={(v) => update('crawlDelayMs', v)}
         info="Sleep this long on each worker AFTER a response completes, before it picks up the next URL. Stacks with the global RPS cap — useful for sites that rate-limit on inter-request gap rather than total throughput."
         example="0 default; 250 ms when a host returns 429 with a 'too fast' message."
       />
 
-      <div className="mt-4 mb-1.5 text-[11px] font-medium text-surface-300">Retries</div>
+      <div className="mt-4 mb-1.5 text-[11px] font-medium text-surface-300">
+        {t('settingsPanels.speed.retriesHeading', { defaultValue: 'Retries' })}
+      </div>
       <Num
-        label="Retry Attempts (per URL on transient errors)"
+        label={t('settingsPanels.speed.retryAttempts', { defaultValue: 'Retry Attempts (per URL on transient errors)' })}
         value={form.retryAttempts}
         onChange={(v) => update('retryAttempts', v)}
         info="On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."
         example="2 default; 0 to record errors immediately without retrying; 5 for unreliable upstreams."
       />
       <Num
-        label="Initial Retry Delay (ms — exponential backoff)"
+        label={t('settingsPanels.speed.retryInitialDelayMs', { defaultValue: 'Initial Retry Delay (ms — exponential backoff)' })}
         value={form.retryInitialDelayMs}
         onChange={(v) => update('retryInitialDelayMs', v)}
         info="Wait this long before the FIRST retry, doubling on each subsequent attempt (500 → 1000 → 2000 …)."
@@ -1275,21 +1388,21 @@ function RequestsPanel({ form, update }: PanelProps) {
         </select>
       </label>
       <Text
-        label="User-Agent"
+        label={t('settingsPanels.requests.userAgent', { defaultValue: 'User-Agent' })}
         value={form.userAgent}
         onChange={(v) => update('userAgent', v)}
         info="Sent on every request as the User-Agent header. Identifies the crawler to servers; some sites serve different content based on UA."
         example="Mozilla/5.0 (compatible; FreeCrawlSEO/1.0; +https://yourdomain.com/bot)"
       />
       <Text
-        label="Accept-Language"
+        label={t('settingsPanels.requests.acceptLanguage', { defaultValue: 'Accept-Language' })}
         value={form.acceptLanguage}
         onChange={(v) => update('acceptLanguage', v)}
         info="Sent on every request. Affects which locale a multi-lingual site serves you."
         example="tr,en;q=0.8 — Turkish first, English fallback."
       />
       <Area
-        label='Custom Headers (one per line, "Key: Value")'
+        label={t('settingsPanels.requests.customHeaders', { defaultValue: 'Custom Headers (one per line, "Key: Value")' })}
         value={form.customHeadersText}
         onChange={(v) => update('customHeadersText', v)}
         rows={6}
@@ -1309,7 +1422,7 @@ function FiltersPanel({ form, update }: PanelProps) {
         {t('settingsPanels.filters.intro', { defaultValue: 'URL allowlist/blocklist. Patterns are JavaScript regex tested against the full URL.' })}
       </p>
       <Area
-        label="Include Patterns (regex, one per line — empty = all allowed)"
+        label={t('settingsPanels.filters.includePatterns', { defaultValue: 'Include Patterns (regex, one per line — empty = all allowed)' })}
         value={form.includePatternsText}
         onChange={(v) => update('includePatternsText', v)}
         rows={5}
@@ -1318,7 +1431,7 @@ function FiltersPanel({ form, update }: PanelProps) {
         example={'^https?://example\\.com/blog/\n/api/v2/'}
       />
       <Area
-        label="Exclude Patterns (regex, one per line)"
+        label={t('settingsPanels.filters.excludePatterns', { defaultValue: 'Exclude Patterns (regex, one per line)' })}
         value={form.excludePatternsText}
         onChange={(v) => update('excludePatternsText', v)}
         rows={5}
@@ -1383,7 +1496,7 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
   const runPreview = async () => {
     const sample = form.urlRewritePreview.trim();
     if (!sample) {
-      setPreviewState({ pending: false, parseError: 'Enter a URL above to preview' });
+      setPreviewState({ pending: false, parseError: t('settingsPanels.urlRewriting.enterUrlAbove', { defaultValue: 'Enter a URL above to preview' }) });
       return;
     }
     setPreviewState({ pending: true });
@@ -1429,32 +1542,32 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
       </p>
       <div className="grid grid-cols-2 gap-2">
         <Bool
-          label="Strip www."
+          label={t('settingsPanels.urlRewriting.stripWww', { defaultValue: 'Strip www.' })}
           checked={form.stripWww}
           onChange={(v) => update('stripWww', v)}
-          hint="Treat www.x.com and x.com as the same URL"
+          hint={t('settingsPanels.urlRewriting.stripWwwHint', { defaultValue: 'Treat www.x.com and x.com as the same URL' })}
           info="Removes the leading 'www.' from the host at normalisation time. The seen-set, redirect graph, and link extraction all use the rewritten form, so duplicates collapse correctly."
           example="On if your site canonicalises to non-www but emits www links somewhere."
         />
         <Bool
-          label="Force HTTPS"
+          label={t('settingsPanels.urlRewriting.forceHttps', { defaultValue: 'Force HTTPS' })}
           checked={form.forceHttps}
           onChange={(v) => update('forceHttps', v)}
-          hint="Upgrade http:// → https:// before fetching"
+          hint={t('settingsPanels.urlRewriting.forceHttpsHint', { defaultValue: 'Upgrade http:// → https:// before fetching' })}
           info="Rewrites http:// to https:// before fetching. Breaks HTTP-only sites."
           example="On for modern sites that 301 http→https anyway; off for legacy intranet."
         />
         <Bool
-          label="Lowercase path"
+          label={t('settingsPanels.urlRewriting.lowercasePath', { defaultValue: 'Lowercase path' })}
           checked={form.lowercasePath}
           onChange={(v) => update('lowercasePath', v)}
-          hint="Treat /Foo and /foo as the same URL"
+          hint={t('settingsPanels.urlRewriting.lowercasePathHint', { defaultValue: 'Treat /Foo and /foo as the same URL' })}
           info="Lowercases the URL path component. Host is already case-insensitive per the URL spec, so this only affects the path."
           example="On if your CMS serves the same page at mixed casing (/Foo and /foo)."
         />
         <label className="flex flex-col gap-1">
           <FieldLabel
-            label="Trailing slash policy"
+            label={t('settingsPanels.urlRewriting.trailingSlashPolicy', { defaultValue: 'Trailing slash policy' })}
             info="How to canonicalise paths with/without a trailing slash. 'Add' is file-extension aware — won't add a slash to /file.pdf or /image.png."
             example="Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/."
           />
@@ -1465,16 +1578,16 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
               update('trailingSlash', e.target.value as 'leave' | 'strip' | 'add')
             }
           >
-            <option value="leave">Leave as-is</option>
-            <option value="strip">Strip (/foo/ → /foo)</option>
-            <option value="add">Add (/foo → /foo/)</option>
+            <option value="leave">{t('settingsPanels.urlRewriting.trailingSlashLeave', { defaultValue: 'Leave as-is' })}</option>
+            <option value="strip">{t('settingsPanels.urlRewriting.trailingSlashStrip', { defaultValue: 'Strip (/foo/ → /foo)' })}</option>
+            <option value="add">{t('settingsPanels.urlRewriting.trailingSlashAdd', { defaultValue: 'Add (/foo → /foo/)' })}</option>
           </select>
         </label>
       </div>
 
       <div className="mt-4 border-t border-surface-800 pt-3">
         <Area
-          label="Keep query parameters (whitelist; one per line)"
+          label={t('settingsPanels.urlRewriting.keepQueryParams', { defaultValue: 'Keep query parameters (whitelist; one per line)' })}
           value={form.keepQueryParamsText}
           onChange={(v) => update('keepQueryParamsText', v)}
           rows={4}
@@ -1487,7 +1600,7 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
       <div className="mt-2">
         <div className="mb-1 flex items-center justify-between">
           <FieldLabel
-            label="Regex rewrites (applied to the final URL string in order)"
+            label={t('settingsPanels.urlRewriting.regexRewrites', { defaultValue: 'Regex rewrites (applied to the final URL string in order)' })}
             info="Each rule runs JavaScript RegExp.replace on the fully-normalised URL. Flags default to 'g'. After all rules run, the result is re-parsed as a URL — if the rewrite produces an invalid URL, the link is dropped at normalisation time."
             example="Pattern: ^https://m\\.(.+) · Replacement: https://www.$1 · Flags: i  (collapse mobile subdomain to www)"
           />
@@ -1496,12 +1609,12 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
             onClick={addRegexRow}
             className="inline-flex items-center gap-1 rounded border border-surface-700 px-2 py-0.5 text-[10px] text-surface-300 hover:bg-surface-800"
           >
-            <Plus size={11} /> Add rule
+            <Plus size={11} /> {t('settingsPanels.urlRewriting.addRule', { defaultValue: 'Add rule' })}
           </button>
         </div>
         {form.urlRegexRewrites.length === 0 ? (
           <div className="rounded border border-dashed border-surface-800 p-2 text-[10px] text-surface-500">
-            No regex rules. Click "Add rule" to define one.
+            {t('settingsPanels.urlRewriting.noRegexRules', { defaultValue: 'No regex rules. Click "Add rule" to define one.' })}
           </div>
         ) : (
           <div className="space-y-1">
@@ -1535,7 +1648,7 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
                   type="button"
                   onClick={() => removeRegexRow(i)}
                   className="rounded p-1 text-surface-400 hover:bg-surface-800 hover:text-red-400"
-                  title="Remove rule"
+                  title={t('settingsPanels.urlRewriting.removeRule', { defaultValue: 'Remove rule' })}
                 >
                   <Trash2 size={12} />
                 </button>
@@ -1547,7 +1660,7 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
 
       <div className="mt-4 border-t border-surface-800 pt-3">
         <FieldLabel
-          label="Preview — test a URL against current settings"
+          label={t('settingsPanels.urlRewriting.previewLabel', { defaultValue: 'Preview — test a URL against current settings' })}
           info="Sends the URL through the same normalisation pipeline used by the crawler, with your unsaved settings applied. Useful for verifying regex rules before kicking off a crawl."
         />
         <div className="mt-1 grid grid-cols-[1fr_auto] gap-1">
@@ -1565,7 +1678,7 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
             disabled={previewState.pending}
             className="rounded border border-surface-700 px-3 py-1 text-[11px] text-surface-200 hover:bg-surface-800 disabled:opacity-50"
           >
-            {previewState.pending ? 'Running…' : 'Preview'}
+            {previewState.pending ? t('settingsPanels.urlRewriting.running', { defaultValue: 'Running…' }) : t('settingsPanels.urlRewriting.preview', { defaultValue: 'Preview' })}
           </button>
         </div>
         {(previewState.result !== undefined || previewState.parseError) && (
@@ -1573,7 +1686,7 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
             {previewState.parseError ? (
               <div className="text-red-400">{previewState.parseError}</div>
             ) : previewState.result === null ? (
-              <div className="text-red-400">URL could not be normalised.</div>
+              <div className="text-red-400">{t('settingsPanels.urlRewriting.cannotNormalise', { defaultValue: 'URL could not be normalised.' })}</div>
             ) : (
               <div className="break-all font-mono text-emerald-300">{previewState.result}</div>
             )}
@@ -1634,7 +1747,7 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
             <button
               className="rounded p-1 text-surface-500 hover:bg-surface-800 hover:text-red-400"
               onClick={() => setRules(rules.filter((_, j) => j !== i))}
-              title="Remove rule"
+              title={t('settingsPanels.customExtraction.removeRule', { defaultValue: 'Remove rule' })}
             >
               <Trash2 className="h-3.5 w-3.5" />
             </button>
@@ -1643,7 +1756,7 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
           <div className="mb-2 grid grid-cols-2 gap-2">
             <label className="flex flex-col gap-1">
               <FieldLabel
-                label="Name"
+                label={t('settingsPanels.customExtraction.name', { defaultValue: 'Name' })}
                 info="The column / JSON-key name for this rule's output. Free-form."
                 example="product_price, sku, breadcrumb_last"
               />
@@ -1656,7 +1769,7 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
             </label>
             <label className="flex flex-col gap-1">
               <FieldLabel
-                label="Type"
+                label={t('settingsPanels.customExtraction.type', { defaultValue: 'Type' })}
                 info="`css` runs against the parsed DOM; `regex` runs against raw HTML."
                 example="css for selectors, regex for free-form patterns"
               />
@@ -1667,15 +1780,17 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                   updateRule(i, { type: e.target.value as 'css' | 'regex' })
                 }
               >
-                <option value="css">CSS Selector</option>
-                <option value="regex">Regex</option>
+                <option value="css">{t('settingsPanels.customExtraction.cssSelector', { defaultValue: 'CSS Selector' })}</option>
+                <option value="regex">{t('settingsPanels.customExtraction.regex', { defaultValue: 'Regex' })}</option>
               </select>
             </label>
           </div>
 
           <label className="mb-2 flex flex-col gap-1">
             <FieldLabel
-              label={r.type === 'css' ? 'CSS Selector' : 'Regex Pattern'}
+              label={r.type === 'css'
+                ? t('settingsPanels.customExtraction.cssSelector', { defaultValue: 'CSS Selector' })
+                : t('settingsPanels.customExtraction.regexPattern', { defaultValue: 'Regex Pattern' })}
               info={
                 r.type === 'css'
                   ? 'Standard CSS selector — same syntax as `document.querySelectorAll`.'
@@ -1698,7 +1813,7 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
           <div className="mb-2 grid grid-cols-3 gap-2">
             <label className="flex flex-col gap-1">
               <FieldLabel
-                label="Output"
+                label={t('settingsPanels.customExtraction.output', { defaultValue: 'Output' })}
                 info={
                   r.type === 'css'
                     ? 'What to read off each matched element.'
@@ -1715,17 +1830,17 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
               >
                 {r.type === 'css' ? (
                   <>
-                    <option value="text">Text</option>
-                    <option value="attribute">Attribute</option>
-                    <option value="inner_html">Inner HTML</option>
-                    <option value="outer_html">Outer HTML</option>
-                    <option value="count">Count</option>
+                    <option value="text">{t('settingsPanels.customExtraction.outputText', { defaultValue: 'Text' })}</option>
+                    <option value="attribute">{t('settingsPanels.customExtraction.outputAttribute', { defaultValue: 'Attribute' })}</option>
+                    <option value="inner_html">{t('settingsPanels.customExtraction.outputInnerHtml', { defaultValue: 'Inner HTML' })}</option>
+                    <option value="outer_html">{t('settingsPanels.customExtraction.outputOuterHtml', { defaultValue: 'Outer HTML' })}</option>
+                    <option value="count">{t('settingsPanels.customExtraction.outputCount', { defaultValue: 'Count' })}</option>
                   </>
                 ) : (
                   <>
-                    <option value="regex_group">Capture group 1</option>
-                    <option value="text">Whole match</option>
-                    <option value="count">Count</option>
+                    <option value="regex_group">{t('settingsPanels.customExtraction.outputCaptureGroup', { defaultValue: 'Capture group 1' })}</option>
+                    <option value="text">{t('settingsPanels.customExtraction.outputWholeMatch', { defaultValue: 'Whole match' })}</option>
+                    <option value="count">{t('settingsPanels.customExtraction.outputCount', { defaultValue: 'Count' })}</option>
                   </>
                 )}
               </select>
@@ -1733,7 +1848,7 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
             {r.type === 'css' && r.output === 'attribute' ? (
               <label className="flex flex-col gap-1">
                 <FieldLabel
-                  label="Attribute"
+                  label={t('settingsPanels.customExtraction.attribute', { defaultValue: 'Attribute' })}
                   info="HTML attribute name to read."
                   example="href, src, content, data-id"
                 />
@@ -1749,7 +1864,7 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
             )}
             <label className="flex flex-col gap-1">
               <FieldLabel
-                label="Multi-Match"
+                label={t('settingsPanels.customExtraction.multiMatch', { defaultValue: 'Multi-Match' })}
                 info="What to do when multiple matches exist."
                 example="first/last for single value, all for JSON array, concat for ' | ' joined string"
               />
@@ -1760,11 +1875,11 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                   updateRule(i, { multi: e.target.value as CustomExtractionRule['multi'] })
                 }
               >
-                <option value="first">First</option>
-                <option value="last">Last</option>
-                <option value="all">All (array)</option>
-                <option value="concat">Concat (` | `)</option>
-                <option value="count">Count</option>
+                <option value="first">{t('settingsPanels.customExtraction.multiFirst', { defaultValue: 'First' })}</option>
+                <option value="last">{t('settingsPanels.customExtraction.multiLast', { defaultValue: 'Last' })}</option>
+                <option value="all">{t('settingsPanels.customExtraction.multiAll', { defaultValue: 'All (array)' })}</option>
+                <option value="concat">{t('settingsPanels.customExtraction.multiConcat', { defaultValue: 'Concat (` | `)' })}</option>
+                <option value="count">{t('settingsPanels.customExtraction.multiCount', { defaultValue: 'Count' })}</option>
               </select>
             </label>
           </div>
@@ -1776,11 +1891,11 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
           className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
           onClick={() => setRules([...rules, { ...DEFAULT_RULE }])}
         >
-          <Plus className="h-3 w-3" /> Add Rule
+          <Plus className="h-3 w-3" /> {t('settingsPanels.customExtraction.addRule', { defaultValue: 'Add Rule' })}
         </button>
       )}
       {rules.length >= 10 && (
-        <p className="text-[10px] text-surface-500">Limit reached (10 rules).</p>
+        <p className="text-[10px] text-surface-500">{t('settingsPanels.customExtraction.limitReached', { defaultValue: 'Limit reached (10 rules).' })}</p>
       )}
     </>
   );
@@ -1798,7 +1913,7 @@ function WebhookPanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <Text
-          label="Webhook URL"
+          label={t('settingsPanels.webhook.url', { defaultValue: 'Webhook URL' })}
           value={form.webhookUrl}
           onChange={(v) => update('webhookUrl', v)}
           info="`POST <url>` is fired when the `done` event emits. 10 s timeout. Failures are logged as info events but never break the crawl."
@@ -1826,7 +1941,7 @@ function AuthPanel({ form, update }: PanelProps) {
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <label className="mb-2 flex flex-col gap-1">
           <FieldLabel
-            label="Auth scheme"
+            label={t('settingsPanels.auth.scheme', { defaultValue: 'Auth scheme' })}
             info="`none` disables auth; `basic` adds `Authorization: Basic <base64>`; `bearer` adds `Authorization: Bearer <token>`."
             example="basic for /staging behind nginx; bearer for protected APIs"
           />
@@ -1837,23 +1952,23 @@ function AuthPanel({ form, update }: PanelProps) {
               setAuth({ type: e.target.value as HttpAuth['type'] })
             }
           >
-            <option value="none">None</option>
-            <option value="basic">Basic (username + password)</option>
-            <option value="bearer">Bearer (token)</option>
+            <option value="none">{t('settingsPanels.auth.schemeNone', { defaultValue: 'None' })}</option>
+            <option value="basic">{t('settingsPanels.auth.schemeBasic', { defaultValue: 'Basic (username + password)' })}</option>
+            <option value="bearer">{t('settingsPanels.auth.schemeBearer', { defaultValue: 'Bearer (token)' })}</option>
           </select>
         </label>
 
         {auth.type === 'basic' && (
           <>
             <Text
-              label="Username"
+              label={t('settingsPanels.auth.username', { defaultValue: 'Username' })}
               value={auth.username ?? ''}
               onChange={(v) => setAuth({ username: v })}
               info="Sent base64-encoded as the first half of the credential pair."
               example="staging-user"
             />
             <Text
-              label="Password"
+              label={t('settingsPanels.auth.password', { defaultValue: 'Password' })}
               value={auth.password ?? ''}
               onChange={(v) => setAuth({ password: v })}
               info="Stored in your local prefs file as plain text. Treat the file accordingly."
@@ -1864,7 +1979,7 @@ function AuthPanel({ form, update }: PanelProps) {
 
         {auth.type === 'bearer' && (
           <Text
-            label="Token"
+            label={t('settingsPanels.auth.token', { defaultValue: 'Token' })}
             value={auth.token ?? ''}
             onChange={(v) => setAuth({ token: v })}
             info="Sent verbatim as `Bearer <token>`. Don't include the `Bearer ` prefix yourself."
@@ -1886,7 +2001,7 @@ function NetworkPanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <Text
-          label="Proxy URL (overrides HTTPS_PROXY)"
+          label={t('settingsPanels.network.proxyUrl', { defaultValue: 'Proxy URL (overrides HTTPS_PROXY)' })}
           value={form.proxyUrl}
           onChange={(v) => update('proxyUrl', v)}
           info="Same syntax as HTTPS_PROXY/HTTP_PROXY env vars. Leave empty to inherit env. Routes via undici's ProxyAgent."
@@ -1899,14 +2014,11 @@ function NetworkPanel({ form, update }: PanelProps) {
           {t('settingsGroups.savedProxyProfiles', { defaultValue: 'Saved Proxy Profiles' })}
         </div>
         <p className="mb-2 text-[10px] text-surface-500">
-          Save multiple `(name, URL)` pairs and switch between them via
-          the dropdown below. The active profile overrides the Proxy URL
-          field and the HTTPS_PROXY env var. Empty selection falls back
-          to the Proxy URL above.
+          {t('settingsPanels.network.savedProfilesDesc', { defaultValue: 'Save multiple `(name, URL)` pairs and switch between them via the dropdown below. The active profile overrides the Proxy URL field and the HTTPS_PROXY env var. Empty selection falls back to the Proxy URL above.' })}
         </p>
         <label className="mb-3 flex flex-col gap-1">
           <FieldLabel
-            label="Active profile"
+            label={t('settingsPanels.network.activeProfile', { defaultValue: 'Active profile' })}
             info="Picks one of the saved profiles by name. Empty = use the Proxy URL field above (or env vars when that's also empty)."
           />
           <select
@@ -1914,7 +2026,7 @@ function NetworkPanel({ form, update }: PanelProps) {
             value={form.proxyProfileActive}
             onChange={(e) => update('proxyProfileActive', e.target.value)}
           >
-            <option value="">— none (use Proxy URL above) —</option>
+            <option value="">{t('settingsPanels.network.noneUseProxyAbove', { defaultValue: '— none (use Proxy URL above) —' })}</option>
             {form.proxyProfiles.map((p) => (
               <option key={p.name} value={p.name}>
                 {p.name}
@@ -1925,7 +2037,7 @@ function NetworkPanel({ form, update }: PanelProps) {
         <div className="space-y-2">
           {form.proxyProfiles.length === 0 && (
             <div className="rounded border border-dashed border-surface-700 px-3 py-3 text-center text-[11px] text-surface-500">
-              No saved profiles — add one below.
+              {t('settingsPanels.network.noSavedProfiles', { defaultValue: 'No saved profiles — add one below.' })}
             </div>
           )}
           {form.proxyProfiles.map((p, i) => (
@@ -1959,7 +2071,7 @@ function NetworkPanel({ form, update }: PanelProps) {
                     update('proxyProfileActive', '');
                   }
                 }}
-                aria-label="Remove profile"
+                aria-label={t('settingsPanels.network.removeProfile', { defaultValue: 'Remove profile' })}
               >
                 <Trash2 className="h-3 w-3" />
               </button>
@@ -1972,13 +2084,13 @@ function NetworkPanel({ form, update }: PanelProps) {
             update('proxyProfiles', [...form.proxyProfiles, { name: '', url: '' }])
           }
         >
-          <Plus className="h-3 w-3" /> Add proxy profile
+          <Plus className="h-3 w-3" /> {t('settingsPanels.network.addProxyProfile', { defaultValue: 'Add proxy profile' })}
         </button>
       </div>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <Text
-          label="Exclude extensions (comma-separated)"
+          label={t('settingsPanels.network.excludeExtensions', { defaultValue: 'Exclude extensions (comma-separated)' })}
           value={form.excludeExtensionsText}
           onChange={(v) => update('excludeExtensionsText', v)}
           info="URL paths ending in any of these extensions are not enqueued. Case-insensitive. Start URL is always crawled regardless."
@@ -1988,7 +2100,7 @@ function NetworkPanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <Num
-          label="Max redirect hops"
+          label={t('settingsPanels.network.maxRedirects', { defaultValue: 'Max redirect hops' })}
           value={form.maxRedirects}
           onChange={(v) => update('maxRedirects', v)}
           info="Hard cap on the number of 3xx hops we follow for a single chain. Each hop is recorded as its own URL row regardless. 0 disables the cap (chain still ends at `redirect_loop`)."
@@ -2013,16 +2125,14 @@ function DuplicatesPanel({ form, update }: PanelProps) {
           {t('settingsGroups.threshold', { defaultValue: 'Threshold' })}
         </div>
         <Num
-          label="Max Hamming distance (0 = exact only, 12 = very loose, 0 disables)"
+          label={t('settingsPanels.duplicates.maxHamming', { defaultValue: 'Max Hamming distance (0 = exact only, 12 = very loose, 0 disables)' })}
           value={form.nearDuplicateHammingThreshold}
           onChange={(v) => update('nearDuplicateHammingThreshold', v)}
           info="Two pages are flagged as near-duplicates if their 64-bit SimHash differs by at most this many bits. 3 ≈ 95% similarity over body-text shingles (Screaming Frog's tightest filter). Set to 0 to skip clustering entirely."
           example="3 = recommended; 5 catches looser duplicates (templated content with light variation); 0 turns the post-crawl pass off."
         />
         <p className="mt-1 text-[10px] text-surface-500">
-          Lower = stricter. 3 is the SF-equivalent default. Pages with too
-          little body content (&lt;50 characters) are excluded from
-          clustering regardless of threshold.
+          {t('settingsPanels.duplicates.thresholdHint', { defaultValue: 'Lower = stricter. 3 is the SF-equivalent default. Pages with too little body content (<50 characters) are excluded from clustering regardless of threshold.' })}
         </p>
       </div>
 
@@ -2031,14 +2141,14 @@ function DuplicatesPanel({ form, update }: PanelProps) {
           {t('settingsGroups.scope', { defaultValue: 'Scope' })}
         </div>
         <Bool
-          label="Only cluster indexable pages"
+          label={t('settingsPanels.duplicates.onlyIndexable', { defaultValue: 'Only cluster indexable pages' })}
           checked={form.duplicatesOnlyIndexable}
           onChange={(v) => update('duplicatesOnlyIndexable', v)}
           info="When on, pages with noindex / canonicalised / robots-blocked indexability are excluded from clustering — the Near-Duplicate report then surfaces only issues that affect search visibility."
           example="ON for SEO audits (the typical case). Turn OFF to also cluster paginated / canonical-blocked variants for completeness."
         />
         <Bool
-          label="Normalise URLs before duplicate-URL check"
+          label={t('settingsPanels.duplicates.preNormalize', { defaultValue: 'Normalise URLs before duplicate-URL check' })}
           checked={form.dedupePreNormalize}
           onChange={(v) => update('dedupePreNormalize', v)}
           info="When ON (default), the Duplicate URL filter compares URLs after lowercasing the host, dropping the query string, and trimming the trailing slash — the canonical SEO behaviour. When OFF, comparison is byte-exact, so the filter only fires on rows that share an identical raw URL string (rare since URLs are deduped at insert time)."
@@ -2047,9 +2157,8 @@ function DuplicatesPanel({ form, update }: PanelProps) {
       </div>
 
       <div className="rounded border border-surface-800 bg-surface-950/40 p-3 text-[10px] text-surface-500">
-        <strong className="text-surface-300">Cost:</strong> SimHash adds
-        ~5-10 ms per page during crawl; clustering itself runs after the
-        last URL completes (~3-10 s at 1M URLs, &lt;500 ms at 100K).
+        <strong className="text-surface-300">{t('settingsPanels.duplicates.costLabel', { defaultValue: 'Cost:' })}</strong>{' '}
+        {t('settingsPanels.duplicates.costBody', { defaultValue: 'SimHash adds ~5-10 ms per page during crawl; clustering itself runs after the last URL completes (~3-10 s at 1M URLs, <500 ms at 100K).' })}
       </div>
     </>
   );
@@ -2068,16 +2177,14 @@ function HardwarePanel({ form, update }: PanelProps) {
           {t('settingsGroups.memory', { defaultValue: 'Memory' })}
         </div>
         <Num
-          label="Memory soft limit (MB) — 0 = unlimited"
+          label={t('settingsPanels.hardware.memorySoftLimit', { defaultValue: 'Memory soft limit (MB) — 0 = unlimited' })}
           value={form.memoryLimitMb}
           onChange={(v) => update('memoryLimitMb', v)}
           info="Crawler RSS auto-pauses the queue when this is exceeded; resumes once memory drops to 80% of the cap. Soft cap — does not enforce a hard heap limit."
           example="2048 (≈2 GB) on a 4 GB laptop; 8192 on a 16 GB workstation; 0 to disable."
         />
         <p className="mt-1 text-[10px] text-surface-500">
-          When the crawler's RSS exceeds this, the queue auto-pauses and
-          resumes once memory drops below 80% of the cap. Soft cap — does
-          not enforce a hard heap limit.
+          {t('settingsPanels.hardware.memoryHint', { defaultValue: "When the crawler's RSS exceeds this, the queue auto-pauses and resumes once memory drops below 80% of the cap. Soft cap — does not enforce a hard heap limit." })}
         </p>
       </div>
 
@@ -2086,17 +2193,14 @@ function HardwarePanel({ form, update }: PanelProps) {
           {t('settingsGroups.queue', { defaultValue: 'Queue' })}
         </div>
         <Num
-          label="Max in-memory queue size — 0 = unlimited"
+          label={t('settingsPanels.hardware.maxQueueSize', { defaultValue: 'Max in-memory queue size — 0 = unlimited' })}
           value={form.maxQueueSize}
           onChange={(v) => update('maxQueueSize', v)}
           info="Hard cap on pending URLs held in memory. Excess discoveries are dropped silently — bounds peak heap during fan-out bursts (big sitemaps, dense link graphs)."
           example="50000 keeps RAM bounded during big sitemap fan-outs; 0 for typical crawls."
         />
         <p className="mt-1 text-[10px] text-surface-500">
-          Hard cap on pending URLs held in memory. Excess discoveries are
-          dropped silently — bounds peak heap during fan-out bursts (large
-          sitemaps, dense link graphs). Set conservatively if memory is
-          tight.
+          {t('settingsPanels.hardware.queueHint', { defaultValue: 'Hard cap on pending URLs held in memory. Excess discoveries are dropped silently — bounds peak heap during fan-out bursts (large sitemaps, dense link graphs). Set conservatively if memory is tight.' })}
         </p>
       </div>
 
@@ -2106,7 +2210,7 @@ function HardwarePanel({ form, update }: PanelProps) {
         </div>
         <label className="mb-2 flex flex-col gap-1">
           <FieldLabel
-            label="Process priority"
+            label={t('settingsPanels.hardware.processPriority', { defaultValue: 'Process priority' })}
             info="OS scheduler hint applied at crawl start. Lowering priority lets the rest of the machine stay responsive during heavy crawls. May require elevated privileges on some platforms."
             example="Below Normal while you keep working in other apps; Idle for overnight unattended runs."
           />
@@ -2120,17 +2224,15 @@ function HardwarePanel({ form, update }: PanelProps) {
               )
             }
           >
-            <option value="normal">Normal</option>
-            <option value="below-normal">Below Normal</option>
-            <option value="idle">Idle (lowest)</option>
+            <option value="normal">{t('settingsPanels.hardware.priorityNormal', { defaultValue: 'Normal' })}</option>
+            <option value="below-normal">{t('settingsPanels.hardware.priorityBelowNormal', { defaultValue: 'Below Normal' })}</option>
+            <option value="idle">{t('settingsPanels.hardware.priorityIdle', { defaultValue: 'Idle (lowest)' })}</option>
           </select>
         </label>
         <p className="text-[10px] text-surface-500">
-          OS scheduler hint. Lowering priority lets the rest of the
-          machine stay responsive during heavy crawls. Effective on next
-          crawl start; may require elevated privileges on some platforms.
-          For raw CPU concurrency, see <strong>Max Concurrency</strong> in the
-          Crawler section.
+          {t('settingsPanels.hardware.priorityHint1', { defaultValue: 'OS scheduler hint. Lowering priority lets the rest of the machine stay responsive during heavy crawls. Effective on next crawl start; may require elevated privileges on some platforms. For raw CPU concurrency, see' })}{' '}
+          <strong>{t('settingsPanels.hardware.maxConcurrencyRef', { defaultValue: 'Max Concurrency' })}</strong>{' '}
+          {t('settingsPanels.hardware.priorityHint2', { defaultValue: 'in the Crawler section.' })}
         </p>
       </div>
     </>
@@ -2150,7 +2252,7 @@ function ContentPanel({ form, update }: PanelProps) {
           {t('settingsGroups.bodySnapshots', { defaultValue: 'Body Snapshots' })}
         </div>
         <Bool
-          label="Store raw HTML body per page"
+          label={t('settingsPanels.content.storeBody', { defaultValue: 'Store raw HTML body per page' })}
           checked={form.storeBodySnapshots}
           onChange={(v) => update('storeBodySnapshots', v)}
           info="Drives the View Source detail tab. ~30–200 KB on disk per HTML page; turn off if you only need metadata and not full source viewing."
@@ -2158,7 +2260,7 @@ function ContentPanel({ form, update }: PanelProps) {
         />
         <div className="mt-3">
           <Num
-            label="Body cap per page (bytes) — 0 = unbounded"
+            label={t('settingsPanels.content.bodyCap', { defaultValue: 'Body cap per page (bytes) — 0 = unbounded' })}
             value={form.bodySnapshotMaxBytes}
             onChange={(v) => update('bodySnapshotMaxBytes', v)}
             info="Bodies over this are truncated and flagged. 1 MB covers the 99.9th percentile of HTML pages without letting one adversarial 50 MB page bloat the project file."
@@ -2180,37 +2282,37 @@ function CrawlAnalysisPanel({ form, update }: PanelProps) {
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3 space-y-2">
         <Bool
-          label="Recompute inlinks"
+          label={t('settingsPanels.crawlAnalysis.recomputeInlinks', { defaultValue: 'Recompute inlinks' })}
           checked={form.analyseInlinks}
           onChange={(v) => update('analyseInlinks', v)}
           info="Counts how many internal pages link to each URL. Drives the Most-Linked URLs report and the per-row Inlinks column."
         />
         <Bool
-          label="Recompute redirect chains"
+          label={t('settingsPanels.crawlAnalysis.recomputeRedirectChains', { defaultValue: 'Recompute redirect chains' })}
           checked={form.analyseRedirectChains}
           onChange={(v) => update('analyseRedirectChains', v)}
           info="Walks 3xx redirect chains, fills `redirect_chain_length` / `redirect_loop`. Drives the 'Long Chain' and 'Redirect Loop' issues + the Redirects tab."
         />
         <Bool
-          label="Hreflang reciprocity + inconsistent lang"
+          label={t('settingsPanels.crawlAnalysis.hreflang', { defaultValue: 'Hreflang reciprocity + inconsistent lang' })}
           checked={form.analyseHreflang}
           onChange={(v) => update('analyseHreflang', v)}
           info="Page A→B declared but B→A absent flags 'Reciprocity Missing'; same lang on two hrefs flags 'Inconsistent Lang'."
         />
         <Bool
-          label="Near-duplicate clustering"
+          label={t('settingsPanels.crawlAnalysis.nearDuplicate', { defaultValue: 'Near-duplicate clustering' })}
           checked={form.analyseDuplicates}
           onChange={(v) => update('analyseDuplicates', v)}
           info="64-bit SimHash + LSH bucketing + Union-Find clustering on body shingles. Most expensive pass — typical 5–10 s on a 100k crawl."
         />
         <Bool
-          label="Pagination ordinal-gap detection"
+          label={t('settingsPanels.crawlAnalysis.paginationGap', { defaultValue: 'Pagination ordinal-gap detection' })}
           checked={form.analysePagination}
           onChange={(v) => update('analysePagination', v)}
           info="?page=1 / ?page=2 / ?page=4 → flags 'Sequence Break' on every member of the broken cluster."
         />
         <Bool
-          label="Materialise heavy issue counters"
+          label={t('settingsPanels.crawlAnalysis.materialiseIssues', { defaultValue: 'Materialise heavy issue counters' })}
           checked={form.analyseIssues}
           onChange={(v) => update('analyseIssues', v)}
           info="Pre-computes Dead External Domain, Duplicate URL post-norm, Canonical Chain Multi-hop. Without this the sidebar shows 0 for those three."
@@ -2248,21 +2350,21 @@ function AdvancedPanel({ form, update }: PanelProps) {
           {t('settingsGroups.linkResponseCaps', { defaultValue: 'Link & Response Caps' })}
         </div>
         <Num
-          label="Max links per page (issue threshold)"
+          label={t('settingsPanels.advanced.maxLinksPerPage', { defaultValue: 'Max links per page (issue threshold)' })}
           value={form.maxLinksPerPage}
           onChange={(v) => update('maxLinksPerPage', v)}
           info="Pages with > this many outgoing links (internal + external) trip the 'Total Links per Page' issue. Google's historic recommendation is 100; mega-menus/hub-pages routinely blow past this."
           example="100 default; 50 for tight on-page link discipline; 0 to disable the issue."
         />
         <Num
-          label="Max response time (ms) — 0 = disabled"
+          label={t('settingsPanels.advanced.maxResponseTime', { defaultValue: 'Max response time (ms) — 0 = disabled' })}
           value={form.maxResponseTimeMs}
           onChange={(v) => update('maxResponseTimeMs', v)}
           info="Aborts requests whose total lifetime (connect + headers + body) exceeds this. Distinct from `requestTimeoutMs` which is the headers timeout. Useful for capping individual slow pages without lowering the overall fetch timeout."
           example="60000 (1 minute) for huge resources; 0 to rely solely on the fetch timeout."
         />
         <Num
-          label="Max file size (bytes) — 0 = disabled"
+          label={t('settingsPanels.advanced.maxFileSize', { defaultValue: 'Max file size (bytes) — 0 = disabled' })}
           value={form.maxFileSizeBytes}
           onChange={(v) => update('maxFileSizeBytes', v)}
           info="Skips body parsing for pages whose Content-Length header exceeds this. The page row is still created so links to it aren't lost; only body parsing and source snapshot capture are skipped."
@@ -2275,21 +2377,21 @@ function AdvancedPanel({ form, update }: PanelProps) {
           {t('settingsGroups.urlStructureThresholds', { defaultValue: 'URL Structure Thresholds' })}
         </div>
         <Num
-          label="Max URL length (chars)"
+          label={t('settingsPanels.advanced.maxUrlLength', { defaultValue: 'Max URL length (chars)' })}
           value={form.maxUrlLength}
           onChange={(v) => update('maxUrlLength', v)}
           info="Trips the 'URL Too Long' issue when LENGTH(url) > this. RFC 7230 doesn't mandate a max but most servers + middleboxes fail above ~2 KB; Chrome itself caps at ~32 KB."
           example="2048 default (RFC-suggested practical ceiling)."
         />
         <Num
-          label="Max query string length (chars) — 0 = disabled"
+          label={t('settingsPanels.advanced.maxQueryStringLength', { defaultValue: 'Max query string length (chars) — 0 = disabled' })}
           value={form.maxQueryStringLength}
           onChange={(v) => update('maxQueryStringLength', v)}
           info="Trips 'Long Query String' when LENGTH(query) > this. Typical session-id sprawl + UTM tracking hits 100+ chars; over 200 starts to look like a bug."
           example="100 default for most audits; 0 to disable the check."
         />
         <Num
-          label="Max folder depth — 0 = disabled"
+          label={t('settingsPanels.advanced.maxFolderDepth', { defaultValue: 'Max folder depth — 0 = disabled' })}
           value={form.maxFolderDepth}
           onChange={(v) => update('maxFolderDepth', v)}
           info="Trips 'Folder Depth Too Deep' when the URL path's `/`-segment count exceeds this. Useful for spotting over-nested URL structures that bury content from crawlers."
@@ -2302,25 +2404,25 @@ function AdvancedPanel({ form, update }: PanelProps) {
           {t('settingsGroups.linkFollowBehaviour', { defaultValue: 'Link Follow Behaviour' })}
         </div>
         <Bool
-          label="Follow canonical targets"
+          label={t('settingsPanels.advanced.followCanonical', { defaultValue: 'Follow canonical targets' })}
           checked={form.followCanonicals}
           onChange={(v) => update('followCanonicals', v)}
           info="When on, a 200 page declaring a canonical pointing elsewhere also enqueues that target. Default off — most crawls treat canonicals as a signal, not a navigation hint."
         />
         <Bool
-          label="Follow rel=next / rel=prev"
+          label={t('settingsPanels.advanced.followNextPrev', { defaultValue: 'Follow rel=next / rel=prev' })}
           checked={form.followPaginationLinks}
           onChange={(v) => update('followPaginationLinks', v)}
           info="When on (default), pagination_next + pagination_prev URLs are post-fetch enqueued. Off only to debug pagination-only loops without disabling all link follow."
         />
         <Bool
-          label="Follow nofollow links (override 'respect nofollow')"
+          label={t('settingsPanels.advanced.followNofollow', { defaultValue: "Follow nofollow links (override 'respect nofollow')" })}
           checked={form.followNofollow}
           onChange={(v) => update('followNofollow', v)}
           info="When on, rel=nofollow links are recursed into like any other link. Default off — Screaming Frog 'Respect Nofollow' default."
         />
         <Bool
-          label="Follow JS / meta-refresh redirects"
+          label={t('settingsPanels.advanced.followJsMetaRefresh', { defaultValue: 'Follow JS / meta-refresh redirects' })}
           checked={form.followJsRedirects}
           onChange={(v) => update('followJsRedirects', v)}
           info="When on, `<meta http-equiv='refresh'>` content URLs are enqueued like a redirect target. window.location body redirects are heuristic-only and currently out of scope."
@@ -2341,7 +2443,7 @@ function CookiesPanel({ form, update }: PanelProps) {
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <label className="flex flex-col gap-1">
           <FieldLabel
-            label="Cookie policy"
+            label={t('settingsPanels.cookies.policy', { defaultValue: 'Cookie policy' })}
             info="Reject-all = ignore Set-Cookie entirely (zero counts on cookie-flag issues). Block-third-party = analyse only first-party cookies (Domain attribute matches the page's registrable domain). Accept-all = analyse every Set-Cookie regardless of scope."
             example="Reject-all for stateless audits; Block-third-party to focus on the site's own cookie hygiene; Accept-all to also see ad/analytics tracker cookies."
           />
@@ -2355,15 +2457,15 @@ function CookiesPanel({ form, update }: PanelProps) {
               )
             }
           >
-            <option value="reject-all">Reject all (default — stateless)</option>
-            <option value="accept-all">Accept all</option>
-            <option value="block-third-party">Block third-party</option>
+            <option value="reject-all">{t('settingsPanels.cookies.rejectAll', { defaultValue: 'Reject all (default — stateless)' })}</option>
+            <option value="accept-all">{t('settingsPanels.cookies.acceptAll', { defaultValue: 'Accept all' })}</option>
+            <option value="block-third-party">{t('settingsPanels.cookies.blockThirdParty', { defaultValue: 'Block third-party' })}</option>
           </select>
         </label>
         <p className="mt-2 text-[10px] text-surface-500">
-          Cookie values themselves are <strong>never</strong> stored in
-          the project file regardless of this setting — only the security
-          flag (Secure / HttpOnly / SameSite) counts are kept.
+          {t('settingsPanels.cookies.valuesNeverStored1', { defaultValue: 'Cookie values themselves are' })}{' '}
+          <strong>{t('settingsPanels.cookies.never', { defaultValue: 'never' })}</strong>{' '}
+          {t('settingsPanels.cookies.valuesNeverStored2', { defaultValue: 'stored in the project file regardless of this setting — only the security flag (Secure / HttpOnly / SameSite) counts are kept.' })}
         </p>
       </div>
     </>
@@ -2419,8 +2521,8 @@ function PerHostUaPanel({ form, update }: PanelProps) {
                   const next = rules.filter((_, j) => j !== i);
                   update('perHostUserAgents', next);
                 }}
-                title="Remove"
-                aria-label="Remove rule"
+                title={t('common.remove', { defaultValue: 'Remove' })}
+                aria-label={t('settingsPanels.perHostUa.removeRule', { defaultValue: 'Remove rule' })}
               >
                 <Trash2 className="h-3 w-3" />
               </button>
@@ -2436,7 +2538,8 @@ function PerHostUaPanel({ form, update }: PanelProps) {
             ])
           }
         >
-          <Plus className="h-3 w-3" /> Add per-host UA rule
+          <Plus className="h-3 w-3" />{' '}
+          {t('settingsPanels.perHostUa.addRule', { defaultValue: 'Add per-host UA rule' })}
         </button>
       </div>
     </>
@@ -2615,6 +2718,328 @@ const AUTH_TYPE_LABEL: Record<IntegrationDef['authType'], string> = {
   'service-account': 'Service Account',
   local: 'Local',
 };
+
+function RenderingPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
+  const enabled = form.renderingMode === 'js';
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settingsPanels.rendering.intro', {
+          defaultValue:
+            'JavaScript rendering uses headless Chromium (Playwright) to fetch the post-load DOM after scripts execute. Required for SPA / hydration-only content. Significantly slower than text mode — every URL pays a browser-launch and wait cost. Enable in the Crawler panel under Rendering Mode.',
+        })}
+      </p>
+
+      {!enabled ? (
+        <div className="mb-4 rounded border border-amber-800/60 bg-amber-950/30 p-3 text-[11px] text-amber-200">
+          {t('settingsPanels.rendering.disabledHint', {
+            defaultValue:
+              'Rendering Mode is currently set to Text or Old AJAX. Switch to JavaScript Rendering in the Crawler panel to apply the settings below.',
+          })}
+        </div>
+      ) : null}
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[11px] font-semibold text-surface-200">
+          {t('settingsPanels.rendering.viewport', { defaultValue: 'Viewport' })}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="flex flex-col gap-1">
+            <FieldLabel
+              label={t('settingsPanels.rendering.viewportWidth', { defaultValue: 'Width (px)' })}
+              info="Viewport width applied to every rendered page. Mobile audits typically use 360–414, desktop 1280–1920."
+              example="1366 = standard laptop, 1920 = full HD desktop, 375 = iPhone width."
+            />
+            <input
+              type="number"
+              min={320}
+              max={3840}
+              className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+              disabled={!enabled}
+              value={form.jsViewportWidth}
+              onChange={(e) => update('jsViewportWidth', e.target.value)}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <FieldLabel
+              label={t('settingsPanels.rendering.viewportHeight', { defaultValue: 'Height (px)' })}
+              info="Viewport height — affects above-the-fold detection and lazy-load triggers."
+              example="768 = standard laptop, 1080 = full HD desktop, 667 = iPhone 8 height."
+            />
+            <input
+              type="number"
+              min={240}
+              max={2160}
+              className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+              disabled={!enabled}
+              value={form.jsViewportHeight}
+              onChange={(e) => update('jsViewportHeight', e.target.value)}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[11px] font-semibold text-surface-200">
+          {t('settingsPanels.rendering.waitConditions', { defaultValue: 'Wait Conditions' })}
+        </div>
+        <label className="mb-3 flex flex-col gap-1">
+          <FieldLabel
+            label={t('settingsPanels.rendering.waitUntil', { defaultValue: 'Wait until' })}
+            info="When Playwright considers navigation complete. domcontentloaded = HTML parsed but resources still loading. load = window.load fired. networkidle = no network activity for 500ms (best for SPA but slower). commit = just response committed (fastest, riskiest)."
+            example="load = good default. networkidle for heavy SPAs. domcontentloaded if you only need raw HTML."
+          />
+          <select
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            disabled={!enabled}
+            value={form.jsWaitUntil}
+            onChange={(e) =>
+              update(
+                'jsWaitUntil',
+                e.target.value as 'load' | 'domcontentloaded' | 'networkidle' | 'commit',
+              )
+            }
+          >
+            <option value="load">load (default)</option>
+            <option value="domcontentloaded">domcontentloaded</option>
+            <option value="networkidle">networkidle</option>
+            <option value="commit">commit (fastest)</option>
+          </select>
+        </label>
+        <label className="mb-3 flex flex-col gap-1">
+          <FieldLabel
+            label={t('settingsPanels.rendering.ajaxTimeoutMs', { defaultValue: 'Extra wait after load (ms)' })}
+            info="Additional time to wait after the chosen wait condition fires, for SPA hydration / late XHRs. 0 = no extra wait. Bounded by the request timeout."
+            example="0 for SSR sites, 2000 for typical SPAs, 5000+ for heavy client-rendered apps."
+          />
+          <input
+            type="number"
+            min={0}
+            max={60000}
+            step={500}
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            disabled={!enabled}
+            value={form.jsAjaxTimeoutMs}
+            onChange={(e) => update('jsAjaxTimeoutMs', e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <FieldLabel
+            label={t('settingsPanels.rendering.waitSelector', { defaultValue: 'Wait for CSS selector (optional)' })}
+            info="If set, Playwright waits for this CSS selector to appear in the DOM before extracting HTML. Overrides the extra-wait timeout when present. Useful when you know the SPA reveals a specific element after hydration."
+            example="#app-loaded, .product-listing, [data-hydrated='true']"
+          />
+          <input
+            type="text"
+            placeholder="#app-loaded"
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            disabled={!enabled}
+            value={form.jsWaitSelector}
+            onChange={(e) => update('jsWaitSelector', e.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[11px] font-semibold text-surface-200">
+          {t('settingsPanels.rendering.resourceBlocking', { defaultValue: 'Resource Blocking' })}
+        </div>
+        <p className="mb-2 text-[11px] text-surface-400">
+          {t('settingsPanels.rendering.resourceBlockingHint', {
+            defaultValue:
+              'Block resource types before they hit the network — speeds up rendering at the cost of fidelity. Images and fonts are typically safe to block for SEO crawls; blocking scripts defeats the point of JS rendering.',
+          })}
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          <Bool
+            label={t('settingsPanels.rendering.blockImages', { defaultValue: 'Block images' })}
+            checked={form.jsBlockImages}
+            onChange={(v) => update('jsBlockImages', v)}
+            hint=""
+            info="Aborts <img>, <picture>, background-image requests. Recommended for SEO crawls — image metadata still comes from <img> tag attributes."
+            example="On for max speed. Off if you need LCP candidate detection or visual screenshots later."
+          />
+          <Bool
+            label={t('settingsPanels.rendering.blockFonts', { defaultValue: 'Block fonts' })}
+            checked={form.jsBlockFonts}
+            onChange={(v) => update('jsBlockFonts', v)}
+            hint=""
+            info="Aborts @font-face / Google Fonts / WOFF2 requests. FOUT visible but text still renders."
+            example="On — fonts add overhead without changing SEO output."
+          />
+          <Bool
+            label={t('settingsPanels.rendering.blockMedia', { defaultValue: 'Block media (video/audio)' })}
+            checked={form.jsBlockMedia}
+            onChange={(v) => update('jsBlockMedia', v)}
+            hint=""
+            info="Aborts <video> / <audio> sources. Page DOM still includes the <video> tag."
+            example="On (default) — media is heavy and rarely SEO-relevant."
+          />
+          <Bool
+            label={t('settingsPanels.rendering.blockStylesheets', { defaultValue: 'Block stylesheets' })}
+            checked={form.jsBlockStylesheets}
+            onChange={(v) => update('jsBlockStylesheets', v)}
+            hint=""
+            info="Aborts external CSS. Inline styles still load. WARNING: many SPAs use CSS-driven visibility / lazy classes — blocking CSS may hide content that JS depends on."
+            example="Off — small speed gain not worth the fidelity loss."
+          />
+          <Bool
+            label={t('settingsPanels.rendering.blockScripts', { defaultValue: 'Block scripts (defeats JS render!)' })}
+            checked={form.jsBlockScripts}
+            onChange={(v) => update('jsBlockScripts', v)}
+            hint=""
+            info="Aborts all <script> requests. This defeats the purpose of JS rendering — use Text Only mode instead."
+            example="Off — only enable for testing edge cases."
+          />
+        </div>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[11px] font-semibold text-surface-200">
+          {t('settingsPanels.rendering.browserConfig', { defaultValue: 'Browser' })}
+        </div>
+        <div className="mb-3">
+          <Bool
+            label={t('settingsPanels.rendering.headless', { defaultValue: 'Headless (no visible window)' })}
+            checked={form.jsRenderHeadless}
+            onChange={(v) => update('jsRenderHeadless', v)}
+            hint="Default on"
+            info="Run Chromium without a visible window. Turn off to debug rendering visually — useful when a page renders correctly in a normal browser but not under Playwright."
+            example="On for production crawls. Off when debugging selector-not-found / hydration issues."
+          />
+        </div>
+        <div className="mb-3 grid grid-cols-2 gap-3">
+          <label className="flex flex-col gap-1">
+            <FieldLabel
+              label={t('settingsPanels.rendering.browserChannel', { defaultValue: 'Chromium channel' })}
+              info="Empty = use the bundled Playwright Chromium build (recommended — pinned version, works everywhere). 'chrome' / 'msedge' uses the system-installed browser. Beta channels for testing newer features."
+              example="Empty = safest. 'chrome' if you want the same Chrome version your users see."
+            />
+            <select
+              className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+              disabled={!enabled}
+              value={form.jsBrowserChannel}
+              onChange={(e) =>
+                update(
+                  'jsBrowserChannel',
+                  e.target.value as '' | 'chrome' | 'msedge' | 'chrome-beta' | 'msedge-beta',
+                )
+              }
+            >
+              <option value="">Bundled Chromium (default)</option>
+              <option value="chrome">Chrome (system)</option>
+              <option value="msedge">Edge (system)</option>
+              <option value="chrome-beta">Chrome Beta</option>
+              <option value="msedge-beta">Edge Beta</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <FieldLabel
+              label={t('settingsPanels.rendering.maxPages', { defaultValue: 'Parallel render pages' })}
+              info="Number of browser tabs the pool keeps warm in parallel. 0 = auto (matches crawler concurrency, capped at 8). More tabs = faster crawl but more RAM (each tab ~80–150 MB)."
+              example="0 = auto. 4 for 8GB RAM machines, 8+ for 16GB+."
+            />
+            <input
+              type="number"
+              min={0}
+              max={32}
+              className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+              disabled={!enabled}
+              value={form.jsMaxPages}
+              onChange={(e) => update('jsMaxPages', e.target.value)}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <label className="flex flex-col gap-1">
+          <FieldLabel
+            label={t('settingsPanels.rendering.prerenderJs', { defaultValue: 'Pre-navigation JS snippet (optional)' })}
+            info="JavaScript executed in every page BEFORE navigation begins (init script). Use to set localStorage / cookies / mock APIs / disable animations. Runs in page context — no Node access."
+            example={"window.localStorage.setItem('cookie-consent', 'accepted');"}
+          />
+          <textarea
+            rows={5}
+            placeholder="window.localStorage.setItem('cookie-consent', 'accepted');"
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            disabled={!enabled}
+            value={form.jsPrerenderJs}
+            onChange={(e) => update('jsPrerenderJs', e.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[11px] font-semibold text-surface-200">
+          {t('settingsPanels.rendering.screenshot', { defaultValue: 'Screenshot Capture' })}
+        </div>
+        <p className="mb-2 text-[11px] text-surface-400">
+          {t('settingsPanels.rendering.screenshotHint', {
+            defaultValue:
+              'PNG screenshots written to a sidecar folder next to the .seoproject file. Adds ~150–500ms per URL — leave off unless you need them for the visual audit.',
+          })}
+        </p>
+        <label className="mb-3 flex flex-col gap-1">
+          <FieldLabel
+            label={t('settingsPanels.rendering.screenshotMode', { defaultValue: 'Capture mode' })}
+            info="Full-page renders the entire scrollable canvas; Above-the-fold captures just the initial viewport (cheaper). Both writes two PNGs per URL."
+            example="None for fastest crawl. Above-the-fold for SERP-thumbnail-style preview. Full page when you need long-page snapshots."
+          />
+          <select
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            disabled={!enabled}
+            value={form.jsScreenshotMode}
+            onChange={(e) =>
+              update(
+                'jsScreenshotMode',
+                e.target.value as 'none' | 'fullpage' | 'fold' | 'both',
+              )
+            }
+          >
+            <option value="none">None (default)</option>
+            <option value="fold">Above the fold</option>
+            <option value="fullpage">Full page</option>
+            <option value="both">Both (full page + fold)</option>
+          </select>
+        </label>
+        <Bool
+          label={t('settingsPanels.rendering.mobileScreenshot', { defaultValue: 'Also capture mobile viewport (375×667)' })}
+          checked={form.jsMobileScreenshot}
+          onChange={(v) => update('jsMobileScreenshot', v)}
+          hint=""
+          info="Renders the page a second time on a mobile viewport and stores an above-the-fold PNG. Adds another full render + screenshot per URL."
+          example="On when auditing mobile UX or capturing PageSpeed-style mobile previews."
+        />
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[11px] font-semibold text-surface-200">
+          {t('settingsPanels.rendering.advancedAudits', { defaultValue: 'Advanced Audits' })}
+        </div>
+        <div className="flex flex-col gap-2">
+          <Bool
+            label={t('settingsPanels.rendering.mobileUsability', { defaultValue: 'Mobile Usability audit' })}
+            checked={form.jsMobileUsability}
+            onChange={(v) => update('jsMobileUsability', v)}
+            hint=""
+            info="Re-renders each page on a mobile viewport and checks viewport meta tag, horizontal overflow, font size legibility, and tap-target spacing. Stores a pass/fail verdict on the urls table."
+            example="On for SEO audits that include Google's Mobile-Friendly checks."
+          />
+          <Bool
+            label={t('settingsPanels.rendering.lcpCandidate', { defaultValue: 'LCP candidate detection' })}
+            checked={form.jsLcpCandidate}
+            onChange={(v) => update('jsLcpCandidate', v)}
+            hint=""
+            info="Identifies the largest element visible in the initial viewport (likely LCP candidate per Google's heuristic) and stores its CSS selector, dimensions, and resource URL. Useful for spotting unoptimised LCP images without a PSI API call."
+            example="On for performance-focused audits."
+          />
+        </div>
+      </div>
+    </>
+  );
+}
 
 function IntegrationsPanel() {
   const { t } = useTranslation();

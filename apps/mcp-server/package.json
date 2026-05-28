@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/mcp-server",
-  "version": "0.6.0",
+  "version": "0.6.5",
   "private": true,
   "type": "module",
   "bin": {

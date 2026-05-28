@@ -1,4 +1,4 @@
-import { createWriteStream, writeFileSync } from 'node:fs';
+import { createWriteStream, writeFileSync, mkdirSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import path from 'node:path';
@@ -9,15 +9,25 @@ import type { CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
 export interface TabularSection {
   label: string;
   category: UrlCategory;
+  /** Optional sub-directory under the export root (for hierarchical
+   *  tree exports — e.g. `Internal` → HTML / JS / CSS land under
+   *  `internal/`). Ignored for xlsx output. */
+  subdir?: string;
+  /** Optional filename stem (without extension). Defaults to a
+   *  sanitized version of `label`. */
+  filename?: string;
 }
 
 export interface TabularExportOptions {
-  format: 'csv' | 'xlsx';
+  format: 'csv' | 'xlsx' | 'json' | 'xml';
   sections: TabularSection[];
   /** Keys of CrawlUrlRow to include, in order. */
   columns: string[];
   /** When provided AND non-empty, restrict every section to these row ids. */
   selectedIds?: number[];
+  /** Prefix CSV files with a UTF-8 BOM so Excel-for-Windows opens them
+   *  in the correct charset. Ignored for non-CSV formats. Default true. */
+  csvBom?: boolean;
 }
 
 export interface TabularExportResult {
@@ -27,9 +37,29 @@ export interface TabularExportResult {
   rowsWritten: number;
 }
 
+/**
+ * Bug #9 — Formula injection guard. Excel + LibreOffice + Google Sheets
+ * interpret cells beginning with `=`, `+`, `-`, `@`, or a TAB/CR as
+ * formulas (CVE-class). When the source data is crawled HTML (titles,
+ * extraction values, anchor text), an attacker can craft a page whose
+ * title is e.g. `=cmd|'/c calc'!A1` and have it execute when the user
+ * opens the export. We neutralise by prepending a single quote — the
+ * canonical CSV-injection mitigation per OWASP. The apostrophe is
+ * visible in Excel only when the user is editing the cell.
+ */
+function sanitizeFormulaPrefix(str: string): string {
+  if (!str) return str;
+  const first = str.charCodeAt(0);
+  // 0x09 TAB, 0x0D CR — both can start a formula in some parsers.
+  if (first === 0x3d || first === 0x2b || first === 0x2d || first === 0x40 || first === 0x09 || first === 0x0d) {
+    return `'${str}`;
+  }
+  return str;
+}
+
 function escapeCsv(value: unknown): string {
   if (value === null || value === undefined) return '';
-  const str = String(value);
+  const str = sanitizeFormulaPrefix(String(value));
   if (/[",\n\r]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }
@@ -61,12 +91,14 @@ async function writeCsvFile(
   columns: string[],
   category: UrlCategory,
   selectedIds: number[] | undefined,
+  withBom: boolean,
 ): Promise<number> {
   let rowsWritten = 0;
   const header = columns.join(',') + '\n';
   const source = rowSource(db, category, selectedIds);
   const generator = async function* (): AsyncGenerator<string> {
-    yield '﻿' + header;
+    if (withBom) yield '﻿' + header;
+    else yield header;
     for (const row of source) {
       const line =
         columns
@@ -81,6 +113,102 @@ async function writeCsvFile(
     createWriteStream(filePath, { encoding: 'utf8' }),
   );
   return rowsWritten;
+}
+
+function escapeXml(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function xmlSafeTag(name: string): string {
+  // Replace anything non-NCName-friendly with `_`. Numeric-leading keys
+  // are prefixed with `n` so the doc stays well-formed.
+  let safe = name.replace(/[^A-Za-z0-9_.-]/g, '_');
+  if (/^[0-9]/.test(safe)) safe = `n${safe}`;
+  return safe || '_';
+}
+
+async function writeJsonFile(
+  db: ProjectDb,
+  filePath: string,
+  columns: string[],
+  category: UrlCategory,
+  selectedIds: number[] | undefined,
+): Promise<number> {
+  let rowsWritten = 0;
+  const source = rowSource(db, category, selectedIds);
+  const generator = async function* (): AsyncGenerator<string> {
+    yield '[';
+    let first = true;
+    for (const row of source) {
+      const obj: Record<string, unknown> = {};
+      for (const c of columns) {
+        obj[c] = (row as unknown as Record<string, unknown>)[c] ?? null;
+      }
+      yield (first ? '\n  ' : ',\n  ') + JSON.stringify(obj);
+      first = false;
+      rowsWritten++;
+    }
+    yield first ? ']\n' : '\n]\n';
+  };
+  await pipeline(
+    Readable.from(generator()),
+    createWriteStream(filePath, { encoding: 'utf8' }),
+  );
+  return rowsWritten;
+}
+
+async function writeXmlFile(
+  db: ProjectDb,
+  filePath: string,
+  columns: string[],
+  category: UrlCategory,
+  selectedIds: number[] | undefined,
+  sectionLabel: string,
+): Promise<number> {
+  let rowsWritten = 0;
+  const source = rowSource(db, category, selectedIds);
+  const rootTag = xmlSafeTag(sectionLabel) || 'export';
+  const cols = columns.map((c) => ({ key: c, tag: xmlSafeTag(c) }));
+  const generator = async function* (): AsyncGenerator<string> {
+    yield `<?xml version="1.0" encoding="UTF-8"?>\n<${rootTag}>\n`;
+    for (const row of source) {
+      yield '  <row>\n';
+      for (const { key, tag } of cols) {
+        const v = (row as unknown as Record<string, unknown>)[key];
+        if (v === null || v === undefined) continue;
+        yield `    <${tag}>${escapeXml(v)}</${tag}>\n`;
+      }
+      yield '  </row>\n';
+      rowsWritten++;
+    }
+    yield `</${rootTag}>\n`;
+  };
+  await pipeline(
+    Readable.from(generator()),
+    createWriteStream(filePath, { encoding: 'utf8' }),
+  );
+  return rowsWritten;
+}
+
+function sanitizeFilename(label: string): string {
+  return label.replace(/[\\/?*\[\]:<>|"]/g, '_').replace(/\s+/g, '-').toLowerCase();
+}
+
+function sanitizeSubdir(subdir: string): string {
+  // Sanitize each path segment individually so a hierarchical export like
+  // 'crawl-data/internal' stays nested rather than collapsing into one
+  // filename component.
+  return subdir
+    .split(/[\\/]+/)
+    .map((seg) => seg.replace(/[\\/?*\[\]:<>|"]/g, '_').replace(/\s+/g, '-').toLowerCase())
+    .filter((seg) => seg.length > 0)
+    .join(path.sep);
 }
 
 // ── Minimal XLSX writer ─────────────────────────────────────────────
@@ -164,8 +292,12 @@ function buildSheetXml(
       } else if (typeof v === 'boolean') {
         parts.push(`<c r="${cellRef}" t="b"><v>${v ? 1 : 0}</v></c>`);
       } else {
+        // Bug #9 — neutralise leading formula triggers; Excel auto-runs
+        // `=cmd|...` if the cell isn't sanitised. Apostrophe prefix is
+        // the canonical guard (OWASP CSV-injection guidance).
+        const safe = sanitizeFormulaPrefix(String(v));
         parts.push(
-          `<c r="${cellRef}" t="inlineStr"><is><t>${xmlEscape(String(v))}</t></is></c>`,
+          `<c r="${cellRef}" t="inlineStr"><is><t>${xmlEscape(safe)}</t></is></c>`,
         );
       }
     });
@@ -343,12 +475,27 @@ function buildXlsxBuffer(
   return buildZip(files);
 }
 
+function resolveSectionPath(
+  outputRoot: string,
+  section: TabularSection,
+  ext: string,
+): string {
+  const stem = section.filename
+    ? sanitizeFilename(section.filename)
+    : sanitizeFilename(section.label) || 'section';
+  const subdir = section.subdir ? sanitizeSubdir(section.subdir) : '';
+  const dir = subdir ? path.join(outputRoot, subdir) : outputRoot;
+  mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${stem}.${ext}`);
+}
+
 export async function exportTabular(
   db: ProjectDb,
   outputPath: string,
   options: TabularExportOptions,
 ): Promise<TabularExportResult> {
   const { format, sections, columns, selectedIds } = options;
+  const csvBom = options.csvBom !== false;
   if (sections.length === 0) {
     throw new Error('exportTabular: at least one section is required');
   }
@@ -356,43 +503,68 @@ export async function exportTabular(
     throw new Error('exportTabular: at least one column is required');
   }
 
-  if (format === 'csv') {
-    if (sections.length === 1) {
-      const rows = await writeCsvFile(
-        db,
-        outputPath,
-        columns,
-        sections[0]!.category,
-        selectedIds,
-      );
-      return { filePath: outputPath, files: [outputPath], rowsWritten: rows };
-    }
-    // Multi-section CSV → write one file per section into the chosen
-    // folder. `outputPath` is treated as a folder.
+  if (format === 'xlsx') {
+    // xlsx — single workbook, one sheet per section. subdir/filename
+    // are ignored; the workbook lives at `outputPath`.
+    const usedNames = new Set<string>();
     let total = 0;
-    const written: string[] = [];
-    for (const section of sections) {
-      const safe = section.label.replace(/[\\/?*\[\]:<>|"]/g, '_');
-      const file = path.join(outputPath, `${safe}.csv`);
-      total += await writeCsvFile(db, file, columns, section.category, selectedIds);
-      written.push(file);
-    }
-    return { filePath: outputPath, files: written, rowsWritten: total };
+    const sheets = sections.map((section) => {
+      const rows: CrawlUrlRow[] = [];
+      for (const row of rowSource(db, section.category, selectedIds)) {
+        rows.push(row);
+      }
+      total += rows.length;
+      return { name: sanitizeSheetName(section.label, usedNames), rows };
+    });
+    const buf = buildXlsxBuffer(sheets, columns);
+    writeFileSync(outputPath, buf);
+    return { filePath: outputPath, files: [outputPath], rowsWritten: total };
   }
 
-  // xlsx — collect rows per section into memory (bounded by typical
-  // section size), build workbook, write once.
-  const usedNames = new Set<string>();
-  let total = 0;
-  const sheets = sections.map((section) => {
-    const rows: CrawlUrlRow[] = [];
-    for (const row of rowSource(db, section.category, selectedIds)) {
-      rows.push(row);
+  // CSV / JSON / XML — file-per-section. When the export has only one
+  // section with no subdir, `outputPath` is treated as the file path
+  // directly (backwards compatible with the legacy single-CSV flow).
+  const ext = format;
+  const singleFlat =
+    sections.length === 1 &&
+    !sections[0]!.subdir &&
+    !sections[0]!.filename &&
+    /\.[a-z0-9]+$/i.test(outputPath);
+  // Bug #11 — force the resolved path's extension to match `format` so a
+  // user-typed "report.txt" with format=json doesn't silently write JSON
+  // into the wrong extension. Only applies to the single-file branch
+  // (folder mode always names its own files).
+  const resolvedOutputPath = singleFlat
+    ? outputPath.replace(/\.[a-z0-9]+$/i, `.${ext}`)
+    : outputPath;
+
+  const writeOne = async (filePath: string, section: TabularSection): Promise<number> => {
+    if (format === 'csv') {
+      return writeCsvFile(db, filePath, columns, section.category, selectedIds, csvBom);
     }
-    total += rows.length;
-    return { name: sanitizeSheetName(section.label, usedNames), rows };
-  });
-  const buf = buildXlsxBuffer(sheets, columns);
-  writeFileSync(outputPath, buf);
-  return { filePath: outputPath, files: [outputPath], rowsWritten: total };
+    if (format === 'json') {
+      return writeJsonFile(db, filePath, columns, section.category, selectedIds);
+    }
+    return writeXmlFile(db, filePath, columns, section.category, selectedIds, section.label);
+  };
+
+  if (singleFlat) {
+    const rows = await writeOne(resolvedOutputPath, sections[0]!);
+    return {
+      filePath: resolvedOutputPath,
+      files: [resolvedOutputPath],
+      rowsWritten: rows,
+    };
+  }
+
+  // Multi-section (or hierarchical) — outputPath is a folder root.
+  mkdirSync(outputPath, { recursive: true });
+  let total = 0;
+  const written: string[] = [];
+  for (const section of sections) {
+    const file = resolveSectionPath(outputPath, section, ext);
+    total += await writeOne(file, section);
+    written.push(file);
+  }
+  return { filePath: outputPath, files: written, rowsWritten: total };
 }

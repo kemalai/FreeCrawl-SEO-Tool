@@ -610,7 +610,6 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
   analytics: [],
   ai: [],
   seo: [],
-  visualization: [],
   canonicals: [
     COL.url,
     COL.canonical,

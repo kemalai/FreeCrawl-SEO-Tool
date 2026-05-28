@@ -230,6 +230,10 @@ const api: FreeCrawlApi = {
   logsGetAll: (): Promise<LogEntry[]> => ipcRenderer.invoke(IPC.logsGetAll),
   logsClear: (): Promise<void> => ipcRenderer.invoke(IPC.logsClear),
   logsOpenWindow: (): Promise<void> => ipcRenderer.invoke(IPC.logsOpenWindow),
+  openVisualizationWindow: (): Promise<void> =>
+    ipcRenderer.invoke(IPC.visualizationOpenWindow),
+  readScreenshot: (absolutePath: string): Promise<string | null> =>
+    ipcRenderer.invoke(IPC.screenshotRead, absolutePath),
   robotsTest: (input: RobotsTestInput): Promise<RobotsTestResult> =>
     ipcRenderer.invoke(IPC.robotsTest, input),
   robotsValidate: (text: string): Promise<RobotsValidationIssue[]> =>

@@ -32,6 +32,8 @@ type SubTab =
   | 'cookies'
   | 'structured-data'
   | 'view-source'
+  | 'view-rendered'
+  | 'screenshot'
   | 'duplicates'
   | 'analytics';
 
@@ -48,6 +50,8 @@ const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'cookies', label: 'Cookies' },
   { key: 'structured-data', label: 'Structured Data' },
   { key: 'view-source', label: 'View Source' },
+  { key: 'view-rendered', label: 'View Rendered' },
+  { key: 'screenshot', label: 'Screenshot' },
   { key: 'duplicates', label: 'Duplicates' },
   { key: 'analytics', label: 'Analytics' },
 ];
@@ -69,6 +73,8 @@ const SINGLE_URL_ONLY_TABS: ReadonlySet<SubTab> = new Set([
   'cookies',
   'structured-data',
   'view-source',
+  'view-rendered',
+  'screenshot',
   'duplicates',
   'analytics',
 ]);
@@ -403,7 +409,13 @@ export function BottomDetailPanel() {
           <StructuredDataView urlId={detail.row.id} row={detail.row} />
         )}
         {detail && subTab === 'view-source' && (
-          <ViewSourceView urlId={detail.row.id} pageUrl={detail.row.url} />
+          <ViewSourceView urlId={detail.row.id} pageUrl={detail.row.url} kind="raw" />
+        )}
+        {detail && subTab === 'view-rendered' && (
+          <ViewSourceView urlId={detail.row.id} pageUrl={detail.row.url} kind="rendered" />
+        )}
+        {detail && subTab === 'screenshot' && (
+          <ScreenshotView urlId={detail.row.id} />
         )}
         {detail && subTab === 'duplicates' && (
           <DuplicatesView urlId={detail.row.id} row={detail.row} />
@@ -560,12 +572,198 @@ function AnalyticsRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+/**
+ * V2 Faz 1 Increment 3 — Screenshot sub-tab. Reads the captured PNG
+ * paths from `url_sources` and serves the bytes via `readScreenshot`
+ * IPC (returns a data: URL). Toggle row picks between Full-Page /
+ * Above-The-Fold / Mobile variants.
+ */
+function ScreenshotView({ urlId }: { urlId: number | null }) {
+  const { t } = useTranslation();
+  const [src, setSrc] = useState<UrlSourceResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [variant, setVariant] = useState<'fullpage' | 'fold' | 'mobile'>('fullpage');
+  const [imgData, setImgData] = useState<string | null>(null);
+  const [imgError, setImgError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (urlId === null) {
+      setSrc(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void window.freecrawl
+      .urlSourceGet({ id: urlId })
+      .then((r) => {
+        if (!cancelled) setSrc(r);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [urlId]);
+
+  // Pick the best default variant for this URL — falls back to whichever
+  // file was actually captured so the user sees something on first open.
+  useEffect(() => {
+    if (!src) return;
+    if (variant === 'fullpage' && !src.screenshotFullpagePath) {
+      if (src.screenshotFoldPath) setVariant('fold');
+      else if (src.screenshotMobilePath) setVariant('mobile');
+    }
+  }, [src, variant]);
+
+  const activePath =
+    variant === 'fullpage'
+      ? src?.screenshotFullpagePath
+      : variant === 'fold'
+        ? src?.screenshotFoldPath
+        : src?.screenshotMobilePath;
+
+  useEffect(() => {
+    setImgData(null);
+    setImgError(null);
+    if (!activePath) return;
+    let cancelled = false;
+    void window.freecrawl
+      .readScreenshot(activePath)
+      .then((dataUrl) => {
+        if (cancelled) return;
+        if (dataUrl) setImgData(dataUrl);
+        else
+          setImgError(
+            t('screenshot.readFailed', {
+              defaultValue: 'Screenshot file could not be read from disk.',
+            }),
+          );
+      })
+      .catch((err) => {
+        if (!cancelled) setImgError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activePath, t]);
+
+  const noneCaptured =
+    !!src &&
+    !src.screenshotFullpagePath &&
+    !src.screenshotFoldPath &&
+    !src.screenshotMobilePath;
+
+  if (loading && !src) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        {t('screenshot.loading', { defaultValue: 'Loading screenshot…' })}
+      </div>
+    );
+  }
+  if (noneCaptured) {
+    return (
+      <div className="p-4 text-[11px] text-surface-500">
+        {t('screenshot.empty', {
+          defaultValue: 'No screenshots stored for this URL.',
+        })}
+        <div className="mt-1 text-[10px] text-surface-600">
+          {t('screenshot.emptyHint', {
+            defaultValue:
+              'Screenshots are only captured when Rendering Mode = JavaScript Rendering and Screenshot Capture is enabled in Settings → Rendering. Re-crawl the URL with those options on.',
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-1 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+        <span className="text-surface-500">
+          {t('screenshot.variant', { defaultValue: 'Variant' })}:
+        </span>
+        <button
+          type="button"
+          disabled={!src?.screenshotFullpagePath}
+          onClick={() => setVariant('fullpage')}
+          className={clsx(
+            'rounded border px-2 py-0.5 text-[10px] transition',
+            !src?.screenshotFullpagePath
+              ? 'cursor-not-allowed border-surface-800 text-surface-600'
+              : variant === 'fullpage'
+                ? 'border-accent-500/60 bg-accent-500/15 text-accent-300'
+                : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+          )}
+        >
+          {t('screenshot.fullpage', { defaultValue: 'Full page' })}
+        </button>
+        <button
+          type="button"
+          disabled={!src?.screenshotFoldPath}
+          onClick={() => setVariant('fold')}
+          className={clsx(
+            'rounded border px-2 py-0.5 text-[10px] transition',
+            !src?.screenshotFoldPath
+              ? 'cursor-not-allowed border-surface-800 text-surface-600'
+              : variant === 'fold'
+                ? 'border-accent-500/60 bg-accent-500/15 text-accent-300'
+                : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+          )}
+        >
+          {t('screenshot.fold', { defaultValue: 'Above the fold' })}
+        </button>
+        <button
+          type="button"
+          disabled={!src?.screenshotMobilePath}
+          onClick={() => setVariant('mobile')}
+          className={clsx(
+            'rounded border px-2 py-0.5 text-[10px] transition',
+            !src?.screenshotMobilePath
+              ? 'cursor-not-allowed border-surface-800 text-surface-600'
+              : variant === 'mobile'
+                ? 'border-accent-500/60 bg-accent-500/15 text-accent-300'
+                : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+          )}
+        >
+          {t('screenshot.mobile', { defaultValue: 'Mobile' })}
+        </button>
+        {activePath && (
+          <span className="ml-auto truncate font-mono text-[10px] text-surface-500" title={activePath}>
+            {activePath}
+          </span>
+        )}
+      </div>
+      <div className="flex-1 overflow-auto bg-surface-950 p-3">
+        {imgError ? (
+          <div className="rounded border border-red-800/60 bg-red-950/30 px-3 py-2 text-[11px] text-red-200">
+            {imgError}
+          </div>
+        ) : imgData ? (
+          <img
+            src={imgData}
+            alt="Captured screenshot"
+            className="max-w-full rounded border border-surface-800"
+          />
+        ) : (
+          <div className="px-3 py-4 text-[11px] text-surface-500">
+            {t('screenshot.loading', { defaultValue: 'Loading screenshot…' })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ViewSourceView({
   urlId,
   pageUrl,
+  kind = 'raw',
 }: {
   urlId: number | null;
   pageUrl: string;
+  /** 'raw' = HTTP response body, 'rendered' = post-JS DOM dump. */
+  kind?: 'raw' | 'rendered';
 }) {
   const { t } = useTranslation();
   const [src, setSrc] = useState<UrlSourceResult | null>(null);
@@ -608,7 +806,23 @@ function ViewSourceView({
   if (loading && !src) {
     return <div className="p-4 text-[11px] text-surface-500">{t('viewSource.loadingSource', { defaultValue: 'Loading source…' })}</div>;
   }
-  if (!src || src.body === null) {
+  const activeBody = kind === 'rendered' ? src?.renderedBody ?? null : src?.body ?? null;
+  if (!src || activeBody === null) {
+    if (kind === 'rendered') {
+      return (
+        <div className="p-4 text-[11px] text-surface-500">
+          {t('viewRendered.noBody', {
+            defaultValue: 'No rendered DOM stored for this URL.',
+          })}
+          <div className="mt-1 text-[10px] text-surface-600">
+            {t('viewRendered.noBodyHint', {
+              defaultValue:
+                'View Rendered is only populated when the page was crawled with Rendering Mode = JavaScript Rendering. Switch to JS mode in Settings → Crawler and re-crawl the URL to capture the post-JS DOM.',
+            })}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="p-4 text-[11px] text-surface-500">
         {t('viewSource.noBody', { defaultValue: 'No HTML body stored for this URL.' })}
@@ -621,7 +835,9 @@ function ViewSourceView({
     );
   }
 
-  const body = src.body;
+  const body = activeBody;
+  const activeLength =
+    kind === 'rendered' ? src.renderedBodyLength ?? body.length : src.bodyLength;
   const matches = search ? countMatches(body, search) : 0;
   // Clamp active match into the current range so a shrinking match
   // count (after the user typed an extra character) doesn't leave us
@@ -661,10 +877,15 @@ function ViewSourceView({
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
         <span className="text-surface-500">
-          {(src.bodyLength / 1024).toFixed(1)} KB
-          {src.truncated && (
+          {(activeLength / 1024).toFixed(1)} KB
+          {src.truncated && kind === 'raw' && (
             <span className="ml-1 rounded bg-amber-900/40 px-1.5 py-0.5 text-[9px] uppercase text-amber-300">
               truncated
+            </span>
+          )}
+          {kind === 'rendered' && src.renderMs !== null && (
+            <span className="ml-2 rounded bg-blue-900/40 px-1.5 py-0.5 text-[9px] uppercase text-blue-300">
+              {t('viewRendered.renderMs', { defaultValue: 'render {{ms}}ms', ms: src.renderMs })}
             </span>
           )}
         </span>

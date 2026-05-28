@@ -85,6 +85,7 @@ const TR_LABELS: Record<string, string> = {
   Noindex: 'Noindex',
   Canonicalised: 'Canonicalised',
   'Canonicalised (→ other)': 'Canonicalised (→ başka)',
+  'Non-Indexable': 'İndekslenemez',
 
   // Issues parent
   'Page Titles': 'Sayfa Başlıkları',
@@ -360,6 +361,8 @@ const TR_LABELS: Record<string, string> = {
   'SERP Snippet': 'SERP Snippet',
   'HTTP Headers': 'HTTP Başlıkları',
   'View Source': 'Kaynağı Göster',
+  'View Rendered': 'Render Edilmiş DOM',
+  Screenshot: 'Ekran Görüntüsü',
 
   // Detail panel resource categories
   Scripts: 'Scriptler',
@@ -547,6 +550,30 @@ const TR_LABELS: Record<string, string> = {
   'Link Position': 'Link Konumu',
   'Link Origin': 'Link Kaynağı',
   Transferred: 'Aktarılan',
+
+  // Settings dialog sidebar sections
+  Presets: 'Hazır Ayarlar',
+  Mode: 'Mod',
+  Crawler: 'Crawler',
+  Speed: 'Hız',
+  Requests: 'İstekler',
+  'Include/Exclude': 'Dahil Et/Hariç Tut',
+  'Custom Search': 'Özel Arama',
+  'Custom Extraction': 'Özel Veri Çekme',
+  'URL Rewriting': 'URL Yeniden Yazma',
+  Authentication: 'Kimlik Doğrulama',
+  Network: 'Ağ',
+  Duplicates: 'Yinelenenler',
+  Hardware: 'Donanım',
+  Webhook: 'Webhook',
+  'Crawl Analysis': 'Crawl Analizi',
+  Advanced: 'Gelişmiş',
+  'Per-Host UA': 'Host Bazlı UA',
+  Integrations: 'Entegrasyonlar',
+  Rendering: 'Render',
+  Storage: 'Depolama',
+  Privacy: 'Gizlilik',
+  Language: 'Dil',
 };
 
 /**

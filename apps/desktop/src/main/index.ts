@@ -12,8 +12,9 @@ import {
   type MenuItemConstructorOptions,
 } from 'electron';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { totalmem, freemem } from 'node:os';
 import {
   DEFAULT_CRAWL_CONFIG,
@@ -128,7 +129,11 @@ import {
   type UrlAnalyticsDetail,
 } from '@freecrawl/shared-types';
 import {
+  BrowserPool,
+  PlaywrightBrowserMissingError,
   Crawler,
+  renderUrl,
+  auditMobileUsability,
   exportUrlsToCsv,
   exportBrokenLinksToCsv,
   exportImagesToCsv,
@@ -188,8 +193,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
 let logsWindow: BrowserWindow | null = null;
+/** Standalone Visualization popup — single-instance, native window. */
+let visualizationWindow: BrowserWindow | null = null;
 let db: ProjectDb | null = null;
 let activeCrawler: Crawler | null = null;
+/** V2 Faz 1 — Playwright browser pool, lazily started when a JS-mode
+ *  crawl launches. Disposed on crawl stop/clear/app quit. */
+let activeBrowserPool: BrowserPool | null = null;
 /** Faz 7 — PageSpeed run guard. Only one PSI batch may run at a time;
  *  `pagespeedCancelRequested` is the cooperative cancel flag. */
 let pagespeedRunActive = false;
@@ -219,7 +229,7 @@ let latestProgress: CrawlProgress | null = null;
  * having to know about the closure-scoped helpers. Null before
  * `registerIpc()` runs. */
 let crawlController: {
-  launchCrawl: (config: CrawlConfig) => void;
+  launchCrawl: (config: CrawlConfig) => Promise<void>;
   stopCrawl: () => void;
   pauseCrawl: () => void;
   resumeCrawl: () => void;
@@ -289,6 +299,11 @@ function flushPrefs(): void {
 
 function fireDataChanged(): void {
   mainWindow?.webContents.send(IPC.dataChanged);
+  // Mirror the event to the standalone Visualization window so its
+  // Cytoscape graph repaints when a crawl finishes or rows change.
+  if (visualizationWindow && !visualizationWindow.isDestroyed()) {
+    visualizationWindow.webContents.send(IPC.dataChanged);
+  }
 }
 
 /**
@@ -356,7 +371,7 @@ function schedulerTick(): void {
     `Scheduled crawl firing: ${lastCrawlConfig.startUrl} (cadence=${entry.spec.cadence})`,
   );
   crawlerStartedByScheduler = true;
-  crawlController.launchCrawl(lastCrawlConfig);
+  void crawlController.launchCrawl(lastCrawlConfig);
 }
 
 function startScheduler(): void {
@@ -682,7 +697,33 @@ function getDb(): ProjectDb {
     // until the user accepts/discards the recovery prompt.
     try {
       const raw = db.getMeta('lastCrawlConfig');
-      if (raw) lastCrawlConfig = JSON.parse(raw) as CrawlConfig;
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<CrawlConfig>;
+        lastCrawlConfig = {
+          ...DEFAULT_CRAWL_CONFIG,
+          ...parsed,
+          jsRender: {
+            ...DEFAULT_CRAWL_CONFIG.jsRender,
+            ...(parsed.jsRender ?? {}),
+            blockResources: {
+              ...DEFAULT_CRAWL_CONFIG.jsRender.blockResources,
+              ...(parsed.jsRender?.blockResources ?? {}),
+            },
+            screenshotMode:
+              parsed.jsRender?.screenshotMode ??
+              DEFAULT_CRAWL_CONFIG.jsRender.screenshotMode,
+            mobileScreenshot:
+              parsed.jsRender?.mobileScreenshot ??
+              DEFAULT_CRAWL_CONFIG.jsRender.mobileScreenshot,
+            mobileUsability:
+              parsed.jsRender?.mobileUsability ??
+              DEFAULT_CRAWL_CONFIG.jsRender.mobileUsability,
+            lcpCandidate:
+              parsed.jsRender?.lcpCandidate ??
+              DEFAULT_CRAWL_CONFIG.jsRender.lcpCandidate,
+          },
+        };
+      }
     } catch {
       /* malformed JSON or missing key — recovery just won't fire */
     }
@@ -1536,6 +1577,69 @@ function openLogsWindow(): void {
   });
 }
 
+/**
+ * V2 — Standalone Visualization window. Single-instance; the same
+ * renderer bundle loads with `?visualization=1` so React mounts only
+ * `VisualizationView` (the Cytoscape graph) instead of the full App.
+ * Keeps the visualization off the main tab strip and gives it its own
+ * OS window the user can move to a second monitor.
+ */
+function openVisualizationWindow(): void {
+  if (visualizationWindow && !visualizationWindow.isDestroyed()) {
+    visualizationWindow.show();
+    visualizationWindow.focus();
+    return;
+  }
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    minWidth: 640,
+    minHeight: 480,
+    show: false,
+    backgroundColor: '#0a0a0a',
+    title: 'FreeCrawl — Visualization',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+  win.setMenu(null);
+  win.on('ready-to-show', () => win.show());
+  win.on('page-title-updated', (e) => e.preventDefault());
+  win.on('closed', () => {
+    if (visualizationWindow === win) visualizationWindow = null;
+  });
+  // Mirror the main window's dev-tools lockdown.
+  win.webContents.on('before-input-event', (e, input) => {
+    if (input.type !== 'keyDown') return;
+    const key = input.key.toLowerCase();
+    const mod = input.control || input.meta;
+    const isF12 = key === 'f12';
+    const isCtrlShiftI = mod && input.shift && key === 'i';
+    const isCtrlAltI = mod && input.alt && key === 'i';
+    const isCtrlShiftJ = mod && input.shift && key === 'j';
+    const isCtrlShiftC = mod && input.shift && key === 'c';
+    if (isF12 || isCtrlShiftI || isCtrlAltI || isCtrlShiftJ || isCtrlShiftC) {
+      e.preventDefault();
+    }
+  });
+  win.webContents.on('devtools-opened', () => {
+    win.webContents.closeDevTools();
+  });
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    void win.loadURL(process.env['ELECTRON_RENDERER_URL'] + '?visualization=1');
+  } else {
+    void win.loadFile(join(__dirname, '../renderer/index.html'), {
+      search: 'visualization=1',
+    });
+  }
+  visualizationWindow = win;
+  logger.log('info', 'main', 'Visualization window opened');
+}
+
 function registerIpc(): void {
   ipcMain.handle(IPC.appVersion, () => app.getVersion());
 
@@ -1585,6 +1689,36 @@ function registerIpc(): void {
     logger.log('info', 'main', 'Log buffer cleared');
   });
   ipcMain.handle(IPC.logsOpenWindow, () => openLogsWindow());
+  ipcMain.handle(IPC.visualizationOpenWindow, () => openVisualizationWindow());
+  ipcMain.handle(
+    IPC.screenshotRead,
+    async (_e, absolutePath: string): Promise<string | null> => {
+      if (typeof absolutePath !== 'string' || absolutePath.length === 0) return null;
+      // Resolve both the requested file AND the allowed root so `..`
+      // traversal can't escape the sidecar. Without `path.resolve` the
+      // naive startsWith() lets `<root>/../../../etc/passwd` pass.
+      const resolved = resolvePath(absolutePath);
+      const allowedRoots: string[] = [];
+      if (currentProjectPath) {
+        const dir = resolveScreenshotDir(currentProjectPath);
+        if (dir) allowedRoots.push(resolvePath(dir));
+      }
+      // Append the separator so that `<root>` doesn't match `<root>2`.
+      const safe = allowedRoots.some(
+        (root) => resolved === root || resolved.startsWith(root + pathSep),
+      );
+      if (!safe) return null;
+      // Only allow PNGs — extra defence in depth against the guard
+      // returning unintended files if the roots set ever broadens.
+      if (!resolved.toLowerCase().endsWith('.png')) return null;
+      try {
+        const buf = readFileSync(resolved);
+        return `data:image/png;base64,${buf.toString('base64')}`;
+      } catch {
+        return null;
+      }
+    },
+  );
 
   ipcMain.handle(IPC.robotsValidate, (_e, text: string) =>
     validateRobotsTxt(typeof text === 'string' ? text : ''),
@@ -2814,7 +2948,7 @@ function registerIpc(): void {
     });
   }
 
-  function launchCrawl(config: CrawlConfig): void {
+  async function launchCrawl(config: CrawlConfig): Promise<void> {
     if (activeCrawler) {
       activeCrawler.stop();
       logger.log('info', 'crawler', 'Stopped previous crawl before starting a new one');
@@ -2838,6 +2972,235 @@ function registerIpc(): void {
       /* never fatal */
     }
     lastCrawlConfig = config;
+
+    // V2 Faz 1 — Spin up the Playwright browser pool when JS rendering
+    // is enabled. Pool start is lazy (Chromium launches on first
+    // acquire) so HTTP-only crawls pay nothing. Dispose any previous
+    // pool first; pool reuse across runs would carry over routes /
+    // viewport from a config that may have changed.
+    void disposeBrowserPool();
+    let renderHook:
+      | ((
+          url: string,
+          urlId: number | null,
+          signal: AbortSignal,
+        ) => Promise<{
+          ok: boolean;
+          html: string;
+          timingMs: number;
+          error?: string;
+          screenshots?: { fullpage?: string; fold?: string; mobile?: string };
+          lcp?: {
+            selector: string;
+            tagName: string;
+            width: number;
+            height: number;
+            coverage: number;
+            resourceUrl: string | null;
+          } | null;
+          mobileUsability?: {
+            ok: boolean;
+            overflowPx: number;
+            hasViewportMeta: boolean;
+          } | null;
+        }>)
+      | undefined;
+    if (config.renderingMode === 'js') {
+      const blocked = new Set<string>();
+      if (config.jsRender.blockResources.image) blocked.add('image');
+      if (config.jsRender.blockResources.font) blocked.add('font');
+      if (config.jsRender.blockResources.media) blocked.add('media');
+      if (config.jsRender.blockResources.stylesheet) blocked.add('stylesheet');
+      if (config.jsRender.blockResources.script) blocked.add('script');
+      activeBrowserPool = new BrowserPool({
+        maxPages:
+          config.jsRender.maxPages > 0
+            ? config.jsRender.maxPages
+            : Math.max(1, Math.min(8, config.maxConcurrency)),
+        headless: config.jsRender.headless,
+        viewport: {
+          width: config.jsRender.viewportWidth,
+          height: config.jsRender.viewportHeight,
+        },
+        userAgent: config.userAgent || undefined,
+        acceptLanguage: config.acceptLanguage || undefined,
+        channel: config.jsRender.browserChannel || undefined,
+        blockResourceTypes: blocked.size > 0 ? blocked : undefined,
+        // Bug #2 — register once at context level. Setting it on
+        // each page accumulated across reused slots; a long crawl
+        // ran the snippet N times per navigation.
+        prerenderJs: config.jsRender.prerenderJs || undefined,
+      });
+      const pool = activeBrowserPool;
+
+      // V2 Faz 1 — Eagerly start the pool so we can detect a missing
+      // Playwright browser BEFORE any URL hits the render hook.
+      // Without this, the binary-missing error fires once per URL as
+      // a "JS render threw" warning, spamming logs and never giving
+      // the user a chance to install. Now: one prompt, install (if
+      // accepted), retry once. If still missing, drop JS render for
+      // this crawl and continue with text-only mode.
+      try {
+        await pool.start();
+      } catch (err) {
+        if (err instanceof PlaywrightBrowserMissingError) {
+          logger.log(
+            'warn',
+            'crawler',
+            'JS render disabled — Playwright browser binary missing. Prompting user to install.',
+          );
+          const installed = await offerPlaywrightInstall();
+          if (installed) {
+            try {
+              // Pool's `closed` was never set; just retry start.
+              await pool.start();
+            } catch (retryErr) {
+              logger.log(
+                'error',
+                'crawler',
+                `JS render pool still failed after install: ${retryErr instanceof Error ? retryErr.message : String(retryErr)} — falling back to text mode for this crawl.`,
+              );
+              await disposeBrowserPool();
+              config = { ...config, renderingMode: 'text' };
+              renderHook = undefined;
+            }
+          } else {
+            logger.log(
+              'warn',
+              'crawler',
+              'User declined Playwright install — falling back to text mode for this crawl.',
+            );
+            await disposeBrowserPool();
+            config = { ...config, renderingMode: 'text' };
+            renderHook = undefined;
+          }
+        } else {
+          logger.log(
+            'error',
+            'crawler',
+            `Browser pool start failed: ${err instanceof Error ? err.message : String(err)} — falling back to text mode.`,
+          );
+          await disposeBrowserPool();
+          config = { ...config, renderingMode: 'text' };
+          renderHook = undefined;
+        }
+      }
+      const screenshotDir = resolveScreenshotDir(currentProjectPath);
+      const wantsScreenshot = config.jsRender.screenshotMode !== 'none';
+      const wantsMobile =
+        config.jsRender.mobileScreenshot || config.jsRender.mobileUsability;
+      renderHook = async (url: string, _urlId: number | null, signal: AbortSignal) => {
+        if (!pool || pool.isClosed()) {
+          return { ok: false, html: '', timingMs: 0, error: 'pool closed' };
+        }
+        let screenshotPaths: { fullpage?: string; fold?: string } | undefined;
+        if (wantsScreenshot && screenshotDir) {
+          try {
+            mkdirSync(screenshotDir, { recursive: true });
+          } catch {
+            /* failure here just disables screenshot for this URL */
+          }
+          const stem = hashUrlStem(url);
+          const mode = config.jsRender.screenshotMode;
+          screenshotPaths = {};
+          if (mode === 'fullpage' || mode === 'both') {
+            screenshotPaths.fullpage = join(screenshotDir, `${stem}-fullpage.png`);
+          }
+          if (mode === 'fold' || mode === 'both') {
+            screenshotPaths.fold = join(screenshotDir, `${stem}-fold.png`);
+          }
+        }
+        const res = await renderUrl(
+          url,
+          pool,
+          {
+            timeoutMs: Math.max(5000, config.requestTimeoutMs),
+            ajaxTimeoutMs: config.jsRender.ajaxTimeoutMs,
+            waitSelector: config.jsRender.waitSelector || undefined,
+            waitUntil: config.jsRender.waitUntil,
+            screenshotMode: config.jsRender.screenshotMode,
+            detectLcp: config.jsRender.lcpCandidate,
+            screenshotPaths,
+          },
+          signal,
+        );
+        // Mobile pass — runs only when screenshot or usability is opted-in.
+        // Reuses the same pool but flips viewport temporarily; the
+        // function restores the previous size before releasing the page.
+        let mobileScreenshotPath: string | undefined;
+        let mobileUsability:
+          | { ok: boolean; overflowPx: number; hasViewportMeta: boolean }
+          | null = null;
+        if (wantsMobile && pool && !pool.isClosed() && res.ok) {
+          try {
+            if (config.jsRender.mobileScreenshot && screenshotDir) {
+              const stem = hashUrlStem(url);
+              const path = join(screenshotDir, `${stem}-mobile.png`);
+              const mobileRes = await renderUrl(
+                url,
+                pool,
+                {
+                  timeoutMs: Math.max(5000, config.requestTimeoutMs),
+                  ajaxTimeoutMs: Math.min(config.jsRender.ajaxTimeoutMs, 1000),
+                  waitUntil: config.jsRender.waitUntil,
+                  screenshotMode: 'fold',
+                  screenshotPaths: { fold: path },
+                  // Bug #1 — actually use a mobile viewport so the PNG
+                  // matches the column name. Without this, the file
+                  // was a duplicate of the desktop above-the-fold.
+                  viewport: { width: 375, height: 667 },
+                },
+                signal,
+              );
+              if (mobileRes.ok && mobileRes.screenshots?.fold) {
+                mobileScreenshotPath = mobileRes.screenshots.fold;
+              }
+            }
+            if (config.jsRender.mobileUsability) {
+              const audit = await auditMobileUsability(
+                url,
+                pool,
+                {
+                  timeoutMs: Math.max(5000, config.requestTimeoutMs),
+                  waitUntil: config.jsRender.waitUntil,
+                },
+                signal,
+              );
+              if (audit) {
+                mobileUsability = {
+                  ok: audit.ok,
+                  overflowPx: audit.overflowPx,
+                  hasViewportMeta: audit.hasViewportMeta,
+                };
+              }
+            }
+          } catch (err) {
+            logger.log(
+              'debug',
+              'crawler',
+              `mobile pass failed for ${url}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+        const screenshots =
+          res.screenshots || mobileScreenshotPath
+            ? {
+                ...(res.screenshots ?? {}),
+                ...(mobileScreenshotPath ? { mobile: mobileScreenshotPath } : {}),
+              }
+            : undefined;
+        return {
+          ok: res.ok,
+          html: res.html,
+          timingMs: res.timingMs,
+          error: res.error,
+          screenshots,
+          lcp: res.lcp ?? null,
+          mobileUsability,
+        };
+      };
+    }
+
     const crawler = new Crawler(config, database, {
       setOp: (op: string) => freezeWatchdog.setMainOp(op),
       parseHtml: parseHtmlViaPool,
@@ -2845,18 +3208,139 @@ function registerIpc(): void {
       recomputeIssues: recomputeIssuesViaPool,
       runDbPass: runDbPassViaPool,
       dbCall: dbCallViaPool,
+      renderUrl: renderHook,
     });
     activeCrawler = crawler;
     attachCrawlerListeners(crawler);
+    crawler.on('done', () => {
+      // Best-effort dispose — keeps Chromium from lingering after a
+      // crawl ends. Pool is recreated on next JS-mode launch.
+      void disposeBrowserPool();
+    });
+    crawler.on('error', () => {
+      void disposeBrowserPool();
+    });
     void crawler.start();
   }
 
-  ipcMain.handle(IPC.crawlStart, (_e, config: CrawlConfig) => {
-    launchCrawl(config);
+  /**
+   * V2 Faz 1 — Resolve the per-project screenshots sidecar directory.
+   * Lives alongside the `.seoproject` file as `<project>.screenshots/`
+   * so it tracks with Save As / move operations.
+   */
+  /**
+   * V2 Faz 1 — Once-per-session prompt asking the user to install the
+   * Playwright browser binaries when JS rendering is enabled but the
+   * binaries are missing on disk. Spawned via `npx playwright install`
+   * inheriting the user-data env so the cache lands in the standard
+   * location. Returns true when the install command finished cleanly
+   * (the caller can then retry the BrowserPool start).
+   */
+  let playwrightInstallPromise: Promise<boolean> | null = null;
+  async function offerPlaywrightInstall(): Promise<boolean> {
+    if (playwrightInstallPromise) return playwrightInstallPromise;
+    if (!mainWindow) return false;
+    const res = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      title: 'JavaScript Rendering — Browser Missing',
+      message:
+        'Playwright needs to download a Chromium browser before JavaScript rendering can run.',
+      detail:
+        'This is a one-time ~250 MB download. The browser is stored in your user cache; FreeCrawl never sends any data to Playwright servers — only the binary is downloaded from cdn.playwright.dev.\n\nDownload now?',
+      buttons: ['Download now', 'Skip — disable JS render for this run'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (res.response !== 0) return false;
+    playwrightInstallPromise = new Promise<boolean>((resolve) => {
+      const { spawn } = require('node:child_process') as typeof import('node:child_process');
+      const proc = spawn(
+        'npx',
+        ['playwright', 'install', 'chromium', 'chromium-headless-shell'],
+        {
+          shell: process.platform === 'win32',
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let stderr = '';
+      proc.stdout?.on('data', (chunk: Buffer) => {
+        const line = chunk.toString().trim();
+        if (line) logger.log('info', 'playwright-install', line);
+      });
+      proc.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      proc.on('close', (code) => {
+        playwrightInstallPromise = null;
+        if (code === 0) {
+          logger.log('info', 'playwright-install', 'Browser install complete.');
+          resolve(true);
+        } else {
+          logger.log(
+            'error',
+            'playwright-install',
+            `Browser install failed (exit ${code}). stderr: ${stderr.slice(0, 500)}`,
+          );
+          dialog.showErrorBox(
+            'Browser Install Failed',
+            `Playwright install exited with code ${code}.\n\n` +
+              `Try running "npx playwright install chromium chromium-headless-shell" manually from a terminal in the FreeCrawl source folder.\n\n${stderr.slice(0, 400)}`,
+          );
+          resolve(false);
+        }
+      });
+      proc.on('error', (err) => {
+        playwrightInstallPromise = null;
+        logger.log('error', 'playwright-install', `spawn failed: ${err.message}`);
+        dialog.showErrorBox(
+          'Browser Install Failed',
+          `Could not run "npx playwright install": ${err.message}\n\nPlease install Playwright browsers manually from a terminal.`,
+        );
+        resolve(false);
+      });
+    });
+    return playwrightInstallPromise;
+  }
+
+  function resolveScreenshotDir(projectPath: string): string | null {
+    if (!projectPath) return null;
+    const dir = dirname(projectPath);
+    const base = basename(projectPath);
+    return join(dir, `${base}.screenshots`);
+  }
+
+  /**
+   * Stable 16-char hex stem derived from the URL. Used as the screenshot
+   * filename prefix so re-crawls overwrite the previous capture instead
+   * of accumulating files.
+   */
+  function hashUrlStem(url: string): string {
+    return createHash('sha1').update(url).digest('hex').slice(0, 16);
+  }
+
+  async function disposeBrowserPool(): Promise<void> {
+    if (!activeBrowserPool) return;
+    const p = activeBrowserPool;
+    activeBrowserPool = null;
+    try {
+      await p.close();
+    } catch (err) {
+      logger.log(
+        'warn',
+        'crawler',
+        `Browser pool close failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  ipcMain.handle(IPC.crawlStart, async (_e, config: CrawlConfig) => {
+    await launchCrawl(config);
   });
 
   ipcMain.handle(IPC.crawlStop, () => {
     activeCrawler?.stop();
+    void disposeBrowserPool();
   });
 
   ipcMain.handle(IPC.crawlPause, () => {
@@ -2881,6 +3365,7 @@ function registerIpc(): void {
     const t0 = Date.now();
     activeCrawler?.stop();
     activeCrawler = null;
+    await disposeBrowserPool();
     const database = getDb();
     // Route reset() through the writer pool so it sits behind any
     // in-flight writeFetchedUrl RPCs in the worker's FIFO. Without
@@ -3408,13 +3893,30 @@ function registerIpc(): void {
     (_e, input: UrlSourceInput): UrlSourceResult => {
       const r = getDb().getUrlSource(input.id);
       if (!r) {
-        return { body: null, bodyLength: 0, truncated: false, capturedAt: null };
+        return {
+          body: null,
+          bodyLength: 0,
+          truncated: false,
+          capturedAt: null,
+          renderedBody: null,
+          renderedBodyLength: null,
+          renderMs: null,
+          screenshotFullpagePath: null,
+          screenshotFoldPath: null,
+          screenshotMobilePath: null,
+        };
       }
       return {
         body: r.body,
         bodyLength: r.bodyLength,
         truncated: r.truncated,
         capturedAt: r.capturedAt,
+        renderedBody: r.renderedBody,
+        renderedBodyLength: r.renderedBodyLength,
+        renderMs: r.renderMs,
+        screenshotFullpagePath: r.screenshotFullpagePath,
+        screenshotFoldPath: r.screenshotFoldPath,
+        screenshotMobilePath: r.screenshotMobilePath,
       };
     },
   );
@@ -3580,23 +4082,34 @@ function registerIpc(): void {
   ipcMain.handle(
     IPC.exportTabular,
     async (_e, input: ExportTabularInput): Promise<ExportTabularResult> => {
-      const { format, sections, columns, selectedIds } = input;
+      const { format, sections, columns, selectedIds, csvBom } = input;
       let outputPath = input.filePath ?? '';
       const isSelection = (selectedIds?.length ?? 0) > 0;
       const multiSection = sections.length > 1;
+      // Hierarchical export (any section with a subdir) always lands in
+      // a folder root so the tree can be reconstructed under it.
+      const hasSubdirs = sections.some((s) => !!s.subdir);
+      const needsFolder = format !== 'xlsx' && (multiSection || hasSubdirs);
       if (!outputPath) {
-        if (format === 'csv' && multiSection) {
+        if (needsFolder) {
           const res = await dialog.showOpenDialog(mainWindow!, {
             properties: ['openDirectory', 'createDirectory'],
-            title: 'Choose folder for CSV export',
+            title: `Choose folder for ${format.toUpperCase()} export`,
           });
           if (res.canceled || res.filePaths.length === 0) {
             return { filePath: '', files: [], rowsWritten: 0 };
           }
           outputPath = res.filePaths[0]!;
         } else {
-          const ext = format === 'xlsx' ? 'xlsx' : 'csv';
-          const filterName = format === 'xlsx' ? 'Excel Workbook' : 'CSV';
+          const ext = format;
+          const filterName =
+            format === 'xlsx'
+              ? 'Excel Workbook'
+              : format === 'csv'
+                ? 'CSV (UTF-8)'
+                : format === 'json'
+                  ? 'JSON'
+                  : 'XML';
           const baseName = isSelection ? 'freecrawl-selected' : 'freecrawl-export';
           const res = await dialog.showSaveDialog(mainWindow!, {
             defaultPath: `${baseName}.${ext}`,
@@ -3613,6 +4126,7 @@ function registerIpc(): void {
         sections,
         columns,
         selectedIds,
+        csvBom,
       });
       return result;
     },
@@ -4249,6 +4763,32 @@ function pickProjectPathFromArgv(argv: readonly string[]): string | null {
 app.commandLine.appendSwitch('disable-gpu-disk-cache');
 app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
 
+// V2 Faz 1 — Production builds may ship the Playwright browser cache
+// inside the installer (when `BUNDLE_PLAYWRIGHT=1` is set at build
+// time, see apps/desktop/scripts/prepare-playwright-bundle.mjs).
+// Playwright reads PLAYWRIGHT_BROWSERS_PATH at module load, so we
+// must set it BEFORE the BrowserPool import gets touched. Setting it
+// to a path that doesn't exist is harmless — Playwright simply falls
+// back to its default cache lookup.
+//
+// Must run before `app.whenReady()` so subsequent `import('playwright')`
+// calls inherit the env. `process.resourcesPath` is undefined in dev
+// (`electron-vite dev`) so the bundled-browser branch is production-only.
+try {
+  if (
+    app.isPackaged &&
+    typeof process.resourcesPath === 'string' &&
+    process.resourcesPath
+  ) {
+    const bundled = join(process.resourcesPath, 'playwright-browsers');
+    if (existsSync(bundled)) {
+      process.env.PLAYWRIGHT_BROWSERS_PATH = bundled;
+    }
+  }
+} catch {
+  /* fall through to default Playwright lookup */
+}
+
 void app.whenReady().then(async () => {
   // Disk logging is bootstrapped after `app.whenReady()` — `getPath('userData')`
   // is only valid post-ready. Prior log lines are still in the ring buffer
@@ -4320,7 +4860,7 @@ void app.whenReady().then(async () => {
             error: 'startUrl is empty — pass it in the request or run a crawl from the desktop UI at least once so the bridge has a saved default.',
           };
         }
-        crawlController.launchCrawl(resolved);
+        await crawlController.launchCrawl(resolved);
         return { ok: true as const, config: resolved };
       },
       stopCrawl: () => crawlController?.stopCrawl(),
@@ -4400,7 +4940,25 @@ let shutdownComplete = false;
 function performShutdown(): void {
   if (shutdownComplete) return;
   shutdownComplete = true;
+  // Close ancillary popup windows first so their renderers can flush
+  // any in-flight IPC before the worker pools shut down.
+  if (visualizationWindow && !visualizationWindow.isDestroyed()) {
+    try {
+      visualizationWindow.close();
+    } catch {
+      /* ignore */
+    }
+    visualizationWindow = null;
+  }
   activeCrawler?.stop();
+  // V2 Faz 1 — Tear down Playwright before worker pools so a hung
+  // Chromium process can't keep the app alive after the renderer
+  // window closes.
+  if (activeBrowserPool) {
+    const pool = activeBrowserPool;
+    activeBrowserPool = null;
+    void pool.close().catch(() => {});
+  }
   stopScheduler();
   // Tear down the MCP bridge first so any in-flight HTTP calls fail
   // fast rather than racing with the DB shutdown that follows.

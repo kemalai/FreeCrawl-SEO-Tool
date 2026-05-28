@@ -23,9 +23,7 @@ export interface MenuLabels {
   clearRecent: string;
   emptyRecent: string;
   clearCrawlData: string;
-  exportCsv: string;
-  exportJson: string;
-  exportXml: string;
+  exportAs: string;
   generateSitemap: string;
   exportHtmlReport: string;
   bulkExport: string;
@@ -43,8 +41,9 @@ export interface MenuLabels {
   view: string;
   overviewSidebar: string;
   detailPanel: string;
-  showVisualization: string;
   fullscreen: string;
+  visualization: string;
+  openVisualizationWindow: string;
   reports: string;
   reportsItem: string;
   help: string;
@@ -73,9 +72,7 @@ const MENU_EN: MenuLabels = {
   clearRecent: 'Clear Recent',
   emptyRecent: '(empty)',
   clearCrawlData: 'Clear Crawl Data',
-  exportCsv: 'Export Current View as CSV',
-  exportJson: 'Export Current View as JSON…',
-  exportXml: 'Export Current View as XML…',
+  exportAs: 'Export Crawl Data…',
   generateSitemap: 'Generate XML Sitemap…',
   exportHtmlReport: 'Export HTML Report…',
   bulkExport: 'Bulk Export…',
@@ -96,8 +93,9 @@ const MENU_EN: MenuLabels = {
   view: 'View',
   overviewSidebar: 'Overview Sidebar',
   detailPanel: 'Detail Panel',
-  showVisualization: 'Show Visualization Tab',
   fullscreen: 'Fullscreen',
+  visualization: 'Visualization',
+  openVisualizationWindow: 'Open Visualization Window…',
   reports: 'Reports',
   reportsItem: 'Reports…',
   help: 'Help',
@@ -131,9 +129,7 @@ const MENU_TR: MenuLabels = {
   clearRecent: 'Son Açılanları Temizle',
   emptyRecent: '(boş)',
   clearCrawlData: 'Crawl Verilerini Temizle',
-  exportCsv: 'Mevcut Görünümü CSV Olarak Dışa Aktar',
-  exportJson: 'Mevcut Görünümü JSON Olarak Dışa Aktar…',
-  exportXml: 'Mevcut Görünümü XML Olarak Dışa Aktar…',
+  exportAs: 'Crawl Verilerini Dışa Aktar…',
   generateSitemap: 'XML Sitemap Oluştur…',
   exportHtmlReport: 'HTML Rapor Dışa Aktar…',
   bulkExport: 'Toplu Dışa Aktarım…',
@@ -154,8 +150,9 @@ const MENU_TR: MenuLabels = {
   view: 'Görünüm',
   overviewSidebar: 'Genel Bakış Kenar Çubuğu',
   detailPanel: 'Detay Paneli',
-  showVisualization: 'Görselleştirme Sekmesini Göster',
   fullscreen: 'Tam Ekran',
+  visualization: 'Görselleştirme',
+  openVisualizationWindow: 'Görselleştirme Penceresini Aç…',
   reports: 'Raporlar',
   reportsItem: 'Raporlar…',
   help: 'Yardım',

@@ -38,6 +38,7 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 - robots.txt, sitemaps, redirect chains
 - HTTP Basic / Bearer auth, proxy override
 - Pause / Resume / manual URL injection
+- **JavaScript rendering** via headless Chromium (Playwright) — post-JS DOM, screenshot capture (full / above-fold / mobile), LCP candidate, Mobile Usability audit
 
 </td>
 <td width="50%" valign="top">
@@ -67,10 +68,13 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 ### 🖥 Desktop UI
 - Dense dark theme, virtualized 1M+ row tables
-- **Multi-language UI** (English + Turkish) — switch instantly from Settings → Language
+- **Multi-language UI** (English + Turkish) — full coverage including all Settings panels
 - Live-streaming rows during crawl
 - Advanced AND/OR search (24 fields × 12 ops)
-- Detail panel with 13 sub-tabs — **HTTP Headers** has Request/Response toggle + **status-code diagnosis banner** (decodes Cloudflare 52x/530 and 4xx/5xx with header signals)
+- **Per-tab quick-filter dropdown** — instant filtering by Overview sub-categories without leaving the tab
+- **List ↔ Tree view toggle** — switch between flat virtual table and URL-path hierarchy with collapsible folders
+- Detail panel with 15 sub-tabs — adds **View Rendered** (post-JS DOM) + **Screenshot** (full/fold/mobile preview) when JS rendering is on
+- **Visualization in its own native window** — open from menu, park on a second monitor while data tables stay free
 - Per-URL **Duplicates** view (cluster siblings)
 - **Live memory monitor** in status bar (RSS / Sys Free / per-URL cost / capacity projection)
 - **Robots.txt syntax validator** in the Robots Tester (typo suggestions, orphan rules, sitemap URL check)
@@ -86,8 +90,8 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 ### 📤 Export & Reports
 - **22 reports** — histograms, top/bottom URLs, link positions, top words, **cross-source orphan pages**
-- **Export Dialog** with column picker — CSV or **XLSX** (multi-sheet)
-- Bulk export (22 categorised CSVs) + dedicated **Images CSV export** (honours missing-alt + search)
+- **Export Crawl Data dialog** — single menu entry with format picker (**Excel `.xlsx`** / **CSV UTF-8** / **JSON** / **XML**) + hierarchical tree picker (top tables + structural sub-categories) + nested folder output
+- Per-tab in-context export button (current category) + dedicated **Images CSV export** (honours missing-alt + search)
 - Standalone HTML audit report
 - Sitemap generator (image / hreflang / sharded / gz)
 - Project-vs-project compare diff
@@ -449,9 +453,9 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development.** All 30 analysis tabs (Internal, External, Response Codes, URL, Page Titles, Meta Description, H1, H2, Content, Images, Canonicals, Directives, Redirects, Pagination, Hreflang, AMP, Structured Data, Meta Refresh, Custom Extraction, Custom Search, Security, Duplicates, Links, Broken Links, SERP, **PageSpeed, Search Console, GA4, AI, SEO Authority**, Visualization), advanced search, 150+ issue categories, sitemap export variants, JSON / CSV / XLSX / HTML reports, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, **Google PageSpeed / Search Console / URL Inspection / GA4 integrations**, **AI per-URL prompts (OpenAI / Anthropic / Ollama)**, **SEO Authority providers (Ahrefs / Majestic / Moz / Semrush)**, **Google Sheets + BigQuery direct export**, **encrypted project snapshots (AES-256-GCM)**, **cross-source orphan detection**, **memory-limit auto-pause watchdog**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, **in-app scheduled crawl**, **multi-language UI (EN + TR)**, **`.seoproject` file association**, in-app logs, and diagnostic popups are working. Cross-platform installers (Windows `.exe` + portable, macOS `.dmg`, Linux `.AppImage` / `.deb` / `.rpm`). Live-streaming UX with **first row in ~1 s**.
+> **Active development.** All 29 analysis tabs (Internal, External, Response Codes, URL, Page Titles, Meta Description, H1, H2, Content, Images, Canonicals, Directives, Redirects, Pagination, Hreflang, AMP, Structured Data, Meta Refresh, Custom Extraction, Custom Search, Security, Duplicates, Links, Broken Links, SERP, **PageSpeed, Search Console, GA4, AI, SEO Authority**) plus standalone Visualization window, advanced search, **per-tab quick-filter dropdown** + **List/Tree view toggle**, 150+ issue categories, sitemap export variants, **Export Crawl Data dialog (XLSX / CSV-UTF-8 / JSON / XML with hierarchical tree picker + nested folder output)**, list mode, custom extraction, near-duplicate + exact-duplicate detection, hreflang validation, project compare, Cytoscape visualization, auth, proxy, webhook, **MCP server with crawl control + live progress**, **Google PageSpeed / Search Console / URL Inspection / GA4 integrations**, **AI per-URL prompts (OpenAI / Anthropic / Ollama)**, **SEO Authority providers (Ahrefs / Majestic / Moz / Semrush)**, **Google Sheets + BigQuery direct export**, **encrypted project snapshots (AES-256-GCM)**, **cross-source orphan detection**, **JavaScript rendering with Playwright (post-JS DOM, screenshot capture, LCP candidate, Mobile Usability audit)**, **memory-limit auto-pause watchdog**, OS notifications, **robots.txt syntax validator**, URL rewriting + preview, **status-code diagnosis banner**, **live memory monitor**, **in-app scheduled crawl**, **multi-language UI (EN + TR) with full Settings coverage**, **`.seoproject` file association**, in-app logs, and diagnostic popups are working. Cross-platform installers (Windows `.exe` + portable, macOS `.dmg`, Linux `.AppImage` / `.deb` / `.rpm`) — **release builds ship Playwright Chromium offline so JS rendering works on first launch**. Live-streaming UX with **first row in ~1 s**.
 >
-> **Upcoming (V2):** JavaScript rendering (Chromium pool), Screenshot capture, Log file analyzer, Plugin system, Light theme, Multi-window, Code-signing + auto-update.
+> **Upcoming (V2):** Log file analyzer, Plugin system, Light theme, Multi-window, Code-signing + auto-update.
 
 <br />
 

@@ -59,7 +59,15 @@ jobs:
       - name: Build shared packages
         run: npx tsc -b
 
-      - name: Build installer
+      - name: Ensure Playwright browsers downloaded
+        # `npm ci` runs `postinstall` which already pulls Chromium +
+        # chrome-headless-shell, but we re-invoke explicitly to make
+        # the dependency obvious in the workflow logs and to force a
+        # re-check if Playwright was upgraded since the lockfile was
+        # written.
+        run: npm run playwright:install
+
+      - name: Build installer (with bundled Playwright browsers)
         run: npm --workspace apps/desktop run ${{ matrix.build_script }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,6 +75,13 @@ jobs:
           # cert in CI yet. Users will see a Gatekeeper warning on first
           # launch and must right-click → Open the .dmg's app once.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # V2 Faz 1 — Bundle the Playwright Chromium browser into the
+          # installer so JS rendering works offline / on first launch
+          # with zero extra download. The prepare-playwright-bundle.mjs
+          # script reads this env var and copies the OS cache into
+          # apps/desktop/resources/playwright-browsers/ before
+          # electron-builder packs the installer.
+          BUNDLE_PLAYWRIGHT: '1'
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

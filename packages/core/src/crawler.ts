@@ -277,6 +277,36 @@ export class Crawler extends EventEmitter {
    */
   private readonly dbCall: <T>(method: string, args: unknown[]) => Promise<T>;
 
+  /**
+   * V2 — Optional Playwright renderer. Returns the post-JS DOM dump for
+   * a URL when `renderingMode === 'js'`. Defaults to undefined so the
+   * crawler silently skips the render pass when no pool is wired.
+   */
+  private readonly renderUrlHook?: (
+    url: string,
+    urlId: number | null,
+    signal: AbortSignal,
+  ) => Promise<{
+    ok: boolean;
+    html: string;
+    timingMs: number;
+    error?: string;
+    screenshots?: { fullpage?: string; fold?: string; mobile?: string };
+    lcp?: {
+      selector: string;
+      tagName: string;
+      width: number;
+      height: number;
+      coverage: number;
+      resourceUrl: string | null;
+    } | null;
+    mobileUsability?: {
+      ok: boolean;
+      overflowPx: number;
+      hasViewportMeta: boolean;
+    } | null;
+  }>;
+
   constructor(
     config: CrawlConfig,
     db: ProjectDb,
@@ -295,6 +325,42 @@ export class Crawler extends EventEmitter {
       ) => Promise<void>;
       runDbPass?: (methodName: string) => Promise<void>;
       dbCall?: <T>(method: string, args: unknown[]) => Promise<T>;
+      /**
+       * Optional Playwright-based renderer. When `config.renderingMode ===
+       * 'js'`, the crawler invokes this hook after the HTTP fetch and
+       * uses the post-JS DOM for link extraction. The desktop host wires
+       * a managed BrowserPool here; CLI runs render-less unless the
+       * caller injects one explicitly.
+       *
+       * The result may include screenshot paths (written by Playwright
+       * to disk before this promise resolves) and an LCP candidate —
+       * the crawler stores these via dbCall hooks. The host decides
+       * which extras to compute via its own config.
+       */
+      renderUrl?: (
+        url: string,
+        urlId: number | null,
+        signal: AbortSignal,
+      ) => Promise<{
+        ok: boolean;
+        html: string;
+        timingMs: number;
+        error?: string;
+        screenshots?: { fullpage?: string; fold?: string; mobile?: string };
+        lcp?: {
+          selector: string;
+          tagName: string;
+          width: number;
+          height: number;
+          coverage: number;
+          resourceUrl: string | null;
+        } | null;
+        mobileUsability?: {
+          ok: boolean;
+          overflowPx: number;
+          hasViewportMeta: boolean;
+        } | null;
+      }>;
     } = {},
   ) {
     super();
@@ -322,6 +388,7 @@ export class Crawler extends EventEmitter {
         }
         return Promise.resolve((fn as (...a: unknown[]) => T).apply(this.db, args));
       });
+    this.renderUrlHook = opts.renderUrl;
     // Wave 9 — Resolve the active proxy. If a named profile is selected
     // and present in `proxyProfiles`, its URL wins over the legacy
     // `proxyUrl` field; if the named profile doesn't resolve we fall
@@ -2062,12 +2129,76 @@ export class Crawler extends EventEmitter {
 
       const body = await res.text();
       const bodyLength = parseIntSafe(contentLengthHeader) ?? Buffer.byteLength(body, 'utf8');
+
+      // V2 Faz 1 — JavaScript rendering pass. When `renderingMode === 'js'`
+      // and the host injected a Playwright renderer, fetch the post-JS DOM
+      // and use it for link extraction + extraction rules. The raw HTTP body
+      // stays in `url_sources.body`; the rendered DOM goes to
+      // `url_sources.rendered_body`. Render failure is non-fatal — we fall
+      // back to the static HTML so the crawl never stalls on a single page.
+      let parseBody = body;
+      let renderedHtml: string | null = null;
+      let renderMs = 0;
+      let renderScreenshots:
+        | { fullpage?: string; fold?: string; mobile?: string }
+        | null = null;
+      let renderLcp:
+        | {
+            selector: string;
+            tagName: string;
+            width: number;
+            height: number;
+            coverage: number;
+            resourceUrl: string | null;
+          }
+        | null = null;
+      let renderMobile:
+        | { ok: boolean; overflowPx: number; hasViewportMeta: boolean }
+        | null = null;
+      if (
+        this.config.renderingMode === 'js' &&
+        this.renderUrlHook &&
+        statusCode < 400
+      ) {
+        this.setOp(`crawl:render:${item.url}`);
+        try {
+          // We pass `null` for urlId here — the writeFetchedUrl call
+          // hasn't happened yet so we don't have one. The host can
+          // either generate a temp id, or use the URL string as the
+          // sidecar filename key. Screenshot paths are returned by
+          // the host so the crawler can persist them after upsert.
+          const renderRes = await this.renderUrlHook(
+            item.url,
+            null,
+            controller.signal,
+          );
+          renderMs = renderRes.timingMs;
+          if (renderRes.ok && renderRes.html) {
+            parseBody = renderRes.html;
+            renderedHtml = renderRes.html;
+          } else if (renderRes.error) {
+            this.emit(
+              'warn',
+              `JS render failed for ${item.url}: ${renderRes.error} (falling back to static HTML)`,
+            );
+          }
+          if (renderRes.screenshots) renderScreenshots = renderRes.screenshots;
+          if (renderRes.lcp) renderLcp = renderRes.lcp;
+          if (renderRes.mobileUsability) renderMobile = renderRes.mobileUsability;
+        } catch (err) {
+          this.emit(
+            'warn',
+            `JS render threw for ${item.url}: ${err instanceof Error ? err.message : String(err)} (falling back to static HTML)`,
+          );
+        }
+      }
+
       // Hand parsing to the worker pool when injected by the desktop
       // host; the CLI's default is the inline `parseHtml`. The
       // crawler doesn't care which one runs as long as the result
       // shape matches.
       this.setOp(`crawl:parse:${item.url}`);
-      const parsed = await this.parsePage(body, item.url, {
+      const parsed = await this.parsePage(parseBody, item.url, {
         includeSubdomains: this.config.scope === 'all-subdomains',
         cdnHosts: this.config.cdnHosts,
         customSearchTerms: this.config.customSearchTerms,
@@ -2270,6 +2401,52 @@ export class Crawler extends EventEmitter {
         images: parsed.images,
         fromDepth: item.depth,
       });
+      // V2 Faz 1 — Persist render artefacts inline so they finish before
+      // the URL is considered done. Bug #8: previously these were
+      // fire-and-forget, which let a Clear racing the crawler write
+      // orphan rows into the freshly-reset DB. Awaiting here adds at
+      // most 1-3 ms per URL but eliminates the race window.
+      if (urlId) {
+        const persistOps: Promise<unknown>[] = [];
+        if (renderedHtml) {
+          const cap =
+            this.config.bodySnapshotMaxBytes > 0
+              ? this.config.bodySnapshotMaxBytes
+              : 1_048_576;
+          persistOps.push(
+            this.dbCall<void>('setUrlRenderedBody', [
+              urlId,
+              renderedHtml,
+              renderMs,
+              cap,
+            ]),
+          );
+        }
+        if (renderScreenshots) {
+          persistOps.push(
+            this.dbCall<void>('setUrlScreenshotPaths', [urlId, renderScreenshots]),
+          );
+        }
+        if (renderLcp) {
+          persistOps.push(this.dbCall<void>('setUrlLcpCandidate', [urlId, renderLcp]));
+        }
+        if (renderMobile) {
+          persistOps.push(
+            this.dbCall<void>('setUrlMobileUsability', [urlId, renderMobile]),
+          );
+        }
+        if (persistOps.length > 0) {
+          const results = await Promise.allSettled(persistOps);
+          for (const r of results) {
+            if (r.status === 'rejected') {
+              this.emit(
+                'debug',
+                `Render persistence failed for ${item.url}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+              );
+            }
+          }
+        }
+      }
       for (const link of storableLinks) {
         if (!link.isInternal) this.enqueueExternal(link.toUrl);
       }

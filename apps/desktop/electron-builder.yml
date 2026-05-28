@@ -17,6 +17,24 @@ files:
 asar: true
 asarUnpack:
   - "**/*.node"
+# V2 Faz 1 — JS rendering. By default the Playwright browser cache is
+# NOT bundled into the installer (saves ~250 MB). The main process
+# prompts the user to download the browser on first JS-render crawl.
+#
+# To opt into bundling (offline installer / enterprise distribution):
+#   1. Run `npm run playwright:install` so the cache exists locally.
+#   2. Build with `BUNDLE_PLAYWRIGHT=1`:
+#        $env:BUNDLE_PLAYWRIGHT='1'; npm --workspace apps/desktop run build:win
+#      The build script copies `~/AppData/Local/ms-playwright` into
+#      `apps/desktop/resources/playwright-browsers/` BEFORE
+#      electron-builder runs, and the `extraResources` glob below picks
+#      it up. When the env var is unset the resources folder is empty
+#      and the glob no-ops.
+extraResources:
+  - from: "resources/playwright-browsers"
+    to: "playwright-browsers"
+    filter:
+      - "**/*"
 win:
   target:
     - target: nsis

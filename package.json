@@ -1,6 +1,6 @@
 {
   "name": "freecrawl-seo",
-  "version": "0.6.0",
+  "version": "0.6.5",
   "private": true,
   "description": "Open-source desktop SEO crawler â€” a free alternative to Screaming Frog",
   "license": "MIT",
@@ -32,7 +32,9 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,css,html}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md,css,html}\"",
     "test": "npm run test --workspaces --if-present",
-    "cli": "npm run start --workspace apps/cli --"
+    "cli": "npm run start --workspace apps/cli --",
+    "postinstall": "node scripts/install-playwright-browsers.mjs",
+    "playwright:install": "node scripts/install-playwright-browsers.mjs --force"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

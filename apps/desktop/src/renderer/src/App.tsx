@@ -13,6 +13,7 @@ import { SettingsDialog } from './components/SettingsDialog.js';
 import { CompareDialog } from './components/CompareDialog.js';
 import { ScheduledCrawlDialog } from './components/ScheduledCrawlDialog.js';
 import { PasswordPromptDialog } from './components/PasswordPromptDialog.js';
+import { ExportDialog } from './components/ExportDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
@@ -22,7 +23,6 @@ import { SearchConsoleTab } from './tabs/SearchConsoleTab.js';
 import { AnalyticsTab } from './tabs/AnalyticsTab.js';
 import { AiTab } from './tabs/AiTab.js';
 import { SeoTab } from './tabs/SeoTab.js';
-import { VisualizationTab } from './tabs/VisualizationTab.js';
 import { useAppStore } from './store.js';
 import type { MenuEvent } from '@freecrawl/shared-types';
 import { clearCrawlWithConfirm } from './utils/clearCrawl.js';
@@ -45,6 +45,7 @@ export function App() {
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
   const [sitemapValidatorOpen, setSitemapValidatorOpen] = useState(false);
+  const [exportAsOpen, setExportAsOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
@@ -229,14 +230,8 @@ export function App() {
             if (didClear) reset();
           });
           break;
-        case 'export-csv':
-          void window.freecrawl.exportCsv({ filePath: '' });
-          break;
-        case 'export-json':
-          void window.freecrawl.exportJson({ filePath: '', pretty: true });
-          break;
-        case 'export-xml':
-          void window.freecrawl.exportXml({ filePath: '' });
+        case 'export-as':
+          setExportAsOpen(true);
           break;
         case 'delete-domain-data': {
           const domain = window.prompt(
@@ -377,7 +372,7 @@ export function App() {
           setPasswordPrompt({ mode: 'open' });
           break;
         case 'open-visualization':
-          setActiveTab('visualization');
+          void window.freecrawl.openVisualizationWindow();
           break;
         case 'open-scheduled-crawl':
           setScheduleOpen(true);
@@ -448,13 +443,11 @@ export function App() {
                   <AiTab />
                 ) : activeTab === 'seo' ? (
                   <SeoTab />
-                ) : activeTab === 'visualization' ? (
-                  <VisualizationTab />
                 ) : (
                   <UrlsTab />
                 )}
               </Panel>
-              {detailPanelOpen && activeTab !== 'visualization' && (
+              {detailPanelOpen && (
                 <>
                   <PanelResizeHandle className="group relative h-1.5 bg-surface-800 transition-colors hover:bg-accent-500/60 data-[resize-handle-state=drag]:bg-accent-500">
                     <div className="absolute inset-x-0 -top-1 -bottom-1" />
@@ -491,6 +484,11 @@ export function App() {
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <CompareDialog open={compareOpen} onClose={() => setCompareOpen(false)} />
       <ScheduledCrawlDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)} />
+      <ExportDialog
+        open={exportAsOpen}
+        onClose={() => setExportAsOpen(false)}
+        defaultTab={activeTab}
+      />
       <PasswordPromptDialog
         open={passwordPrompt !== null}
         title={

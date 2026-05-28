@@ -551,6 +551,29 @@ const UPSERT_URL_SQL = `
   RETURNING id
 `;
 
+/**
+ * Truncate a UTF-8 string to at most `cap` bytes, rounding down at a
+ * code-point boundary so the result is always valid UTF-8. `Buffer.slice`
+ * can leave a partial sequence at the end (a continuation byte `10xxxxxx`
+ * without its leader), which `.toString('utf8')` then renders as
+ * `�`. We back up at most 3 bytes — the maximum continuation chain
+ * length in 4-byte UTF-8 — until the next byte starts a new code point.
+ */
+function truncateUtf8(input: string, cap: number): string {
+  if (cap <= 0) return '';
+  const buf = Buffer.from(input, 'utf8');
+  if (buf.length <= cap) return input;
+  let end = cap;
+  // Walk back past continuation bytes (10xxxxxx → 0x80..0xBF). The byte
+  // we keep must NOT be a continuation byte; it's either ASCII (0xxxxxxx)
+  // or a leader (11xxxxxx). If we're sitting on a continuation byte, the
+  // previous leader's sequence is incomplete — drop the whole sequence.
+  while (end > 0 && (buf[end] !== undefined) && (buf[end]! & 0xc0) === 0x80) {
+    end--;
+  }
+  return buf.subarray(0, end).toString('utf8');
+}
+
 export class ProjectDb {
   private readonly db: DatabaseSync;
   private readonly stmtUpsertUrl: StatementSync;
@@ -4469,8 +4492,7 @@ export class ProjectDb {
     let stored = body;
     let truncated = 0;
     if (fullLength > cap) {
-      // Slice on bytes, not chars — surrogate-pair safe via Buffer.
-      stored = Buffer.from(body, 'utf8').slice(0, cap).toString('utf8');
+      stored = truncateUtf8(body, cap);
       truncated = 1;
     }
     this.db
@@ -4493,13 +4515,38 @@ export class ProjectDb {
    */
   getUrlSource(
     urlId: number,
-  ): { body: string; bodyLength: number; truncated: boolean; capturedAt: string } | null {
+  ): {
+    body: string;
+    bodyLength: number;
+    truncated: boolean;
+    capturedAt: string;
+    renderedBody: string | null;
+    renderedBodyLength: number | null;
+    renderMs: number | null;
+    screenshotFullpagePath: string | null;
+    screenshotFoldPath: string | null;
+    screenshotMobilePath: string | null;
+  } | null {
     const row = this.db
       .prepare(
-        'SELECT body, body_length, truncated, captured_at FROM url_sources WHERE url_id = ?',
+        `SELECT body, body_length, truncated, captured_at,
+                rendered_body, rendered_body_length, render_ms,
+                screenshot_fullpage_path, screenshot_fold_path, screenshot_mobile_path
+           FROM url_sources WHERE url_id = ?`,
       )
       .get(urlId) as
-      | { body: string; body_length: number; truncated: number; captured_at: string }
+      | {
+          body: string;
+          body_length: number;
+          truncated: number;
+          captured_at: string;
+          rendered_body: string | null;
+          rendered_body_length: number | null;
+          render_ms: number | null;
+          screenshot_fullpage_path: string | null;
+          screenshot_fold_path: string | null;
+          screenshot_mobile_path: string | null;
+        }
       | undefined;
     if (!row) return null;
     return {
@@ -4507,7 +4554,153 @@ export class ProjectDb {
       bodyLength: row.body_length,
       truncated: row.truncated === 1,
       capturedAt: row.captured_at,
+      renderedBody: row.rendered_body,
+      renderedBodyLength: row.rendered_body_length,
+      renderMs: row.render_ms,
+      screenshotFullpagePath: row.screenshot_fullpage_path,
+      screenshotFoldPath: row.screenshot_fold_path,
+      screenshotMobilePath: row.screenshot_mobile_path,
     };
+  }
+
+  /**
+   * Persist the screenshot file paths for a URL. Screenshots live
+   * on disk under `<projectDir>/screenshots/` — the DB only stores
+   * the paths so the row size stays small. Pass `null` to clear an
+   * individual field.
+   */
+  setUrlScreenshotPaths(
+    urlId: number,
+    paths: {
+      fullpage?: string | null;
+      fold?: string | null;
+      mobile?: string | null;
+    },
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO url_sources (
+            url_id, body, body_length, truncated,
+            screenshot_fullpage_path, screenshot_fold_path, screenshot_mobile_path
+          ) VALUES (?, '', 0, 0, ?, ?, ?)
+         ON CONFLICT(url_id) DO UPDATE SET
+           screenshot_fullpage_path =
+             CASE WHEN excluded.screenshot_fullpage_path IS NULL
+                  THEN url_sources.screenshot_fullpage_path
+                  ELSE excluded.screenshot_fullpage_path END,
+           screenshot_fold_path =
+             CASE WHEN excluded.screenshot_fold_path IS NULL
+                  THEN url_sources.screenshot_fold_path
+                  ELSE excluded.screenshot_fold_path END,
+           screenshot_mobile_path =
+             CASE WHEN excluded.screenshot_mobile_path IS NULL
+                  THEN url_sources.screenshot_mobile_path
+                  ELSE excluded.screenshot_mobile_path END,
+           captured_at = CURRENT_TIMESTAMP`,
+      )
+      .run(
+        urlId,
+        paths.fullpage ?? null,
+        paths.fold ?? null,
+        paths.mobile ?? null,
+      );
+  }
+
+  /**
+   * Persist the LCP candidate (largest above-fold element) details on
+   * the urls row. All fields are nullable — only updated when present.
+   */
+  setUrlLcpCandidate(
+    urlId: number,
+    lcp: {
+      selector: string;
+      tagName: string;
+      width: number;
+      height: number;
+      coverage: number;
+      resourceUrl: string | null;
+    } | null,
+  ): void {
+    if (!lcp) return;
+    this.db
+      .prepare(
+        `UPDATE urls
+           SET lcp_selector = ?,
+               lcp_tag = ?,
+               lcp_width = ?,
+               lcp_height = ?,
+               lcp_coverage = ?,
+               lcp_resource_url = ?
+         WHERE id = ?`,
+      )
+      .run(
+        lcp.selector,
+        lcp.tagName,
+        lcp.width,
+        lcp.height,
+        lcp.coverage,
+        lcp.resourceUrl,
+        urlId,
+      );
+  }
+
+  /** Persist mobile-usability audit verdict + raw overflow / viewport-meta flag. */
+  setUrlMobileUsability(
+    urlId: number,
+    audit: {
+      ok: boolean;
+      overflowPx: number;
+      hasViewportMeta: boolean;
+    },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE urls
+           SET mobile_usable = ?,
+               mobile_overflow_px = ?,
+               mobile_viewport_meta = ?
+         WHERE id = ?`,
+      )
+      .run(
+        audit.ok ? 1 : 0,
+        audit.overflowPx,
+        audit.hasViewportMeta ? 1 : 0,
+        urlId,
+      );
+  }
+
+  /**
+   * Persist (or overwrite) the post-JS rendered HTML for a URL.
+   * Called when `renderingMode === 'js'` after Playwright finishes
+   * navigating the page. The pre-JS body (if captured) stays in
+   * `url_sources.body`; this column holds the DOM dump after
+   * scripts execute and ajax/wait conditions settle.
+   */
+  setUrlRenderedBody(
+    urlId: number,
+    renderedBody: string,
+    renderMs: number,
+    cap = 1_048_576,
+  ): void {
+    const fullLength = Buffer.byteLength(renderedBody, 'utf8');
+    let stored = renderedBody;
+    if (fullLength > cap) {
+      stored = truncateUtf8(renderedBody, cap);
+    }
+    // INSERT-OR-UPDATE — when no row exists yet (storeBodySnapshots was off
+    // for the raw HTML), seed an empty `body` so the NOT NULL constraint
+    // holds while still recording the rendered DOM.
+    this.db
+      .prepare(
+        `INSERT INTO url_sources (url_id, body, body_length, truncated, rendered_body, rendered_body_length, render_ms)
+         VALUES (?, '', 0, 0, ?, ?, ?)
+         ON CONFLICT(url_id) DO UPDATE SET
+           rendered_body = excluded.rendered_body,
+           rendered_body_length = excluded.rendered_body_length,
+           render_ms = excluded.render_ms,
+           captured_at = CURRENT_TIMESTAMP`,
+      )
+      .run(urlId, stored, fullLength, renderMs);
   }
 
   *iterateAllUrls(): IterableIterator<CrawlUrlRow> {

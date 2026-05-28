@@ -116,6 +116,15 @@ export const IPC = {
    * heavy crawls this drops IPC volume from ~200 msgs/s to ~10. */
   logsBatch: 'logs:batch',
   logsOpenWindow: 'logs:open-window',
+  /** Renderer → main: open (or focus) the standalone Visualization
+   *  popup window. The graph runs in its own native window so the user
+   *  can park it on a second monitor while the main tab strip stays
+   *  free for data tables. */
+  visualizationOpenWindow: 'visualization:open-window',
+  /** Renderer → main: read a captured screenshot PNG and return a
+   *  data: URL the renderer can plug straight into `<img src>`. Avoids
+   *  file:// CSP / sandbox headaches. */
+  screenshotRead: 'screenshot:read',
   /** main → logs renderer: pause / resume the live setState pump while
    * the user is dragging or resizing the Logs window. Prevents the
    * renderer's render loop from competing with the OS compositor for
@@ -335,9 +344,7 @@ export type MenuEvent =
   | 'clear-crawl'
   | 'toggle-sidebar'
   | 'toggle-detail-panel'
-  | 'export-csv'
-  | 'export-json'
-  | 'export-xml'
+  | 'export-as'
   | 'export-html-report'
   | 'export-bulk'
   | 'export-sheets'
@@ -417,19 +424,28 @@ export interface ExportImagesResult {
 }
 
 /** One section / sheet of a tabular export — a single category fed into
- * the workbook (xlsx) or split into its own file (csv). */
+ * the workbook (xlsx) or split into its own file (csv/json/xml). */
 export interface ExportTabularSection {
-  /** Display label — becomes the xlsx sheet name and the csv file suffix. */
+  /** Display label — becomes the xlsx sheet name and the per-file label. */
   label: string;
   category: UrlCategory;
+  /** Optional subdirectory under the chosen folder. When set, the section
+   *  file lands at `<root>/<subdir>/<filename>.<ext>` instead of the flat
+   *  `<root>/<filename>.<ext>`. Lets a hierarchical tree pick (Internal →
+   *  HTML/JS/CSS) export under nested folders. Ignored for xlsx output
+   *  (everything stays in a single workbook). */
+  subdir?: string;
+  /** Optional filename (without extension) — defaults to a sanitized label. */
+  filename?: string;
 }
 
 export interface ExportTabularInput {
-  format: 'csv' | 'xlsx';
+  format: 'csv' | 'xlsx' | 'json' | 'xml';
   /**
-   * One or more sections. With CSV + multiple sections, files are written
-   * into a folder the user picks; xlsx always produces a single workbook
-   * with one sheet per section.
+   * One or more sections. With CSV/JSON/XML + multiple sections, files are
+   * written into a folder the user picks (one file per section, honouring
+   * the optional `subdir`); xlsx always produces a single workbook with
+   * one sheet per section.
    */
   sections: ExportTabularSection[];
   /** Keys of `CrawlUrlRow` to emit, in order. */
@@ -438,6 +454,9 @@ export interface ExportTabularInput {
   filePath?: string;
   /** When set, restrict every section to these row ids. */
   selectedIds?: number[];
+  /** When true, CSV files are written with a UTF-8 BOM so Excel for Windows
+   *  opens them in the correct charset. Ignored for non-CSV formats. */
+  csvBom?: boolean;
 }
 
 export interface ExportTabularResult {
@@ -624,6 +643,19 @@ export interface UrlSourceResult {
   truncated: boolean;
   /** ISO timestamp of when the snapshot was captured. */
   capturedAt: string | null;
+  /** V2 Faz 1 — Post-JS rendered DOM dump. Null when JS render did not
+   *  run for this URL (text/ajax mode or page rendered before V2). */
+  renderedBody: string | null;
+  /** Byte length of the rendered DOM before truncation. */
+  renderedBodyLength: number | null;
+  /** Total Playwright render time in ms (nav + wait + extract). */
+  renderMs: number | null;
+  /** Absolute path to the full-page screenshot PNG, when captured. */
+  screenshotFullpagePath: string | null;
+  /** Absolute path to the above-the-fold screenshot PNG, when captured. */
+  screenshotFoldPath: string | null;
+  /** Absolute path to the mobile-viewport screenshot PNG, when captured. */
+  screenshotMobilePath: string | null;
 }
 
 export interface UrlPageImagesInput {
@@ -1323,6 +1355,8 @@ export interface FreeCrawlApi {
   logsGetAll(): Promise<LogEntry[]>;
   logsClear(): Promise<void>;
   logsOpenWindow(): Promise<void>;
+  openVisualizationWindow(): Promise<void>;
+  readScreenshot(absolutePath: string): Promise<string | null>;
   robotsTest(input: RobotsTestInput): Promise<RobotsTestResult>;
   robotsValidate(text: string): Promise<RobotsValidationIssue[]>;
   sitemapValidate(input: SitemapValidateInput): Promise<SitemapValidateResult>;

@@ -1,6 +1,19 @@
 export { Crawler } from './crawler.js';
 export type { CrawlerEvents } from './crawler.js';
 export {
+  BrowserPool,
+  PlaywrightBrowserMissingError,
+  type BrowserPoolOptions,
+} from './browser-pool.js';
+export {
+  renderUrl,
+  auditMobileUsability,
+  type RenderOptions,
+  type RenderResult,
+  type LcpCandidate,
+  type MobileUsabilityResult,
+} from './render-fetcher.js';
+export {
   normalizeUrl,
   isSameHost,
   resolveStartUrl,

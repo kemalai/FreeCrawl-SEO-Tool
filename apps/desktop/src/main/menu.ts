@@ -79,18 +79,9 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         { label: L.clearCrawlData, click: () => send('clear-crawl') },
         { type: 'separator' },
         {
-          label: L.exportCsv,
+          label: L.exportAs,
           accelerator: 'CmdOrCtrl+E',
-          click: () => send('export-csv'),
-        },
-        {
-          label: L.exportJson,
-          accelerator: 'CmdOrCtrl+Shift+E',
-          click: () => send('export-json'),
-        },
-        {
-          label: L.exportXml,
-          click: () => send('export-xml'),
+          click: () => send('export-as'),
         },
         {
           label: L.generateSitemap,
@@ -161,12 +152,6 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => send('toggle-detail-panel'),
         },
         { type: 'separator' },
-        {
-          label: L.showVisualization,
-          accelerator: 'CmdOrCtrl+G',
-          click: () => send('open-visualization'),
-        },
-        { type: 'separator' },
         { role: 'reload' },
         { type: 'separator' },
         { role: 'resetZoom' },
@@ -174,6 +159,16 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         { role: 'zoomOut' },
         { type: 'separator' },
         { role: 'togglefullscreen', label: L.fullscreen },
+      ],
+    },
+    {
+      label: L.visualization,
+      submenu: [
+        {
+          label: L.openVisualizationWindow,
+          accelerator: 'CmdOrCtrl+G',
+          click: () => send('open-visualization'),
+        },
       ],
     },
     {
@@ -236,7 +231,10 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => handlers.onCheckForUpdates(),
         },
         { type: 'separator' },
-        { label: L.about, click: () => send('about') },
+        {
+          label: L.about,
+          click: () => void shell.openExternal('https://freecrawl.net/'),
+        },
       ],
     },
   ];

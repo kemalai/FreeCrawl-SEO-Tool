@@ -1409,6 +1409,96 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 62,
+    name: 'add_rendered_body_column',
+    // V2 Faz 1 — JavaScript rendering. Stores the post-JS DOM dump
+    // captured by Playwright alongside the raw HTML in `url_sources`.
+    // When `renderingMode === 'js'`, the crawler fills `rendered_body`
+    // and re-uses `body` for the pre-JS HTML so users can diff the two
+    // in the View Rendered HTML detail sub-tab.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(url_sources)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'rendered_body')) {
+        db.exec('ALTER TABLE url_sources ADD COLUMN rendered_body TEXT');
+      }
+      if (!cols.some((c) => c.name === 'rendered_body_length')) {
+        db.exec(
+          'ALTER TABLE url_sources ADD COLUMN rendered_body_length INTEGER',
+        );
+      }
+      if (!cols.some((c) => c.name === 'render_ms')) {
+        db.exec('ALTER TABLE url_sources ADD COLUMN render_ms INTEGER');
+      }
+    },
+  },
+  {
+    version: 63,
+    name: 'add_screenshot_lcp_mobile_columns',
+    // V2 Faz 1 Increment 3+4 — Screenshot capture + LCP candidate +
+    // Mobile Usability. Screenshot files live as PNGs on disk under
+    // the project's `screenshots/` sidecar folder; the DB only stores
+    // the file paths (relative-to-project-dir when possible). LCP +
+    // mobile-usability fields live on the urls table because they're
+    // queried alongside other per-URL fields in the main grid.
+    up: (db) => {
+      const srcCols = db
+        .prepare('PRAGMA table_info(url_sources)')
+        .all() as unknown as { name: string }[];
+      if (!srcCols.some((c) => c.name === 'screenshot_fullpage_path')) {
+        db.exec(
+          'ALTER TABLE url_sources ADD COLUMN screenshot_fullpage_path TEXT',
+        );
+      }
+      if (!srcCols.some((c) => c.name === 'screenshot_fold_path')) {
+        db.exec('ALTER TABLE url_sources ADD COLUMN screenshot_fold_path TEXT');
+      }
+      if (!srcCols.some((c) => c.name === 'screenshot_mobile_path')) {
+        db.exec(
+          'ALTER TABLE url_sources ADD COLUMN screenshot_mobile_path TEXT',
+        );
+      }
+      const urlCols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!urlCols.some((c) => c.name === 'lcp_selector')) {
+        db.exec('ALTER TABLE urls ADD COLUMN lcp_selector TEXT');
+      }
+      if (!urlCols.some((c) => c.name === 'lcp_tag')) {
+        db.exec('ALTER TABLE urls ADD COLUMN lcp_tag TEXT');
+      }
+      if (!urlCols.some((c) => c.name === 'lcp_width')) {
+        db.exec('ALTER TABLE urls ADD COLUMN lcp_width INTEGER');
+      }
+      if (!urlCols.some((c) => c.name === 'lcp_height')) {
+        db.exec('ALTER TABLE urls ADD COLUMN lcp_height INTEGER');
+      }
+      if (!urlCols.some((c) => c.name === 'lcp_coverage')) {
+        db.exec('ALTER TABLE urls ADD COLUMN lcp_coverage REAL');
+      }
+      if (!urlCols.some((c) => c.name === 'lcp_resource_url')) {
+        db.exec('ALTER TABLE urls ADD COLUMN lcp_resource_url TEXT');
+      }
+      // mobile_usable: -1 = not audited, 0 = fails one or more checks, 1 = pass.
+      if (!urlCols.some((c) => c.name === 'mobile_usable')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN mobile_usable INTEGER NOT NULL DEFAULT -1',
+        );
+      }
+      if (!urlCols.some((c) => c.name === 'mobile_overflow_px')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN mobile_overflow_px INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+      if (!urlCols.some((c) => c.name === 'mobile_viewport_meta')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN mobile_viewport_meta INTEGER NOT NULL DEFAULT -1',
+        );
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

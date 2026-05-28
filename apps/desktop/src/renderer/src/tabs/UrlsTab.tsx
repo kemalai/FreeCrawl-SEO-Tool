@@ -1,13 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronsUpDown, Columns3, Download, Filter, X } from 'lucide-react';
+import {
+  ChevronsUpDown,
+  Columns3,
+  Download,
+  Filter,
+  List,
+  Network,
+  X,
+} from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
-import type { AdvancedFilter, CrawlUrlRow } from '@freecrawl/shared-types';
-import { useAppStore, type TabKey } from '../store.js';
+import type {
+  AdvancedFilter,
+  CrawlUrlRow,
+  UrlCategory,
+} from '@freecrawl/shared-types';
+import { useAppStore, TAB_QUICK_FILTERS, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId, type ColumnSpec } from './columns.js';
 import { useLazyUrlRows } from '../hooks/useLazyUrlRows.js';
 import { AdvancedFilterDialog } from '../components/AdvancedFilterDialog.js';
+import { UrlTreeView } from '../components/UrlTreeView.js';
 import { ErrorBoundary } from '../components/ErrorBoundary.js';
 import { ExportDialog } from '../components/ExportDialog.js';
 import { InfoTip } from '../components/InfoTip.js';
@@ -51,6 +64,7 @@ export function UrlsTab() {
   const lang = i18n.language;
   const activeTab = useAppStore((s) => s.activeTab);
   const activeCategory = useAppStore((s) => s.activeCategory);
+  const setActiveCategory = useAppStore((s) => s.setActiveCategory);
   const selectedUrlId = useAppStore((s) => s.selectedUrlId);
   const setSelectedUrlId = useAppStore((s) => s.setSelectedUrlId);
   const setSelectedUrlIds = useAppStore((s) => s.setSelectedUrlIds);
@@ -60,6 +74,17 @@ export function UrlsTab() {
   const [filter, setFilter] = useState<AdvancedFilter | null>(null);
   const [filterDialogOpen, setFilterDialogOpen] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  /** View mode toggle — list (default flat virtual table) or tree
+   *  (URL-path hierarchy). Per-tab + persisted across mounts via prefs. */
+  const [viewMode, setViewMode] = useState<'list' | 'tree'>(() => {
+    const stored = window.freecrawl.prefsGet(`view-mode:${activeTab}`);
+    return stored === 'tree' ? 'tree' : 'list';
+  });
+  const quickFilters = TAB_QUICK_FILTERS[activeTab];
+  const activeQuickFilter = useMemo(() => {
+    if (!quickFilters) return null;
+    return quickFilters.find((q) => q.category === activeCategory) ?? null;
+  }, [quickFilters, activeCategory]);
   // Three orthogonal selection layers:
   // - selectedIds: row-level selection driven by the Row-number column.
   //   Feeds the bulk context menu (Copy/Open/Re-Spider/Remove/Export).
@@ -133,7 +158,19 @@ export function UrlsTab() {
     setColumnWidths(loadStoredWidths(activeTab));
     setHiddenColumnsState(loadHiddenColumns(activeTab));
     setColumnPickerOpen(false);
+    // Pick up the persisted view-mode for the new tab.
+    const stored = window.freecrawl.prefsGet(`view-mode:${activeTab}`);
+    setViewMode(stored === 'tree' ? 'tree' : 'list');
   }, [activeTab]);
+
+  // Persist viewMode whenever the user toggles it.
+  useEffect(() => {
+    try {
+      window.freecrawl.prefsSet(`view-mode:${activeTab}`, viewMode);
+    } catch {
+      /* best-effort */
+    }
+  }, [activeTab, viewMode]);
 
   useEffect(() => {
     setSelectedIds(new Set());
@@ -532,6 +569,34 @@ export function UrlsTab() {
           onChange={(e) => setSearch(e.target.value)}
           spellCheck={false}
         />
+        {quickFilters && quickFilters.length > 0 && (
+          <select
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-200 focus:border-blue-500 focus:outline-none"
+            // Bug #6 — when activeCategory isn't one of the predefined
+            // quick-filter options, fall back to an explicit placeholder
+            // value so the dropdown doesn't silently mislabel itself as
+            // the first option.
+            value={activeQuickFilter?.category ?? ''}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v) setActiveCategory(v as UrlCategory);
+            }}
+            title={t('urlsTab.quickFilterTitle', { defaultValue: 'Quick filter for this tab' })}
+          >
+            {!activeQuickFilter && (
+              <option value="" disabled>
+                {t('urlsTab.quickFilterCustom', {
+                  defaultValue: '— Custom filter —',
+                })}
+              </option>
+            )}
+            {quickFilters.map((q) => (
+              <option key={q.category} value={q.category}>
+                {translateLabel(q.label, lang)}
+              </option>
+            ))}
+          </select>
+        )}
         <button
           type="button"
           onClick={() => setFilterDialogOpen(true)}
@@ -561,7 +626,35 @@ export function UrlsTab() {
             <X className="h-3 w-3" />
           </button>
         )}
-        <div className="relative ml-auto">
+        <div className="ml-auto inline-flex overflow-hidden rounded border border-surface-700">
+          <button
+            type="button"
+            onClick={() => setViewMode('list')}
+            className={clsx(
+              'inline-flex items-center justify-center px-2 py-1 text-[11px] transition',
+              viewMode === 'list'
+                ? 'bg-accent-500/15 text-accent-300'
+                : 'text-surface-300 hover:bg-surface-800',
+            )}
+            title={t('urlsTab.listView', { defaultValue: 'List view' })}
+          >
+            <List className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('tree')}
+            className={clsx(
+              'inline-flex items-center justify-center border-l border-surface-700 px-2 py-1 text-[11px] transition',
+              viewMode === 'tree'
+                ? 'bg-accent-500/15 text-accent-300'
+                : 'text-surface-300 hover:bg-surface-800',
+            )}
+            title={t('urlsTab.treeView', { defaultValue: 'Tree view (URL hierarchy)' })}
+          >
+            <Network className="h-3.5 w-3.5" />
+          </button>
+        </div>
+        <div className="relative">
           <button
             type="button"
             data-columns-anchor="1"
@@ -617,6 +710,25 @@ export function UrlsTab() {
         </button>
       </div>
 
+      {viewMode === 'tree' ? (
+        <UrlTreeView
+          category={activeCategory}
+          search={search}
+          filter={filter}
+          refreshKey={dataVersion}
+          selectedUrlId={selectedUrlId}
+          onSelect={(id) => {
+            setSelectedUrlId(id);
+            if (id !== null) {
+              setSelectedIds(new Set([id]));
+              setSelectedUrlIds([id]);
+            } else {
+              setSelectedIds(new Set());
+              setSelectedUrlIds([]);
+            }
+          }}
+        />
+      ) : (
       <div ref={scrollRef} className="relative flex-1 select-none overflow-auto">
         <div style={{ minWidth: totalWidth, width: '100%' }}>
           {/* Header row */}
@@ -876,6 +988,7 @@ export function UrlsTab() {
           </div>
         )}
       </div>
+      )}
       <div
         className="flex shrink-0 items-center justify-end gap-4 border-t border-surface-800 bg-surface-900/60 px-3 text-[11px] text-surface-400"
         style={{ height: STATUS_BAR_HEIGHT }}
