@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.7] — 2026-06-01
+
+### Added
+- MCP server action tools — 29 new actions covering every export format, sitemap generate / validate, robots tester, project compare, schedule, respider, remove, settings, URL rewrite + extraction previews, and graph snapshot.
+- MCP integration triggers — `gsc_fetch`, `ga4_fetch`, `gsc_list_sites`, `ga4_list_properties`, and `google_auth_status` let agents pull Search Console and Analytics data on demand.
+- In-app Integration Setup Guide modal — every integration card now opens a localised step-by-step walkthrough with deep links to the relevant Google Cloud Console pages and troubleshooting for the most common OAuth and API errors.
+
+### Changed
+- README Highlights rewritten as flowing paragraphs that reflect what the current release can actually do — shorter, less wall-of-bullets.
+
 ## [0.6.6] — 2026-06-01
 
 ### Added
