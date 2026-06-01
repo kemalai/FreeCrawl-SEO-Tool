@@ -1499,6 +1499,33 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 64,
+    name: 'add_amp_validation_columns',
+    // V2 Faz 16 — AMP smoke validation. Pages that declare themselves
+    // AMP via `<html ⚡>` / `<html amp>` are validated against a
+    // hand-rolled subset of the AMP spec (boilerplate, runtime, charset,
+    // viewport, canonical, forbidden tags) — full spec needs Google's
+    // 10+ MB validator.js which is overkill for a desktop tool.
+    //
+    // `amp_page` is 0 when the page isn't AMP and 1 when the `<html>`
+    // tag carries the AMP marker. `amp_validation_errors` is a JSON
+    // array of short error codes (e.g. `["missing-boilerplate",
+    // "forbidden-style-tag"]`); empty array means clean AMP page.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'amp_page')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN amp_page INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+      if (!cols.some((c) => c.name === 'amp_validation_errors')) {
+        db.exec('ALTER TABLE urls ADD COLUMN amp_validation_errors TEXT');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

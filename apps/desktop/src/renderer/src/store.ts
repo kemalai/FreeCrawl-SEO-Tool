@@ -515,6 +515,7 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
     if (cat === 'issues:meta-refresh-used') return 'meta-refresh';
     return 'meta-description';
   }
+  if (cat === 'issues:amp-validation-errors') return 'amp';
   if (cat.startsWith('issues:h1-')) return 'h1';
   if (cat === 'issues:heading-skipped-level') return 'h2';
   if (cat.startsWith('issues:canonical-')) return 'canonicals';

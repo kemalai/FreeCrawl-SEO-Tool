@@ -19,8 +19,11 @@ import {
   Code2,
   Cookie,
   Webhook,
+  Download,
+  Play,
   Plus,
   Trash2,
+  Upload,
   Shield,
   Network,
   Sparkles,
@@ -48,6 +51,7 @@ import type {
 import { DEFAULT_CRAWL_CONFIG, INTEGRATIONS } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip, type FieldInfo } from './InfoTip.js';
+import { ExtractionPreviewDialog } from './ExtractionPreviewDialog.js';
 
 interface Props {
   open: boolean;
@@ -1718,18 +1722,138 @@ const DEFAULT_RULE: CustomExtractionRule = {
 function CustomExtractionPanel({ form, update }: PanelProps) {
   const { t } = useTranslation();
   const rules = form.customExtractionRules;
+  // Default URL for the preview dialog — startUrl isn't part of
+  // FormState (TopBar owns it) so we pull from the store directly.
+  // Falls back to empty so the user types something themselves when no
+  // crawl has been kicked off yet.
+  const currentStartUrl = useAppStore((s) => s.config.startUrl);
   const setRules = (next: CustomExtractionRule[]) => update('customExtractionRules', next);
   const updateRule = (i: number, patch: Partial<CustomExtractionRule>) => {
     const next = rules.slice();
     next[i] = { ...next[i]!, ...patch };
     setRules(next);
   };
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const previewableRules = rules.filter(
+    (r) => r.name.trim() && r.selector.trim(),
+  ).length;
   return (
     <>
-      <p className="mb-3 text-[11px] text-surface-400">
-        {t('settingsPanels.customExtraction.intro1', { defaultValue: 'Up to 10 custom extraction rules. Each runs against every crawled HTML page; results are stored on the URL row and visible in the URL Details panel under' })}{' '}
-        <strong>{t('settingsPanels.customExtraction.extractionLabel', { defaultValue: 'Extraction' })}</strong>.
-      </p>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <p className="text-[11px] text-surface-400">
+          {t('settingsPanels.customExtraction.intro1', { defaultValue: 'Up to 10 custom extraction rules. Each runs against every crawled HTML page; results are stored on the URL row and visible in the URL Details panel under' })}{' '}
+          <strong>{t('settingsPanels.customExtraction.extractionLabel', { defaultValue: 'Extraction' })}</strong>.
+        </p>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={async () => {
+              const result = await window.freecrawl.extractionRulesImport();
+              if (!result.filePath) {
+                if (result.error) {
+                  // Surface main-process parse errors inline rather than
+                  // silently dropping — invalid JSON is the most common
+                  // import failure mode and the user needs to know.
+                  // eslint-disable-next-line no-alert
+                  alert(`Import failed: ${result.error}`);
+                }
+                return;
+              }
+              if (result.rules.length === 0) {
+                // eslint-disable-next-line no-alert
+                alert(
+                  result.error ??
+                    'No valid rules found in the file.',
+                );
+                return;
+              }
+              if (rules.length > 0) {
+                // eslint-disable-next-line no-alert, no-restricted-globals
+                const ok = confirm(
+                  t('settingsPanels.customExtraction.importConfirm', {
+                    defaultValue:
+                      'Replace {{existing}} existing rule(s) with {{incoming}} imported rule(s)?',
+                    existing: rules.length,
+                    incoming: result.rules.length,
+                  }) as string,
+                );
+                if (!ok) return;
+              }
+              setRules(result.rules);
+              if (result.skippedCount > 0) {
+                // eslint-disable-next-line no-alert
+                alert(
+                  t('settingsPanels.customExtraction.importSkipped', {
+                    defaultValue:
+                      'Imported {{ok}} rule(s). {{skipped}} entries were skipped (invalid shape or over the 10-rule cap).',
+                    ok: result.rules.length,
+                    skipped: result.skippedCount,
+                  }) as string,
+                );
+              }
+            }}
+            className="inline-flex items-center gap-1.5 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:bg-surface-800"
+            title={t('settingsPanels.customExtraction.importTitle', {
+              defaultValue:
+                'Replace current rules with a JSON file. Accepts {rules: [...]} envelope or a bare array.',
+            })}
+          >
+            <Upload className="h-3 w-3" />
+            {t('settingsPanels.customExtraction.import', { defaultValue: 'Import' })}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void window.freecrawl.extractionRulesExport(rules);
+            }}
+            disabled={rules.length === 0}
+            className={clsx(
+              'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition',
+              rules.length === 0
+                ? 'cursor-not-allowed border-surface-800 text-surface-600'
+                : 'border-surface-700 text-surface-300 hover:bg-surface-800',
+            )}
+            title={
+              rules.length === 0
+                ? t('settingsPanels.customExtraction.exportDisabled', {
+                    defaultValue: 'Add at least one rule before exporting.',
+                  })
+                : t('settingsPanels.customExtraction.exportTitle', {
+                    defaultValue:
+                      'Save the current rule set as a JSON file. Versioned envelope, safe to commit to source control.',
+                  })
+            }
+          >
+            <Download className="h-3 w-3" />
+            {t('settingsPanels.customExtraction.export', { defaultValue: 'Export' })}
+          </button>
+          <button
+            type="button"
+            onClick={() => setPreviewOpen(true)}
+            disabled={previewableRules === 0}
+            className={clsx(
+              'inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition',
+              previewableRules === 0
+                ? 'cursor-not-allowed border-surface-800 text-surface-600'
+                : 'border-accent-500/60 text-accent-300 hover:bg-accent-500/15',
+            )}
+            title={
+              previewableRules === 0
+                ? t('settingsPanels.customExtraction.previewDisabled', {
+                    defaultValue:
+                      'Add at least one rule with a name and selector to enable preview.',
+                  })
+                : t('settingsPanels.customExtraction.previewTitle', {
+                    defaultValue:
+                      'Test current rules against a URL before saving — no full crawl needed.',
+                  })
+            }
+          >
+            <Play className="h-3 w-3" />
+            {t('settingsPanels.customExtraction.preview', { defaultValue: 'Preview' })}
+          </button>
+        </div>
+      </div>
 
       {rules.length === 0 && (
         <p className="mb-3 text-[11px] italic text-surface-500">{t('settingsPanels.customExtraction.empty', { defaultValue: 'No rules — click "Add Rule" to start.' })}</p>
@@ -1897,6 +2021,15 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
       {rules.length >= 10 && (
         <p className="text-[10px] text-surface-500">{t('settingsPanels.customExtraction.limitReached', { defaultValue: 'Limit reached (10 rules).' })}</p>
       )}
+
+      <ExtractionPreviewDialog
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        rules={rules}
+        defaultUrl={currentStartUrl}
+        userAgent={form.userAgent}
+        acceptLanguage={form.acceptLanguage}
+      />
     </>
   );
 }

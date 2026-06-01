@@ -1,3 +1,4 @@
+import * as cheerio from 'cheerio';
 import type { CheerioAPI } from 'cheerio';
 import type { CustomExtractionRule } from '@freecrawl/shared-types';
 
@@ -52,6 +53,44 @@ export function runExtractionRules(
   }
 
   return anyMatch ? out : null;
+}
+
+/**
+ * Live-preview variant of {@link runExtractionRules} — runs every rule
+ * against a single page and returns per-rule outcomes WITHOUT
+ * swallowing errors. The crawler-side variant silently nulls failed
+ * rules so a misconfigured selector doesn't poison the whole map; the
+ * preview UI needs the opposite contract because the whole point of
+ * the dialog is to surface broken selectors.
+ *
+ * Loads cheerio internally so the caller doesn't need its own parser.
+ * Same per-rule semantics for CSS vs regex; `null` value distinguishes
+ * "no match" while a populated `error` distinguishes "rule failed to
+ * compile / execute".
+ */
+export function previewExtractionRules(
+  rawHtml: string,
+  rules: ReadonlyArray<CustomExtractionRule>,
+): Array<{ name: string; value: unknown; error?: string }> {
+  if (rules.length === 0) return [];
+  const $ = cheerio.load(rawHtml);
+  const out: Array<{ name: string; value: unknown; error?: string }> = [];
+  for (const rule of rules) {
+    const name = (rule.name ?? '').trim() || '(unnamed)';
+    try {
+      let value: unknown = null;
+      if (rule.type === 'css') {
+        value = runCssRule($, rule);
+      } else if (rule.type === 'regex') {
+        value = runRegexRule(rawHtml, rule);
+      }
+      out.push({ name, value });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      out.push({ name, value: null, error: msg });
+    }
+  }
+  return out;
 }
 
 function runCssRule($: CheerioAPI, rule: CustomExtractionRule): unknown {

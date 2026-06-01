@@ -60,6 +60,7 @@ export {
   type SitemapVariant,
   type SitemapExportResult,
 } from './sitemap-export.js';
+export { previewExtractionRules } from './extraction.js';
 export { exportHtmlReport, type HtmlReportOptions } from './html-report.js';
 export {
   analyseCookies,

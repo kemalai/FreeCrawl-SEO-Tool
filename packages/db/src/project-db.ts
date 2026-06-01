@@ -96,6 +96,11 @@ interface UrlRowDb {
   hreflangs: string | null;
   hreflang_count: number;
   amphtml: string | null;
+  /** 1 when the page declares `<html ⚡>` / `<html amp>`, else 0. */
+  amp_page: number;
+  /** JSON string array of AMP smoke-validator error codes. Empty when
+   *  not an AMP page or when validation passes. */
+  amp_validation_errors: string | null;
   favicon: string | null;
   mixed_content_count: number;
   mixed_content_active: number;
@@ -257,6 +262,9 @@ export interface UpsertUrlInput {
   hreflangs?: string | null;
   hreflangCount?: number;
   amphtml?: string | null;
+  ampPage?: boolean;
+  /** JSON-stringified array of AMP validator error codes. */
+  ampValidationErrors?: string | null;
   favicon?: string | null;
   mixedContentCount?: number;
   /** Active mixed content (blocked by browser) — script/iframe/object/embed/stylesheet over HTTP. */
@@ -379,7 +387,8 @@ const UPSERT_URL_SQL = `
     url_malformed, og_type, og_url, og_site_name, og_locale, android_icon,
     landmark_main, skip_link_present, aria_invalid_roles,
     schema_duplicate_ids, schema_unknown_types, schema_missing_required,
-    heading_order_violations, subresource_request_count
+    heading_order_violations, subresource_request_count,
+    amp_page, amp_validation_errors
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
@@ -418,7 +427,8 @@ const UPSERT_URL_SQL = `
     :url_malformed, :og_type, :og_url, :og_site_name, :og_locale, :android_icon,
     :landmark_main, :skip_link_present, :aria_invalid_roles,
     :schema_duplicate_ids, :schema_unknown_types, :schema_missing_required,
-    :heading_order_violations, :subresource_request_count
+    :heading_order_violations, :subresource_request_count,
+    :amp_page, :amp_validation_errors
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -547,6 +557,8 @@ const UPSERT_URL_SQL = `
     schema_missing_required = excluded.schema_missing_required,
     heading_order_violations = excluded.heading_order_violations,
     subresource_request_count = excluded.subresource_request_count,
+    amp_page = excluded.amp_page,
+    amp_validation_errors = excluded.amp_validation_errors,
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -1282,6 +1294,8 @@ export class ProjectDb {
       hreflangs: input.hreflangs ?? null,
       hreflang_count: input.hreflangCount ?? 0,
       amphtml: input.amphtml ?? null,
+      amp_page: input.ampPage ? 1 : 0,
+      amp_validation_errors: input.ampValidationErrors ?? null,
       favicon: input.favicon ?? null,
       mixed_content_count: input.mixedContentCount ?? 0,
       mixed_content_active: input.mixedContentActive ?? 0,
@@ -2001,7 +2015,7 @@ export class ProjectDb {
   listDuplicateClusters(offset: number, limit: number): DuplicateClusterRow[] {
     const rows = this.db
       .prepare(
-        `SELECT u.url, u.status_code, u.indexability, u.title, u.word_count,
+        `SELECT u.id, u.url, u.status_code, u.indexability, u.title, u.word_count,
                 u.inlinks, u.cluster_id, u.cluster_size, u.simhash
            FROM urls u
           WHERE u.is_external = 0 AND u.content_kind = 'html'
@@ -2010,6 +2024,7 @@ export class ProjectDb {
           LIMIT ? OFFSET ?`,
       )
       .all(limit, offset) as {
+      id: number;
       url: string;
       status_code: number | null;
       indexability: Indexability;
@@ -2059,6 +2074,7 @@ export class ProjectDb {
         hammingFromRep = popcount(BigInt('0x' + repHash) ^ BigInt('0x' + r.simhash));
       }
       return {
+        urlId: r.id,
         url: r.url,
         statusCode: r.status_code,
         indexability: r.indexability,
@@ -2072,6 +2088,7 @@ export class ProjectDb {
       };
     });
   }
+
 
   /**
    * Returns OTHER URLs in the same near-duplicate cluster as `urlId`.
@@ -3792,6 +3809,12 @@ export class ProjectDb {
       charsetMissing: countWhere(
         `${html} AND status_code >= 200 AND status_code < 300
          AND (charset IS NULL OR charset = '')`,
+      ),
+      ampValidationErrors: countWhere(
+        `${html} AND amp_page = 1
+         AND amp_validation_errors IS NOT NULL
+         AND amp_validation_errors != ''
+         AND amp_validation_errors != '[]'`,
       ),
       brokenLinksInternal: this.countBrokenLinks('internal'),
       brokenLinksExternal: this.countBrokenLinks('external'),
@@ -5824,6 +5847,8 @@ export class ProjectDb {
     hreflangs: r.hreflangs,
     hreflangCount: r.hreflang_count,
     amphtml: r.amphtml,
+    ampPage: r.amp_page === 1,
+    ampValidationErrors: r.amp_validation_errors,
     favicon: r.favicon,
     mixedContentCount: r.mixed_content_count,
     mixedContentActive: r.mixed_content_active ?? 0,
@@ -6531,6 +6556,18 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND status_code >= 200 AND status_code < 300
               AND (charset IS NULL OR charset = '')`;
+    case 'issues:amp-validation-errors':
+      // V2 Faz 16 — AMP smoke validation. Page declares itself AMP via
+      // `<html ⚡>` / `<html amp>` but trips one or more of the
+      // hand-rolled spec checks (missing boilerplate, missing runtime,
+      // forbidden script/style tags, etc). The JSON column contains
+      // the error code list; presence of any non-empty value other
+      // than "[]" means at least one rule failed.
+      return `is_external = 0 AND content_kind = 'html'
+              AND amp_page = 1
+              AND amp_validation_errors IS NOT NULL
+              AND amp_validation_errors != ''
+              AND amp_validation_errors != '[]'`;
     // Broken-link categories drive the BrokenLinksTab view; they never
     // filter the URL table itself.
     case 'issues:broken-links-all':

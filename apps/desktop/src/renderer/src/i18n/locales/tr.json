@@ -428,7 +428,17 @@
       "multiConcat": "Birleştir (` | `)",
       "multiCount": "Sayı",
       "addRule": "Kural Ekle",
-      "limitReached": "Limit aşıldı (10 kural)."
+      "limitReached": "Limit aşıldı (10 kural).",
+      "preview": "Önizle",
+      "previewTitle": "Kaydetmeden önce mevcut kuralları bir URL üzerinde test et — tam crawl gerekmez.",
+      "previewDisabled": "Önizlemeyi etkinleştirmek için en az bir kural (ad + selector) ekle.",
+      "import": "İçe aktar",
+      "export": "Dışa aktar",
+      "importTitle": "Mevcut kuralları JSON dosyasıyla değiştir. {rules: [...]} sarmalı veya çıplak dizi kabul edilir.",
+      "exportTitle": "Mevcut kural setini JSON dosyasına kaydet. Versiyonlu sarmal, kaynak kontrolüne commit'lenebilir.",
+      "exportDisabled": "Dışa aktarmadan önce en az bir kural ekle.",
+      "importConfirm": "Mevcut {{existing}} kural, içe aktarılan {{incoming}} kuralla değiştirilsin mi?",
+      "importSkipped": "{{ok}} kural içe aktarıldı. {{skipped}} kayıt atlandı (geçersiz şema veya 10 kuralın üzerinde)."
     },
     "urlRewriting": {
       "intro": "URL'ler yinelemeden ve kuyruğa alınmadan önce uygulanan normalleştirme.",
@@ -664,7 +674,16 @@
     "noOtherMembers": "Bu kümede başka üye yok. (Küme boyutu {{n}}.)",
     "cluster": "Küme",
     "membersTotal": "Toplam {{n}} üye",
-    "hammingHint": "(Bu URL'den Hamming mesafesi — düşük = daha benzer)"
+    "hammingHint": "(Bu URL'den Hamming mesafesi — düşük = daha benzer)",
+    "loadingClusters": "Yakın-yinelenen kümeleri yükleniyor…",
+    "noClustersTitle": "Yakın-yinelenen küme yok",
+    "noClustersHint": "Bir crawl çalıştır ve post-crawl analizi tamamlansın — iki ya da daha fazla sayfa SimHash Hamming eşiğinin altında yeterli içerik paylaştığında kümeler görünür (Settings → Duplicates).",
+    "statusClusters": "{{clusters}} küme · {{members}} sayfa",
+    "truncated": "ilk {{cap}} satırla sınırlı",
+    "toggleClusterTitle": "Bu kümeyi açmak/kapatmak için tıkla",
+    "headerSize": "{{n}} sayfa",
+    "maxHamming": "maks. Δ {{n}} bit",
+    "hammingFromRepTitle": "Küme temsilcisinden SimHash Hamming mesafesi — 0 temsilcinin kendisi, yüksek = temsilciden daha uzak"
   },
   "resources": {
     "loadingSource": "Kaynak yükleniyor…",
@@ -683,6 +702,21 @@
     "empty4": "üzerinden ayarla, sonra yeniden crawl çalıştır.",
     "customExtraction": "Özel Çıkarım",
     "customSearchHits": "Özel Arama Sonuçları"
+  },
+  "extractionPreview": {
+    "title": "Özel Çıkarım Önizlemesi",
+    "subtitle": "Crawl başlatmadan önce tüm kuralları tek bir URL üzerinde çalıştırarak selector / regex'leri doğrula.",
+    "noRules": "Önizleme yapmadan önce en az bir kural (ad + selector ile) ekle.",
+    "runTitle": "URL'i çek ve yanıta her kuralı uygula.",
+    "run": "Önizlemeyi çalıştır ({{n}} kural)",
+    "running": "Çalışıyor…",
+    "idle": "Yukarıya bir URL gir ve her kuralı uygulamak için Önizlemeyi çalıştır'a bas.",
+    "fetching": "URL çekiliyor ve yanıt parse ediliyor…",
+    "failed": "Önizleme başarısız",
+    "noMatch": "eşleşme yok",
+    "noResults": "Sonuç yok — Custom Extraction panelinde kural ekleyin.",
+    "colName": "Kural",
+    "colValue": "Değer"
   },
   "structured": {
     "blocks": "blok",
@@ -1043,10 +1077,14 @@
     "hideAllExceptRow": "Satır # dışındaki her kolonu gizle",
     "showAll": "Tümünü göster",
     "hideAll": "Tümünü gizle",
+    "pinColumn": "Bu kolonu sol kenara sabitle",
+    "unpinColumn": "Bu kolonun sabitlemesini kaldır",
+    "reorderColumn": "Kolonu sürükleyerek yeniden sırala",
     "columnHeaderHint": "(seçmek için tıkla · çoklu seçim için sürükle · gizlemek için sağ-tıkla)",
     "quickFilterTitle": "Bu sekme için hızlı filtre",
     "listView": "Liste görünümü",
     "treeView": "Ağaç görünümü (URL hiyerarşisi)",
+    "clusterView": "Küme görünümü (yakın-tekrar kümelerine göre gruplu)",
     "treeStatus": "Ağaç görünümü · {{rows}} URL · {{folders}} klasör",
     "treeTruncated": "ilk {{cap}} satırla sınırlı",
     "treeLoading": "URL ağacı yükleniyor…",

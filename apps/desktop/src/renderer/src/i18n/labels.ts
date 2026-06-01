@@ -140,6 +140,7 @@ const TR_LABELS: Record<string, string> = {
   'Gunning Fog >17': 'Gunning Fog >17',
   'Lang Attribute Missing': 'Lang Niteliği Eksik',
   'Charset Missing': 'Charset Eksik',
+  'AMP Validation Errors': 'AMP Doğrulama Hataları',
 
   // Response performance
   'Slow (>1s)': 'Yavaş (>1sn)',

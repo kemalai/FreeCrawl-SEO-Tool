@@ -124,6 +124,15 @@ export interface ParsedPage {
   hreflangs: HreflangEntry[];
   /** `<link rel="amphtml" href>` if present, else null. */
   amphtml: string | null;
+  /** True when the page declares itself AMP via `<html ⚡>` /
+   *  `<html amp>` (also covers ⚡4ads / ⚡4email variants). */
+  ampPage: boolean;
+  /** Short, machine-readable error codes from the AMP smoke validator.
+   *  Empty when the page isn't AMP or when it passes every check.
+   *  Codes are stable identifiers (e.g. `missing-charset-meta`,
+   *  `forbidden-style-tag`) so the UI can localise the human-readable
+   *  copy without coupling to the parser. */
+  ampValidationErrors: string[];
   /** Resolved favicon URL from `<link rel="icon">` / `shortcut icon`, else null. */
   favicon: string | null;
   /** Resolved `<link rel="apple-touch-icon">` URL, else null. */
@@ -623,6 +632,17 @@ export function parseHtml(
   // the current page, when one exists.
   const amphtmlRaw = ($('link[rel="amphtml"]').attr('href') ?? '').trim();
   const amphtml = amphtmlRaw ? normalizeUrl(amphtmlRaw, pageUrl, opts.urlRewrites) : null;
+
+  // AMP smoke validation — pages that declare themselves AMP via
+  // `<html ⚡>` / `<html amp>` get a hand-rolled subset of Google's
+  // validator (boilerplate, runtime, charset, viewport, canonical,
+  // forbidden script/style/legacy tags). The full validator is a
+  // 10+ MB bundle from cdn.ampproject.org which is wildly out of
+  // proportion for a desktop tool — these checks catch the most
+  // common AMP authoring mistakes (forgotten boilerplate, missing
+  // runtime, third-party tracker scripts).
+  const { isAmpPage: ampPage, errors: ampValidationErrors } =
+    detectAndValidateAmp($);
 
   // Favicon — prefer modern `rel="icon"`, fall back to legacy
   // `rel="shortcut icon"`. We don't fabricate a default `/favicon.ico`;
@@ -1252,6 +1272,8 @@ export function parseHtml(
     paginationPrev,
     hreflangs,
     amphtml,
+    ampPage,
+    ampValidationErrors,
     favicon,
     appleTouchIcon,
     androidIcon,
@@ -1746,6 +1768,134 @@ function buildLinkPath(el: unknown): string | null {
   }
   if (parts.length === 0) return null;
   return parts.slice(-8).join(' > ');
+}
+
+/**
+ * Detect whether the page declares itself AMP and, if so, run the
+ * smoke-validation subset of Google's spec. Catches the most common
+ * authoring mistakes (forgotten boilerplate / runtime / canonical,
+ * forbidden inline scripts or style blocks, banned legacy tags) without
+ * pulling in the 10+ MB official validator.js bundle.
+ *
+ * AMP marker variants checked:
+ *  - `<html amp>` — the ASCII spelling
+ *  - `<html ⚡>` — the official lightning-bolt spelling
+ *  - `<html ⚡4ads>` / `<html ⚡4email>` — AMP-for-Ads / AMP-for-Email
+ *
+ * Returns short stable error codes so the UI can localise the
+ * human-readable copy without coupling to the parser.
+ */
+function detectAndValidateAmp(
+  $: ReturnType<typeof cheerio.load>,
+): { isAmpPage: boolean; errors: string[] } {
+  const htmlEl = $('html').first();
+  if (htmlEl.length === 0) return { isAmpPage: false, errors: [] };
+  const attribs =
+    ((htmlEl[0] as { attribs?: Record<string, string> } | undefined)
+      ?.attribs ?? {});
+  const attribKeys = Object.keys(attribs);
+  const isAmpPage =
+    'amp' in attribs ||
+    attribKeys.some((k) => k === '⚡' || k.startsWith('⚡'));
+  if (!isAmpPage) return { isAmpPage: false, errors: [] };
+
+  const errors: string[] = [];
+
+  // 1. <meta charset="utf-8"> required (any case for utf-8 / UTF-8).
+  const charsetMeta = $('head meta[charset]').first();
+  if (charsetMeta.length === 0) {
+    errors.push('missing-charset-meta');
+  } else if ((charsetMeta.attr('charset') ?? '').toLowerCase() !== 'utf-8') {
+    errors.push('non-utf8-charset');
+  }
+
+  // 2. <meta name="viewport"> with width=device-width.
+  const viewportMeta = $('head meta[name="viewport"]').first();
+  if (viewportMeta.length === 0) {
+    errors.push('missing-viewport');
+  } else {
+    const content = (viewportMeta.attr('content') ?? '').toLowerCase();
+    if (!content.includes('width=device-width')) {
+      errors.push('viewport-missing-device-width');
+    }
+  }
+
+  // 3. <link rel="canonical"> required.
+  if ($('head link[rel="canonical"][href]').length === 0) {
+    errors.push('missing-canonical');
+  }
+
+  // 4. AMP runtime — async script from cdn.ampproject.org.
+  const runtime = $('head script[async]').filter((_, el) => {
+    const src = ($(el).attr('src') ?? '').trim();
+    return (
+      src.startsWith('https://cdn.ampproject.org/v0.js') ||
+      src.startsWith('https://cdn.ampproject.org/v0.mjs') ||
+      src.startsWith('https://ampjs.org/v0.js')
+    );
+  });
+  if (runtime.length === 0) {
+    errors.push('missing-amp-runtime');
+  }
+
+  // 5. AMP boilerplate — `<style amp-boilerplate>` + matching
+  // `<noscript><style amp-boilerplate>`. Both halves are required by
+  // the spec; missing either makes the validator fail.
+  if ($('head style[amp-boilerplate]').length === 0) {
+    errors.push('missing-boilerplate-style');
+  }
+  if ($('head noscript style[amp-boilerplate]').length === 0) {
+    errors.push('missing-noscript-boilerplate');
+  }
+
+  // 6. Forbidden <script> tags. Allow-list:
+  //  - JSON-LD / generic JSON / amp-mustache templates (type-based)
+  //  - Async + src points to cdn.ampproject.org / ampjs.org
+  // `function () { $(this) }` form sidesteps cheerio's tricky generic
+  // `.each((i, el) => ...)` inference when `$` arrives as a parameter
+  // (vs a `cheerio.load()` local elsewhere in this file).
+  let forbiddenScript = false;
+  $('script').each(function (this: unknown) {
+    if (forbiddenScript) return;
+    const $el = $(this as Parameters<typeof $>[0]);
+    const type = ($el.attr('type') ?? '').toLowerCase();
+    if (
+      type === 'application/ld+json' ||
+      type === 'application/json' ||
+      type === 'text/template'
+    ) {
+      return;
+    }
+    const src = ($el.attr('src') ?? '').trim();
+    const isAsync = $el.is('[async]');
+    if (
+      isAsync &&
+      (src.startsWith('https://cdn.ampproject.org/') ||
+        src.startsWith('https://ampjs.org/'))
+    ) {
+      return;
+    }
+    forbiddenScript = true;
+  });
+  if (forbiddenScript) errors.push('forbidden-script-tag');
+
+  // 7. Forbidden <style> tags. Allow-list: amp-boilerplate + amp-custom.
+  let forbiddenStyle = false;
+  $('style').each(function (this: unknown) {
+    if (forbiddenStyle) return;
+    const $el = $(this as Parameters<typeof $>[0]);
+    if ($el.is('[amp-boilerplate]') || $el.is('[amp-custom]')) return;
+    forbiddenStyle = true;
+  });
+  if (forbiddenStyle) errors.push('forbidden-style-tag');
+
+  // 8. Legacy / forbidden tags banned by the AMP spec.
+  if ($('base').length > 0) errors.push('forbidden-base-tag');
+  if ($('frame, frameset, embed, object, iframe[src*="javascript:"]').length > 0) {
+    errors.push('forbidden-legacy-tag');
+  }
+
+  return { isAmpPage: true, errors: [...new Set(errors)] };
 }
 
 /**

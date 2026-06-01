@@ -2326,6 +2326,10 @@ export class Crawler extends EventEmitter {
           hreflangs: parsed.hreflangs.length > 0 ? JSON.stringify(parsed.hreflangs) : null,
           hreflangCount: parsed.hreflangs.length,
           amphtml: parsed.amphtml,
+          ampPage: parsed.ampPage,
+          ampValidationErrors: parsed.ampValidationErrors.length > 0
+            ? JSON.stringify(parsed.ampValidationErrors)
+            : null,
           favicon: parsed.favicon,
           appleTouchIcon: parsed.appleTouchIcon,
           androidIcon: parsed.androidIcon,

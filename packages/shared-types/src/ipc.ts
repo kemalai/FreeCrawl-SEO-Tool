@@ -5,6 +5,13 @@ import type {
   CrawlProgress,
   CrawlSummary,
   CrawlUrlRow,
+  DuplicateClusterRow,
+  DuplicateClustersListInput,
+  CustomExtractionRule,
+  ExtractionPreviewInput,
+  ExtractionPreviewResult,
+  ExtractionRulesExportResult,
+  ExtractionRulesImportResult,
   ImageRow,
   Indexability,
   OverviewCounts,
@@ -136,6 +143,27 @@ export const IPC = {
   sitemapValidate: 'sitemap:validate',
   urlRewritePreview: 'url:rewrite-preview',
   urlClusterMembers: 'urls:cluster-members',
+  /** Faz 7 — grouped Duplicates tab view: paginates near-duplicate cluster
+   *  members ordered by cluster size DESC. Cluster headers / hamming
+   *  distance to the representative are derived in {@link
+   *  packages/db/src/project-db.ts#listDuplicateClusters}. */
+  duplicateClustersList: 'duplicates:clusters-list',
+  /** Faz 7 — total cluster-member row count, used by the grouped view to
+   *  stop scrolling once every member has been fetched. */
+  duplicateClustersCount: 'duplicates:clusters-count',
+  /** Faz 11 — live preview of custom extraction rules against a single
+   *  URL. Backs the "Preview" button in Settings → Custom Extraction so
+   *  users can validate selectors / regex without committing to a full
+   *  crawl. */
+  extractionPreview: 'extraction:preview',
+  /** Faz 11 — serialize the current rule set to a JSON file. Wraps the
+   *  rules in a versioned envelope so future imports can detect schema
+   *  drift. */
+  extractionRulesExport: 'extraction:rules-export',
+  /** Faz 11 — read a JSON file and validate its rules against the
+   *  CustomExtractionRule schema. Returns the cleaned-up list plus a
+   *  skipped-count so the renderer can warn about rejected entries. */
+  extractionRulesImport: 'extraction:rules-import',
   reportsPagesPerDirectory: 'reports:pages-per-directory',
   reportsStatusCodeHistogram: 'reports:status-code-histogram',
   reportsIndexabilityDistribution: 'reports:indexability-distribution',
@@ -1362,6 +1390,25 @@ export interface FreeCrawlApi {
   sitemapValidate(input: SitemapValidateInput): Promise<SitemapValidateResult>;
   urlRewritePreview(input: UrlRewritePreviewInput): Promise<UrlRewritePreviewResult>;
   urlClusterMembers(urlId: number): Promise<UrlClusterMember[]>;
+  /** Paginates near-duplicate cluster members for the dedicated grouped
+   *  Duplicates view. Pages are ordered by cluster size DESC, cluster id
+   *  ASC, URL ASC so the largest clusters come first. */
+  duplicateClustersList(input: DuplicateClustersListInput): Promise<DuplicateClusterRow[]>;
+  /** Total cluster-member row count (cluster_id > 0). */
+  duplicateClustersCount(): Promise<number>;
+  /** Faz 11 — fetch the URL once, parse HTML, run every supplied rule
+   *  against it and return the per-rule results so the user can spot
+   *  broken selectors / regex before committing to a full crawl. */
+  extractionPreview(input: ExtractionPreviewInput): Promise<ExtractionPreviewResult>;
+  /** Faz 11 — opens a save dialog and writes `rules` as a versioned
+   *  JSON envelope. `filePath` is empty when the user cancels. */
+  extractionRulesExport(
+    rules: CustomExtractionRule[],
+  ): Promise<ExtractionRulesExportResult>;
+  /** Faz 11 — opens an open dialog, parses + validates the JSON, and
+   *  returns the cleaned-up rule list. `filePath` is empty when the
+   *  user cancels. */
+  extractionRulesImport(): Promise<ExtractionRulesImportResult>;
   reportsPagesPerDirectory(input: PagesPerDirectoryInput): Promise<PagesPerDirectoryRow[]>;
   reportsStatusCodeHistogram(): Promise<StatusCodeHistogramRow[]>;
   reportsIndexabilityDistribution(): Promise<IndexabilityDistributionRow[]>;

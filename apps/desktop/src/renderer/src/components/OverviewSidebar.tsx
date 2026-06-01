@@ -743,6 +743,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.charsetMissing,
               category: 'issues:charset-missing',
             },
+            {
+              key: 'issues-amp-validation',
+              label: 'AMP Validation Errors',
+              count: o.issues.ampValidationErrors,
+              category: 'issues:amp-validation-errors',
+            },
           ],
         },
         {

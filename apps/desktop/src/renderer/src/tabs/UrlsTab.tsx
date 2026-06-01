@@ -1,12 +1,30 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import {
   ChevronsUpDown,
   Columns3,
   Download,
   Filter,
+  GripVertical,
+  Layers,
   List,
   Network,
+  Pin,
   X,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -20,6 +38,7 @@ import { useAppStore, TAB_QUICK_FILTERS, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId, type ColumnSpec } from './columns.js';
 import { useLazyUrlRows } from '../hooks/useLazyUrlRows.js';
 import { AdvancedFilterDialog } from '../components/AdvancedFilterDialog.js';
+import { DuplicatesGroupedView } from '../components/DuplicatesGroupedView.js';
 import { UrlTreeView } from '../components/UrlTreeView.js';
 import { ErrorBoundary } from '../components/ErrorBoundary.js';
 import { ExportDialog } from '../components/ExportDialog.js';
@@ -34,6 +53,8 @@ const ROW_NUM_KEY = '__row_num__';
 const STATUS_BAR_HEIGHT = 22;
 const PREFS_PREFIX = 'col-widths:';
 const PREFS_HIDDEN_PREFIX = 'col-hidden:';
+const PREFS_PINNED_LEFT_PREFIX = 'col-pinned-left:';
+const PREFS_ORDER_PREFIX = 'col-order:';
 
 function loadStoredWidths(tab: TabKey): Record<string, number> {
   const value = window.freecrawl.prefsGet(PREFS_PREFIX + tab);
@@ -59,6 +80,47 @@ function saveHiddenColumns(tab: TabKey, hidden: Set<string>): void {
   }
 }
 
+/** Per-tab persistence for the pinned-left column set. Order is preserved
+ *  so users can pin columns in the order they want them stacked at the
+ *  left edge — first-pinned ends up nearest the row-number column. */
+function loadPinnedLeft(tab: TabKey): string[] {
+  const value = window.freecrawl.prefsGet(PREFS_PINNED_LEFT_PREFIX + tab);
+  if (Array.isArray(value)) {
+    return value.filter((v): v is string => typeof v === 'string');
+  }
+  return [];
+}
+
+function savePinnedLeft(tab: TabKey, pinned: string[]): void {
+  try {
+    window.freecrawl.prefsSet(PREFS_PINNED_LEFT_PREFIX + tab, pinned);
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** Per-tab user-defined column ordering, applied AFTER hide-filter +
+ *  pin-prepend. Stored as an array of column ids in left-to-right order
+ *  for the *unpinned* region. Columns that don't appear in the stored
+ *  array fall through to their `COLUMN_SPECS` default position so a
+ *  partial preference (the user dragged only one column) doesn't reset
+ *  everything else. */
+function loadColumnOrder(tab: TabKey): string[] {
+  const value = window.freecrawl.prefsGet(PREFS_ORDER_PREFIX + tab);
+  if (Array.isArray(value)) {
+    return value.filter((v): v is string => typeof v === 'string');
+  }
+  return [];
+}
+
+function saveColumnOrder(tab: TabKey, order: string[]): void {
+  try {
+    window.freecrawl.prefsSet(PREFS_ORDER_PREFIX + tab, order);
+  } catch {
+    /* best-effort */
+  }
+}
+
 export function UrlsTab() {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -74,11 +136,14 @@ export function UrlsTab() {
   const [filter, setFilter] = useState<AdvancedFilter | null>(null);
   const [filterDialogOpen, setFilterDialogOpen] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
-  /** View mode toggle — list (default flat virtual table) or tree
-   *  (URL-path hierarchy). Per-tab + persisted across mounts via prefs. */
-  const [viewMode, setViewMode] = useState<'list' | 'tree'>(() => {
+  /** View mode toggle — list (flat virtual table), tree (URL-path
+   *  hierarchy), or cluster (Duplicates-tab-only near-duplicate cluster
+   *  grouping). Per-tab + persisted across mounts via prefs. */
+  const [viewMode, setViewMode] = useState<'list' | 'tree' | 'cluster'>(() => {
     const stored = window.freecrawl.prefsGet(`view-mode:${activeTab}`);
-    return stored === 'tree' ? 'tree' : 'list';
+    if (stored === 'tree') return 'tree';
+    if (stored === 'cluster' && activeTab === 'duplicates') return 'cluster';
+    return 'list';
   });
   const quickFilters = TAB_QUICK_FILTERS[activeTab];
   const activeQuickFilter = useMemo(() => {
@@ -133,18 +198,74 @@ export function UrlsTab() {
   const [hiddenColumns, setHiddenColumnsState] = useState<Set<string>>(() =>
     loadHiddenColumns(activeTab),
   );
+  /** Ordered list of column ids pinned to the left edge. Order = stacking
+   *  order from inner (next to row-num) outward. Stored as a list (not a
+   *  Set) so the stacking order is deterministic across reloads. */
+  const [pinnedLeftOrder, setPinnedLeftOrderState] = useState<string[]>(() =>
+    loadPinnedLeft(activeTab),
+  );
+  /** User-defined order of UNPINNED columns. Pinned columns are
+   *  positioned via {@link pinnedLeftOrder}; this list governs only the
+   *  scrollable region. Drag-drop on a header writes here. */
+  const [columnOrder, setColumnOrderState] = useState<string[]>(() =>
+    loadColumnOrder(activeTab),
+  );
   const [columnPickerOpen, setColumnPickerOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** Ref on the "Columns" toolbar button so the popover (rendered via
+   *  portal at document.body) can compute its position from the
+   *  anchor's bounding rect — without the portal it would be clipped
+   *  by the resizable bottom detail panel which lives in a separate
+   *  stacking context. */
+  const columnsAnchorRef = useRef<HTMLButtonElement>(null);
 
   const allColumns = COLUMN_SPECS[activeTab];
   // Visible columns drive the rendered header + body. Hidden ids that no
   // longer exist on the active tab (e.g. user switched between tabs with
   // different specs) are silently filtered out — they remain in the saved
   // set so toggling back to the originating tab restores them.
-  const columns = useMemo(
-    () => allColumns.filter((c) => !hiddenColumns.has(columnId(c))),
-    [allColumns, hiddenColumns],
-  );
+  //
+  // Pinned columns are floated to the head of the visible list (in the
+  // order persisted to prefs) so the row render loop sees pinned cells
+  // first — that order, combined with the cumulative-offset table built
+  // below, drives the CSS `position: sticky; left: …` layout. Visual
+  // outcome: the row-number cell, then the pinned strip in user-chosen
+  // order, then the scrollable region.
+  const columns = useMemo(() => {
+    const visible = allColumns.filter((c) => !hiddenColumns.has(columnId(c)));
+    const byId = new Map(visible.map((c) => [columnId(c), c] as const));
+
+    // (1) Pinned region in pin-stack order.
+    const pinned: ColumnSpec[] = [];
+    for (const id of pinnedLeftOrder) {
+      const c = byId.get(id);
+      if (c) {
+        pinned.push(c);
+        byId.delete(id);
+      }
+    }
+
+    // (2) Unpinned region — explicit user order (drag-drop) first, then
+    // anything left over in `COLUMN_SPECS` default order so partial
+    // preferences don't reset newly-added columns.
+    const unpinned: ColumnSpec[] = [];
+    for (const id of columnOrder) {
+      const c = byId.get(id);
+      if (c) {
+        unpinned.push(c);
+        byId.delete(id);
+      }
+    }
+    for (const c of allColumns) {
+      const id = columnId(c);
+      if (byId.has(id)) {
+        unpinned.push(c);
+        byId.delete(id);
+      }
+    }
+
+    return [...pinned, ...unpinned];
+  }, [allColumns, hiddenColumns, pinnedLeftOrder, columnOrder]);
 
   const setHiddenColumns = useCallback(
     (next: Set<string>) => {
@@ -154,13 +275,79 @@ export function UrlsTab() {
     [activeTab],
   );
 
+  const setPinnedLeftOrder = useCallback(
+    (next: string[]) => {
+      setPinnedLeftOrderState(next);
+      savePinnedLeft(activeTab, next);
+    },
+    [activeTab],
+  );
+
+  const setColumnOrder = useCallback(
+    (next: string[]) => {
+      setColumnOrderState(next);
+      saveColumnOrder(activeTab, next);
+    },
+    [activeTab],
+  );
+
+  /** Set view for callers that only need membership lookups. */
+  const pinnedLeftSet = useMemo(
+    () => new Set(pinnedLeftOrder),
+    [pinnedLeftOrder],
+  );
+
+  /** Toggle a column id between pinned and unpinned. When pinning, the
+   *  new id is appended to the right end of the pinned strip so the
+   *  newest pin sits next to the unpinned region — keeps existing pins
+   *  visually stable. */
+  const togglePinned = useCallback(
+    (id: string) => {
+      const idx = pinnedLeftOrder.indexOf(id);
+      if (idx >= 0) {
+        setPinnedLeftOrder(pinnedLeftOrder.filter((x) => x !== id));
+      } else {
+        setPinnedLeftOrder([...pinnedLeftOrder, id]);
+      }
+    },
+    [pinnedLeftOrder, setPinnedLeftOrder],
+  );
+
+  /** dnd-kit pointer sensor with a 5 px activation constraint so a quick
+   *  click on the grip handle doesn't start a drag (the user still has
+   *  to deliberately drag). Without this, clicks would race the cell's
+   *  onMouseDown handler for column-selection drag. */
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
   useEffect(() => {
     setColumnWidths(loadStoredWidths(activeTab));
     setHiddenColumnsState(loadHiddenColumns(activeTab));
+    setPinnedLeftOrderState(loadPinnedLeft(activeTab));
+    setColumnOrderState(loadColumnOrder(activeTab));
     setColumnPickerOpen(false);
-    // Pick up the persisted view-mode for the new tab.
+    // Scope ephemeral view state (search box / sort column / advanced
+    // filter) to the active tab — these are intentionally NOT persisted
+    // because each tab has a different column / category vocabulary
+    // (a sort by "depth" on Internal makes no sense on Response Codes,
+    // a filter clause on `images_missing_alt` is meaningless outside
+    // Images, etc). Without these resets the filter chips of one tab
+    // would silently apply to every other tab the user visits — which
+    // is exactly the bug surfaced in 2026-06-01.
+    setSearch('');
+    setSortBy(undefined);
+    setSortDir('asc');
+    setFilter(null);
+    setFilterDialogOpen(false);
+    // Pick up the persisted view-mode for the new tab. Cluster mode is
+    // duplicates-tab-only — switching to any other tab while it was the
+    // active mode falls back to list so the toolbar toggle doesn't get
+    // stuck in an unreachable state.
     const stored = window.freecrawl.prefsGet(`view-mode:${activeTab}`);
-    setViewMode(stored === 'tree' ? 'tree' : 'list');
+    if (stored === 'tree') setViewMode('tree');
+    else if (stored === 'cluster' && activeTab === 'duplicates') setViewMode('cluster');
+    else setViewMode('list');
   }, [activeTab]);
 
   // Persist viewMode whenever the user toggles it.
@@ -222,6 +409,29 @@ export function UrlsTab() {
     [columns, getWidth, rowNumWidth],
   );
 
+  /** Cumulative left-offset for each pinned column. Maps column id →
+   *  pixel offset from the table's left edge so the cell's
+   *  `position: sticky; left: <offset>` lands flush against the previous
+   *  pinned column. Pinned columns are always rendered first in
+   *  `columns`, so iterating from the front stops as soon as we hit a
+   *  non-pinned column. */
+  const pinnedLeftOffsets = useMemo(() => {
+    const map = new Map<string, number>();
+    let acc = rowNumWidth;
+    for (const c of columns) {
+      const id = columnId(c);
+      if (!pinnedLeftSet.has(id)) break;
+      map.set(id, acc);
+      acc += getWidth(c);
+    }
+    return map;
+  }, [columns, pinnedLeftSet, getWidth, rowNumWidth]);
+
+  /** Number of pinned columns currently rendered as sticky — used by
+   *  the resize handler to recompute downstream offsets implicitly via
+   *  state change. */
+  const pinnedCount = pinnedLeftOffsets.size;
+
   // Only dataVersion (context-menu mutations like Remove / Re-Spider) forces
   // a snapshot rebuild. Crawler progress ticks intentionally do NOT rebuild
   // — the user sees a "N new rows · Refresh" pill instead so the sorted
@@ -262,6 +472,52 @@ export function UrlsTab() {
     const last = virtualRows[virtualRows.length - 1]!.index;
     lazy.ensureRange(first, last);
   }, [virtualRows, lazy]);
+
+  /** Apply a drag-drop column reorder. Pin state is preserved: drags
+   *  inside the pinned strip reorder `pinnedLeftOrder`; drags inside the
+   *  unpinned strip reorder `columnOrder`. Cross-strip drags snap back
+   *  silently — the user has to explicitly toggle pin via the column
+   *  picker if they want to change the partition. This keeps pin /
+   *  reorder as two orthogonal concepts the user can reason about
+   *  independently. */
+  const handleDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      const fromId = String(active.id);
+      const toId = String(over.id);
+      const fromIsPinned = pinnedLeftSet.has(fromId);
+      const toIsPinned = pinnedLeftSet.has(toId);
+      if (fromIsPinned !== toIsPinned) return;
+
+      if (fromIsPinned) {
+        const list = pinnedLeftOrder.slice();
+        const fi = list.indexOf(fromId);
+        const ti = list.indexOf(toId);
+        if (fi < 0 || ti < 0) return;
+        list.splice(fi, 1);
+        list.splice(ti, 0, fromId);
+        setPinnedLeftOrder(list);
+      } else {
+        // Snapshot the *currently displayed* unpinned order — the stored
+        // `columnOrder` may be partial, but what's visible is what the
+        // user is reordering, so persist the full sequence to avoid
+        // surprising fall-through behaviour for never-dragged columns.
+        const unpinnedIds: string[] = [];
+        for (const c of columns) {
+          const id = columnId(c);
+          if (!pinnedLeftSet.has(id)) unpinnedIds.push(id);
+        }
+        const fi = unpinnedIds.indexOf(fromId);
+        const ti = unpinnedIds.indexOf(toId);
+        if (fi < 0 || ti < 0) return;
+        unpinnedIds.splice(fi, 1);
+        unpinnedIds.splice(ti, 0, fromId);
+        setColumnOrder(unpinnedIds);
+      }
+    },
+    [columns, pinnedLeftOrder, pinnedLeftSet, setColumnOrder, setPinnedLeftOrder],
+  );
 
   const handleSort = (key: keyof CrawlUrlRow) => {
     if (sortBy === key) {
@@ -653,9 +909,27 @@ export function UrlsTab() {
           >
             <Network className="h-3.5 w-3.5" />
           </button>
+          {activeTab === 'duplicates' && (
+            <button
+              type="button"
+              onClick={() => setViewMode('cluster')}
+              className={clsx(
+                'inline-flex items-center justify-center border-l border-surface-700 px-2 py-1 text-[11px] transition',
+                viewMode === 'cluster'
+                  ? 'bg-accent-500/15 text-accent-300'
+                  : 'text-surface-300 hover:bg-surface-800',
+              )}
+              title={t('urlsTab.clusterView', {
+                defaultValue: 'Cluster view (grouped by near-duplicate clusters)',
+              })}
+            >
+              <Layers className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
         <div className="relative">
           <button
+            ref={columnsAnchorRef}
             type="button"
             data-columns-anchor="1"
             onClick={() => setColumnPickerOpen((v) => !v)}
@@ -686,9 +960,12 @@ export function UrlsTab() {
           </button>
           {columnPickerOpen && (
             <ColumnPickerPopover
+              anchorRef={columnsAnchorRef}
               allColumns={allColumns}
               hiddenColumns={hiddenColumns}
+              pinnedLeft={pinnedLeftSet}
               onChange={setHiddenColumns}
+              onTogglePin={togglePinned}
               onClose={() => setColumnPickerOpen(false)}
             />
           )}
@@ -728,6 +1005,8 @@ export function UrlsTab() {
             }
           }}
         />
+      ) : viewMode === 'cluster' ? (
+        <DuplicatesGroupedView />
       ) : (
       <div ref={scrollRef} className="relative flex-1 select-none overflow-auto">
         <div style={{ minWidth: totalWidth, width: '100%' }}>
@@ -742,6 +1021,14 @@ export function UrlsTab() {
                 width: rowNumWidth,
                 minWidth: rowNumWidth,
                 flex: `0 0 ${rowNumWidth}px`,
+                // Row-number cell is always pinned at the table's left
+                // edge so the index never scrolls out of view. Background
+                // matches the header so cells scrolling underneath are
+                // masked.
+                position: 'sticky',
+                left: 0,
+                zIndex: 13,
+                background: 'rgb(23 23 23)',
               }}
               title="Row number"
             >
@@ -762,86 +1049,49 @@ export function UrlsTab() {
                 title="Drag to resize · double-click to reset"
               />
             </div>
-            {columns.map((c, colIdx) => {
-              const w = getWidth(c);
-              const id = columnId(c);
-              const isColSelected = selectedColumns.has(colIdx);
-              const isSortCol = sortBy === c.key;
-              return (
-                <div
-                  key={id}
-                  className={clsx(
-                    'group/header relative flex select-none items-center gap-1 border-b border-r border-surface-800 pl-2 pr-1 font-medium',
-                    isColSelected
-                      ? 'bg-accent-500/25 text-surface-50'
-                      : 'text-surface-300 hover:text-surface-100',
-                  )}
-                  style={{ width: w, minWidth: w, flex: `0 0 ${w}px` }}
-                  onMouseDown={(e) => beginColumnDrag(colIdx, e)}
-                  onMouseEnter={() => {
-                    if (dragRef.current?.kind === 'column') applyColumnDrag(colIdx);
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const next = new Set(hiddenColumns);
-                    next.add(columnId(c));
-                    setHiddenColumns(next);
-                  }}
-                  title={translateLabel(c.header, lang) + ' ' + t('urlsTab.columnHeaderHint', { defaultValue: '(click to select · drag to multi-select · right-click to hide)' })}
-                >
-                  <span className="cursor-pointer truncate">{translateLabel(c.header, lang)}</span>
-                  {(c.info || c.example) && (
-                    <span
-                      className="shrink-0"
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <InfoTip info={c.info} example={c.example} />
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    className={clsx(
-                      'ml-auto flex shrink-0 items-center rounded px-0.5 hover:bg-surface-800',
-                      isSortCol ? 'text-accent-300' : 'text-surface-600 hover:text-surface-300',
-                    )}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleSort(c.key);
-                    }}
-                    title={
-                      isSortCol
-                        ? `Sorted ${sortDir === 'asc' ? 'ascending' : 'descending'} — click to flip`
-                        : 'Sort by this column'
-                    }
-                  >
-                    {isSortCol ? (
-                      <span className="text-[10px]">
-                        {sortDir === 'asc' ? '▲' : '▼'}
-                      </span>
-                    ) : (
-                      <ChevronsUpDown className="h-3 w-3" />
-                    )}
-                  </button>
-                  <div
-                    className="absolute -right-1 top-0 bottom-0 z-20 w-2 cursor-col-resize hover:bg-accent-500/40"
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      startResize(id, w, e.clientX);
-                    }}
-                    onDoubleClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      resetColumn(id);
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    title="Drag to resize · double-click to reset"
-                  />
-                </div>
-              );
-            })}
+            <DndContext
+              sensors={dndSensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+            >
+              <SortableContext
+                items={columns.map((c) => columnId(c))}
+                strategy={horizontalListSortingStrategy}
+              >
+                {columns.map((c, colIdx) => {
+                  const id = columnId(c);
+                  const stickyLeft = pinnedLeftOffsets.get(id);
+                  return (
+                    <SortableHeaderCell
+                      key={id}
+                      id={id}
+                      spec={c}
+                      colIdx={colIdx}
+                      width={getWidth(c)}
+                      lang={lang}
+                      isColSelected={selectedColumns.has(colIdx)}
+                      isSortCol={sortBy === c.key}
+                      sortDir={sortDir}
+                      stickyLeft={stickyLeft}
+                      isPinned={stickyLeft !== undefined}
+                      isLastPinned={stickyLeft !== undefined && colIdx + 1 === pinnedCount}
+                      onSort={handleSort}
+                      onBeginColumnDrag={beginColumnDrag}
+                      onColumnMouseEnter={() => {
+                        if (dragRef.current?.kind === 'column') applyColumnDrag(colIdx);
+                      }}
+                      onContextHide={(hid) => {
+                        const next = new Set(hiddenColumns);
+                        next.add(hid);
+                        setHiddenColumns(next);
+                      }}
+                      onStartResize={startResize}
+                      onResetColumn={resetColumn}
+                    />
+                  );
+                })}
+              </SortableContext>
+            </DndContext>
             {/* Filler cell — extends the header bar across the remaining
                 empty space so the table doesn't look truncated when the
                 viewport is wider than the summed column widths. */}
@@ -914,6 +1164,20 @@ export function UrlsTab() {
                       minWidth: rowNumWidth,
                       flex: `0 0 ${rowNumWidth}px`,
                       height: '100%',
+                      // Always-pinned row index. Solid background masks
+                      // cells scrolling underneath; selection state still
+                      // wins (the conditional bg-accent-500/30 class
+                      // overrides the inline background via class
+                      // ordering, but Tailwind's accent class won't beat
+                      // an inline style, so paint the body-default and
+                      // let the selected highlight come from the cell's
+                      // outer ring + text colour).
+                      position: 'sticky',
+                      left: 0,
+                      zIndex: 9,
+                      background: rowSelected
+                        ? 'rgb(37 99 235 / 0.30)'
+                        : 'rgb(10 10 10)',
                     }}
                     onMouseDown={(e) => {
                       if (row) beginRowDrag(row.id, vi.index, e);
@@ -927,13 +1191,17 @@ export function UrlsTab() {
                   </div>
                   {columns.map((c, colIdx) => {
                     const w = getWidth(c);
+                    const id = columnId(c);
                     const cellSel =
                       row !== null &&
                       (selectedCells.has(`${row.id}:${colIdx}`) ||
                         selectedColumns.has(colIdx));
+                    const stickyLeft = pinnedLeftOffsets.get(id);
+                    const isPinned = stickyLeft !== undefined;
+                    const isLastPinned = isPinned && colIdx + 1 === pinnedCount;
                     return (
                       <div
-                        key={columnId(c)}
+                        key={id}
                         className={clsx(
                           'flex cursor-cell items-center overflow-hidden border-r border-surface-900 px-2',
                           cellSel
@@ -945,6 +1213,19 @@ export function UrlsTab() {
                           minWidth: w,
                           flex: `0 0 ${w}px`,
                           height: '100%',
+                          ...(isPinned && {
+                            position: 'sticky' as const,
+                            left: stickyLeft,
+                            zIndex: 8,
+                            background: cellSel
+                              ? 'rgb(37 99 235 / 0.30)'
+                              : rowSelected
+                                ? 'rgb(37 99 235 / 0.15)'
+                                : 'rgb(10 10 10)',
+                            boxShadow: isLastPinned
+                              ? '2px 0 4px rgba(0,0,0,0.4)'
+                              : undefined,
+                          }),
                         }}
                         onMouseDown={(e) => {
                           if (row) beginCellDrag(row.id, vi.index, colIdx, e);
@@ -1043,20 +1324,231 @@ export function UrlsTab() {
   );
 }
 
+/**
+ * One header cell wrapped in {@link useSortable} so the whole row of
+ * headers can be reordered by dragging the {@link GripVertical} handle
+ * on the left. The handle is the only drag-trigger: clicking anywhere
+ * else on the header preserves the existing semantics — left-click for
+ * column-selection drag, the sort-arrow button for sort, the resize
+ * handle on the right edge for resize, right-click to hide. Activation
+ * distance of 5 px (set on the parent's PointerSensor) makes the handle
+ * forgiving — a quick click doesn't slip into a drag.
+ *
+ * Sticky-left pin styling is preserved during drag (the cell stays
+ * pinned visually as the user drags it around), and the drag transform
+ * is composed on top so the cell follows the pointer.
+ */
+function SortableHeaderCell(props: {
+  id: string;
+  spec: ColumnSpec;
+  colIdx: number;
+  width: number;
+  lang: string;
+  isColSelected: boolean;
+  isSortCol: boolean;
+  sortDir: 'asc' | 'desc';
+  stickyLeft: number | undefined;
+  isPinned: boolean;
+  isLastPinned: boolean;
+  onSort: (key: keyof CrawlUrlRow) => void;
+  onBeginColumnDrag: (colIdx: number, e: React.MouseEvent) => void;
+  onColumnMouseEnter: () => void;
+  onContextHide: (id: string) => void;
+  onStartResize: (id: string, w: number, clientX: number) => void;
+  onResetColumn: (id: string) => void;
+}) {
+  const { t } = useTranslation();
+  const {
+    id,
+    spec: c,
+    colIdx,
+    width: w,
+    lang,
+    isColSelected,
+    isSortCol,
+    sortDir,
+    stickyLeft,
+    isPinned,
+    isLastPinned,
+    onSort,
+    onBeginColumnDrag,
+    onColumnMouseEnter,
+    onContextHide,
+    onStartResize,
+    onResetColumn,
+  } = props;
+
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  const style: React.CSSProperties = {
+    width: w,
+    minWidth: w,
+    flex: `0 0 ${w}px`,
+    ...(isPinned && {
+      position: 'sticky' as const,
+      left: stickyLeft,
+      zIndex: 12,
+      background: 'rgb(23 23 23)',
+      boxShadow: isLastPinned ? '2px 0 4px rgba(0,0,0,0.4)' : undefined,
+    }),
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : undefined,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={clsx(
+        'group/header relative flex select-none items-center gap-1 border-b border-r border-surface-800 pl-1 pr-1 font-medium',
+        isColSelected
+          ? 'bg-accent-500/25 text-surface-50'
+          : 'text-surface-300 hover:text-surface-100',
+      )}
+      style={style}
+      onMouseDown={(e) => onBeginColumnDrag(colIdx, e)}
+      onMouseEnter={onColumnMouseEnter}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextHide(id);
+      }}
+      title={
+        translateLabel(c.header, lang) +
+        ' ' +
+        t('urlsTab.columnHeaderHint', {
+          defaultValue:
+            '(click to select · drag to multi-select · right-click to hide)',
+        })
+      }
+    >
+      <button
+        type="button"
+        {...attributes}
+        {...listeners}
+        // Drag-handle isolation — don't let the grip's mousedown bubble
+        // up to the cell's column-selection drag handler, and don't let
+        // a click fall through to anything else.
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        className="flex shrink-0 cursor-grab items-center text-surface-600 opacity-0 transition-opacity hover:text-surface-300 group-hover/header:opacity-100 active:cursor-grabbing"
+        title={t('urlsTab.reorderColumn', { defaultValue: 'Drag to reorder column' })}
+      >
+        <GripVertical className="h-3 w-3" />
+      </button>
+      <span className="cursor-pointer truncate">{translateLabel(c.header, lang)}</span>
+      {(c.info || c.example) && (
+        <span
+          className="shrink-0"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <InfoTip info={c.info} example={c.example} />
+        </span>
+      )}
+      <button
+        type="button"
+        className={clsx(
+          'ml-auto flex shrink-0 items-center rounded px-0.5 hover:bg-surface-800',
+          isSortCol ? 'text-accent-300' : 'text-surface-600 hover:text-surface-300',
+        )}
+        onClick={(e) => {
+          e.stopPropagation();
+          onSort(c.key);
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+        title={
+          isSortCol
+            ? `Sorted ${sortDir === 'asc' ? 'ascending' : 'descending'} — click to flip`
+            : 'Sort by this column'
+        }
+      >
+        {isSortCol ? (
+          <span className="text-[10px]">{sortDir === 'asc' ? '▲' : '▼'}</span>
+        ) : (
+          <ChevronsUpDown className="h-3 w-3" />
+        )}
+      </button>
+      <div
+        className="absolute -right-1 top-0 bottom-0 z-20 w-2 cursor-col-resize hover:bg-accent-500/40"
+        onMouseDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onStartResize(id, w, e.clientX);
+        }}
+        onDoubleClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onResetColumn(id);
+        }}
+        onClick={(e) => e.stopPropagation()}
+        title="Drag to resize · double-click to reset"
+      />
+    </div>
+  );
+}
+
 function ColumnPickerPopover({
+  anchorRef,
   allColumns,
   hiddenColumns,
+  pinnedLeft,
   onChange,
+  onTogglePin,
   onClose,
 }: {
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
   allColumns: ColumnSpec[];
   hiddenColumns: Set<string>;
+  pinnedLeft: Set<string>;
   onChange: (next: Set<string>) => void;
+  onTogglePin: (id: string) => void;
   onClose: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const popRef = useRef<HTMLDivElement | null>(null);
+  /** Viewport-relative position derived from the anchor button's
+   *  bounding rect. Recomputed on every open + on window resize. The
+   *  popover is rendered into document.body via a portal so it isn't
+   *  clipped by the parent's overflow region or any sibling stacking
+   *  context (the bottom detail panel) — both of which previously hid
+   *  the lower checkboxes. */
+  const [pos, setPos] = useState<{
+    top: number;
+    right: number;
+    maxHeight: number;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    const updatePos = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const margin = 8;
+      const top = rect.bottom + 4;
+      const right = window.innerWidth - rect.right;
+      // Reserve `margin` px above the viewport bottom so the popover
+      // doesn't bleed off-screen on small viewports. Internal scroll
+      // (`overflow-y-auto` on the list region) takes over past that.
+      const maxHeight = Math.max(120, window.innerHeight - top - margin);
+      setPos({ top, right, maxHeight });
+    };
+    updatePos();
+    window.addEventListener('resize', updatePos);
+    window.addEventListener('scroll', updatePos, true);
+    return () => {
+      window.removeEventListener('resize', updatePos);
+      window.removeEventListener('scroll', updatePos, true);
+    };
+  }, [anchorRef]);
   // Outside-click closes the popover. We attach to mousedown so the
   // listener fires before any click handler inside the table can fire
   // and reopen us in the same gesture. Clicks on the anchoring "Columns"
@@ -1094,13 +1586,33 @@ function ColumnPickerPopover({
 
   const visibleCount = allColumns.length - hiddenColumns.size;
 
-  return (
+  if (!pos) return null;
+
+  const headerHeight = 33; /* matches py-2 + line-height of the top strip */
+
+  return createPortal(
     <div
       ref={popRef}
-      className="absolute right-0 top-full z-30 mt-1 w-80 rounded-md border border-surface-700 bg-surface-900 shadow-2xl"
+      className="w-80 rounded-md border border-surface-700 bg-surface-900 shadow-2xl"
+      style={{
+        position: 'fixed',
+        top: pos.top,
+        right: pos.right,
+        // Cap to whatever room is left between the anchor and the bottom
+        // of the viewport. The internal list takes overflow-y-auto.
+        maxHeight: pos.maxHeight,
+        display: 'flex',
+        flexDirection: 'column',
+        // Beat the bottom detail panel + StatsBar + any toolbar overlays
+        // — both live in sibling stacking contexts.
+        zIndex: 100,
+      }}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="flex items-center justify-between border-b border-surface-800 px-3 py-2">
+      <div
+        className="flex shrink-0 items-center justify-between border-b border-surface-800 px-3 py-2"
+        style={{ minHeight: headerHeight }}
+      >
         <div className="text-[12px] font-semibold text-surface-100">
           {t('urlsTab.columns', { defaultValue: 'Columns' })} ({visibleCount}/{allColumns.length})
         </div>
@@ -1123,27 +1635,55 @@ function ColumnPickerPopover({
           </button>
         </div>
       </div>
-      <div className="max-h-[60vh] overflow-y-auto py-1">
+      <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {allColumns.map((c) => {
           const id = columnId(c);
           const visible = !hiddenColumns.has(id);
+          const isPinned = pinnedLeft.has(id);
           return (
-            <label
+            <div
               key={id}
-              className="flex cursor-pointer items-center gap-2 px-3 py-1 text-[11px] text-surface-200 hover:bg-surface-800"
+              className="flex items-center gap-2 px-3 py-1 text-[11px] text-surface-200 hover:bg-surface-800"
             >
-              <input
-                type="checkbox"
-                checked={visible}
-                onChange={() => toggle(id)}
-                className="h-3 w-3 accent-blue-500"
-              />
-              <span className="truncate">{translateLabel(c.header, lang)}</span>
-            </label>
+              <label className="flex flex-1 cursor-pointer items-center gap-2 truncate">
+                <input
+                  type="checkbox"
+                  checked={visible}
+                  onChange={() => toggle(id)}
+                  className="h-3 w-3 accent-blue-500"
+                />
+                <span className="truncate">{translateLabel(c.header, lang)}</span>
+              </label>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onTogglePin(id);
+                }}
+                className={clsx(
+                  'flex shrink-0 items-center rounded p-0.5 transition',
+                  isPinned
+                    ? 'text-accent-300 hover:bg-accent-500/20'
+                    : 'text-surface-600 hover:bg-surface-700 hover:text-surface-300',
+                )}
+                title={
+                  isPinned
+                    ? t('urlsTab.unpinColumn', { defaultValue: 'Unpin this column' })
+                    : t('urlsTab.pinColumn', {
+                        defaultValue: 'Pin this column to the left edge',
+                      })
+                }
+              >
+                <Pin
+                  className={clsx('h-3 w-3', isPinned && 'rotate-45 fill-current')}
+                />
+              </button>
+            </div>
           );
         })}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

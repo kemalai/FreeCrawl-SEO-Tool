@@ -53,6 +53,11 @@ import {
   type SitemapValidateResult,
   type UrlRewritePreviewInput,
   type UrlRewritePreviewResult,
+  type CustomExtractionRule,
+  type ExtractionPreviewInput,
+  type ExtractionPreviewResult,
+  type ExtractionRulesExportResult,
+  type ExtractionRulesImportResult,
   type TopUrlsInput,
   type TopUrlsRow,
   type ExternalDomainHealthRow,
@@ -150,7 +155,9 @@ import {
   validateSitemap,
   normalizeUrl,
   compileUrlRegexRewrites,
+  previewExtractionRules,
 } from '@freecrawl/core';
+import { fetch as undiciFetch } from 'undici';
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
 import { isMenuLang, type MenuLang } from './menu-i18n.js';
@@ -233,6 +240,11 @@ let crawlController: {
   stopCrawl: () => void;
   pauseCrawl: () => void;
   resumeCrawl: () => void;
+  /** Wipe URL/links/images/headers/queue tables. Same primitive the
+   *  desktop "Clear" button calls — wired here so the MCP bridge can
+   *  invoke it without duplicating the writer-pool serialisation +
+   *  recovery-checkpoint reset logic. */
+  clearCrawl: () => Promise<void>;
 } | null = null;
 /** In-memory snapshot of the previous session's checkpoint, captured
  * before `db.reset()` wipes it. Cleared once the user accepts or
@@ -1751,6 +1763,233 @@ function registerIpc(): void {
         parseError = err instanceof Error ? err.message : String(err);
       }
       return { result, regexErrors: errors, parseError };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.extractionPreview,
+    async (_e, input: ExtractionPreviewInput): Promise<ExtractionPreviewResult> => {
+      // Live preview of Custom Extraction rules against a single URL.
+      // Mirrors the production crawler's parse pipeline (cheerio + the
+      // shared `previewExtractionRules` helper) so what the user sees
+      // here matches what would be stored per-URL after a full crawl.
+      // The fetch is one-shot — no retry, no robots.txt, no rate
+      // limiting; the user explicitly asked for this URL so we honour
+      // it directly.
+      const url = (input.url ?? '').trim();
+      if (!url) {
+        return { ok: false, error: 'URL is required' };
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return { ok: false, error: 'Invalid URL' };
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return { ok: false, error: 'Only http:// or https:// URLs are supported' };
+      }
+
+      const userAgent =
+        (input.userAgent ?? '').trim() ||
+        'FreeCrawl SEO Tool (extraction preview)';
+      const acceptLanguage = (input.acceptLanguage ?? '').trim() || 'en';
+
+      const controller = new AbortController();
+      const timeoutMs = 15_000;
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const startedAt = Date.now();
+
+      let response: Response | null = null;
+      try {
+        response = (await undiciFetch(parsed.href, {
+          method: 'GET',
+          redirect: 'follow',
+          headers: {
+            'User-Agent': userAgent,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': acceptLanguage,
+          },
+          signal: controller.signal,
+        })) as unknown as Response;
+      } catch (err) {
+        clearTimeout(timer);
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: controller.signal.aborted
+            ? `Fetch timed out after ${timeoutMs / 1000}s`
+            : `Fetch failed: ${msg}`,
+        };
+      }
+      clearTimeout(timer);
+
+      const fetchMs = Date.now() - startedAt;
+      const contentType = response.headers.get('content-type') ?? '';
+      const finalUrl = response.url || parsed.href;
+
+      let bodyText = '';
+      try {
+        bodyText = await response.text();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          statusCode: response.status,
+          finalUrl,
+          contentType,
+          fetchMs,
+          error: `Body read failed: ${msg}`,
+        };
+      }
+      const byteSize = Buffer.byteLength(bodyText, 'utf8');
+
+      const results = previewExtractionRules(bodyText, input.rules ?? []).map(
+        (r) => ({
+          name: r.name,
+          value: r.value,
+          ...(r.error !== undefined && { error: r.error }),
+        }),
+      );
+
+      return {
+        ok: true,
+        statusCode: response.status,
+        finalUrl,
+        contentType,
+        byteSize,
+        fetchMs,
+        results,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.extractionRulesExport,
+    async (
+      _e,
+      rules: CustomExtractionRule[],
+    ): Promise<ExtractionRulesExportResult> => {
+      if (!mainWindow) return { filePath: '', bytesWritten: 0 };
+      const res = await dialog.showSaveDialog(mainWindow, {
+        title: 'Export Extraction Rules',
+        defaultPath: 'freecrawl-extraction-rules.json',
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (res.canceled || !res.filePath) {
+        return { filePath: '', bytesWritten: 0 };
+      }
+      // Versioned envelope — same pattern as prefsExportSettings so
+      // future imports can detect schema drift without breaking on the
+      // raw rule blob.
+      const payload = {
+        format: 'freecrawl/extraction-rules',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        rules,
+      };
+      const json = JSON.stringify(payload, null, 2);
+      writeFileSync(res.filePath, json, 'utf8');
+      return {
+        filePath: res.filePath,
+        bytesWritten: Buffer.byteLength(json, 'utf8'),
+      };
+    },
+  );
+
+  ipcMain.handle(
+    IPC.extractionRulesImport,
+    async (): Promise<ExtractionRulesImportResult> => {
+      if (!mainWindow) {
+        return { filePath: '', rules: [], skippedCount: 0 };
+      }
+      const res = await dialog.showOpenDialog(mainWindow, {
+        title: 'Import Extraction Rules',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (res.canceled || res.filePaths.length === 0) {
+        return { filePath: '', rules: [], skippedCount: 0 };
+      }
+      const filePath = res.filePaths[0]!;
+      let raw: unknown;
+      try {
+        const text = readFileSync(filePath, 'utf8');
+        raw = JSON.parse(text);
+      } catch (err) {
+        return {
+          filePath: '',
+          rules: [],
+          skippedCount: 0,
+          error: `Cannot parse JSON: ${(err as Error).message}`,
+        };
+      }
+      // Accept either the wrapped envelope { rules: [...] } or a bare
+      // array — bare arrays let users share rule snippets without the
+      // boilerplate.
+      const candidates: unknown[] = Array.isArray(raw)
+        ? raw
+        : raw &&
+            typeof raw === 'object' &&
+            Array.isArray((raw as { rules?: unknown }).rules)
+          ? ((raw as { rules: unknown[] }).rules)
+          : [];
+      if (candidates.length === 0) {
+        return {
+          filePath: '',
+          rules: [],
+          skippedCount: 0,
+          error: 'File does not contain a rules array.',
+        };
+      }
+      const validOutputs = new Set([
+        'text',
+        'attribute',
+        'inner_html',
+        'outer_html',
+        'count',
+        'regex_group',
+      ]);
+      const validMulti = new Set(['first', 'last', 'all', 'concat', 'count']);
+      const accepted: CustomExtractionRule[] = [];
+      let skippedCount = 0;
+      for (const item of candidates) {
+        if (!item || typeof item !== 'object') {
+          skippedCount++;
+          continue;
+        }
+        const o = item as Record<string, unknown>;
+        if (
+          typeof o['name'] !== 'string' ||
+          typeof o['selector'] !== 'string' ||
+          (o['type'] !== 'css' && o['type'] !== 'regex') ||
+          typeof o['output'] !== 'string' ||
+          !validOutputs.has(o['output'] as string) ||
+          typeof o['multi'] !== 'string' ||
+          !validMulti.has(o['multi'] as string)
+        ) {
+          skippedCount++;
+          continue;
+        }
+        // Hard cap at 10 to match the in-app limit; everything past the
+        // cap is reported as skipped so the user knows truncation happened.
+        if (accepted.length >= 10) {
+          skippedCount++;
+          continue;
+        }
+        const rule: CustomExtractionRule = {
+          name: o['name'] as string,
+          type: o['type'] as 'css' | 'regex',
+          selector: o['selector'] as string,
+          output: o['output'] as CustomExtractionRule['output'],
+          multi: o['multi'] as CustomExtractionRule['multi'],
+        };
+        if (typeof o['attribute'] === 'string') {
+          rule.attribute = o['attribute'];
+        }
+        accepted.push(rule);
+      }
+      return { filePath, rules: accepted, skippedCount };
     },
   );
 
@@ -3359,9 +3598,17 @@ function registerIpc(): void {
     stopCrawl: () => activeCrawler?.stop(),
     pauseCrawl: () => activeCrawler?.pause(),
     resumeCrawl: () => activeCrawler?.resume(),
+    clearCrawl: () => clearCrawlDb(),
   };
 
-  ipcMain.handle(IPC.crawlClear, async () => {
+  // Shared between the renderer's IPC `crawl:clear` and the MCP bridge's
+  // `POST /v1/crawl/clear` — keeps the two surfaces from drifting (e.g.
+  // remembering to drop `pendingRecoveryCheckpoint` and fire
+  // `dataChanged` in both places). Without this helper an MCP-driven
+  // re-start after a completed crawl is a no-op because the crawler's
+  // resume-vs-fresh decision keeps existing rows when the start URL
+  // matches the previous one.
+  async function clearCrawlDb(): Promise<void> {
     const t0 = Date.now();
     activeCrawler?.stop();
     activeCrawler = null;
@@ -3408,7 +3655,9 @@ function registerIpc(): void {
     // stale rows until the next refresh tick.
     fireDataChanged();
     logger.log('info', 'main', `Clear completed in ${Date.now() - t0} ms`);
-  });
+  }
+
+  ipcMain.handle(IPC.crawlClear, () => clearCrawlDb());
 
   ipcMain.handle(IPC.crawlAddUrl, (_e, url: string): { accepted: boolean } => {
     if (!activeCrawler) return { accepted: false };
@@ -3931,6 +4180,16 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.urlClusterMembers, (_e, urlId: number) =>
     getDb().urlClusterMembers(urlId),
+  );
+
+  ipcMain.handle(
+    IPC.duplicateClustersList,
+    (_e, input: { offset: number; limit: number }) =>
+      getDb().listDuplicateClusters(input.offset, input.limit),
+  );
+
+  ipcMain.handle(IPC.duplicateClustersCount, () =>
+    getDb().countDuplicateClusterMembers(),
   );
 
   ipcMain.handle(
@@ -4866,6 +5125,9 @@ void app.whenReady().then(async () => {
       stopCrawl: () => crawlController?.stopCrawl(),
       pauseCrawl: () => crawlController?.pauseCrawl(),
       resumeCrawl: () => crawlController?.resumeCrawl(),
+      clearCrawl: async () => {
+        if (crawlController) await crawlController.clearCrawl();
+      },
       getProgress: () => latestProgress,
       getProjectPath: () => currentProjectPath || null,
       getUrlCount: () => {

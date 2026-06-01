@@ -101,6 +101,7 @@ export type UrlCategory =
   | 'issues:image-empty-alt'
   | 'issues:meta-refresh-used'
   | 'issues:charset-missing'
+  | 'issues:amp-validation-errors'
   | 'issues:broken-links-all'
   | 'issues:broken-links-internal'
   | 'issues:broken-links-external'
@@ -446,6 +447,13 @@ export interface CrawlUrlRow {
   hreflangs: string | null;
   hreflangCount: number;
   amphtml: string | null;
+  /** True when the page declares `<html ⚡>` / `<html amp>`. AMP-for-Ads
+   *  / AMP-for-Email variants (`⚡4ads`, `⚡4email`) count too. */
+  ampPage: boolean;
+  /** JSON-stringified array of AMP smoke-validator error codes (e.g.
+   *  `["missing-boilerplate","forbidden-script-tag"]`), or null when
+   *  not an AMP page / clean validation. */
+  ampValidationErrors: string | null;
   favicon: string | null;
   /** Resolved `<link rel="apple-touch-icon">` URL, else null. */
   appleTouchIcon: string | null;
@@ -535,6 +543,10 @@ export interface CrawlUrlRow {
  * the cluster size for the dedicated "Duplicates" tab.
  */
 export interface DuplicateClusterRow {
+  /** Internal URL row id — required by the grouped Duplicates view to
+   *  pivot the selection into the URL Details panel without a round-trip
+   *  URL → id lookup. */
+  urlId: number;
   url: string;
   statusCode: number | null;
   indexability: Indexability;
@@ -547,6 +559,12 @@ export interface DuplicateClusterRow {
   simhash: string | null;
   /** Hamming distance to the cluster representative (0 for the rep itself). */
   hammingFromRep: number;
+}
+
+/** Input for {@link FreeCrawlApi.duplicateClustersList}. */
+export interface DuplicateClustersListInput {
+  offset: number;
+  limit: number;
 }
 
 export interface CrawlConfig {
@@ -1010,6 +1028,75 @@ export interface CustomExtractionRule {
   multi: 'first' | 'last' | 'all' | 'concat' | 'count';
 }
 
+/**
+ * Input for the live "Preview" button in Settings → Custom Extraction.
+ * Lets the user test selectors against a real URL without running a
+ * full crawl — the response is fetched once with a single GET, parsed
+ * via cheerio, and every rule is run against it. Output mirrors what
+ * the crawler stores per URL so the preview is faithful to production
+ * behaviour.
+ */
+export interface ExtractionPreviewInput {
+  url: string;
+  rules: CustomExtractionRule[];
+  /** Optional User-Agent override; falls back to the default FreeCrawl
+   *  preview UA when omitted. */
+  userAgent?: string;
+  /** Optional Accept-Language; mirrors crawl config. */
+  acceptLanguage?: string;
+}
+
+export interface ExtractionPreviewRuleResult {
+  /** Mirrors `CustomExtractionRule.name` so the renderer can correlate
+   *  result rows back to rule rows. */
+  name: string;
+  /** JSON-serialisable extracted value. `null` when the rule matched
+   *  nothing (selector missed, regex no match). */
+  value: unknown;
+  /** Populated when the rule itself failed (e.g. invalid regex, invalid
+   *  CSS selector). Distinct from a clean "no match" — the user wants
+   *  to know which selectors are broken. */
+  error?: string;
+}
+
+export interface ExtractionPreviewResult {
+  ok: boolean;
+  /** HTTP status code when the fetch resolved. */
+  statusCode?: number;
+  /** Final URL after redirects (empty if not followed). */
+  finalUrl?: string;
+  /** Response Content-Type header. */
+  contentType?: string;
+  /** Total response body size in bytes. */
+  byteSize?: number;
+  /** Wall-clock time of the fetch in milliseconds. */
+  fetchMs?: number;
+  /** Per-rule results in submission order. */
+  results?: ExtractionPreviewRuleResult[];
+  /** Fetch-level error (DNS, timeout, network). When set, `results` is
+   *  undefined. */
+  error?: string;
+}
+
+/** Result of the "Export Rules" button in Settings → Custom Extraction.
+ *  `filePath` empty + `bytesWritten` 0 when the user cancels the save
+ *  dialog (the renderer just dismisses the action). */
+export interface ExtractionRulesExportResult {
+  filePath: string;
+  bytesWritten: number;
+}
+
+/** Result of the "Import Rules" button. `rules` is the validated list
+ *  (rejected entries excluded); `skippedCount` is how many entries in
+ *  the file failed shape validation so the renderer can warn the user.
+ *  All-empty on cancel. */
+export interface ExtractionRulesImportResult {
+  filePath: string;
+  rules: CustomExtractionRule[];
+  skippedCount: number;
+  error?: string;
+}
+
 export interface OverviewCounts {
   summary: {
     totalInternalUrls: number;
@@ -1100,6 +1187,7 @@ export interface OverviewCounts {
     imageMissingAlt: number;
     metaRefreshUsed: number;
     charsetMissing: number;
+    ampValidationErrors: number;
     brokenLinksInternal: number;
     brokenLinksExternal: number;
     nearDuplicate: number;

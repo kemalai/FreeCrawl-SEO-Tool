@@ -429,7 +429,17 @@
       "multiConcat": "Concat (` | `)",
       "multiCount": "Count",
       "addRule": "Add Rule",
-      "limitReached": "Limit reached (10 rules)."
+      "limitReached": "Limit reached (10 rules).",
+      "preview": "Preview",
+      "previewTitle": "Test current rules against a URL before saving — no full crawl needed.",
+      "previewDisabled": "Add at least one rule with a name and selector to enable preview.",
+      "import": "Import",
+      "export": "Export",
+      "importTitle": "Replace current rules with a JSON file. Accepts {rules: [...]} envelope or a bare array.",
+      "exportTitle": "Save the current rule set as a JSON file. Versioned envelope, safe to commit to source control.",
+      "exportDisabled": "Add at least one rule before exporting.",
+      "importConfirm": "Replace {{existing}} existing rule(s) with {{incoming}} imported rule(s)?",
+      "importSkipped": "Imported {{ok}} rule(s). {{skipped}} entries were skipped (invalid shape or over the 10-rule cap)."
     },
     "urlRewriting": {
       "intro": "Normalisation applied before URLs are deduplicated and queued.",
@@ -665,7 +675,16 @@
     "noOtherMembers": "No other members in this cluster. (Cluster size {{n}}.)",
     "cluster": "Cluster",
     "membersTotal": "{{n}} member(s) total",
-    "hammingHint": "(Hamming distance from this URL — lower means more similar)"
+    "hammingHint": "(Hamming distance from this URL — lower means more similar)",
+    "loadingClusters": "Loading near-duplicate clusters…",
+    "noClustersTitle": "No near-duplicate clusters",
+    "noClustersHint": "Run a crawl and let post-crawl analysis finish — clusters appear once two or more pages share enough content to fall under the SimHash Hamming threshold (Settings → Duplicates).",
+    "statusClusters": "{{clusters}} cluster · {{members}} pages",
+    "truncated": "truncated to first {{cap}} rows",
+    "toggleClusterTitle": "Click to expand/collapse this cluster",
+    "headerSize": "{{n}} pages",
+    "maxHamming": "max Δ {{n}} bits",
+    "hammingFromRepTitle": "SimHash Hamming distance from the cluster representative — 0 means the rep itself, higher = further from the rep"
   },
   "resources": {
     "loadingSource": "Loading source…",
@@ -684,6 +703,21 @@
     "empty4": "then re-crawl.",
     "customExtraction": "Custom Extraction",
     "customSearchHits": "Custom Search hits"
+  },
+  "extractionPreview": {
+    "title": "Custom Extraction Preview",
+    "subtitle": "Run all configured rules against a single URL to validate selectors / regex before crawling.",
+    "noRules": "Add at least one rule (with a name and selector) before previewing.",
+    "runTitle": "Fetch the URL and run every rule against the response.",
+    "run": "Run preview ({{n}} rule(s))",
+    "running": "Running…",
+    "idle": "Enter a URL above and click Run preview to fetch and apply every rule.",
+    "fetching": "Fetching URL and parsing response…",
+    "failed": "Preview failed",
+    "noMatch": "no match",
+    "noResults": "No results — add rules in the Custom Extraction panel.",
+    "colName": "Rule",
+    "colValue": "Value"
   },
   "structured": {
     "blocks": "block(s)",
@@ -1044,10 +1078,14 @@
     "hideAllExceptRow": "Hide every column except Row #",
     "showAll": "Show all",
     "hideAll": "Hide all",
+    "pinColumn": "Pin this column to the left edge",
+    "unpinColumn": "Unpin this column",
+    "reorderColumn": "Drag to reorder column",
     "columnHeaderHint": "(click to select · drag to multi-select · right-click to hide)",
     "quickFilterTitle": "Quick filter for this tab",
     "listView": "List view",
     "treeView": "Tree view (URL hierarchy)",
+    "clusterView": "Cluster view (grouped by near-duplicate clusters)",
     "treeStatus": "Tree view · {{rows}} URL · {{folders}} folder",
     "treeTruncated": "truncated to first {{cap}}",
     "treeLoading": "Loading URL tree…",

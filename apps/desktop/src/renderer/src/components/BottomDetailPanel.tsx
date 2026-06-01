@@ -1593,6 +1593,26 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Hreflang Count', row.hreflangCount > 0 ? row.hreflangCount : null],
     ['Hreflangs', summarizeHreflangs(row.hreflangs)],
     ['AMP HTML', row.amphtml],
+    ['AMP Page', row.ampPage ? 'Yes' : null],
+    [
+      'AMP Validation Errors',
+      // The DB stores a JSON array; show "OK" when the column is empty
+      // and the page IS AMP (clean validation), otherwise pretty-print
+      // the comma-joined error codes so users see exactly which checks
+      // failed without scrolling through a JSON literal.
+      row.ampPage
+        ? (() => {
+            if (!row.ampValidationErrors) return 'OK';
+            try {
+              const parsed = JSON.parse(row.ampValidationErrors) as string[];
+              if (!Array.isArray(parsed) || parsed.length === 0) return 'OK';
+              return parsed.join(', ');
+            } catch {
+              return row.ampValidationErrors;
+            }
+          })()
+        : null,
+    ],
     ['Favicon', row.favicon],
     ['Apple Touch Icon', row.appleTouchIcon],
     ['Android / PWA Icon', row.androidIcon],

@@ -126,6 +126,7 @@ const ISSUES: IssueDef[] = [
   { key: 'hreflangTargetIssues', label: 'Hreflang Target Issues', severity: 'error' },
   { key: 'faviconMissing', label: 'Favicon Missing', severity: 'info' },
   { key: 'charsetMissing', label: 'Charset Missing', severity: 'warn' },
+  { key: 'ampValidationErrors', label: 'AMP Validation Errors', severity: 'warn' },
   { key: 'nonIndexableInSitemap', label: 'Non-Indexable in Sitemap', severity: 'error' },
   { key: 'non200InSitemap', label: 'Non-200 in Sitemap', severity: 'error' },
   { key: 'redirectInSitemap', label: 'Redirect in Sitemap', severity: 'warn' },

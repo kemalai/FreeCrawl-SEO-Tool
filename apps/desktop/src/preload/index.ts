@@ -42,7 +42,14 @@ import {
   type SitemapValidateResult,
   type UrlRewritePreviewInput,
   type UrlRewritePreviewResult,
+  type CustomExtractionRule,
+  type ExtractionPreviewInput,
+  type ExtractionPreviewResult,
+  type ExtractionRulesExportResult,
+  type ExtractionRulesImportResult,
   type UrlClusterMember,
+  type DuplicateClusterRow,
+  type DuplicateClustersListInput,
   type PagesPerDirectoryInput,
   type PagesPerDirectoryRow,
   type StatusCodeHistogramRow,
@@ -243,8 +250,24 @@ const api: FreeCrawlApi = {
   urlRewritePreview: (
     input: UrlRewritePreviewInput,
   ): Promise<UrlRewritePreviewResult> => ipcRenderer.invoke(IPC.urlRewritePreview, input),
+  extractionPreview: (
+    input: ExtractionPreviewInput,
+  ): Promise<ExtractionPreviewResult> =>
+    ipcRenderer.invoke(IPC.extractionPreview, input),
+  extractionRulesExport: (
+    rules: CustomExtractionRule[],
+  ): Promise<ExtractionRulesExportResult> =>
+    ipcRenderer.invoke(IPC.extractionRulesExport, rules),
+  extractionRulesImport: (): Promise<ExtractionRulesImportResult> =>
+    ipcRenderer.invoke(IPC.extractionRulesImport),
   urlClusterMembers: (urlId: number): Promise<UrlClusterMember[]> =>
     ipcRenderer.invoke(IPC.urlClusterMembers, urlId),
+  duplicateClustersList: (
+    input: DuplicateClustersListInput,
+  ): Promise<DuplicateClusterRow[]> =>
+    ipcRenderer.invoke(IPC.duplicateClustersList, input),
+  duplicateClustersCount: (): Promise<number> =>
+    ipcRenderer.invoke(IPC.duplicateClustersCount),
   reportsPagesPerDirectory: (
     input: PagesPerDirectoryInput,
   ): Promise<PagesPerDirectoryRow[]> => ipcRenderer.invoke(IPC.reportsPagesPerDirectory, input),

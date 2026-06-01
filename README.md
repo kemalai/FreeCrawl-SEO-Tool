@@ -44,16 +44,17 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 <td width="50%" valign="top">
 
 ### 🔍 Analysis
-- **150+ SEO issue checks** across 25 top-level tabs
-- Near-duplicate clustering (SimHash + LSH) + exact-duplicate content hash
+- **150+ SEO issue checks** across 30 top-level tabs
+- Near-duplicate clustering (SimHash + LSH) + exact-duplicate content hash + **Cluster view** that groups every near-duplicate cluster on the Duplicates tab
 - Full hreflang validation (reciprocity, self-ref, inconsistent lang)
 - OpenGraph / Twitter Card / JSON-LD / AMP / **Web App Manifest** parsing
+- **AMP smoke validation** — pages declaring themselves AMP get flagged for missing boilerplate, runtime, canonical, or forbidden script/style/legacy tags
 - **Structured-data validation** — duplicate `@id`, malformed `@type`, missing required props
 - **Accessibility** — `<main>` landmark, skip-link, ARIA roles, heading order
 - SSL/TLS cert chain audit, security headers, **CORS audit**
 - **Active vs passive mixed content** split
 - Readability (Flesch, Flesch–Kincaid, Gunning Fog)
-- Custom CSS + Regex extraction (10 rules) + `/regex/` literal Custom Search
+- Custom CSS + Regex extraction (10 rules) — with **live Preview dialog** + **JSON import / export** for sharing rule sets — plus `/regex/` literal Custom Search
 - **PageSpeed Insights** — on-demand Lighthouse audits (mobile + desktop) per URL
 - **Google Search Console + GA4** — clicks / impressions / CTR / position / sessions / users joined onto crawled pages
 - **URL Inspection** — coverage verdict, last-crawl time, canonical decisions in batches
@@ -72,8 +73,9 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 - Live-streaming rows during crawl
 - Advanced AND/OR search (24 fields × 12 ops)
 - **Per-tab quick-filter dropdown** — instant filtering by Overview sub-categories without leaving the tab
-- **List ↔ Tree view toggle** — switch between flat virtual table and URL-path hierarchy with collapsible folders
-- Detail panel with 15 sub-tabs — adds **View Rendered** (post-JS DOM) + **Screenshot** (full/fold/mobile preview) when JS rendering is on
+- **List ↔ Tree ↔ Cluster view toggle** — flat virtual table, URL-path hierarchy with collapsible folders, or near-duplicate cluster groups (Duplicates tab)
+- **Column pin (sticky-left) + drag-to-reorder** — pin a column so it stays visible during horizontal scroll, drag any header's grip handle to rearrange
+- Detail panel with 16 sub-tabs — adds **View Rendered** (post-JS DOM) + **Screenshot** (full/fold/mobile preview) when JS rendering is on
 - **Visualization in its own native window** — open from menu, park on a second monitor while data tables stay free
 - Per-URL **Duplicates** view (cluster siblings)
 - **Live memory monitor** in status bar (RSS / Sys Free / per-URL cost / capacity projection)
@@ -97,7 +99,7 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 - Project-vs-project compare diff
 - **Google Sheets** + **BigQuery** direct export (OAuth / service-account)
 - **Encrypted project snapshots** — password-protected `.seoproject.enc` (AES-256-GCM + PBKDF2)
-- **MCP server** for AI agents — **drive crawls live from Claude Code**, poll progress, plus full read-only DB access
+- **MCP server** for AI agents — **drive crawls live from Claude Code** with 47 tools covering every tab, detail sub-tab, integration row, and report
 - Webhook on completion + OS notifications
 
 </td>
@@ -268,15 +270,19 @@ FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the acti
 1. **Read-only data access** to the SQLite project — runs alongside the desktop app without contention (WAL allows concurrent readers).
 2. **Live crawl control** — when the desktop app is open, an agent can start / pause / resume / stop crawls and poll progress in real time. This goes through a localhost-only HTTP bridge (127.0.0.1, ephemeral random port, 32-byte Bearer token auth, discovery file written to `<userData>/mcp-bridge.json` on app launch).
 
-**14 tools**:
+**47 tools**:
 
 | Group | Tools |
 | :--- | :--- |
-| 📊 **Data queries** (always available) | `get_summary`, `get_overview_counts`, `top_issues`, `query_urls`, `get_url_detail` |
+| 📊 **Top-level data** | `get_summary`, `get_overview_counts`, `top_issues`, `query_urls`, `get_url_detail` |
+| 🔬 **Per-URL detail sub-tabs** | `get_url_source` (raw + rendered + screenshot paths), `get_url_inlinks`, `get_url_outlinks`, `get_url_images`, `get_url_headers`, `get_url_duplicates`, `get_url_analytics`, `get_url_cert` |
+| 🧩 **Integration rows** | `query_gsc`, `query_ga4`, `query_pagespeed`, `query_ai`, `query_seo` |
+| 🔎 **Specialised queries** | `query_images`, `query_broken_links`, `list_duplicate_clusters` |
+| 📈 **Reports** | `report_status_code_histogram`, `report_indexability_distribution`, `report_content_kind_distribution`, `report_depth_histogram`, `report_response_time_histogram`, `report_inlinks_histogram`, `report_word_count_histogram`, `report_url_length_histogram`, `report_top_urls_by`, `report_top_anchor_texts`, `report_external_domain_health`, `report_image_weight_per_page`, `report_link_position_breakdown`, `report_pages_per_directory`, `report_word_count_per_directory`, `report_sitemap_orphans`, `report_analytics_coverage`, `report_server_header_breakdown` |
 | 📁 **Project management** | `list_projects`, `set_project`, `current_project` |
-| 🕷 **Crawl control** (desktop must be open) | `start_crawl`, `stop_crawl`, `pause_crawl`, `resume_crawl`, `get_crawl_progress`, `get_desktop_project` |
+| 🕷 **Crawl control** (desktop must be open) | `start_crawl`, `stop_crawl`, `pause_crawl`, `resume_crawl`, `clear_crawl`, `get_crawl_progress`, `get_desktop_project` |
 
-`start_crawl` accepts a `startUrl` plus optional whitelisted overrides (scope, maxDepth, maxUrls, maxConcurrency, maxRps, crawlDelayMs, requestTimeoutMs, respectRobotsTxt, followRedirects, crawlExternal, userAgent, include/excludePatterns) — anything you don't override keeps the desktop user's saved value. Crawls launched via MCP go through the **same code path** as the UI's Start button, so progress shows up in the desktop app live as the agent drives it.
+`start_crawl` accepts a `startUrl` plus optional whitelisted overrides (scope, maxDepth, maxUrls, maxConcurrency, maxRps, crawlDelayMs, requestTimeoutMs, respectRobotsTxt, followRedirects, crawlExternal, userAgent, include/excludePatterns) — anything you don't override keeps the desktop user's saved value. Crawls launched via MCP go through the **same code path** as the UI's Start button, so progress shows up in the desktop app live as the agent drives it. Call `clear_crawl` first when you want a fresh BFS after a completed crawl with the same seed URL (otherwise the crawler treats the re-start as a resume and exits because every URL is already in the DB).
 
 **1. Build it once:**
 

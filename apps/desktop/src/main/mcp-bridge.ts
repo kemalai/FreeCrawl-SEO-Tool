@@ -32,6 +32,7 @@
  *   POST /v1/crawl/stop
  *   POST /v1/crawl/pause
  *   POST /v1/crawl/resume
+ *   POST /v1/crawl/clear
  *   GET  /v1/crawl/progress
  *   GET  /v1/project        — { projectPath, urlsCrawled }
  *
@@ -62,6 +63,15 @@ export interface McpBridgeDeps {
   stopCrawl: () => void;
   pauseCrawl: () => void;
   resumeCrawl: () => void;
+  /**
+   * Wipe the URLs table (and all dependent rows — links / images /
+   * headers / cookies / sitemap_urls / crawl_queue). Same primitive
+   * the desktop's "Clear" button calls. Required because the crawler's
+   * resume-vs-fresh decision is "same start URL → keep existing rows"
+   * — without an explicit clear, an MCP-driven re-start after a
+   * completed crawl finds zero pending work and exits immediately.
+   */
+  clearCrawl: () => Promise<void>;
   /**
    * Snapshot of the latest progress event the Crawler emitted. Null
    * when no crawl has ever run in this session. The bridge passes it
@@ -360,6 +370,17 @@ async function handleRequest(
   if (method === 'POST' && path === '/v1/crawl/resume') {
     deps.resumeCrawl();
     send(res, 200, { ok: true });
+    return;
+  }
+  if (method === 'POST' && path === '/v1/crawl/clear') {
+    try {
+      await deps.clearCrawl();
+      send(res, 200, { ok: true });
+    } catch (err) {
+      send(res, 500, {
+        error: err instanceof Error ? err.message : 'clear-failed',
+      });
+    }
     return;
   }
 
