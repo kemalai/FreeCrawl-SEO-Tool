@@ -12,9 +12,21 @@
     "savedPlaceholder": "Kayıtlı — değiştirmek için yaz",
     "optional": "(isteğe bağlı)",
     "getCredentials": "Kimlik bilgisi al",
+    "setupGuide": "Kurulum Rehberi",
+    "setupGuideTitle": "Adım adım kurulum rehberi — OAuth client, test user, API enable, sık karşılaşılan hatalar.",
     "saved": "Kaydedildi.",
     "cleared": "Kaldırıldı.",
     "confirmClear": "Bu entegrasyonun saklanan tüm kimlik bilgileri kaldırılsın mı?"
+  },
+  "integrationGuide": {
+    "title": "{{name}} — Kurulum Rehberi",
+    "lastReviewed": "Son güncelleme {{date}}",
+    "notAvailable": "Bu entegrasyon için detaylı rehber henüz hazır değil.",
+    "fallback": "Detaylı rehber yok. Kart üzerindeki \"Kimlik bilgisi al\" butonuyla sağlayıcının kendi dokümantasyonuna git.",
+    "prereqs": "Ön gereksinimler",
+    "steps": "Adım adım kurulum",
+    "troubleshooting": "Sorun giderme",
+    "notes": "Notlar"
   },
   "common": {
     "save": "Kaydet",

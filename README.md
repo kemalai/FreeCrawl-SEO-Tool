@@ -25,86 +25,13 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 ---
 
-## ✨ Highlights
+## ✨ What FreeCrawl Does
 
-<table>
-<tr>
-<td width="50%" valign="top">
+FreeCrawl is a desktop SEO crawler that scales to **1M+ URLs on a single machine** at 80–150 URL/s via undici with keep-alive, with optional **JavaScript rendering** through headless Chromium (Playwright) that captures the post-JS DOM, full-page / above-fold / mobile screenshots, LCP candidate elements, and a per-URL mobile usability audit. It runs **150+ on-page SEO checks across 30 top-level tabs** — exact and near-duplicate clustering (SimHash + LSH) with a dedicated Cluster view, full hreflang validation (reciprocity, self-reference, inconsistent lang), OpenGraph / Twitter Card / JSON-LD / Web App Manifest parsing, AMP smoke validation, structured-data validation (duplicate `@id`, malformed `@type`, missing required props), WCAG accessibility checks (`<main>` landmark, skip-link, ARIA roles, heading order), security headers + SSL/TLS chain audit + active/passive mixed content split, readability scores (Flesch, Flesch–Kincaid, Gunning Fog), and a 10-rule custom CSS + regex extraction engine with a **live Preview dialog and JSON import / export** for sharing rule sets.
 
-### 🚀 Crawler
-- **undici** HTTP client with keep-alive Agent
-- **80–150 URL/s** typical throughput
-- **1M+ URL** crawls on a single machine
-- robots.txt, sitemaps, redirect chains
-- HTTP Basic / Bearer auth, proxy override
-- Pause / Resume / manual URL injection
-- **JavaScript rendering** via headless Chromium (Playwright) — post-JS DOM, screenshot capture (full / above-fold / mobile), LCP candidate, Mobile Usability audit
+The **dense dark UI** renders virtualized 1M-row tables that live-stream rows during a crawl, with **List ↔ Tree ↔ Cluster view toggles**, **column pin (sticky-left) + drag-to-reorder + show/hide**, advanced AND/OR filters across 24 fields × 12 operators, per-tab quick-filter dropdowns, a 16-tab Details panel per URL (URL Details, Outline, Inlinks, Outlinks, Images, Resources, Extracted Data, SERP Snippet, HTTP Headers, Cookies, Structured Data, View Source, View Rendered, Screenshot, Duplicates, Analytics), an English + Turkish UI including every Settings panel, **in-app scheduled crawls** (hourly / daily / weekly / custom), a live memory monitor, robots.txt syntax validator, URL rewriting with live preview, project-vs-project compare diff, a Cytoscape link graph in its own native window, and a `.seoproject` file association for OS double-click.
 
-</td>
-<td width="50%" valign="top">
-
-### 🔍 Analysis
-- **150+ SEO issue checks** across 30 top-level tabs
-- Near-duplicate clustering (SimHash + LSH) + exact-duplicate content hash + **Cluster view** that groups every near-duplicate cluster on the Duplicates tab
-- Full hreflang validation (reciprocity, self-ref, inconsistent lang)
-- OpenGraph / Twitter Card / JSON-LD / AMP / **Web App Manifest** parsing
-- **AMP smoke validation** — pages declaring themselves AMP get flagged for missing boilerplate, runtime, canonical, or forbidden script/style/legacy tags
-- **Structured-data validation** — duplicate `@id`, malformed `@type`, missing required props
-- **Accessibility** — `<main>` landmark, skip-link, ARIA roles, heading order
-- SSL/TLS cert chain audit, security headers, **CORS audit**
-- **Active vs passive mixed content** split
-- Readability (Flesch, Flesch–Kincaid, Gunning Fog)
-- Custom CSS + Regex extraction (10 rules) — with **live Preview dialog** + **JSON import / export** for sharing rule sets — plus `/regex/` literal Custom Search
-- **PageSpeed Insights** — on-demand Lighthouse audits (mobile + desktop) per URL
-- **Google Search Console + GA4** — clicks / impressions / CTR / position / sessions / users joined onto crawled pages
-- **URL Inspection** — coverage verdict, last-crawl time, canonical decisions in batches
-- **AI per-URL** — OpenAI / Anthropic / local Ollama prompts with shared variables (`{url}`/`{title}`/`{description}`/`{h1}`/`{body}`)
-- **SEO Authority** — Ahrefs / Majestic / Moz / Semrush metrics behind one provider dropdown
-- **Cross-source orphan detection** — pages PSI / GSC / GA4 / sitemap know about but the crawl never reached
-
-</td>
-</tr>
-<tr>
-<td valign="top">
-
-### 🖥 Desktop UI
-- Dense dark theme, virtualized 1M+ row tables
-- **Multi-language UI** (English + Turkish) — full coverage including all Settings panels
-- Live-streaming rows during crawl
-- Advanced AND/OR search (24 fields × 12 ops)
-- **Per-tab quick-filter dropdown** — instant filtering by Overview sub-categories without leaving the tab
-- **List ↔ Tree ↔ Cluster view toggle** — flat virtual table, URL-path hierarchy with collapsible folders, or near-duplicate cluster groups (Duplicates tab)
-- **Column pin (sticky-left) + drag-to-reorder** — pin a column so it stays visible during horizontal scroll, drag any header's grip handle to rearrange
-- Detail panel with 16 sub-tabs — adds **View Rendered** (post-JS DOM) + **Screenshot** (full/fold/mobile preview) when JS rendering is on
-- **Visualization in its own native window** — open from menu, park on a second monitor while data tables stay free
-- Per-URL **Duplicates** view (cluster siblings)
-- **Live memory monitor** in status bar (RSS / Sys Free / per-URL cost / capacity projection)
-- **Robots.txt syntax validator** in the Robots Tester (typo suggestions, orphan rules, sitemap URL check)
-- **In-app scheduled crawl** (hourly / daily / weekly / custom) per project
-- **`.seoproject` file association** — double-click a project file from the OS to open it
-- URL rewriting (regex + whitelist + live preview)
-- Cytoscape graph + anchor-text word cloud + **Top Words** report
-- Custom CSS theme override (`custom-theme.css` in user-data folder)
-- Diagnostic popups for DNS/TLS/proxy issues
-
-</td>
-<td valign="top">
-
-### 📤 Export & Reports
-- **22 reports** — histograms, top/bottom URLs, link positions, top words, **cross-source orphan pages**
-- **Export Crawl Data dialog** — single menu entry with format picker (**Excel `.xlsx`** / **CSV UTF-8** / **JSON** / **XML**) + hierarchical tree picker (top tables + structural sub-categories) + nested folder output
-- Per-tab in-context export button (current category) + dedicated **Images CSV export** (honours missing-alt + search)
-- Standalone HTML audit report
-- Sitemap generator (image / hreflang / sharded / gz)
-- Project-vs-project compare diff
-- **Google Sheets** + **BigQuery** direct export (OAuth / service-account)
-- **Encrypted project snapshots** — password-protected `.seoproject.enc` (AES-256-GCM + PBKDF2)
-- **MCP server** for AI agents — **drive crawls live from Claude Code** with 47 tools covering every tab, detail sub-tab, integration row, and report
-- Webhook on completion + OS notifications
-
-</td>
-</tr>
-</table>
+Integrations cover **Google Search Console** (clicks, impressions, CTR, position + URL Inspection coverage), **Google Analytics 4** (sessions, users, bounce, engagement), **PageSpeed Insights** Lighthouse audits, custom **AI prompts via OpenAI / Anthropic Claude / local Ollama** with `{url}`/`{title}`/`{description}`/`{h1}`/`{body}` variables, and **SEO authority providers** (Ahrefs / Majestic / Moz / Semrush) behind a single dropdown — each integration card now ships with an **in-app step-by-step Setup Guide modal** in English and Turkish that walks you through OAuth client creation, test-user setup, API enablement, and the most common errors. Exports go through a unified **Export Crawl Data dialog** (Excel `.xlsx` / CSV UTF-8 / JSON / XML with hierarchical category selection and nested folder output) plus a standalone HTML audit report, sitemap generator (standard / image / hreflang / sharded / gzipped), and direct streaming to **Google Sheets** and **BigQuery**. Project files can be saved as **password-protected encrypted snapshots** (`.seoproject.enc`, AES-256-GCM + PBKDF2). The **MCP server** exposes **76 tools** that let Claude Code or any MCP client drive crawls live, query every UI surface, trigger exports, fetch GSC/GA4 data on demand, and modify settings — every action a human user can take in the desktop is callable from an agent. Crawl-completion webhooks, OS notifications, 22 built-in reports (histograms, top/bottom URLs, link positions, top words, cross-source orphans), per-URL **Duplicates** view, and a custom-CSS theme override round out the suite. Everything runs **fully local** — no telemetry, no cloud, MIT-style license.
 
 <br />
 

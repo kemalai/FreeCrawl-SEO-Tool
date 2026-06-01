@@ -36,6 +36,7 @@ import {
   Languages,
   Plug,
   ExternalLink,
+  BookOpen,
   Chrome,
   type LucideIcon,
 } from 'lucide-react';
@@ -52,6 +53,7 @@ import { DEFAULT_CRAWL_CONFIG, INTEGRATIONS } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip, type FieldInfo } from './InfoTip.js';
 import { ExtractionPreviewDialog } from './ExtractionPreviewDialog.js';
+import { IntegrationSetupGuideModal } from './IntegrationSetupGuideModal.js';
 
 interface Props {
   open: boolean;
@@ -3282,6 +3284,7 @@ function IntegrationCard({
   const { t } = useTranslation();
   const configured = state?.configured ?? false;
   const hasDraft = Object.values(draft).some((v) => v.length > 0);
+  const [guideOpen, setGuideOpen] = useState(false);
 
   return (
     <div className="rounded border border-surface-800 bg-surface-950/40 p-3">
@@ -3376,17 +3379,35 @@ function IntegrationCard({
             {t('common.remove', { defaultValue: 'Remove' })}
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => setGuideOpen(true)}
+          className="ml-auto inline-flex items-center gap-1 rounded border border-accent-500/50 px-2 py-0.5 text-[10px] text-accent-300 hover:bg-accent-500/15"
+          title={t('integrations.setupGuideTitle', {
+            defaultValue:
+              'Step-by-step setup walkthrough — OAuth client, test users, API enable, common errors.',
+          })}
+        >
+          <BookOpen className="h-3 w-3" />
+          {t('integrations.setupGuide', { defaultValue: 'Setup Guide' })}
+        </button>
         <a
           href={def.helpUrl}
           target="_blank"
           rel="noreferrer"
-          className="ml-auto inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300"
+          className="inline-flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300"
         >
           {t('integrations.getCredentials', { defaultValue: 'Get credentials' })}
           <ExternalLink className="h-3 w-3" />
         </a>
       </div>
       {notice && <div className="mt-1.5 text-[10px] text-emerald-400">{notice}</div>}
+
+      <IntegrationSetupGuideModal
+        open={guideOpen}
+        integration={def}
+        onClose={() => setGuideOpen(false)}
+      />
     </div>
   );
 }

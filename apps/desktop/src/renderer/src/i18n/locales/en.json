@@ -12,9 +12,21 @@
     "savedPlaceholder": "Saved — type to replace",
     "optional": "(optional)",
     "getCredentials": "Get credentials",
+    "setupGuide": "Setup Guide",
+    "setupGuideTitle": "Step-by-step setup walkthrough — OAuth client, test users, API enable, common errors.",
     "saved": "Saved.",
     "cleared": "Removed.",
     "confirmClear": "Remove all stored credentials for this integration?"
+  },
+  "integrationGuide": {
+    "title": "{{name}} — Setup Guide",
+    "lastReviewed": "Last reviewed {{date}}",
+    "notAvailable": "A guide for this integration is not yet available.",
+    "fallback": "No detailed guide yet. Click \"Get credentials\" on the card to open the provider's docs.",
+    "prereqs": "Prerequisites",
+    "steps": "Step-by-step setup",
+    "troubleshooting": "Troubleshooting",
+    "notes": "Notes"
   },
   "common": {
     "save": "Save",

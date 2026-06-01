@@ -967,5 +967,625 @@ export function buildTools(): Tool[] {
       inputSchema: { type: 'object', properties: {} },
       handler: (_args, db) => ({ rows: db.serverHeaderBreakdown() }),
     },
+
+    // =================================================================
+    // V2 Faz 0.5 Increment 2 — Action tools. Each one POSTs through the
+    // bridge's generic `/v1/action/<name>` route; the main process
+    // dispatches via `crawlController.actions[<name>]`. Unlike the
+    // desktop IPC handlers, MCP actions require explicit file paths —
+    // no save / open dialog can pop up because the agent is not the
+    // one in front of the screen. Pass absolute paths; the agent
+    // should call `current_project` first if it needs to know where
+    // the project lives.
+    // =================================================================
+
+    {
+      requiresDb: false,
+      name: 'crawl_add_url',
+      description:
+        'Enqueue a single URL into the currently running crawl. Same primitive as the TopBar "Add URL" button. No-op when no crawl is active (returns `{accepted: false, reason: "no-active-crawl"}`). URL is filtered by the active crawl\'s scope / include / exclude / robots rules just like any link-discovered URL.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Absolute URL to inject.' },
+        },
+        required: ['url'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ accepted: boolean; reason?: string }>(
+          'POST',
+          '/v1/action/crawl-add-url',
+          { url: String(args.url ?? '') },
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'export_csv',
+      description:
+        'Export the active project (or one tab\'s subset, or a list of URL ids) to a CSV file. Path must be absolute. CSV is UTF-8 with formula-injection neutralisation on cells starting with `=`, `+`, `-`, `@`, TAB, or CR.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Absolute output path.' },
+          category: {
+            type: 'string',
+            enum: URL_CATEGORY_VALUES,
+            description: 'Optional UrlCategory subset filter. Default exports the whole project.',
+          },
+          selectedIds: {
+            type: 'array',
+            items: { type: 'integer' },
+            description: 'When set, only these URL ids are exported. Wins over category.',
+          },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string; rowsWritten: number }>(
+          'POST',
+          '/v1/action/export-csv',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'export_json',
+      description: 'Export to JSON. Same shape as export_csv plus an optional `pretty: true` for 2-space indent (default compact).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string' },
+          category: { type: 'string', enum: URL_CATEGORY_VALUES },
+          selectedIds: { type: 'array', items: { type: 'integer' } },
+          pretty: { type: 'boolean' },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string; rowsWritten: number }>(
+          'POST',
+          '/v1/action/export-json',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'export_xml',
+      description: 'Export to XML. Same shape as export_csv.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string' },
+          category: { type: 'string', enum: URL_CATEGORY_VALUES },
+          selectedIds: { type: 'array', items: { type: 'integer' } },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string; rowsWritten: number }>(
+          'POST',
+          '/v1/action/export-xml',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'export_html_report',
+      description: 'Generate a standalone HTML audit report (summary + sample tables) — same content as File → Export → HTML Report in the desktop. Embeds top-level counts, top issues, and sample URLs per issue category.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Absolute output path. Use a `.html` extension.' },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string; bytesWritten: number }>(
+          'POST',
+          '/v1/action/export-html-report',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'sitemap_generate',
+      description:
+        'Generate a sitemap.xml from the indexable URLs in the active project. Variant defaults to `standard`; pass `image` for Google Images extension or `hreflang` for international targeting. Gzip and per-file URL caps supported (sharding kicks in over 50,000).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Absolute output path.' },
+          variant: {
+            type: 'string',
+            enum: ['standard', 'image', 'hreflang'],
+          },
+          gzip: { type: 'boolean' },
+          splitAtUrlCount: { type: 'integer', minimum: 1, maximum: 50_000 },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{
+          filePath: string;
+          files?: string[];
+          urlsWritten: number;
+          truncated: boolean;
+          sharded?: boolean;
+        }>('POST', '/v1/action/sitemap-generate', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'sitemap_validate',
+      description:
+        'Fetch a remote sitemap.xml (or sitemap-index.xml) and validate its XML, URL count, and lastmod entries. Walks nested sitemap indexes up to 3 levels deep, capped at 100,000 entries. Returns per-sitemap parse errors plus protocol-level findings.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Sitemap URL to fetch.' },
+          userAgent: { type: 'string', description: 'Optional UA override.' },
+        },
+        required: ['url'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/sitemap-validate', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'robots_test',
+      description:
+        'Test whether a URL is allowed by a robots.txt policy. Defaults to fetching the live robots.txt from the URL\'s origin; pass `customRobots` (raw body string) to test a draft policy offline.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          userAgent: { type: 'string' },
+          customRobots: {
+            type: 'string',
+            description: 'Optional raw robots.txt body to test against instead of fetching live.',
+          },
+        },
+        required: ['url', 'userAgent'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/robots-test', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'robots_validate',
+      description: 'Lint a raw robots.txt body — surface syntax errors, typo suggestions, orphan rules, and sitemap-URL checks. Lines are 1-indexed.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'Full robots.txt body to validate.' },
+        },
+        required: ['text'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/robots-validate', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'compare_load',
+      description:
+        'Diff the active project against another `.seoproject` file — same as File → Compare With Project. Returns counts across 9 categories (added / removed / status / title / meta / h1 / canonical / indexability / response_time) plus sample rows (up to 5K per category).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Absolute path to the OTHER `.seoproject` to diff against.',
+          },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/compare-load', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'schedule_get',
+      description:
+        'Read the active project\'s scheduled-crawl spec, or null when none. Same data the Scheduled Crawl dialog shows: cadence (hourly/daily/weekly/custom), next-fire timestamp, last-fire timestamp + status.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () =>
+        bridgeRequest<unknown>('POST', '/v1/action/schedule-get', {}),
+    },
+
+    {
+      requiresDb: false,
+      name: 'schedule_set',
+      description:
+        'Write the active project\'s scheduled-crawl spec, or pass `spec: null` to clear. The in-app scheduler\'s 60-second tick picks up the change immediately — the next fire is computed server-side and returned. Cadence `custom` requires `intervalMinutes` ≥ 15.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          spec: {
+            type: ['object', 'null'],
+            description: 'ScheduleSpec or null to clear. Required field: `cadence`. Optional: enabled, intervalMinutes, hourOfDay, minuteOfHour, dayOfWeek.',
+            properties: {
+              enabled: { type: 'boolean' },
+              cadence: { type: 'string', enum: ['hourly', 'daily', 'weekly', 'custom'] },
+              intervalMinutes: { type: 'integer', minimum: 15 },
+              hourOfDay: { type: 'integer', minimum: 0, maximum: 23 },
+              minuteOfHour: { type: 'integer', minimum: 0, maximum: 59 },
+              dayOfWeek: { type: 'integer', minimum: 0, maximum: 6 },
+            },
+          },
+        },
+        required: ['spec'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/schedule-set', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'report_top_words',
+      description:
+        'Most-used words across every indexable page\'s title + meta description + H1. Locale tunes the stopword list — `en` strips English stopwords, `tr` Turkish, `all` strips both. Use for "what does the site talk about" content audits.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', minimum: 1, maximum: 2000 },
+          minLength: { type: 'integer', minimum: 1, maximum: 20 },
+          locale: { type: 'string', enum: ['en', 'tr', 'all'] },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/report-top-words', args),
+    },
+
+    // ---- Faz 0.5 Increment 3 — URL mutation + remaining exports + config + previews ----
+
+    {
+      requiresDb: false,
+      name: 'respider_urls',
+      description:
+        'Bulk re-spider URLs by id — same primitive as the URL multi-select context menu\'s "Re-Spider N URLs". DB rows are marked dirty (`recrawl_pending`); if an active crawl is running, the URLs are also live-requeued. With no active crawl, the marks survive — the next `start_crawl` picks them up. Returns `{marked, requeued, hasActiveCrawl}`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          urlIds: { type: 'array', items: { type: 'integer' }, minItems: 1 },
+        },
+        required: ['urlIds'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ marked: number; requeued: number; hasActiveCrawl: boolean }>(
+          'POST',
+          '/v1/action/respider-urls',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'remove_urls',
+      description:
+        'Delete URLs from the project by id, plus every dependent row (links / images / headers / cookies / sources / issues). DESTRUCTIVE — no undo. Same primitive as the URL multi-select context menu\'s "Remove N URLs".',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          urlIds: { type: 'array', items: { type: 'integer' }, minItems: 1 },
+        },
+        required: ['urlIds'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ removed: number }>(
+          'POST',
+          '/v1/action/remove-urls',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'data_delete_by_domain',
+      description:
+        'GDPR-style domain wipe — deletes every URL whose host matches the given domain (case-insensitive, no scheme/port), plus all dependent rows. Same primitive as Settings → Storage → "Delete Domain Data". DESTRUCTIVE.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          domain: { type: 'string', description: 'Hostname only (e.g. "example.com", not "https://example.com/").' },
+        },
+        required: ['domain'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ urlsDeleted: number; linksDeleted: number }>(
+          'POST',
+          '/v1/action/data-delete-by-domain',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'export_broken_links',
+      description: 'Export every 4xx/5xx broken link in the project to a CSV. Honours the same internal/external scope filter the Broken Links tab\'s sidebar exposes.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Absolute output path.' },
+          internal: { type: 'string', enum: ['all', 'internal', 'external'] },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string; rowsWritten: number }>(
+          'POST',
+          '/v1/action/export-broken-links',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'export_images',
+      description: 'Export every image the crawler saw to a CSV with src/alt/dimensions/byte_size/is_internal. Honours the Images tab\'s "Missing Alt only" toggle and search box.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string' },
+          missingAltOnly: { type: 'boolean' },
+          search: { type: 'string', description: 'Substring filter on src or alt.' },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string; rowsWritten: number }>(
+          'POST',
+          '/v1/action/export-images',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'export_tabular',
+      description:
+        'Multi-section export — emit several tabs into one workbook (xlsx) or one file per section (csv/json/xml). `sections` lists which categories to include; `columns` is the CrawlUrlRow key list (in order). With xlsx, each section becomes a sheet; with the others, each section becomes its own file under the chosen folder (or sub-folder via `subdir`).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Absolute file (xlsx) or folder (csv/json/xml) path.' },
+          format: { type: 'string', enum: ['csv', 'xlsx', 'json', 'xml'] },
+          sections: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' },
+                category: { type: 'string', enum: URL_CATEGORY_VALUES },
+                subdir: { type: 'string' },
+                filename: { type: 'string' },
+              },
+              required: ['label', 'category'],
+            },
+          },
+          columns: { type: 'array', items: { type: 'string' } },
+          selectedIds: { type: 'array', items: { type: 'integer' } },
+        },
+        required: ['filePath', 'format', 'sections', 'columns'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/export-tabular', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'get_crawl_config',
+      description: 'Read the most recently-used CrawlConfig — the same config `start_crawl` falls back to when called without overrides. Reflects whatever the user (or the previous MCP `set_crawl_config` call) configured in Settings.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () =>
+        bridgeRequest<unknown>('POST', '/v1/action/get-crawl-config', {}),
+    },
+
+    {
+      requiresDb: false,
+      name: 'set_crawl_config',
+      description:
+        'Persist a full CrawlConfig as the saved default — next `start_crawl` without overrides will use these settings. The input is the entire CrawlConfig object (every field the Settings dialog exposes). Pass `get_crawl_config` first to read the current shape, then send the modified copy back. Validation happens at crawl launch time — out-of-range values may be silently clamped or fail at start.',
+      inputSchema: {
+        type: 'object',
+        description: 'Full CrawlConfig object. Pass the result of `get_crawl_config` with your modifications layered on.',
+        additionalProperties: true,
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/set-crawl-config', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'url_rewrite_preview',
+      description:
+        'Test a URL-rewrite pipeline against a sample URL — same primitive as the Settings → URL Rewriting "Preview" button. Returns the rewritten URL plus any regex compile errors. Useful for debugging `urlRegexRewrites` patterns before committing them via `set_crawl_config`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          stripWww: { type: 'boolean' },
+          forceHttps: { type: 'boolean' },
+          lowercasePath: { type: 'boolean' },
+          trailingSlash: { type: 'string', enum: ['leave', 'strip', 'add'] },
+          keepQueryParams: { type: 'array', items: { type: 'string' } },
+          urlRegexRewrites: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                pattern: { type: 'string' },
+                replacement: { type: 'string' },
+                flags: { type: 'string' },
+              },
+              required: ['pattern', 'replacement'],
+            },
+          },
+        },
+        required: ['url'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/url-rewrite-preview', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'extraction_preview',
+      description:
+        'Test custom extraction rules against a live URL fetch — same primitive as Settings → Custom Extraction "Preview". Returns per-rule values (or compile errors) plus the response\'s status / content-type / byte size / fetch ms. The agent can iterate on selectors without running a full crawl.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          rules: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                type: { type: 'string', enum: ['css', 'regex'] },
+                selector: { type: 'string' },
+                attribute: { type: 'string' },
+                output: { type: 'string', enum: ['text', 'attribute', 'inner_html', 'outer_html', 'count', 'regex_group'] },
+                multi: { type: 'string', enum: ['first', 'last', 'all', 'concat', 'count'] },
+              },
+              required: ['name', 'type', 'selector', 'output', 'multi'],
+            },
+          },
+          userAgent: { type: 'string' },
+          acceptLanguage: { type: 'string' },
+        },
+        required: ['url', 'rules'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/extraction-preview', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'graph_snapshot',
+      description:
+        'Internal link graph for the Visualization view — every URL as a node + every internal link as an edge. `nodeLimit` caps the size for large crawls (default 5000). Useful to feed graph-analysis or compute centrality offline.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          nodeLimit: { type: 'integer', minimum: 10, maximum: 50_000 },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/graph-snapshot', args),
+    },
+
+    // ---- Faz 0.5 Increment 4 — Integration fetch (GSC + GA4 only;
+    // PSI/AI/SEO have progress streaming and stay in the desktop UI). ----
+
+    {
+      requiresDb: false,
+      name: 'google_auth_status',
+      description:
+        'Read the OAuth connection state of one Google integration (`gsc` / `ga4` / `sheets` / `bigquery` / `pagespeed`). Returns `{connected, email, scopes, expiresAt, error}`. Use this BEFORE `gsc_fetch` / `ga4_fetch` to verify the user has connected; not-connected paths surface a clear "Settings → Integrations → Connect" hint in the response.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          integrationId: {
+            type: 'string',
+            enum: ['gsc', 'ga4', 'sheets', 'bigquery', 'pagespeed', 'openai', 'anthropic', 'ollama'],
+          },
+        },
+        required: ['integrationId'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/google-auth-status', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'gsc_list_sites',
+      description:
+        'List every Search Console property the connected Google account has access to. Returns `{ok, sites: [{siteUrl, permissionLevel}]}`. Pass the desired `siteUrl` to `gsc_fetch` next. Requires the GSC integration to be connected (see google_auth_status).',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () =>
+        bridgeRequest<unknown>('POST', '/v1/action/gsc-list-sites', {}),
+    },
+
+    {
+      requiresDb: false,
+      name: 'gsc_fetch',
+      description:
+        'Pull per-page Search Console metrics (clicks, impressions, CTR, position) for one property over a trailing window (7/28/90 days). Data is stored against crawled URLs; query the result via `query_gsc` or `get_url_analytics`. GSC data lags ~2 days, so the window ends 2 days before today. Blocks until the pull finishes (a few seconds to a minute depending on row count). Requires GSC integration connected.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          property: {
+            type: 'string',
+            description: 'Search Console property `siteUrl` (e.g. "sc-domain:example.com" or "https://example.com/"). Get available values from `gsc_list_sites`.',
+          },
+          days: {
+            type: 'integer',
+            enum: [7, 28, 90],
+            description: 'Trailing window length in days. Default 28.',
+          },
+        },
+        required: ['property'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{
+          ok: boolean;
+          error: string | null;
+          rowCount: number;
+          meta: unknown;
+        }>('POST', '/v1/action/gsc-fetch', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'ga4_list_properties',
+      description:
+        'List every GA4 property the connected Google account has access to. Returns `{ok, properties: [{name, displayName, account}]}`. Pass the desired property resource name to `ga4_fetch` next.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async () =>
+        bridgeRequest<unknown>('POST', '/v1/action/ga4-list-properties', {}),
+    },
+
+    {
+      requiresDb: false,
+      name: 'ga4_fetch',
+      description:
+        'Pull per-page GA4 metrics (sessions, users, bounceRate, engagementRate) for one property over a trailing window (7/28/90 days). Data is stored against crawled URLs; query the result via `query_ga4` or `get_url_analytics`. GA4 data is near-realtime so the window ends at today. Blocks until the pull finishes. Requires GA4 integration connected.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          property: {
+            type: 'string',
+            description: 'GA4 property resource name (`properties/<numeric-id>`). Get available values from `ga4_list_properties`.',
+          },
+          propertyName: {
+            type: 'string',
+            description: 'Friendly label persisted into the fetch meta for the UI. Optional — falls back to `property`.',
+          },
+          days: {
+            type: 'integer',
+            enum: [7, 28, 90],
+            description: 'Trailing window length in days. Default 28.',
+          },
+        },
+        required: ['property'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{
+          ok: boolean;
+          error: string | null;
+          rowCount: number;
+          meta: unknown;
+        }>('POST', '/v1/action/ga4-fetch', args),
+    },
   ];
 }

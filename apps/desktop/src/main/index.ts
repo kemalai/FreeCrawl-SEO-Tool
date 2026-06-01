@@ -245,6 +245,12 @@ let crawlController: {
    *  invoke it without duplicating the writer-pool serialisation +
    *  recovery-checkpoint reset logic. */
   clearCrawl: () => Promise<void>;
+  /** Generic MCP action dispatch table. Built once inside the IPC
+   *  registration scope (which captures closures over getDb /
+   *  mainWindow / schedulerStore / etc) and handed to the bridge's
+   *  generic `/v1/action/<name>` route. Keys are short kebab-case
+   *  action names matching the MCP tool's `bridgeRequest` path. */
+  actions: Record<string, (input: unknown) => Promise<unknown>>;
 } | null = null;
 /** In-memory snapshot of the previous session's checkpoint, captured
  * before `db.reset()` wipes it. Cleared once the user accepts or
@@ -3593,12 +3599,483 @@ function registerIpc(): void {
   // Expose the same primitives to the MCP bridge so external agents
   // (Claude Code, etc.) can drive Start/Stop/Pause/Resume through the
   // exact same code path the renderer does.
+  // Generic MCP action dispatch table — kebab-case names map to closures
+  // that perform actions. Each closure reuses the same util functions as
+  // the desktop's IPC handlers, but skips the user dialog popups (MCP
+  // requires explicit `filePath`'s instead of blocking the agent on a
+  // file picker). Validation is intentionally light — the bridge layer
+  // already requires an authenticated request, and a misshapen payload
+  // throws which the bridge wraps into a 500 with the underlying error
+  // message. The MCP tool definitions on the other side enforce schema.
+  const mcpActions: Record<string, (input: unknown) => Promise<unknown>> = {
+    'crawl-add-url': async (input) => {
+      const url = (input as { url?: string }).url ?? '';
+      if (!activeCrawler) return { accepted: false, reason: 'no-active-crawl' };
+      const accepted = activeCrawler.enqueueManual(url);
+      return { accepted };
+    },
+
+    'export-csv': async (input) => {
+      const i = input as ExportCsvInput;
+      if (!i.filePath) throw new Error('filePath is required (MCP cannot open dialogs).');
+      const { rowsWritten } = await exportUrlsToCsv(getDb(), i.filePath, {
+        selectedIds: i.selectedIds,
+      });
+      return { filePath: i.filePath, rowsWritten };
+    },
+
+    'export-json': async (input) => {
+      const i = input as ExportJsonInput;
+      if (!i.filePath) throw new Error('filePath is required.');
+      const { rowsWritten } = await exportUrlsToJson(getDb(), i.filePath, {
+        selectedIds: i.selectedIds,
+        pretty: i.pretty,
+      });
+      return { filePath: i.filePath, rowsWritten };
+    },
+
+    'export-xml': async (input) => {
+      const i = input as ExportXmlInput;
+      if (!i.filePath) throw new Error('filePath is required.');
+      const { rowsWritten } = await exportUrlsToXml(getDb(), i.filePath, {
+        selectedIds: i.selectedIds,
+        category: i.category,
+      });
+      return { filePath: i.filePath, rowsWritten };
+    },
+
+    'export-html-report': async (input) => {
+      const i = input as ExportHtmlReportInput;
+      if (!i.filePath) throw new Error('filePath is required.');
+      const result = await exportHtmlReport(getDb(), i.filePath, {
+        startUrl: getDb().getMeta('lastStartUrl') ?? '',
+      });
+      return { filePath: result.filePath, bytesWritten: result.bytesWritten };
+    },
+
+    'sitemap-generate': async (input) => {
+      const i = input as SitemapGenerateInput;
+      if (!i.filePath) throw new Error('filePath is required.');
+      return exportSitemap(getDb(), i.filePath, {
+        variant: i.variant,
+        gzip: i.gzip,
+        splitAtUrlCount: i.splitAtUrlCount,
+      });
+    },
+
+    'sitemap-validate': async (input) => {
+      const i = input as SitemapValidateInput;
+      if (!i.url) throw new Error('url is required.');
+      const ac = new AbortController();
+      const timeout = setTimeout(() => ac.abort(), 30_000);
+      try {
+        const ua = i.userAgent || DEFAULT_CRAWL_CONFIG.userAgent;
+        const result = await fetchSitemaps([i.url], {
+          userAgent: ua,
+          signal: ac.signal,
+          timeoutMs: 30_000,
+          maxUrls: 100_000,
+          maxDepth: 3,
+        });
+        const lastmodSamples = result.entries
+          .slice(0, 50)
+          .map((e) => e.lastmod ?? '')
+          .filter(Boolean)
+          .slice(0, 10);
+        const validation = validateSitemap({
+          urlCount: result.entries.length,
+          fileBytes: 0,
+          lastmodSamples,
+        });
+        return {
+          url: i.url,
+          sitemapsTried: result.sitemapsTried,
+          sitemapsParsed: result.sitemapsParsed,
+          errors: result.errors,
+          urlCount: result.entries.length,
+          truncated: result.truncated,
+          findings: validation.findings,
+          lastmodSamples,
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+
+    'robots-test': async (input) => {
+      const i = input as RobotsTestInput;
+      if (!i.url || !i.userAgent) {
+        throw new Error('url and userAgent are required.');
+      }
+      return testUrlAgainstRobots(i.url, i.userAgent, i.customRobots);
+    },
+
+    'robots-validate': async (input) => {
+      const text = typeof (input as { text?: string }).text === 'string'
+        ? (input as { text: string }).text
+        : '';
+      return validateRobotsTxt(text);
+    },
+
+    'compare-load': async (input) => {
+      const i = input as CompareLoadInput;
+      if (!i.filePath) throw new Error('filePath is required (MCP cannot open dialogs).');
+      const otherDb = new ProjectDb(i.filePath);
+      try {
+        const summary = compareCrawls(getDb(), otherDb);
+        return {
+          filePath: i.filePath,
+          totalA: summary.totalA,
+          totalB: summary.totalB,
+          counts: summary.counts,
+          samples: summary.samples,
+        };
+      } finally {
+        otherDb.close?.();
+      }
+    },
+
+    'schedule-get': async () => {
+      return getSchedule(schedulerStore, currentProjectPath);
+    },
+
+    'schedule-set': async (input) => {
+      const spec = (input as { spec?: ScheduleSpec | null }).spec ?? null;
+      return setSchedule(schedulerStore, currentProjectPath, spec);
+    },
+
+    'report-top-words': async (input) => {
+      const i = (input ?? {}) as { limit?: number; minLength?: number; locale?: 'en' | 'tr' | 'all' };
+      const corpus = getDb().seoTextCorpus();
+      return aggregateTopWords(corpus, {
+        limit: i.limit ?? 100,
+        minLength: i.minLength ?? 3,
+        locale: i.locale ?? 'all',
+      });
+    },
+
+    // ---- Faz 0.5 Increment 3 — URL mutation, exports, config, integrations, project file ----
+
+    'respider-urls': async (input) => {
+      // Mirrors the URL-bulk context menu's "Re-Spider" item. Requires
+      // an active crawler — the queued URLs are re-fetched live as part
+      // of the existing crawl. With no active crawl, the DB rows are
+      // still marked dirty so the NEXT crawl will pick them up.
+      const ids = (input as { urlIds?: number[] }).urlIds ?? [];
+      if (!Array.isArray(ids) || ids.length === 0) {
+        throw new Error('urlIds is required (non-empty array).');
+      }
+      const db = getDb();
+      db.markUrlsForRecrawl(ids);
+      let requeued = 0;
+      if (activeCrawler && activeCrawler.isRunning) {
+        const urls = db.getUrlsByIds(ids);
+        for (const u of urls) {
+          activeCrawler.requeueUrl(u);
+          requeued++;
+        }
+      }
+      fireDataChanged();
+      return { marked: ids.length, requeued, hasActiveCrawl: activeCrawler?.isRunning === true };
+    },
+
+    'remove-urls': async (input) => {
+      const ids = (input as { urlIds?: number[] }).urlIds ?? [];
+      if (!Array.isArray(ids) || ids.length === 0) {
+        throw new Error('urlIds is required (non-empty array).');
+      }
+      getDb().deleteUrls(ids);
+      fireDataChanged();
+      return { removed: ids.length };
+    },
+
+    'data-delete-by-domain': async (input) => {
+      const domain = (input as { domain?: string }).domain ?? '';
+      if (!domain.trim()) throw new Error('domain is required.');
+      const result = getDb().deleteByDomain(domain.trim().toLowerCase());
+      fireDataChanged();
+      return result;
+    },
+
+    'export-broken-links': async (input) => {
+      const i = input as { filePath?: string; internal?: 'all' | 'internal' | 'external' };
+      if (!i.filePath) throw new Error('filePath is required.');
+      const { rowsWritten } = await exportBrokenLinksToCsv(getDb(), i.filePath, {
+        internal: i.internal ?? 'all',
+      });
+      return { filePath: i.filePath, rowsWritten };
+    },
+
+    'export-images': async (input) => {
+      const i = input as { filePath?: string; missingAltOnly?: boolean; search?: string };
+      if (!i.filePath) throw new Error('filePath is required.');
+      const { rowsWritten } = await exportImagesToCsv(getDb(), i.filePath, {
+        missingAltOnly: i.missingAltOnly,
+        search: i.search,
+      });
+      return { filePath: i.filePath, rowsWritten };
+    },
+
+    'export-tabular': async (input) => {
+      const i = input as ExportTabularInput;
+      if (!i.filePath) throw new Error('filePath is required.');
+      return exportTabular(getDb(), i.filePath, {
+        format: i.format,
+        sections: i.sections,
+        columns: i.columns,
+        selectedIds: i.selectedIds,
+      });
+    },
+
+    'get-crawl-config': async () => {
+      // Mirrors what the renderer hydrates from prefs at boot — the
+      // current saved `lastCrawlConfig` if present, else the factory
+      // default. Lets an agent see what's saved before calling
+      // `start_crawl` without overrides.
+      return lastCrawlConfig ?? { ...DEFAULT_CRAWL_CONFIG };
+    },
+
+    'set-crawl-config': async (input) => {
+      // Persists the supplied CrawlConfig as the "last used" — the next
+      // `start_crawl` call without overrides will use this. Whitelist
+      // is intentionally loose (full CrawlConfig) because the desktop's
+      // Settings dialog has dozens of fields and gating MCP narrower
+      // than the UI would be arbitrary. The crawler itself validates
+      // ranges at launch time.
+      const cfg = input as CrawlConfig;
+      if (!cfg || typeof cfg !== 'object') {
+        throw new Error('CrawlConfig object required.');
+      }
+      lastCrawlConfig = { ...DEFAULT_CRAWL_CONFIG, ...cfg };
+      try {
+        getDb().setMeta('lastCrawlConfig', JSON.stringify(lastCrawlConfig));
+      } catch {
+        /* non-fatal — config still set in memory */
+      }
+      return { ok: true, config: lastCrawlConfig };
+    },
+
+    'url-rewrite-preview': async (input) => {
+      const i = input as UrlRewritePreviewInput;
+      const errors: Array<{ pattern: string; error: string }> = [];
+      const compiled = compileUrlRegexRewrites(i.urlRegexRewrites, (p, err) =>
+        errors.push({ pattern: p, error: err }),
+      );
+      let result: string | null = null;
+      let parseError: string | undefined;
+      try {
+        result = normalizeUrl(i.url, undefined, {
+          stripWww: i.stripWww,
+          forceHttps: i.forceHttps,
+          lowercasePath: i.lowercasePath,
+          trailingSlash: i.trailingSlash,
+          keepQueryParams: i.keepQueryParams,
+          regexRewrites: compiled,
+        });
+        if (result === null) parseError = 'URL failed to parse or rewrite produced an invalid URL';
+      } catch (err) {
+        parseError = err instanceof Error ? err.message : String(err);
+      }
+      return { result, regexErrors: errors, parseError };
+    },
+
+    'extraction-preview': async (input) => {
+      // Same shape as the IPC `extraction:preview` handler — fetches
+      // the URL once and runs rules against it. Used by the Settings →
+      // Custom Extraction "Preview" button on the desktop; exposed
+      // here so an agent can iterate on selectors without a full crawl.
+      const i = input as ExtractionPreviewInput;
+      if (!i.url) return { ok: false, error: 'URL is required' };
+      let parsed: URL;
+      try {
+        parsed = new URL(i.url);
+      } catch {
+        return { ok: false, error: 'Invalid URL' };
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return { ok: false, error: 'Only http(s) URLs supported' };
+      }
+      const userAgent = (i.userAgent ?? '').trim() || 'FreeCrawl SEO Tool (extraction preview)';
+      const acceptLanguage = (i.acceptLanguage ?? '').trim() || 'en';
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15_000);
+      const startedAt = Date.now();
+      let response: Response | null = null;
+      try {
+        response = (await undiciFetch(parsed.href, {
+          method: 'GET',
+          redirect: 'follow',
+          headers: {
+            'User-Agent': userAgent,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': acceptLanguage,
+          },
+          signal: controller.signal,
+        })) as unknown as Response;
+      } catch (err) {
+        clearTimeout(timer);
+        return {
+          ok: false,
+          error: controller.signal.aborted
+            ? 'Fetch timed out after 15s'
+            : `Fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      clearTimeout(timer);
+      const bodyText = await response.text();
+      const results = previewExtractionRules(bodyText, i.rules ?? []).map((r) => ({
+        name: r.name,
+        value: r.value,
+        ...(r.error !== undefined && { error: r.error }),
+      }));
+      return {
+        ok: true,
+        statusCode: response.status,
+        finalUrl: response.url || parsed.href,
+        contentType: response.headers.get('content-type') ?? '',
+        byteSize: Buffer.byteLength(bodyText, 'utf8'),
+        fetchMs: Date.now() - startedAt,
+        results,
+      };
+    },
+
+    'graph-snapshot': async (input) => {
+      const i = (input ?? {}) as { nodeLimit?: number };
+      return getDb().graphSnapshot(i.nodeLimit ?? 5000);
+    },
+
+    // ---- Faz 0.5 Increment 4 — Integration fetch triggers (simple ones). ----
+    // GSC and GA4 fetches are single blocking API calls, no progress
+    // streaming — safe to expose to MCP. PSI / AI / SEO have multi-URL
+    // batches with progress events + cancellation flags; those stay
+    // desktop-only until a polling tool pattern is designed.
+
+    'gsc-list-sites': async () => {
+      try {
+        return { ok: true, error: null, sites: await listSites() };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          sites: [],
+        };
+      }
+    },
+
+    'gsc-fetch': async (input) => {
+      // Mirrors the desktop's `gsc:fetch` IPC handler exactly — same
+      // window-end-lags-by-2-days logic so the date range only covers
+      // data Search Console has actually published.
+      const i = input as GscFetchInput;
+      if (!i.property) {
+        return {
+          ok: false,
+          error: 'property is required (e.g. "sc-domain:example.com").',
+          rowCount: 0,
+          meta: null,
+        };
+      }
+      const days = (i.days ?? 28) as 7 | 28 | 90;
+      const isoDate = (d: Date): string => d.toISOString().slice(0, 10);
+      const end = new Date(Date.now() - 2 * 86_400_000);
+      const start = new Date(end.getTime() - (days - 1) * 86_400_000);
+      const startDate = isoDate(start);
+      const endDate = isoDate(end);
+      const runDb = getDb();
+      try {
+        const rows = await querySearchAnalytics(i.property, startDate, endDate);
+        const fetchedAt = new Date().toISOString();
+        runDb.replaceGscResults(rows, fetchedAt);
+        const meta = {
+          property: i.property,
+          startDate,
+          endDate,
+          fetchedAt,
+          rowCount: rows.length,
+        };
+        runDb.setMeta('gscFetchMeta', JSON.stringify(meta));
+        fireDataChanged();
+        return { ok: true, error: null, rowCount: rows.length, meta };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          rowCount: 0,
+          meta: null,
+        };
+      }
+    },
+
+    'ga4-list-properties': async () => {
+      try {
+        return { ok: true, error: null, properties: await ga4ListProperties() };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          properties: [],
+        };
+      }
+    },
+
+    'ga4-fetch': async (input) => {
+      // Mirrors the desktop's `ga4:fetch` IPC handler exactly — GA4 data
+      // is near-realtime so the range ends at today (unlike GSC's 2-day lag).
+      const i = input as Ga4FetchInput;
+      if (!i.property) {
+        return {
+          ok: false,
+          error: 'property is required (e.g. "properties/123456").',
+          rowCount: 0,
+          meta: null,
+        };
+      }
+      const days = (i.days ?? 28) as 7 | 28 | 90;
+      const isoDate = (d: Date): string => d.toISOString().slice(0, 10);
+      const end = new Date();
+      const start = new Date(end.getTime() - (days - 1) * 86_400_000);
+      const startDate = isoDate(start);
+      const endDate = isoDate(end);
+      const runDb = getDb();
+      try {
+        const rows = await ga4RunReport(i.property, startDate, endDate);
+        const fetchedAt = new Date().toISOString();
+        runDb.replaceGa4Results(rows, fetchedAt);
+        const meta = {
+          property: i.property,
+          propertyName: i.propertyName || i.property,
+          startDate,
+          endDate,
+          fetchedAt,
+          rowCount: rows.length,
+        };
+        runDb.setMeta('ga4FetchMeta', JSON.stringify(meta));
+        fireDataChanged();
+        return { ok: true, error: null, rowCount: rows.length, meta };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          rowCount: 0,
+          meta: null,
+        };
+      }
+    },
+
+    'google-auth-status': async (input) => {
+      const id = (input as { integrationId?: string }).integrationId ?? '';
+      if (!id) throw new Error('integrationId is required (e.g. "gsc" or "ga4").');
+      return getAuthState(id);
+    },
+  };
+
   crawlController = {
     launchCrawl,
     stopCrawl: () => activeCrawler?.stop(),
     pauseCrawl: () => activeCrawler?.pause(),
     resumeCrawl: () => activeCrawler?.resume(),
     clearCrawl: () => clearCrawlDb(),
+    actions: mcpActions,
   };
 
   // Shared between the renderer's IPC `crawl:clear` and the MCP bridge's
@@ -5128,6 +5605,18 @@ void app.whenReady().then(async () => {
       clearCrawl: async () => {
         if (crawlController) await crawlController.clearCrawl();
       },
+      // Lazy lookup — crawlController is set inside the IPC registration
+      // scope (which runs before the bridge starts), but using a getter
+      // here keeps the wire-up symmetric with the other deps and avoids
+      // a "TDZ between registerIpc() and startMcpBridge()" footgun.
+      actions: new Proxy({}, {
+        get: (_t, name) => {
+          if (typeof name !== 'string') return undefined;
+          return crawlController?.actions[name];
+        },
+        has: (_t, name) =>
+          typeof name === 'string' && crawlController?.actions[name] !== undefined,
+      }) as Record<string, (input: unknown) => Promise<unknown>>,
       getProgress: () => latestProgress,
       getProjectPath: () => currentProjectPath || null,
       getUrlCount: () => {

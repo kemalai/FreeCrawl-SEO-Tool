@@ -35,6 +35,10 @@
  *   POST /v1/crawl/clear
  *   GET  /v1/crawl/progress
  *   GET  /v1/project        — { projectPath, urlsCrawled }
+ *   POST /v1/action/<name>  — generic action dispatch; <name> is one of
+ *                             the keys registered in `McpBridgeDeps.actions`.
+ *                             Body shape per-action; defined by the MCP
+ *                             tool contract on the other side.
  *
  * Caller signs every request:
  *   `Authorization: Bearer <token>`
@@ -72,6 +76,17 @@ export interface McpBridgeDeps {
    * completed crawl finds zero pending work and exits immediately.
    */
   clearCrawl: () => Promise<void>;
+  /**
+   * Generic action dispatch table — keyed by short kebab-case action
+   * name, value is the closure that performs the action. The bridge's
+   * `POST /v1/action/<name>` route looks up by name and invokes with
+   * the request body. Keeps the bridge route surface flat (one route
+   * for N actions) while letting the main process explicitly allow-list
+   * which actions MCP can drive. Closures return `unknown` so they can
+   * be wired up to any util-function shape; the MCP server is the
+   * point that gives each action a typed contract.
+   */
+  actions: Record<string, (input: unknown) => Promise<unknown>>;
   /**
    * Snapshot of the latest progress event the Crawler emitted. Null
    * when no crawl has ever run in this session. The bridge passes it
@@ -379,6 +394,30 @@ async function handleRequest(
     } catch (err) {
       send(res, 500, {
         error: err instanceof Error ? err.message : 'clear-failed',
+      });
+    }
+    return;
+  }
+  if (method === 'POST' && path.startsWith('/v1/action/')) {
+    const name = path.slice('/v1/action/'.length);
+    const action = deps.actions[name];
+    if (!action) {
+      send(res, 404, { error: `unknown-action: ${name}` });
+      return;
+    }
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      send(res, 400, { error: err instanceof Error ? err.message : 'bad-body' });
+      return;
+    }
+    try {
+      const result = await action(body);
+      send(res, 200, result === undefined ? { ok: true } : result);
+    } catch (err) {
+      send(res, 500, {
+        error: err instanceof Error ? err.message : 'action-failed',
       });
     }
     return;
