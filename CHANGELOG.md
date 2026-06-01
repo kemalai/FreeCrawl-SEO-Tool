@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.6.6] — 2026-06-01
+
+### Added
+- Cluster view on the Duplicates tab — surfaces every near-duplicate cluster with grouped headers and inline members.
+- Column pin (sticky left) — pin frequently-referenced columns so they stay visible during horizontal scroll.
+- Column reorder via drag-drop — grab the grip handle on a header to rearrange columns within their pin region.
+- AMP smoke validation — pages declaring themselves AMP now flag missing boilerplate, runtime, canonical, and forbidden tags.
+- Extraction Preview button in Settings → Custom Extraction — test selectors / regex against a real URL before committing to a crawl.
+- Custom Extraction rule import / export — versioned JSON envelope, shareable as a file or via source control.
+- MCP server read parity — 33 new tools covering every detail sub-tab, integration row, report, and specialised query.
+- MCP `clear_crawl` tool — same primitive as the desktop "Clear" button so an agent can force a fresh BFS.
+
+### Fixed
+- Re-running a same-seed crawl via MCP no longer no-ops once the prior crawl already completed.
+- Advanced filter clauses now reset on tab change so a filter set on one tab doesn't silently apply to every other tab.
+- Column picker popover no longer hides behind the bottom detail panel — rendered through a portal at document.body.
+
 ## [0.6.5] — 2026-05-28
 
 ### Added
