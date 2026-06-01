@@ -2,6 +2,8 @@
 
 # FreeCrawl SEO Tool
 
+<img src="Freecrawl.gif" alt="FreeCrawl SEO Tool in action — dense table view, live crawl progress, and detail panel" width="100%" />
+
 ### Open-source desktop SEO crawler — a free, cross-platform alternative to Screaming Frog
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-black?style=for-the-badge)](LICENSE)
