@@ -141,6 +141,8 @@ const TR_LABELS: Record<string, string> = {
   'Lang Attribute Missing': 'Lang Niteliği Eksik',
   'Charset Missing': 'Charset Eksik',
   'AMP Validation Errors': 'AMP Doğrulama Hataları',
+  'Canonical Conflict (Near-Duplicate)': 'Canonical Çakışması (Yakın-Yinelenen)',
+  'High Boilerplate (>50%)': 'Yüksek Şablon İçerik (>%50)',
 
   // Response performance
   'Slow (>1s)': 'Yavaş (>1sn)',

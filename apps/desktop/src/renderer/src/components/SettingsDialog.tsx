@@ -108,6 +108,7 @@ interface FormState {
   nearDuplicateHammingThreshold: string;
   duplicatesOnlyIndexable: boolean;
   dedupePreNormalize: boolean;
+  contentAreaSelector: string;
   // custom extraction
   customExtractionRules: CustomExtractionRule[];
   // webhook
@@ -402,6 +403,7 @@ function configToForm(c: CrawlConfig): FormState {
     nearDuplicateHammingThreshold: String(c.nearDuplicateHammingThreshold),
     duplicatesOnlyIndexable: c.duplicatesOnlyIndexable,
     dedupePreNormalize: c.dedupePreNormalize ?? true,
+    contentAreaSelector: c.contentAreaSelector ?? '',
     customExtractionRules: (c.customExtractionRules ?? []).map((r) => ({ ...r })),
     webhookUrl: c.webhookUrl ?? '',
     auth: { ...(c.auth ?? { type: 'none' }) },
@@ -597,6 +599,7 @@ export function SettingsDialog({ open, onClose }: Props) {
       ),
       duplicatesOnlyIndexable: form.duplicatesOnlyIndexable,
       dedupePreNormalize: form.dedupePreNormalize,
+      contentAreaSelector: form.contentAreaSelector.trim(),
       customExtractionRules: form.customExtractionRules
         .filter((r) => r.name.trim() && r.selector.trim())
         .slice(0, 10),
@@ -2289,6 +2292,27 @@ function DuplicatesPanel({ form, update }: PanelProps) {
           info="When ON (default), the Duplicate URL filter compares URLs after lowercasing the host, dropping the query string, and trimming the trailing slash — the canonical SEO behaviour. When OFF, comparison is byte-exact, so the filter only fires on rows that share an identical raw URL string (rare since URLs are deduped at insert time)."
           example="ON for SEO audits. OFF only when you specifically need to inspect raw-URL collisions (e.g. case-sensitive filesystem CMSes)."
         />
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settingsGroups.contentArea', { defaultValue: 'Content area' })}
+        </div>
+        <Text
+          label={t('settingsPanels.duplicates.contentAreaSelector', {
+            defaultValue: 'Content area CSS selector (optional)',
+          })}
+          value={form.contentAreaSelector}
+          onChange={(v) => update('contentAreaSelector', v)}
+          info="CSS selector that pins the duplicate-fingerprint text extraction to a specific page region. When set, the heuristic (main / role=main / article / body-minus-chrome) is bypassed and the selector wins. Useful on sites where the heuristic misclassifies — e.g. CMSes that wrap navigation inside `<main>` or sites with no semantic landmarks at all. Empty = use the heuristic. Invalid selectors silently fall back to the heuristic so a typo doesn't break the crawl."
+          example="article.main-content, #post-body, .article-body, div[itemprop='articleBody']"
+        />
+        <p className="mt-1 text-[10px] text-surface-500">
+          {t('settingsPanels.duplicates.contentAreaHint', {
+            defaultValue:
+              'Applies to NEW crawls. Existing crawls keep their old fingerprints until you re-crawl.',
+          })}
+        </p>
       </div>
 
       <div className="rounded border border-surface-800 bg-surface-950/40 p-3 text-[10px] text-surface-500">

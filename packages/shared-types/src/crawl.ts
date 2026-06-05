@@ -102,6 +102,8 @@ export type UrlCategory =
   | 'issues:meta-refresh-used'
   | 'issues:charset-missing'
   | 'issues:amp-validation-errors'
+  | 'issues:canonical-conflict-near-duplicate'
+  | 'issues:high-boilerplate'
   | 'issues:broken-links-all'
   | 'issues:broken-links-internal'
   | 'issues:broken-links-external'
@@ -454,6 +456,12 @@ export interface CrawlUrlRow {
    *  `["missing-boilerplate","forbidden-script-tag"]`), or null when
    *  not an AMP page / clean validation. */
   ampValidationErrors: string | null;
+  /** V2 Faz 14 #5 — Boilerplate coverage percentage (0-100) from the
+   *  post-crawl sampling pass. Pages whose unique 5-word shingles are
+   *  >50% boilerplate (= repeated across the cluster of sampled pages)
+   *  are flagged as templated / thin-content. NULL when the page
+   *  wasn't in the sample (no body snapshot, or sample LIMIT exceeded). */
+  boilerplateCoverage: number | null;
   favicon: string | null;
   /** Resolved `<link rel="apple-touch-icon">` URL, else null. */
   appleTouchIcon: string | null;
@@ -691,6 +699,16 @@ export interface CrawlConfig {
    * surfaces issues that actually affect search visibility.
    */
   duplicatesOnlyIndexable: boolean;
+  /**
+   * V2 Faz 14 — Optional CSS selector that pins the duplicate-fingerprint
+   * text extraction to a specific page region (e.g. `article.main`,
+   * `#content`). When set, the heuristic (main / role=main / article /
+   * body-minus-chrome) is bypassed and the selector wins. Empty string
+   * falls back to the heuristic — typical for sites with semantic
+   * HTML5 landmarks. Invalid selectors silently degrade to the
+   * heuristic so a typo doesn't break the crawl.
+   */
+  contentAreaSelector: string;
   /**
    * Optional webhook URL that receives a single `POST` with a JSON
    * summary when a crawl finishes. Empty string disables it. Failures
@@ -1188,6 +1206,8 @@ export interface OverviewCounts {
     metaRefreshUsed: number;
     charsetMissing: number;
     ampValidationErrors: number;
+    canonicalConflictNearDuplicate: number;
+    highBoilerplate: number;
     brokenLinksInternal: number;
     brokenLinksExternal: number;
     nearDuplicate: number;
@@ -1656,6 +1676,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   processPriority: 'normal',
   nearDuplicateHammingThreshold: 3,
   duplicatesOnlyIndexable: true,
+  contentAreaSelector: '',
   webhookUrl: '',
   customExtractionRules: [],
   auth: { type: 'none' },

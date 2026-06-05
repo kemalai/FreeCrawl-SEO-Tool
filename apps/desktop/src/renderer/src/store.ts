@@ -523,6 +523,7 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
   if (
     cat === 'issues:content-thin' ||
     cat === 'issues:page-empty' ||
+    cat === 'issues:high-boilerplate' ||
     cat === 'issues:flesch-very-difficult' ||
     cat === 'issues:gunning-fog-very-high' ||
     cat === 'issues:page-large' ||

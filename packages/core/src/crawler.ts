@@ -736,6 +736,32 @@ export class Crawler extends EventEmitter {
       // Duplicate clustering has JS-side simhash work that lives on
       // the crawler instance, not the DB; can't blindly off-thread it.
       this.runDuplicateClustering();
+
+      // V2 Faz 14 #5 — Template / boilerplate detection. Runs alongside
+      // duplicate clustering because both are content-similarity passes;
+      // this one specifically surfaces the repeated chrome (nav, footer,
+      // sidebar) that bleeds into every page and dilutes thin-content
+      // detection. Memory-bounded (samples ~2K bodies), skipped when
+      // no body snapshots are stored.
+      await yieldToEventLoop();
+      this.emit('info', 'Detecting boilerplate coverage…');
+      this.setOp('post-crawl:boilerplate-coverage');
+      try {
+        const result = this.db.recomputeBoilerplateCoverage();
+        if (result.sampled > 0) {
+          this.emit(
+            'info',
+            `Boilerplate: ${result.boilerplateShingles} shared shingles across ${result.sampled} sampled pages; ${result.pagesAboveHighThreshold} page(s) > 50% template`,
+          );
+        }
+      } catch (err) {
+        this.emit(
+          'error',
+          new Error(
+            `recomputeBoilerplateCoverage failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      }
     }
     if (this.config.analysePagination) {
       await yieldToEventLoop();
@@ -2204,6 +2230,7 @@ export class Crawler extends EventEmitter {
         customSearchTerms: this.config.customSearchTerms,
         urlRewrites: this.urlRewrites,
         customExtractionRules: this.config.customExtractionRules,
+        contentAreaSelector: this.config.contentAreaSelector,
       });
 
       // Charset resolution — prefer the document's own declaration (HTML5

@@ -611,6 +611,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.canonicalChainMultiHop,
               category: 'issues:canonical-chain-multi-hop',
             },
+            {
+              key: 'issues-canonical-conflict-near-duplicate',
+              label: 'Canonical Conflict (Near-Duplicate)',
+              count: o.issues.canonicalConflictNearDuplicate,
+              category: 'issues:canonical-conflict-near-duplicate',
+            },
           ],
         },
         {
@@ -628,6 +634,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Empty Page (<30 words)',
               count: o.issues.pageEmpty,
               category: 'issues:page-empty',
+            },
+            {
+              key: 'issues-high-boilerplate',
+              label: 'High Boilerplate (>50%)',
+              count: o.issues.highBoilerplate,
+              category: 'issues:high-boilerplate',
             },
             {
               key: 'issues-near-duplicate',

@@ -101,6 +101,10 @@ interface UrlRowDb {
   /** JSON string array of AMP smoke-validator error codes. Empty when
    *  not an AMP page or when validation passes. */
   amp_validation_errors: string | null;
+  /** V2 Faz 14 #5 — per-URL boilerplate coverage percentage (0-100)
+   *  from the sampled post-crawl pass. NULL when the page wasn't in
+   *  the sample (body snapshot missing, or sample LIMIT exceeded). */
+  boilerplate_coverage: number | null;
   favicon: string | null;
   mixed_content_count: number;
   mixed_content_active: number;
@@ -2008,6 +2012,163 @@ export class ProjectDb {
   }
 
   /**
+   * V2 Faz 14 #5 — Template / boilerplate detection.
+   *
+   * Memory-bounded post-crawl pass that samples up to `sampleSize` pages
+   * (default 2000), extracts plain text from each stored body, generates
+   * fixed-length word shingles (default 5-word window), hashes them with
+   * FNV-1a 32-bit, and tracks per-shingle page coverage. Shingles
+   * appearing on more than `pageThresholdPct` of the sample (default
+   * 30%) are flagged as "boilerplate" — repeated chrome (nav, footer,
+   * sidebar copy) that bleeds into every page. Each sampled page gets
+   * a `boilerplate_coverage` percentage (0-100) = ratio of its unique
+   * shingles that are boilerplate. Pages with no body snapshot stay
+   * NULL.
+   *
+   * Why sampling instead of full-crawl pass: at 100K URLs × 50KB body
+   * × 100 unique 5-word shingles, a full pass needs ~5GB of working
+   * memory for the shingle→pageSet inverted index. Sampling 2K bodies
+   * keeps it under 200MB while still surfacing the same boilerplate
+   * (templated chrome doesn't change between page 2000 and page 100000).
+   *
+   * Pages with < shingleSize words contribute nothing (no shingles
+   * generated) and get coverage = 0.
+   */
+  recomputeBoilerplateCoverage(
+    opts: {
+      sampleSize?: number;
+      shingleSize?: number;
+      pageThresholdPct?: number;
+    } = {},
+  ): {
+    sampled: number;
+    boilerplateShingles: number;
+    pagesAboveHighThreshold: number;
+  } {
+    const sampleSize = Math.max(1, Math.min(20_000, opts.sampleSize ?? 2000));
+    const shingleSize = Math.max(2, Math.min(10, opts.shingleSize ?? 5));
+    const pageThresholdPct = Math.max(
+      5,
+      Math.min(80, opts.pageThresholdPct ?? 30),
+    );
+
+    // FNV-1a 32-bit hash — compact, fast, decent distribution for
+    // text shingles. Returned as unsigned via `>>> 0`.
+    const fnv1a32 = (s: string): number => {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < s.length; i++) {
+        h = (h ^ s.charCodeAt(i)) >>> 0;
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+      return h;
+    };
+
+    // Rough HTML-to-text — strips `<script>` / `<style>` blocks, then
+    // every remaining tag, then named entities, collapses whitespace,
+    // lowercases. We don't bother with a full cheerio parse because the
+    // boilerplate-detection signal is robust to noise (repeated
+    // navigation copy is repeated whether we get tags right or not),
+    // and the 2K-page pass needs to be fast.
+    const stripHtml = (html: string): string =>
+      html
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+        .replace(/<!--[\s\S]*?-->/g, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&[#a-z0-9]+;/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+    const shingleHashes = (text: string): Set<number> => {
+      const words = text.split(' ').filter((w) => w.length > 0);
+      const out = new Set<number>();
+      if (words.length < shingleSize) return out;
+      for (let i = 0; i + shingleSize <= words.length; i++) {
+        out.add(fnv1a32(words.slice(i, i + shingleSize).join(' ')));
+      }
+      return out;
+    };
+
+    // Phase 1 — collect per-page shingle sets + shingle→pageCount map.
+    // We hold one Set<number> per sampled page; each Set has ~100-2000
+    // entries depending on body length. Memory budget: 2000 pages ×
+    // 1000 shingles × ~30 bytes ≈ 60MB worst case.
+    const pageShingles = new Map<number, Set<number>>();
+    const shingleCounts = new Map<number, number>();
+
+    const rows = this.db
+      .prepare(
+        `SELECT u.id AS id, us.body AS body
+           FROM urls u
+           JOIN url_sources us ON us.url_id = u.id
+          WHERE u.is_external = 0
+            AND u.content_kind = 'html'
+            AND us.body IS NOT NULL
+            AND LENGTH(us.body) > 0
+          ORDER BY u.id
+          LIMIT ?`,
+      )
+      .all(sampleSize) as { id: number; body: string }[];
+
+    for (const row of rows) {
+      const shingles = shingleHashes(stripHtml(row.body));
+      pageShingles.set(row.id, shingles);
+      for (const h of shingles) {
+        shingleCounts.set(h, (shingleCounts.get(h) ?? 0) + 1);
+      }
+    }
+
+    // Phase 2 — identify boilerplate shingles (appear on more than
+    // pageThresholdPct% of sampled pages, AND on at least 2 pages so
+    // a single-page crawl never flags itself).
+    const totalSampled = pageShingles.size;
+    const minPages = Math.max(2, Math.ceil((totalSampled * pageThresholdPct) / 100));
+    const boilerplateSet = new Set<number>();
+    for (const [h, n] of shingleCounts) {
+      if (n >= minPages) boilerplateSet.add(h);
+    }
+
+    // Phase 3 — write per-page coverage. Wipe stale values from prior
+    // runs first so pages that dropped out of the sample (because the
+    // crawl grew and bumped them off the LIMIT) don't keep a stale
+    // coverage from an older state.
+    const update = this.db.prepare(
+      'UPDATE urls SET boilerplate_coverage = ? WHERE id = ?',
+    );
+    const wipe = this.db.prepare(
+      "UPDATE urls SET boilerplate_coverage = NULL WHERE is_external = 0 AND content_kind = 'html'",
+    );
+    let pagesAboveHighThreshold = 0;
+    this.db.exec('BEGIN');
+    try {
+      wipe.run();
+      for (const [urlId, shingles] of pageShingles) {
+        if (shingles.size === 0) {
+          update.run(0, urlId);
+          continue;
+        }
+        let boilerCount = 0;
+        for (const h of shingles) if (boilerplateSet.has(h)) boilerCount++;
+        const coverage = Math.round((boilerCount / shingles.size) * 100);
+        if (coverage >= 50) pagesAboveHighThreshold++;
+        update.run(coverage, urlId);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    return {
+      sampled: totalSampled,
+      boilerplateShingles: boilerplateSet.size,
+      pagesAboveHighThreshold,
+    };
+  }
+
+  /**
    * Page through near-duplicate clusters for the dedicated Duplicates tab.
    * Members are returned grouped: ORDER BY cluster_size DESC, cluster_id,
    * then by URL within the cluster. Singletons (cluster_id=0) are excluded.
@@ -2434,6 +2595,160 @@ export class ProjectDb {
     return [...counts.entries()]
       .map(([directory, count]) => ({ directory, count }))
       .sort((a, b) => b.count - a.count || a.directory.localeCompare(b.directory))
+      .slice(0, limit);
+  }
+
+  /**
+   * V2 Faz 14 — Sitemap priority / changefreq inconsistency report.
+   * Surfaces sitemap-declared high-priority URLs whose actual crawl
+   * outcome contradicts that priority: page returned 4xx/5xx, was
+   * marked noindex, was canonicalised to another URL, redirected, or
+   * never reached. A `priority` ≥ `priorityThreshold` (default 0.8 —
+   * the "important page" floor most sitemap generators use) combined
+   * with a quality issue means the sitemap is misleading search
+   * engines. Also surfaces the changefreq mismatch when present
+   * (e.g. `daily` declared on a page whose `lastmod` is months old —
+   * a soft signal that the sitemap generator is stale).
+   */
+  getSitemapPriorityMismatch(
+    opts: { priorityThreshold?: number; limit?: number } = {},
+  ): {
+    url: string;
+    declaredPriority: number;
+    declaredChangefreq: string | null;
+    declaredLastmod: string | null;
+    sourceSitemap: string;
+    actualStatusCode: number | null;
+    actualIndexability: string | null;
+    issue:
+      | 'not-crawled'
+      | 'status-error'
+      | 'noindex'
+      | 'canonicalised'
+      | 'redirect'
+      | 'blocked-robots';
+  }[] {
+    const threshold = Math.max(0, Math.min(1, opts.priorityThreshold ?? 0.8));
+    const limit = Math.max(1, Math.min(10_000, opts.limit ?? 1000));
+    const rows = this.db
+      .prepare(
+        `SELECT
+           s.url            AS url,
+           s.priority       AS priority,
+           s.changefreq     AS changefreq,
+           s.lastmod        AS lastmod,
+           s.source_sitemap AS source_sitemap,
+           u.status_code    AS status_code,
+           u.indexability   AS indexability
+         FROM sitemap_urls s
+         LEFT JOIN urls u ON u.url = s.url
+         WHERE s.priority IS NOT NULL AND s.priority >= ?
+         ORDER BY s.priority DESC, s.url ASC`,
+      )
+      .all(threshold) as {
+      url: string;
+      priority: number;
+      changefreq: string | null;
+      lastmod: string | null;
+      source_sitemap: string;
+      status_code: number | null;
+      indexability: string | null;
+    }[];
+    const out: ReturnType<ProjectDb['getSitemapPriorityMismatch']> = [];
+    for (const r of rows) {
+      let issue: (typeof out)[number]['issue'] | null = null;
+      if (r.status_code === null || r.indexability === null) {
+        issue = 'not-crawled';
+      } else if (r.status_code >= 400) {
+        issue = 'status-error';
+      } else if (r.indexability === 'non-indexable:noindex') {
+        issue = 'noindex';
+      } else if (r.indexability === 'non-indexable:canonical') {
+        issue = 'canonicalised';
+      } else if (r.indexability === 'non-indexable:redirect') {
+        issue = 'redirect';
+      } else if (r.indexability === 'non-indexable:robots-blocked') {
+        issue = 'blocked-robots';
+      }
+      if (issue === null) continue;
+      out.push({
+        url: r.url,
+        declaredPriority: r.priority,
+        declaredChangefreq: r.changefreq,
+        declaredLastmod: r.lastmod,
+        sourceSitemap: r.source_sitemap,
+        actualStatusCode: r.status_code,
+        actualIndexability: r.indexability,
+        issue,
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  /**
+   * V2 Faz 14 — Query-string variant grouping. Surface base URLs (path
+   * without `?…`) that have multiple variant URLs in the crawl —
+   * typically session IDs / faceted nav / utm_*-style trackers that
+   * the URL normaliser didn't strip (or that the user disabled
+   * stripping for). Each group carries variant count + sample query
+   * strings so the user can decide whether to add the params to the
+   * normaliser's strip-list or to exclude them via include/exclude
+   * patterns. Excludes URLs without a query string (they can't be in
+   * a multi-variant group by definition) and singletons (count = 1).
+   */
+  getQueryStringVariantGroups(
+    opts: { limit?: number; sampleLimit?: number } = {},
+  ): {
+    baseUrl: string;
+    variantCount: number;
+    sampleQueries: string[];
+  }[] {
+    const limit = Math.max(1, Math.min(5000, opts.limit ?? 500));
+    const sampleLimit = Math.max(1, Math.min(20, opts.sampleLimit ?? 5));
+    const rows = this.db
+      .prepare(
+        `SELECT url FROM urls
+          WHERE is_external = 0
+            AND content_kind = 'html'
+            AND INSTR(url, '?') > 0`,
+      )
+      .all() as { url: string }[];
+    // SQLite SUBSTR with INSTR works in principle but URL parsing in JS
+    // is more robust (handles bare `#`, malformed query, etc.). Group
+    // in memory — query-bearing pages are a small subset of the total
+    // crawl in practice (handful of K at most for million-URL crawls).
+    const groups = new Map<string, { count: number; samples: string[] }>();
+    for (const r of rows) {
+      let baseUrl: string;
+      let query: string;
+      try {
+        const u = new URL(r.url);
+        baseUrl = `${u.protocol}//${u.host}${u.pathname}`;
+        query = u.search; // includes leading '?'
+        if (!query) continue;
+      } catch {
+        continue;
+      }
+      let g = groups.get(baseUrl);
+      if (!g) {
+        g = { count: 0, samples: [] };
+        groups.set(baseUrl, g);
+      }
+      g.count += 1;
+      if (g.samples.length < sampleLimit) g.samples.push(query);
+    }
+    return [...groups.entries()]
+      .filter(([, v]) => v.count > 1)
+      .map(([baseUrl, v]) => ({
+        baseUrl,
+        variantCount: v.count,
+        sampleQueries: v.samples,
+      }))
+      .sort(
+        (a, b) =>
+          b.variantCount - a.variantCount || a.baseUrl.localeCompare(b.baseUrl),
+      )
       .slice(0, limit);
   }
 
@@ -3815,6 +4130,21 @@ export class ProjectDb {
          AND amp_validation_errors IS NOT NULL
          AND amp_validation_errors != ''
          AND amp_validation_errors != '[]'`,
+      ),
+      canonicalConflictNearDuplicate: countWhere(
+        `${html} AND cluster_id > 0 AND cluster_size > 1
+         AND canonical IS NOT NULL AND canonical != ''
+         AND EXISTS (
+           SELECT 1 FROM urls u2
+           WHERE u2.cluster_id = urls.cluster_id
+             AND u2.is_external = 0 AND u2.content_kind = 'html'
+             AND u2.canonical IS NOT NULL AND u2.canonical != ''
+             AND u2.canonical != urls.canonical
+             AND u2.url != urls.url
+         )`,
+      ),
+      highBoilerplate: countWhere(
+        `${html} AND boilerplate_coverage IS NOT NULL AND boilerplate_coverage > 50`,
       ),
       brokenLinksInternal: this.countBrokenLinks('internal'),
       brokenLinksExternal: this.countBrokenLinks('external'),
@@ -5849,6 +6179,7 @@ export class ProjectDb {
     amphtml: r.amphtml,
     ampPage: r.amp_page === 1,
     ampValidationErrors: r.amp_validation_errors,
+    boilerplateCoverage: r.boilerplate_coverage,
     favicon: r.favicon,
     mixedContentCount: r.mixed_content_count,
     mixedContentActive: r.mixed_content_active ?? 0,
@@ -6420,6 +6751,38 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               AND EXISTS (
                 SELECT 1 FROM urls t WHERE t.url = urls.canonical
                   AND t.indexability = 'non-indexable:noindex'
+              )`;
+    case 'issues:high-boilerplate':
+      // V2 Faz 14 #5 — Page's unique 5-word shingles are >50%
+      // boilerplate (shingles that repeat across >30% of the sampled
+      // 2K pages — typically nav / footer / sidebar copy). High
+      // coverage = templated thin content; the actual unique body is
+      // a small fraction of the rendered page. Excludes pages that
+      // weren't in the sample (NULL coverage) so the filter never
+      // false-positives on bodies we never analysed.
+      return `is_external = 0 AND content_kind = 'html'
+              AND boilerplate_coverage IS NOT NULL
+              AND boilerplate_coverage > 50`;
+    case 'issues:canonical-conflict-near-duplicate':
+      // V2 Faz 14 — two pages clustered as near-duplicates (same
+      // SimHash band / cluster_id > 0) but pointing to DIFFERENT
+      // canonicals. Classic CMS misconfig: localised variants or
+      // pagination shards drift apart on the canonical signal even
+      // though Google sees them as the same content. Distinct from
+      // `issues:canonical-mismatch` (HTML vs HTTP header on the same
+      // page); this is cross-page within a near-duplicate cluster.
+      // Excludes singletons (cluster_id = 0) and pages without a
+      // declared canonical (those are caught by `issues:canonical-missing`).
+      return `is_external = 0 AND content_kind = 'html'
+              AND cluster_id > 0 AND cluster_size > 1
+              AND canonical IS NOT NULL AND canonical != ''
+              AND EXISTS (
+                SELECT 1 FROM urls u2
+                WHERE u2.cluster_id = urls.cluster_id
+                  AND u2.is_external = 0 AND u2.content_kind = 'html'
+                  AND u2.canonical IS NOT NULL AND u2.canonical != ''
+                  AND u2.canonical != urls.canonical
+                  AND u2.url != urls.url
               )`;
     case 'issues:content-thin':
       return "is_external = 0 AND content_kind = 'html' AND word_count IS NOT NULL AND word_count < 300";

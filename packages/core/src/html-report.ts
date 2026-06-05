@@ -127,6 +127,7 @@ const ISSUES: IssueDef[] = [
   { key: 'faviconMissing', label: 'Favicon Missing', severity: 'info' },
   { key: 'charsetMissing', label: 'Charset Missing', severity: 'warn' },
   { key: 'ampValidationErrors', label: 'AMP Validation Errors', severity: 'warn' },
+  { key: 'highBoilerplate', label: 'High Boilerplate (>50%)', severity: 'warn' },
   { key: 'nonIndexableInSitemap', label: 'Non-Indexable in Sitemap', severity: 'error' },
   { key: 'non200InSitemap', label: 'Non-200 in Sitemap', severity: 'error' },
   { key: 'redirectInSitemap', label: 'Redirect in Sitemap', severity: 'warn' },

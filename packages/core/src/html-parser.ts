@@ -331,8 +331,30 @@ export interface ParsedPage {
  * fingerprint uses this; `wordCount` / readability stay on the full
  * body so existing thin-content thresholds don't shift.
  */
-function extractMainContentText($: cheerio.CheerioAPI): string {
+function extractMainContentText(
+  $: cheerio.CheerioAPI,
+  userSelector?: string,
+): string {
   const collapse = (s: string): string => s.replace(/\s+/g, ' ').trim();
+
+  // V2 Faz 14 — user-supplied content area selector takes precedence
+  // over the heuristic. Lets duplicate fingerprinting target a specific
+  // region (e.g. `article.main-content`, `#content`) when the heuristic
+  // misclassifies — common on CMSes where the navigation sits inside
+  // `<main>` or where there's no semantic landmark at all. Invalid /
+  // unmatched selectors silently fall through to the heuristic so a
+  // typo doesn't break the crawl.
+  if (userSelector && userSelector.trim().length > 0) {
+    try {
+      const region = $(userSelector.trim()).first();
+      if (region.length > 0) {
+        const t = collapse(region.text());
+        if (t.length > 0) return t;
+      }
+    } catch {
+      // Bad selector — fall through to heuristic.
+    }
+  }
 
   const main = $('main, [role="main"]').first();
   if (main.length > 0) {
@@ -372,6 +394,10 @@ export function parseHtml(
     urlRewrites?: UrlRewriteOptions;
     /** Custom Extraction rules to run against this page. */
     customExtractionRules?: ReadonlyArray<CustomExtractionRule>;
+    /** Optional CSS selector that pins duplicate-fingerprint text
+     *  extraction to a specific region. Empty / missing → heuristic
+     *  (main/article/body-minus-chrome) is used. */
+    contentAreaSelector?: string;
   } = {},
 ): ParsedPage {
   // Fast path: force the htmlparser2 backend and skip entity decoding.
@@ -785,7 +811,7 @@ export function parseHtml(
   // pages that share a big nav/footer template but differ in body
   // content aren't falsely clustered as near-duplicates.
   const { simhash, contentHash } = computeContentFingerprint(
-    extractMainContentText($),
+    extractMainContentText($, opts.contentAreaSelector),
   );
 
   // Custom Extraction — runs after all standard fields so the cheerio

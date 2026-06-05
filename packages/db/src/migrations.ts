@@ -1526,6 +1526,26 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 65,
+    name: 'add_boilerplate_coverage',
+    // V2 Faz 14 #5 — Template / boilerplate detection. Memory-bounded
+    // post-crawl pass samples up to ~2K stored bodies, generates
+    // 5-word shingles (FNV-1a hashed), identifies shingles appearing
+    // on > 30% of sampled pages as "boilerplate", and writes a per-URL
+    // coverage percentage (0-100) to this column. NULL = not yet
+    // computed (or page wasn't in the sample / had no body snapshot).
+    // 50+ is the "high boilerplate" threshold for the dedicated issue
+    // filter — typical templated pages with thin content land here.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'boilerplate_coverage')) {
+        db.exec('ALTER TABLE urls ADD COLUMN boilerplate_coverage INTEGER');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

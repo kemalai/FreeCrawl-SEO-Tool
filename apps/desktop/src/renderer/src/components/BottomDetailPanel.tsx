@@ -1502,6 +1502,16 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['H5 Count', row.h5Count > 0 ? row.h5Count : null],
     ['H6 Count', row.h6Count > 0 ? row.h6Count : null],
     ['Word Count', row.wordCount],
+    [
+      'Boilerplate Coverage',
+      // Post-crawl pass samples up to ~2K pages; URLs outside the
+      // sample (or pages without a body snapshot) keep null. Show "—"
+      // for null instead of "0%" so the user can tell "not computed"
+      // apart from "0% boilerplate".
+      row.boilerplateCoverage !== null && row.boilerplateCoverage !== undefined
+        ? `${row.boilerplateCoverage}%`
+        : null,
+    ],
     ['Sentence Count', row.sentenceCount > 0 ? row.sentenceCount : null],
     [
       'Flesch Reading Ease',

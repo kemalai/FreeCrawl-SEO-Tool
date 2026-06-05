@@ -968,6 +968,50 @@ export function buildTools(): Tool[] {
       handler: (_args, db) => ({ rows: db.serverHeaderBreakdown() }),
     },
 
+    {
+      name: 'report_query_string_variants',
+      description:
+        'Base URLs (path without `?…`) that appear with 2+ query-string variants in the crawl. Each row carries the variant count and a sample of the actual `?…` strings — useful for spotting session-id / faceted-nav / `utm_*` parameter bloat that the URL normaliser did not strip. Use this to decide which params to add to Settings → URL Rewriting → Keep query parameters list, or which routes to exclude.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', minimum: 1, maximum: 5000, description: 'Max base URLs returned. Default 500.' },
+          sampleLimit: { type: 'integer', minimum: 1, maximum: 20, description: 'Per-group sample size for the query-string list. Default 5.' },
+        },
+      },
+      handler: (args, db) => ({
+        rows: db.getQueryStringVariantGroups({
+          limit: clamp(args.limit, 1, 5000, 500),
+          sampleLimit: clamp(args.sampleLimit, 1, 20, 5),
+        }),
+      }),
+    },
+
+    {
+      name: 'report_sitemap_priority_mismatch',
+      description:
+        'Sitemap-declared high-priority URLs whose actual crawl outcome contradicts the declared importance — 4xx/5xx page, noindex, canonicalised to another URL, redirected, robots-blocked, or never reached. The classic "sitemap lies to Google" signal. `priorityThreshold` defaults to 0.8 (most sitemap generators use this as the "important pages" floor). Each row carries the declared priority/changefreq/lastmod plus the actual status_code/indexability and a typed `issue` discriminator (not-crawled / status-error / noindex / canonicalised / redirect / blocked-robots).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          priorityThreshold: {
+            type: 'number',
+            minimum: 0,
+            maximum: 1,
+            description: 'Only flag URLs whose declared sitemap priority is at least this value. Default 0.8.',
+          },
+          limit: { type: 'integer', minimum: 1, maximum: 10_000, description: 'Default 1000.' },
+        },
+      },
+      handler: (args, db) => ({
+        rows: db.getSitemapPriorityMismatch({
+          priorityThreshold:
+            typeof args.priorityThreshold === 'number' ? args.priorityThreshold : 0.8,
+          limit: clamp(args.limit, 1, 10_000, 1000),
+        }),
+      }),
+    },
+
     // =================================================================
     // V2 Faz 0.5 Increment 2 — Action tools. Each one POSTs through the
     // bridge's generic `/v1/action/<name>` route; the main process
