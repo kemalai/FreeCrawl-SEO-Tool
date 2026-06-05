@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.8] — 2026-06-04
+
+### Added
+- Canonical Conflict (Near-Duplicate) issue filter — flags pages clustered as near-duplicates whose declared canonical URLs disagree, a classic CMS localisation / pagination drift bug.
+- Query String Variant Grouping report — surfaces base URLs that share many tracker / session-id / faceted-nav variants so you can spot crawl bloat from un-stripped query parameters.
+- Sitemap Priority Mismatch report — high-priority sitemap URLs whose actual crawl outcome contradicts the declared importance (4xx, noindex, canonicalised, redirect, blocked, never reached).
+- Content area selector — Settings → Duplicates accepts a CSS selector that pins the duplicate fingerprint to a specific page region, overriding the heuristic.
+- Template / Boilerplate Detection — post-crawl sampling pass identifies repeated chrome (nav, footer, sidebar) across pages and flags pages whose unique 5-word shingles are over 50% boilerplate.
+
 ## [0.6.7] — 2026-06-01
 
 ### Added
