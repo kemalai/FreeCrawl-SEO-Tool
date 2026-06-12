@@ -138,6 +138,7 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
     },
+    { role: 'editMenu' as const },
     {
       label: L.view,
       submenu: [
