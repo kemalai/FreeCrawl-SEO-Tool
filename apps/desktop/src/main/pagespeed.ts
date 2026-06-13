@@ -40,10 +40,30 @@ function errorMetrics(fetchedAt: string, message: string): PagespeedMetrics {
     fcp: null,
     tbt: null,
     speedIndex: null,
+    tti: null,
+    maxPotentialFid: null,
+    inp: null,
     status: 'error',
     error: message,
     fetchedAt,
   };
+}
+
+/**
+ * Pull a CrUX field metric's 75th-percentile value (ms) out of the PSI
+ * `loadingExperience` block. Field metrics only exist when the URL has
+ * enough real-user data — returns null otherwise.
+ */
+function fieldMetricMs(
+  json: Record<string, unknown>,
+  key: string,
+): number | null {
+  const le = json['loadingExperience'] as
+    | { metrics?: Record<string, unknown> }
+    | undefined;
+  const metric = le?.metrics?.[key] as { percentile?: unknown } | undefined;
+  const p = metric?.percentile;
+  return typeof p === 'number' && Number.isFinite(p) ? Math.round(p) : null;
 }
 
 /** Pull `numericValue` out of a Lighthouse audit object, rounded. */
@@ -117,6 +137,11 @@ export async function fetchPagespeedAudit(
       fcp: auditValue(audits, 'first-contentful-paint'),
       tbt: auditValue(audits, 'total-blocking-time'),
       speedIndex: auditValue(audits, 'speed-index'),
+      tti: auditValue(audits, 'interactive'),
+      maxPotentialFid: auditValue(audits, 'max-potential-fid'),
+      // INP is a field metric — read from CrUX loadingExperience, not the
+      // lab audits. Null when the URL lacks real-user data.
+      inp: fieldMetricMs(json, 'INTERACTION_TO_NEXT_PAINT'),
       status: 'ok',
       error: null,
       fetchedAt,

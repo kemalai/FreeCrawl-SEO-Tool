@@ -167,6 +167,7 @@ interface FormState {
   jsMobileScreenshot: boolean;
   jsMobileUsability: boolean;
   jsLcpCandidate: boolean;
+  jsA11yAudit: boolean;
 }
 
 type SectionKey =
@@ -451,6 +452,7 @@ function configToForm(c: CrawlConfig): FormState {
     jsMobileScreenshot: c.jsRender?.mobileScreenshot ?? false,
     jsMobileUsability: c.jsRender?.mobileUsability ?? false,
     jsLcpCandidate: c.jsRender?.lcpCandidate ?? false,
+    jsA11yAudit: c.jsRender?.a11yAudit ?? false,
   };
 }
 
@@ -686,6 +688,7 @@ export function SettingsDialog({ open, onClose }: Props) {
         mobileScreenshot: form.jsMobileScreenshot,
         mobileUsability: form.jsMobileUsability,
         lcpCandidate: form.jsLcpCandidate,
+        a11yAudit: form.jsA11yAudit,
       },
     });
     onClose();
@@ -3193,6 +3196,14 @@ function RenderingPanel({ form, update }: PanelProps) {
             hint=""
             info="Identifies the largest element visible in the initial viewport (likely LCP candidate per Google's heuristic) and stores its CSS selector, dimensions, and resource URL. Useful for spotting unoptimised LCP images without a PSI API call."
             example="On for performance-focused audits."
+          />
+          <Bool
+            label={t('settingsPanels.rendering.a11yAudit', { defaultValue: 'Accessibility audit (contrast + focus)' })}
+            checked={form.jsA11yAudit}
+            onChange={(v) => update('jsA11yAudit', v)}
+            hint=""
+            info="Audits the rendered DOM for WCAG AA colour-contrast failures (4.5:1 normal text, 3:1 large text) and stylesheet rules that suppress the keyboard focus outline without a :focus-visible fallback. Surfaces the Low-Contrast Text and Focus Outline Suppressed issue filters."
+            example="On for accessibility / WCAG audits."
           />
         </div>
       </div>

@@ -13,6 +13,8 @@ export interface RenderOptions {
   screenshotMode?: 'none' | 'fullpage' | 'fold' | 'both';
   /** Detect the LCP candidate element after render. */
   detectLcp?: boolean;
+  /** Run the in-page accessibility audit (contrast + focus outline). */
+  detectA11y?: boolean;
   /** Where to write screenshot PNGs — the caller resolves a per-URL path. */
   screenshotPaths?: {
     fullpage?: string;
@@ -55,6 +57,18 @@ export interface RenderResult {
   screenshots?: { fullpage?: string; fold?: string };
   /** LCP candidate from `detectLcp` — null when no eligible element found. */
   lcp?: LcpCandidate | null;
+  /** Accessibility audit from `detectA11y` — null when it could not run. */
+  a11y?: A11yAudit | null;
+}
+
+/** V2 Faz 16 — in-page accessibility audit result. */
+export interface A11yAudit {
+  /** Sampled text elements whose contrast is below WCAG AA. */
+  lowContrast: number;
+  /** How many text elements were sampled (context for `lowContrast`). */
+  sampled: number;
+  /** A stylesheet rule suppresses the focus outline without a fallback. */
+  focusSuppressed: boolean;
 }
 
 /**
@@ -125,6 +139,112 @@ const LCP_DETECT_FN = `(() => {
     coverage: Math.round((bestArea / viewportArea) * 10000) / 10000,
     resourceUrl: resourceUrl,
   };
+})()`;
+
+/**
+ * Browser-side accessibility audit. Stringified + injected via
+ * `page.evaluate()`. Two checks:
+ *
+ *  1. **Colour contrast** — samples up to 500 visible elements that have
+ *     direct text, computes the WCAG contrast ratio between the text
+ *     colour and the effective background (walking ancestors until an
+ *     opaque background-colour is found; default white). Elements over a
+ *     background-image are skipped (contrast is indeterminate). Threshold
+ *     is 3:1 for large text (>=24px, or >=18.66px bold) and 4.5:1
+ *     otherwise — the WCAG 2.1 AA minimums.
+ *  2. **Focus outline suppression** — scans accessible stylesheets for a
+ *     `:focus` rule that removes the outline (`outline: none/0`) without a
+ *     compensating box-shadow/border, and with no `:focus-visible` rule
+ *     restoring a visible indicator. Catches the common
+ *     `*:focus { outline: none }` keyboard-trap anti-pattern. Cross-origin
+ *     sheets (whose cssRules throw) are skipped.
+ */
+const A11Y_AUDIT_FN = `(() => {
+  const parseColor = (s) => {
+    const m = s && s.match(/rgba?\\(([^)]+)\\)/);
+    if (!m) return null;
+    const p = m[1].split(',').map((x) => parseFloat(x.trim()));
+    if (p.length < 3 || p.some((n) => !isFinite(n))) return null;
+    return { r: p[0], g: p[1], b: p[2], a: p.length >= 4 ? p[3] : 1 };
+  };
+  const relLum = (c) => {
+    const f = (v) => { v = v / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+  };
+  const ratio = (fg, bg) => {
+    const l1 = relLum(fg), l2 = relLum(bg);
+    const hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  const over = (top, bottom) => {
+    if (top.a >= 1) return top;
+    const a = top.a;
+    return { r: top.r * a + bottom.r * (1 - a), g: top.g * a + bottom.g * (1 - a), b: top.b * a + bottom.b * (1 - a), a: 1 };
+  };
+  const effectiveBg = (el) => {
+    let node = el;
+    while (node && node.nodeType === 1) {
+      const cs = getComputedStyle(node);
+      if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
+      const c = parseColor(cs.backgroundColor);
+      if (c && c.a > 0) return c.a >= 1 ? c : over(c, { r: 255, g: 255, b: 255, a: 1 });
+      node = node.parentElement;
+    }
+    return { r: 255, g: 255, b: 255, a: 1 };
+  };
+  let sampled = 0, low = 0;
+  const all = document.body ? document.body.querySelectorAll('*') : [];
+  for (const el of all) {
+    if (sampled >= 500) break;
+    let hasText = false;
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3 && n.textContent && n.textContent.trim().length > 1) { hasText = true; break; }
+    }
+    if (!hasText) continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none' || parseFloat(cs.opacity || '1') === 0) continue;
+    const fg = parseColor(cs.color);
+    if (!fg) continue;
+    const bg = effectiveBg(el);
+    if (!bg) continue;
+    const fgc = fg.a < 1 ? over(fg, bg) : fg;
+    sampled++;
+    const fontSize = parseFloat(cs.fontSize || '16');
+    let weight = parseInt(cs.fontWeight, 10);
+    if (!isFinite(weight)) weight = cs.fontWeight === 'bold' ? 700 : 400;
+    const large = fontSize >= 24 || (fontSize >= 18.66 && weight >= 700);
+    const threshold = large ? 3.0 : 4.5;
+    if (ratio(fgc, bg) < threshold - 0.05) low++;
+  }
+  let focusSuppressed = false, focusVisibleRestores = false;
+  try {
+    for (const sheet of document.styleSheets) {
+      let rules = null;
+      try { rules = sheet.cssRules; } catch (e) { continue; }
+      if (!rules) continue;
+      for (const rule of rules) {
+        if (rule.type !== 1 || !rule.selectorText) continue;
+        const sel = rule.selectorText;
+        if (sel.indexOf(':focus') === -1) continue;
+        const st = rule.style;
+        const ow = parseFloat(st.outlineWidth || '');
+        const hasOutline = (st.outlineStyle && st.outlineStyle !== 'none' && (isNaN(ow) || ow !== 0));
+        const hasShadow = st.boxShadow && st.boxShadow !== 'none';
+        const hasBorder = st.border && st.border !== 'none' && !/^0/.test(st.border) && st.border.indexOf('none') === -1;
+        if (sel.indexOf(':focus-visible') !== -1) {
+          if (hasOutline || hasShadow) focusVisibleRestores = true;
+          continue;
+        }
+        const ct = (rule.cssText || '');
+        const removesOutline = st.outlineStyle === 'none' || ow === 0 || /outline\\s*:\\s*(none|0)/.test(ct);
+        if (removesOutline && !hasShadow && !hasBorder && !hasOutline) focusSuppressed = true;
+      }
+    }
+  } catch (e) { /* ignore */ }
+  if (focusVisibleRestores) focusSuppressed = false;
+  return { lowContrast: low, sampled: sampled, focusSuppressed: focusSuppressed };
 })()`;
 
 /**
@@ -213,6 +333,17 @@ export async function renderUrl(
       }
     }
 
+    // Accessibility audit — contrast + focus outline. Best-effort: a
+    // failing evaluate (detached page, hostile CSP) leaves a11y null.
+    let a11y: A11yAudit | null = null;
+    if (opts.detectA11y) {
+      try {
+        a11y = (await page.evaluate(A11Y_AUDIT_FN)) as A11yAudit | null;
+      } catch {
+        a11y = null;
+      }
+    }
+
     // Screenshot capture — best-effort. Failures (e.g. detached page)
     // do not fail the render result.
     const screenshots: { fullpage?: string; fold?: string } = {};
@@ -254,6 +385,7 @@ export async function renderUrl(
       ok: true,
       screenshots: Object.keys(screenshots).length > 0 ? screenshots : undefined,
       lcp: opts.detectLcp ? lcp : undefined,
+      a11y: opts.detectA11y ? a11y : undefined,
     };
   } catch (err) {
     result = {

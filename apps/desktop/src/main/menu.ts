@@ -153,7 +153,7 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => send('toggle-detail-panel'),
         },
         { type: 'separator' },
-        { role: 'reload' },
+        { role: 'reload', accelerator: 'CmdOrCtrl+Shift+R' },
         { type: 'separator' },
         { role: 'resetZoom' },
         { role: 'zoomIn' },
@@ -182,6 +182,7 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         },
       ],
     },
+    { role: 'windowMenu' as const },
     {
       label: L.help,
       submenu: [

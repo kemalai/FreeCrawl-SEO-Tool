@@ -598,7 +598,8 @@
       "mobileScreenshot": "Also capture mobile viewport (375×667)",
       "advancedAudits": "Advanced Audits",
       "mobileUsability": "Mobile Usability audit",
-      "lcpCandidate": "LCP candidate detection"
+      "lcpCandidate": "LCP candidate detection",
+      "a11yAudit": "Accessibility audit (contrast + focus)"
     },
     "perHostUa": {
       "intro": "Override the User-Agent on a per-host basis. Useful when crawling a mobile subdomain with the mobile-Googlebot UA in the same run as the desktop site, or when a CDN serves a different page based on the requester's UA. The first matching pattern wins; the global User-Agent (Requests tab) is the fallback.",
@@ -917,6 +918,7 @@
     "colStatus": "Status",
     "colPerf": "Perf",
     "colLcp": "LCP",
+    "colInp": "INP",
     "colCls": "CLS",
     "colLastRun": "Last run",
     "groupMobile": "Mobile",

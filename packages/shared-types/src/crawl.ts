@@ -194,6 +194,10 @@ export type UrlCategory =
   | 'issues:render-blocking-critical'
   | 'issues:og-image-too-large'
   | 'issues:twitter-image-too-large'
+  | 'issues:og-image-wrong-aspect'
+  | 'issues:twitter-image-wrong-aspect'
+  | 'issues:low-contrast-text'
+  | 'issues:focus-outline-suppressed'
   | 'issues:pagination-sequence-break'
   | 'issues:links-per-page-too-many'
   | 'tab:redirects'
@@ -389,6 +393,17 @@ export interface CrawlUrlRow {
   twitterTitle: string | null;
   twitterDescription: string | null;
   twitterImage: string | null;
+  /**
+   * V2 Faz 16 #1 — Pixel dimensions of the `og:image` / `twitter:image`,
+   * resolved by the post-crawl social-image probe (ranged GET + header
+   * parse). `null` = not probed (no social image, or probe disabled);
+   * `0` = probed but undecodable / fetch failed; `>0` = real dimension.
+   * Drive the social-card aspect-ratio issue filters.
+   */
+  ogImageWidth: number | null;
+  ogImageHeight: number | null;
+  twitterImageWidth: number | null;
+  twitterImageHeight: number | null;
   metaKeywords: string | null;
   metaAuthor: string | null;
   metaGenerator: string | null;
@@ -462,6 +477,16 @@ export interface CrawlUrlRow {
    *  are flagged as templated / thin-content. NULL when the page
    *  wasn't in the sample (no body snapshot, or sample LIMIT exceeded). */
   boilerplateCoverage: number | null;
+  /**
+   * V2 Faz 16 — accessibility audit from the JS-render in-page pass.
+   * `a11yLowContrast` = number of sampled text elements below the WCAG AA
+   * contrast threshold. `a11yFocusSuppressed` = 1 when a stylesheet rule
+   * removes the keyboard focus outline without a compensating indicator,
+   * 0 when clean. Both `null` when the page wasn't rendered with the
+   * a11y audit enabled (text mode, or audit off).
+   */
+  a11yLowContrast: number | null;
+  a11yFocusSuppressed: number | null;
   favicon: string | null;
   /** Resolved `<link rel="apple-touch-icon">` URL, else null. */
   appleTouchIcon: string | null;
@@ -809,6 +834,16 @@ export interface CrawlConfig {
    */
   probeManifestJson: boolean;
   /**
+   * After the HTML crawl finishes, ranged-GET each distinct `og:image` /
+   * `twitter:image` once to read its pixel dimensions, then stamp them
+   * onto every page referencing that image. Feeds the social-card
+   * aspect-ratio issue filters (Facebook/LinkedIn 1.91:1, Twitter 2:1
+   * or 1:1). Default `true` — social images are heavily deduplicated
+   * across a site so the probe count is tiny. Only the first ~64 KB of
+   * each image is read (enough for the header), so cost is minimal.
+   */
+  probeSocialImages: boolean;
+  /**
    * When the post-norm "Duplicate URL" issue filter runs, normalise
    * URLs (lowercase, strip query, trim trailing slash) before
    * comparing. Default `true` — the canonical SEO behaviour. Set to
@@ -1001,6 +1036,15 @@ export interface JsRenderConfig {
    * requiring a PSI API call.
    */
   lcpCandidate: boolean;
+  /**
+   * Run an in-page accessibility audit on the rendered DOM: count text
+   * elements whose colour contrast falls below the WCAG AA threshold
+   * (4.5:1 normal, 3:1 large text) and detect stylesheet rules that
+   * suppress the keyboard focus outline without a compensating
+   * indicator. Requires the rendered DOM's computed styles, so it only
+   * runs in JS mode. Off by default — adds an in-page evaluate pass.
+   */
+  a11yAudit: boolean;
 }
 
 export interface HttpAuth {
@@ -1427,6 +1471,27 @@ export interface OverviewCounts {
      */
     twitterImageTooLarge: number;
     /**
+     * Pages whose `og:image` dimensions won't render as a proper share
+     * card — too small (<200 px either side) or aspect ratio far from
+     * the Facebook/LinkedIn 1.91:1 recommendation. From the post-crawl
+     * social-image probe.
+     */
+    ogImageWrongAspect: number;
+    /**
+     * V2 Faz 16 — text elements below the WCAG AA contrast threshold,
+     * and pages whose stylesheets suppress the keyboard focus outline.
+     * From the JS-render in-page accessibility audit (only populated
+     * when that audit is enabled).
+     */
+    lowContrastText: number;
+    focusOutlineSuppressed: number;
+    /**
+     * Pages whose `twitter:image` dimensions don't fit the declared
+     * card type — `summary_large_image` wants ~2:1 (min 300×157),
+     * `summary` (and the default) wants ~1:1 (min 144×144).
+     */
+    twitterImageWrongAspect: number;
+    /**
      * Pages part of a paginated cluster whose ordinals have a gap
      * (e.g. ?page=1, ?page=2, ?page=4 — page 3 missing). Set by the
      * post-crawl `recomputePaginationSequence()` pass.
@@ -1692,6 +1757,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   largeImageBytes: 102_400,
   probeTlsCerts: true,
   probeManifestJson: true,
+  probeSocialImages: true,
   dedupePreNormalize: true,
   cdnHosts: [],
   maxLinksPerPage: 100,
@@ -1733,5 +1799,6 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
     mobileScreenshot: false,
     mobileUsability: false,
     lcpCandidate: false,
+    a11yAudit: false,
   },
 };

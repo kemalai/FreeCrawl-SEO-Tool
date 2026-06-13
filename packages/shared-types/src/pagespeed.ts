@@ -37,6 +37,20 @@ export interface PagespeedMetrics {
   tbt: number | null;
   /** Speed Index (ms). */
   speedIndex: number | null;
+  /** Time to Interactive (ms) — lab audit `interactive`. */
+  tti: number | null;
+  /**
+   * Max Potential First Input Delay (ms) — lab audit `max-potential-fid`,
+   * Lighthouse's worst-case input-delay estimate. The closest lab proxy
+   * for the deprecated field FID metric.
+   */
+  maxPotentialFid: number | null;
+  /**
+   * Interaction to Next Paint (ms) — the Core Web Vital that replaced FID
+   * in March 2024. Field (CrUX) metric from the PSI `loadingExperience`
+   * block; `null` when the URL has no real-user data yet.
+   */
+  inp: number | null;
   /** `ok` when the audit completed, `error` when PSI/Lighthouse failed. */
   status: 'ok' | 'error';
   /** Human-readable failure reason when `status` is `error`. */

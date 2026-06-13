@@ -74,6 +74,7 @@ const ALLOWED_METHODS = new Set<string>([
   'setUrlScreenshotPaths',
   'setUrlLcpCandidate',
   'setUrlMobileUsability',
+  'setUrlA11y',
   'setSitemapUrls',
   'setHostCert',
   'setImageSize',

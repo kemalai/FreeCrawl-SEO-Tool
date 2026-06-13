@@ -875,6 +875,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.ariaInvalidRole,
               category: 'issues:aria-invalid-role',
             },
+            {
+              key: 'issues-low-contrast-text',
+              label: 'Low Contrast Text',
+              count: o.issues.lowContrastText,
+              category: 'issues:low-contrast-text',
+            },
+            {
+              key: 'issues-focus-outline-suppressed',
+              label: 'Focus Outline Suppressed',
+              count: o.issues.focusOutlineSuppressed,
+              category: 'issues:focus-outline-suppressed',
+            },
           ],
         },
         {
@@ -928,6 +940,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Twitter Image >5MB',
               count: o.issues.twitterImageTooLarge,
               category: 'issues:twitter-image-too-large',
+            },
+            {
+              key: 'issues-og-image-wrong-aspect',
+              label: 'OG Image Wrong Aspect Ratio',
+              count: o.issues.ogImageWrongAspect,
+              category: 'issues:og-image-wrong-aspect',
+            },
+            {
+              key: 'issues-twitter-image-wrong-aspect',
+              label: 'Twitter Image Wrong Aspect Ratio',
+              count: o.issues.twitterImageWrongAspect,
+              category: 'issues:twitter-image-wrong-aspect',
             },
           ],
         },

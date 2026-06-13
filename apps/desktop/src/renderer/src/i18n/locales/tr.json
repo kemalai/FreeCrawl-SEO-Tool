@@ -597,7 +597,8 @@
       "mobileScreenshot": "Mobil viewport (375×667) için de yakala",
       "advancedAudits": "Gelişmiş Denetimler",
       "mobileUsability": "Mobil Kullanılabilirlik denetimi",
-      "lcpCandidate": "LCP aday tespiti"
+      "lcpCandidate": "LCP aday tespiti",
+      "a11yAudit": "Erişilebilirlik denetimi (kontrast + odak)"
     },
     "perHostUa": {
       "intro": "User-Agent'ı host bazında geçersiz kıl. Mobil bir alt alan adını mobile-Googlebot UA ile masaüstü sitesiyle aynı koşuda crawl ederken veya bir CDN, isteyene göre farklı sayfa servis ettiğinde faydalı. İlk eşleşen kalıp kazanır; global User-Agent (Requests sekmesi) yedektir.",
@@ -916,6 +917,7 @@
     "colStatus": "Durum",
     "colPerf": "Perf",
     "colLcp": "LCP",
+    "colInp": "INP",
     "colCls": "CLS",
     "colLastRun": "Son çalıştırma",
     "groupMobile": "Mobil",

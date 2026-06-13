@@ -739,6 +739,9 @@ function getDb(): ProjectDb {
             lcpCandidate:
               parsed.jsRender?.lcpCandidate ??
               DEFAULT_CRAWL_CONFIG.jsRender.lcpCandidate,
+            a11yAudit:
+              parsed.jsRender?.a11yAudit ??
+              DEFAULT_CRAWL_CONFIG.jsRender.a11yAudit,
           },
         };
       }
@@ -3248,6 +3251,11 @@ function registerIpc(): void {
             overflowPx: number;
             hasViewportMeta: boolean;
           } | null;
+          a11y?: {
+            lowContrast: number;
+            sampled: number;
+            focusSuppressed: boolean;
+          } | null;
         }>)
       | undefined;
     if (config.renderingMode === 'js') {
@@ -3365,6 +3373,7 @@ function registerIpc(): void {
             waitUntil: config.jsRender.waitUntil,
             screenshotMode: config.jsRender.screenshotMode,
             detectLcp: config.jsRender.lcpCandidate,
+            detectA11y: config.jsRender.a11yAudit,
             screenshotPaths,
           },
           signal,
@@ -3442,6 +3451,7 @@ function registerIpc(): void {
           screenshots,
           lcp: res.lcp ?? null,
           mobileUsability,
+          a11y: res.a11y ?? null,
         };
       };
     }

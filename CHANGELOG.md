@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.9] — 2026-06-14
+
+### Added
+- Social image aspect-ratio validation — flags OG / Twitter images too small or wrongly shaped to render as a proper share card.
+- Core Web Vitals INP, TTI, and Max Potential FID in PageSpeed audits, with INP shown alongside LCP and CLS as a Core Web Vital.
+- Accessibility audit (opt-in, JS render) — flags low colour-contrast text (WCAG AA) and stylesheets that suppress the keyboard focus outline.
+
+### Fixed
+- macOS: added Edit and Window menus so copy / paste and ⌘M work, and cleared a ⌘R shortcut conflict between Reload and Reports.
+
 ## [0.6.8] — 2026-06-04
 
 ### Added

@@ -240,6 +240,13 @@ const TR_LABELS: Record<string, string> = {
   'Twitter Card Missing': 'Twitter Card Eksik',
   'Twitter Image Not Absolute': 'Twitter Image Mutlak Değil',
   'Twitter Image >5MB': 'Twitter Image >5MB',
+  'OG Image Wrong Aspect Ratio': 'OG Görsel Yanlış En-Boy Oranı',
+  'Twitter Image Wrong Aspect Ratio': 'Twitter Görsel Yanlış En-Boy Oranı',
+  'OG Image Dimensions': 'OG Görsel Boyutları',
+  'Twitter Image Dimensions': 'Twitter Görsel Boyutları',
+  'Low Contrast Text': 'Düşük Kontrastlı Metin',
+  'Focus Outline Suppressed': 'Odak Çerçevesi Bastırılmış',
+  'Low Contrast Elements': 'Düşük Kontrastlı Öğeler',
 
   // PWA / icons
   'Viewport Meta Missing': 'Viewport Meta Eksik',

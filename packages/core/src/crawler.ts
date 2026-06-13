@@ -305,6 +305,11 @@ export class Crawler extends EventEmitter {
       overflowPx: number;
       hasViewportMeta: boolean;
     } | null;
+    a11y?: {
+      lowContrast: number;
+      sampled: number;
+      focusSuppressed: boolean;
+    } | null;
   }>;
 
   constructor(
@@ -359,6 +364,11 @@ export class Crawler extends EventEmitter {
           ok: boolean;
           overflowPx: number;
           hasViewportMeta: boolean;
+        } | null;
+        a11y?: {
+          lowContrast: number;
+          sampled: number;
+          focusSuppressed: boolean;
         } | null;
       }>;
     } = {},
@@ -791,6 +801,9 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.setOp('post-crawl:manifest-probes');
     await this.runManifestProbes();
+    await yieldToEventLoop();
+    this.setOp('post-crawl:social-image-probes');
+    await this.runSocialImageProbes();
     this.running = false;
     this.stopMemoryMonitor();
     // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
@@ -1041,6 +1054,78 @@ export class Crawler extends EventEmitter {
     );
   }
 
+  /**
+   * V2 Faz 16 #1 — Post-crawl social-image dimension probe. Ranged-GETs
+   * each distinct `og:image` / `twitter:image` (heavily deduplicated —
+   * usually a handful per site), reads its pixel width × height from the
+   * header, and stamps them onto every referencing page. Feeds the
+   * social-card aspect-ratio issue filters. Undecodable / failed fetches
+   * record 0×0 so the image isn't re-probed on the next crawl.
+   */
+  private async runSocialImageProbes(): Promise<void> {
+    if (!this.config.probeSocialImages) return;
+    if (this.stopped) return;
+    let urls: string[] = [];
+    try {
+      urls = this.db.unprobedSocialImageUrls(5_000);
+    } catch (err) {
+      this.emit(
+        'info',
+        `social-image probe skipped (DB query failed): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    if (urls.length === 0) return;
+    this.emit('info', `Probing ${urls.length} social image(s)…`);
+
+    const { probeSocialImageDimensions } = await import('./social-image-probe.js');
+    const concurrency = Math.max(1, Math.min(this.config.maxConcurrency, 8));
+    let cursor = 0;
+    let decoded = 0;
+
+    const worker = async (): Promise<void> => {
+      while (!this.stopped) {
+        const idx = cursor++;
+        if (idx >= urls.length) return;
+        const src = urls[idx];
+        if (!src) return;
+        let dims: { width: number; height: number } | null = null;
+        try {
+          dims = await probeSocialImageDimensions(src, {
+            userAgent: this.resolveUserAgent(src),
+            acceptLanguage: this.config.acceptLanguage,
+            customHeaders: this.config.customHeaders,
+            auth: this.config.auth,
+          });
+        } catch {
+          dims = null;
+        }
+        try {
+          // 0×0 marks "probed but undecodable" so the row leaves the
+          // unprobed set and we don't re-fetch a broken image next crawl.
+          this.db.setSocialImageDimsForReferrers({
+            src,
+            width: dims?.width ?? 0,
+            height: dims?.height ?? 0,
+          });
+        } catch {
+          /* ignore — best-effort */
+        }
+        if (dims) decoded++;
+      }
+    };
+
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < concurrency; i++) workers.push(worker());
+    await Promise.all(workers);
+    this.emit(
+      'info',
+      `Social-image probe complete: ${decoded}/${urls.length} dimensions read`,
+    );
+  }
+
   private async runTlsCertProbes(): Promise<void> {
     if (!this.config.probeTlsCerts) return;
     if (this.stopped) return;
@@ -1249,6 +1334,8 @@ export class Crawler extends EventEmitter {
     await this.runImageSizeProbes();
     await yieldToEventLoop();
     await this.runTlsCertProbes();
+    await yieldToEventLoop();
+    await this.runSocialImageProbes();
     this.running = false;
     this.stopMemoryMonitor();
     this.seen.clear();
@@ -2181,6 +2268,9 @@ export class Crawler extends EventEmitter {
       let renderMobile:
         | { ok: boolean; overflowPx: number; hasViewportMeta: boolean }
         | null = null;
+      let renderA11y:
+        | { lowContrast: number; sampled: number; focusSuppressed: boolean }
+        | null = null;
       if (
         this.config.renderingMode === 'js' &&
         this.renderUrlHook &&
@@ -2211,6 +2301,7 @@ export class Crawler extends EventEmitter {
           if (renderRes.screenshots) renderScreenshots = renderRes.screenshots;
           if (renderRes.lcp) renderLcp = renderRes.lcp;
           if (renderRes.mobileUsability) renderMobile = renderRes.mobileUsability;
+          if (renderRes.a11y) renderA11y = renderRes.a11y;
         } catch (err) {
           this.emit(
             'warn',
@@ -2465,6 +2556,9 @@ export class Crawler extends EventEmitter {
           persistOps.push(
             this.dbCall<void>('setUrlMobileUsability', [urlId, renderMobile]),
           );
+        }
+        if (renderA11y) {
+          persistOps.push(this.dbCall<void>('setUrlA11y', [urlId, renderA11y]));
         }
         if (persistOps.length > 0) {
           const results = await Promise.allSettled(persistOps);

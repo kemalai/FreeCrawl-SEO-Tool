@@ -80,6 +80,12 @@ interface UrlRowDb {
   twitter_title: string | null;
   twitter_description: string | null;
   twitter_image: string | null;
+  /** V2 Faz 16 #1 — social image pixel dimensions from the post-crawl
+   *  ranged-GET probe. NULL = not probed, 0 = undecodable, >0 = real. */
+  og_image_width: number | null;
+  og_image_height: number | null;
+  twitter_image_width: number | null;
+  twitter_image_height: number | null;
   meta_keywords: string | null;
   meta_author: string | null;
   meta_generator: string | null;
@@ -105,6 +111,10 @@ interface UrlRowDb {
    *  from the sampled post-crawl pass. NULL when the page wasn't in
    *  the sample (body snapshot missing, or sample LIMIT exceeded). */
   boilerplate_coverage: number | null;
+  /** V2 Faz 16 — accessibility audit from the JS-render in-page pass.
+   *  NULL when not audited; a11y_low_contrast >=0, a11y_focus_suppressed 0/1. */
+  a11y_low_contrast: number | null;
+  a11y_focus_suppressed: number | null;
   favicon: string | null;
   mixed_content_count: number;
   mixed_content_active: number;
@@ -2991,8 +3001,9 @@ export class ProjectDb {
       .prepare(
         `INSERT INTO pagespeed_results
            (url, strategy, performance, lcp, cls, fcp, tbt, speed_index,
+            tti, max_potential_fid, inp,
             status, error, fetched_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(url, strategy) DO UPDATE SET
            performance = excluded.performance,
            lcp = excluded.lcp,
@@ -3000,6 +3011,9 @@ export class ProjectDb {
            fcp = excluded.fcp,
            tbt = excluded.tbt,
            speed_index = excluded.speed_index,
+           tti = excluded.tti,
+           max_potential_fid = excluded.max_potential_fid,
+           inp = excluded.inp,
            status = excluded.status,
            error = excluded.error,
            fetched_at = excluded.fetched_at`,
@@ -3013,6 +3027,9 @@ export class ProjectDb {
         m.fcp,
         m.tbt,
         m.speedIndex,
+        m.tti,
+        m.maxPotentialFid,
+        m.inp,
         m.status,
         m.error,
         m.fetchedAt,
@@ -3060,9 +3077,11 @@ export class ProjectDb {
         `SELECT u.url AS url, u.status_code AS status_code,
                 pm.performance AS m_perf, pm.lcp AS m_lcp, pm.cls AS m_cls,
                 pm.fcp AS m_fcp, pm.tbt AS m_tbt, pm.speed_index AS m_si,
+                pm.tti AS m_tti, pm.max_potential_fid AS m_mpfid, pm.inp AS m_inp,
                 pm.status AS m_status, pm.error AS m_error, pm.fetched_at AS m_fetched,
                 pd.performance AS d_perf, pd.lcp AS d_lcp, pd.cls AS d_cls,
                 pd.fcp AS d_fcp, pd.tbt AS d_tbt, pd.speed_index AS d_si,
+                pd.tti AS d_tti, pd.max_potential_fid AS d_mpfid, pd.inp AS d_inp,
                 pd.status AS d_status, pd.error AS d_error, pd.fetched_at AS d_fetched
          ${joinSql}
          ${whereSql}
@@ -3087,6 +3106,9 @@ export class ProjectDb {
         fcp: (r[`${p}_fcp`] as number | null) ?? null,
         tbt: (r[`${p}_tbt`] as number | null) ?? null,
         speedIndex: (r[`${p}_si`] as number | null) ?? null,
+        tti: (r[`${p}_tti`] as number | null) ?? null,
+        maxPotentialFid: (r[`${p}_mpfid`] as number | null) ?? null,
+        inp: (r[`${p}_inp`] as number | null) ?? null,
         status: status === 'ok' ? 'ok' : 'error',
         error: (r[`${p}_error`] as string | null) ?? null,
         fetchedAt: (r[`${p}_fetched`] as string | null) ?? '',
@@ -4533,6 +4555,31 @@ export class ProjectDb {
               AND i.byte_size > 5242880
          )`,
       ),
+      ogImageWrongAspect: countWhere(
+        `${html} AND og_image IS NOT NULL AND og_image != ''
+         AND og_image_width > 0 AND og_image_height > 0
+         AND (
+           og_image_width < 200 OR og_image_height < 200
+           OR (CAST(og_image_width AS REAL) / og_image_height) NOT BETWEEN 1.5 AND 2.3
+         )`,
+      ),
+      twitterImageWrongAspect: countWhere(
+        `${html} AND twitter_image IS NOT NULL AND twitter_image != ''
+         AND twitter_image_width > 0 AND twitter_image_height > 0
+         AND (
+           (LOWER(COALESCE(twitter_card, '')) = 'summary_large_image' AND (
+              twitter_image_width < 300 OR twitter_image_height < 157
+              OR (CAST(twitter_image_width AS REAL) / twitter_image_height) NOT BETWEEN 1.7 AND 2.3))
+           OR
+           (LOWER(COALESCE(twitter_card, '')) != 'summary_large_image' AND (
+              twitter_image_width < 144 OR twitter_image_height < 144
+              OR (CAST(twitter_image_width AS REAL) / twitter_image_height) NOT BETWEEN 0.8 AND 1.25))
+         )`,
+      ),
+      lowContrastText: countWhere(
+        `${html} AND a11y_low_contrast IS NOT NULL AND a11y_low_contrast > 0`,
+      ),
+      focusOutlineSuppressed: countWhere(`${html} AND a11y_focus_suppressed = 1`),
       paginationSequenceBreak: countWhere(
         `${html} AND pagination_sequence_break = 1`,
       ),
@@ -5018,6 +5065,30 @@ export class ProjectDb {
         audit.ok ? 1 : 0,
         audit.overflowPx,
         audit.hasViewportMeta ? 1 : 0,
+        urlId,
+      );
+  }
+
+  /**
+   * V2 Faz 16 — persist the in-page accessibility audit (contrast +
+   * focus outline) for a URL. Called from the JS-render path when the
+   * a11y audit is enabled. Stores the low-contrast element count and a
+   * 0/1 focus-suppression flag; NULL stays for pages never audited.
+   */
+  setUrlA11y(
+    urlId: number,
+    audit: { lowContrast: number; sampled: number; focusSuppressed: boolean },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE urls
+           SET a11y_low_contrast = ?,
+               a11y_focus_suppressed = ?
+         WHERE id = ?`,
+      )
+      .run(
+        Math.max(0, Math.round(audit.lowContrast)),
+        audit.focusSuppressed ? 1 : 0,
         urlId,
       );
   }
@@ -5537,6 +5608,61 @@ export class ProjectDb {
         scope: input.scope,
         icons: input.iconCount,
       });
+  }
+
+  /**
+   * V2 Faz 16 #1 — Distinct `og:image` / `twitter:image` URLs that
+   * haven't had their pixel dimensions probed yet. A single image is
+   * usually shared across many pages (site-wide default OG card), so the
+   * DISTINCT set is tiny relative to the URL count. "Unprobed" = the
+   * matching width column is still NULL; a failed probe writes 0 so the
+   * URL drops out of this set and isn't re-fetched on the next crawl.
+   */
+  unprobedSocialImageUrls(limit = 5_000): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT src FROM (
+           SELECT og_image AS src, og_image_width AS w FROM urls
+            WHERE og_image IS NOT NULL AND og_image != ''
+              AND content_kind = 'html'
+              AND og_image_width IS NULL
+           UNION
+           SELECT twitter_image AS src, twitter_image_width AS w FROM urls
+            WHERE twitter_image IS NOT NULL AND twitter_image != ''
+              AND content_kind = 'html'
+              AND twitter_image_width IS NULL
+         )
+         WHERE src LIKE 'http%'
+         LIMIT ?`,
+      )
+      .all(limit) as { src: string }[];
+    return rows.map((r) => r.src).filter((s) => typeof s === 'string' && s.length > 0);
+  }
+
+  /**
+   * Stamp probed pixel dimensions onto every page that references this
+   * image as its `og:image` and/or `twitter:image`. `width`/`height` of
+   * 0 marks the image as probed-but-undecodable (fetch failed, unknown
+   * format, truncated header) so it isn't re-probed next crawl. One image
+   * → fan-out write across all referrers, mirroring `setManifestForReferrers`.
+   */
+  setSocialImageDimsForReferrers(input: {
+    src: string;
+    width: number;
+    height: number;
+  }): void {
+    this.db
+      .prepare(
+        `UPDATE urls SET og_image_width = :w, og_image_height = :h
+          WHERE og_image = :src AND og_image_width IS NULL`,
+      )
+      .run({ src: input.src, w: input.width, h: input.height });
+    this.db
+      .prepare(
+        `UPDATE urls SET twitter_image_width = :w, twitter_image_height = :h
+          WHERE twitter_image = :src AND twitter_image_width IS NULL`,
+      )
+      .run({ src: input.src, w: input.width, h: input.height });
   }
 
   /**
@@ -6160,6 +6286,10 @@ export class ProjectDb {
     twitterTitle: r.twitter_title,
     twitterDescription: r.twitter_description,
     twitterImage: r.twitter_image,
+    ogImageWidth: r.og_image_width ?? null,
+    ogImageHeight: r.og_image_height ?? null,
+    twitterImageWidth: r.twitter_image_width ?? null,
+    twitterImageHeight: r.twitter_image_height ?? null,
     metaKeywords: r.meta_keywords,
     metaAuthor: r.meta_author,
     metaGenerator: r.meta_generator,
@@ -6180,6 +6310,8 @@ export class ProjectDb {
     ampPage: r.amp_page === 1,
     ampValidationErrors: r.amp_validation_errors,
     boilerplateCoverage: r.boilerplate_coverage,
+    a11yLowContrast: r.a11y_low_contrast ?? null,
+    a11yFocusSuppressed: r.a11y_focus_suppressed ?? null,
     favicon: r.favicon,
     mixedContentCount: r.mixed_content_count,
     mixedContentActive: r.mixed_content_active ?? 0,
@@ -7711,6 +7843,50 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                    AND i.byte_size IS NOT NULL
                    AND i.byte_size > 5242880
               )`;
+    case 'issues:og-image-wrong-aspect':
+      // og:image dimensions that won't render as a proper Facebook /
+      // LinkedIn share card. Probed by the post-crawl social-image pass
+      // (width > 0 = decoded). Flags too-small images (< 200 px either
+      // side — share renderers drop them) and aspect ratios far from the
+      // recommended 1.91:1 (1200×630). The 1.5–2.3 band keeps the
+      // canonical 1.91 ratio comfortably inside while catching square
+      // (1.0) and portrait images that get awkwardly cropped.
+      return `is_external = 0 AND content_kind = 'html'
+              AND og_image IS NOT NULL AND og_image != ''
+              AND og_image_width > 0 AND og_image_height > 0
+              AND (
+                og_image_width < 200 OR og_image_height < 200
+                OR (CAST(og_image_width AS REAL) / og_image_height) NOT BETWEEN 1.5 AND 2.3
+              )`;
+    case 'issues:twitter-image-wrong-aspect':
+      // twitter:image dimensions that don't fit the declared card type.
+      // `summary_large_image` wants ~2:1 (min 300×157); `summary` and the
+      // implicit default want ~1:1 (min 144×144). Probed width > 0 means
+      // decoded. Card type read from twitter_card (case-insensitive).
+      return `is_external = 0 AND content_kind = 'html'
+              AND twitter_image IS NOT NULL AND twitter_image != ''
+              AND twitter_image_width > 0 AND twitter_image_height > 0
+              AND (
+                (LOWER(COALESCE(twitter_card, '')) = 'summary_large_image' AND (
+                   twitter_image_width < 300 OR twitter_image_height < 157
+                   OR (CAST(twitter_image_width AS REAL) / twitter_image_height) NOT BETWEEN 1.7 AND 2.3))
+                OR
+                (LOWER(COALESCE(twitter_card, '')) != 'summary_large_image' AND (
+                   twitter_image_width < 144 OR twitter_image_height < 144
+                   OR (CAST(twitter_image_width AS REAL) / twitter_image_height) NOT BETWEEN 0.8 AND 1.25))
+              )`;
+    case 'issues:low-contrast-text':
+      // Pages with at least one text element below the WCAG AA contrast
+      // ratio, from the JS-render in-page audit. NULL (not audited)
+      // excluded — only flag pages we actually measured.
+      return `is_external = 0 AND content_kind = 'html'
+              AND a11y_low_contrast IS NOT NULL AND a11y_low_contrast > 0`;
+    case 'issues:focus-outline-suppressed':
+      // Pages whose stylesheets remove the keyboard focus outline without
+      // a compensating indicator (and no :focus-visible fallback). NULL
+      // (not audited) excluded.
+      return `is_external = 0 AND content_kind = 'html'
+              AND a11y_focus_suppressed = 1`;
     case 'issues:pagination-sequence-break':
       // Set post-crawl by `recomputePaginationSequence()` — see the
       // implementation comment there for the gap-detection algorithm

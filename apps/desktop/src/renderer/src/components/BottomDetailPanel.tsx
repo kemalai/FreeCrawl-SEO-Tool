@@ -1538,6 +1538,12 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['OG Title', row.ogTitle],
     ['OG Description', row.ogDescription],
     ['OG Image', row.ogImage],
+    [
+      'OG Image Dimensions',
+      row.ogImageWidth && row.ogImageWidth > 0 && row.ogImageHeight && row.ogImageHeight > 0
+        ? `${row.ogImageWidth} × ${row.ogImageHeight}`
+        : null,
+    ],
     ['OG Type', row.ogType],
     ['OG URL', row.ogUrl],
     ['OG Site Name', row.ogSiteName],
@@ -1546,6 +1552,15 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Twitter Title', row.twitterTitle],
     ['Twitter Description', row.twitterDescription],
     ['Twitter Image', row.twitterImage],
+    [
+      'Twitter Image Dimensions',
+      row.twitterImageWidth &&
+      row.twitterImageWidth > 0 &&
+      row.twitterImageHeight &&
+      row.twitterImageHeight > 0
+        ? `${row.twitterImageWidth} × ${row.twitterImageHeight}`
+        : null,
+    ],
     ['Meta Keywords', row.metaKeywords],
     ['Meta Author', row.metaAuthor],
     ['Meta Generator', row.metaGenerator],
@@ -1656,6 +1671,20 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     [
       'Form Inputs Without Label',
       row.formInputUnlabeled > 0 ? row.formInputUnlabeled : null,
+    ],
+    [
+      'Low Contrast Elements',
+      row.a11yLowContrast !== null && row.a11yLowContrast !== undefined
+        ? row.a11yLowContrast
+        : null,
+    ],
+    [
+      'Focus Outline Suppressed',
+      row.a11yFocusSuppressed === 1
+        ? 'Yes'
+        : row.a11yFocusSuppressed === 0
+          ? 'No'
+          : null,
     ],
     ['Empty Anchor Links', row.emptyAnchorCount > 0 ? row.emptyAnchorCount : null],
     ['Mixed Content (subresources)', row.mixedContentCount > 0 ? row.mixedContentCount : null],

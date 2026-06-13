@@ -1546,6 +1546,87 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 66,
+    name: 'add_social_image_dimensions',
+    // V2 Faz 16 #1 — Social image aspect-ratio validation. The post-crawl
+    // `runSocialImageProbes()` pass does a ranged GET on each distinct
+    // og:image / twitter:image URL, parses the pixel width × height out
+    // of the image header (PNG/JPEG/GIF/WebP/BMP), and stamps them onto
+    // every page that referenced that image. NULL = not yet probed;
+    // 0 = probed but undecodable / fetch failed (so we don't re-probe a
+    // broken image every crawl); >0 = real dimensions. The dedicated
+    // `og-image-wrong-aspect` / `twitter-image-wrong-aspect` issue
+    // filters read these to flag images that won't render as a proper
+    // share card (Facebook/LinkedIn 1.91:1, Twitter 2:1 or 1:1).
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      for (const col of [
+        'og_image_width',
+        'og_image_height',
+        'twitter_image_width',
+        'twitter_image_height',
+      ]) {
+        if (!cols.some((c) => c.name === col)) {
+          db.exec(`ALTER TABLE urls ADD COLUMN ${col} INTEGER`);
+        }
+      }
+    },
+  },
+  {
+    version: 67,
+    name: 'add_pagespeed_interactivity_metrics',
+    // V2 Faz 15 #1 — extend the PageSpeed audit row with the
+    // interactivity metrics PSI returns beyond the existing LCP/CLS/FCP/
+    // TBT/SpeedIndex set:
+    //   tti                — Time to Interactive (lab, `interactive`), ms
+    //   max_potential_fid  — Max Potential First Input Delay (lab,
+    //                        `max-potential-fid`), ms — Lighthouse's
+    //                        worst-case input-delay estimate, the closest
+    //                        lab proxy for the deprecated field FID.
+    //   inp                — Interaction to Next Paint, ms. INP is a field
+    //                        (CrUX) metric and the Core Web Vital that
+    //                        replaced FID in March 2024; pulled from the
+    //                        PSI `loadingExperience` block, NULL when the
+    //                        URL has no real-user data.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(pagespeed_results)')
+        .all() as unknown as { name: string }[];
+      for (const col of ['tti', 'max_potential_fid', 'inp']) {
+        if (!cols.some((c) => c.name === col)) {
+          db.exec(`ALTER TABLE pagespeed_results ADD COLUMN ${col} REAL`);
+        }
+      }
+    },
+  },
+  {
+    version: 68,
+    name: 'add_a11y_audit_columns',
+    // V2 Faz 16 — accessibility audit from the JS-render in-page pass.
+    //   a11y_low_contrast     — count of sampled text elements whose
+    //                           colour contrast is below WCAG AA
+    //                           (4.5:1 normal / 3:1 large text). NULL
+    //                           when the page wasn't rendered with the
+    //                           a11y audit on; >=0 once audited.
+    //   a11y_focus_suppressed — 0/1: a stylesheet rule removes the
+    //                           keyboard focus outline (`:focus { outline:
+    //                           none }`) without a compensating indicator
+    //                           and no `:focus-visible` fallback. NULL =
+    //                           not audited.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      for (const col of ['a11y_low_contrast', 'a11y_focus_suppressed']) {
+        if (!cols.some((c) => c.name === col)) {
+          db.exec(`ALTER TABLE urls ADD COLUMN ${col} INTEGER`);
+        }
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

@@ -371,7 +371,7 @@ export function PageSpeedTab() {
           {t('pagespeedTab.colStatus', { defaultValue: 'Status' })}
         </div>
         {/* Mobile group */}
-        <div className="flex w-[162px] flex-col border-r border-surface-800">
+        <div className="flex w-[218px] flex-col border-r border-surface-800">
           <div className="flex h-[22px] items-center justify-center gap-1 border-b border-surface-800 bg-surface-900/80 text-surface-300">
             <Smartphone size={11} />
             {t('pagespeedTab.groupMobile', { defaultValue: 'Mobile' })}
@@ -379,11 +379,12 @@ export function PageSpeedTab() {
           <div className="flex flex-1 items-end pb-1 text-center">
             <div className="w-[50px]">{t('pagespeedTab.colPerf', { defaultValue: 'Perf' })}</div>
             <div className="w-[60px]">{t('pagespeedTab.colLcp', { defaultValue: 'LCP' })}</div>
+            <div className="w-[56px]">{t('pagespeedTab.colInp', { defaultValue: 'INP' })}</div>
             <div className="w-[52px]">{t('pagespeedTab.colCls', { defaultValue: 'CLS' })}</div>
           </div>
         </div>
         {/* Desktop group */}
-        <div className="flex w-[162px] flex-col border-r border-surface-800">
+        <div className="flex w-[218px] flex-col border-r border-surface-800">
           <div className="flex h-[22px] items-center justify-center gap-1 border-b border-surface-800 bg-surface-900/80 text-surface-300">
             <Monitor size={11} />
             {t('pagespeedTab.groupDesktop', { defaultValue: 'Desktop' })}
@@ -391,6 +392,7 @@ export function PageSpeedTab() {
           <div className="flex flex-1 items-end pb-1 text-center">
             <div className="w-[50px]">{t('pagespeedTab.colPerf', { defaultValue: 'Perf' })}</div>
             <div className="w-[60px]">{t('pagespeedTab.colLcp', { defaultValue: 'LCP' })}</div>
+            <div className="w-[56px]">{t('pagespeedTab.colInp', { defaultValue: 'INP' })}</div>
             <div className="w-[52px]">{t('pagespeedTab.colCls', { defaultValue: 'CLS' })}</div>
           </div>
         </div>
@@ -525,6 +527,7 @@ function StrategyCells({ m }: { m: PagespeedMetrics | null }) {
       <>
         <MetricCell text="—" cls="text-surface-700" width={50} />
         <MetricCell text="—" cls="text-surface-700" width={60} />
+        <MetricCell text="—" cls="text-surface-700" width={56} />
         <MetricCell text="—" cls="text-surface-700" width={52} />
       </>
     );
@@ -533,7 +536,7 @@ function StrategyCells({ m }: { m: PagespeedMetrics | null }) {
     const label = classifyError(m.error);
     return (
       <div
-        className="flex w-[162px] shrink-0 cursor-help items-center justify-center gap-1 text-red-400"
+        className="flex w-[218px] shrink-0 cursor-help items-center justify-center gap-1 text-red-400"
         title={m.error ?? 'Audit failed'}
       >
         <span className="font-semibold">{label}</span>
@@ -552,6 +555,12 @@ function StrategyCells({ m }: { m: PagespeedMetrics | null }) {
         text={fmtMs(m.lcp)}
         cls={cwvClass(m.lcp, 2500, 4000)}
         width={60}
+      />
+      <MetricCell
+        text={fmtMs(m.inp)}
+        cls={cwvClass(m.inp, 200, 500)}
+        width={56}
+        title={`INP (field, CrUX) · TTI ${fmtMs(m.tti)} · Max-FID ${fmtMs(m.maxPotentialFid)}`}
       />
       <MetricCell
         text={fmtCls(m.cls)}
