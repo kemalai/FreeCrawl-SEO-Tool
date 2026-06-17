@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.0] — 2026-06-18
+
+### Added
+- Performance budget — set per-page response-time / page-size / LCP / CLS ceilings and flag every page that exceeds them under a new issue filter.
+- Structured-data validation now warns on missing Google-recommended properties (not just required ones) and covers 17 schema types including LocalBusiness, JobPosting, Review, and Course.
+
 ## [0.6.9] — 2026-06-14
 
 ### Added
