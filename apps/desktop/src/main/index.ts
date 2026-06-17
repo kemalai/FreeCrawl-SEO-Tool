@@ -743,6 +743,10 @@ function getDb(): ProjectDb {
               parsed.jsRender?.a11yAudit ??
               DEFAULT_CRAWL_CONFIG.jsRender.a11yAudit,
           },
+          performanceBudget: {
+            ...DEFAULT_CRAWL_CONFIG.performanceBudget,
+            ...(parsed.performanceBudget ?? {}),
+          },
         };
       }
     } catch {

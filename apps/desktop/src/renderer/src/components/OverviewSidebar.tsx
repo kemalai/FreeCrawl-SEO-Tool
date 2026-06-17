@@ -695,6 +695,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.ttfbVerySlow,
               category: 'issues:ttfb-very-slow',
             },
+            {
+              key: 'issues-over-budget',
+              label: 'Over Performance Budget',
+              count: o.issues.overBudget,
+              category: 'issues:over-budget',
+            },
           ],
         },
         {
@@ -1234,6 +1240,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Missing Required Property',
               count: o.issues.schemaMissingRequired,
               category: 'issues:schema-missing-required',
+            },
+            {
+              key: 'issues-schema-missing-recommended',
+              label: 'Missing Recommended Property',
+              count: o.issues.schemaMissingRecommended,
+              category: 'issues:schema-missing-recommended',
             },
           ],
         },

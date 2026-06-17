@@ -339,6 +339,7 @@
     "cpu": "CPU",
     "bodySnapshots": "Body Snapshots",
     "linkResponseCaps": "Link & Response Caps",
+    "budgetThresholds": "Budget Thresholds",
     "urlStructureThresholds": "URL Structure Thresholds",
     "linkFollowBehaviour": "Link Follow Behaviour",
     "savedProxyProfiles": "Saved Proxy Profiles",
@@ -601,6 +602,14 @@
       "lcpCandidate": "LCP candidate detection",
       "a11yAudit": "Accessibility audit (contrast + focus)"
     },
+    "performanceBudget": {
+      "intro": "Set per-page performance ceilings. After each crawl, internal HTML pages that exceed any enabled threshold are flagged under the \"Over Performance Budget\" issue filter. Response time and page size come from the crawl itself; LCP and CLS use PageSpeed Insights data when present. Set any field to 0 to disable that individual check.",
+      "enabled": "Enable performance budget",
+      "maxResponseMs": "Max response time (ms)",
+      "maxPageKb": "Max page size (KB)",
+      "maxLcpMs": "Max LCP (ms)",
+      "maxCls": "Max CLS"
+    },
     "perHostUa": {
       "intro": "Override the User-Agent on a per-host basis. Useful when crawling a mobile subdomain with the mobile-Googlebot UA in the same run as the desktop site, or when a CDN serves a different page based on the requester's UA. The first matching pattern wins; the global User-Agent (Requests tab) is the fallback.",
       "syntax1": "Pattern syntax: exact host",
@@ -735,6 +744,8 @@
   "structured": {
     "blocks": "block(s)",
     "invalid": "{{n}} invalid",
+    "missingRequired": "{{n}} missing required",
+    "missingRecommended": "{{n}} missing recommended",
     "microdataItems": "microdata items",
     "rdfaAttrs": "RDFa attrs",
     "empty": "No structured data declared on this page (no JSON-LD, microdata or RDFa).",

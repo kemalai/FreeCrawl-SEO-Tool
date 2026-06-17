@@ -338,6 +338,7 @@
     "cpu": "CPU",
     "bodySnapshots": "Gövde Snapshot'ları",
     "linkResponseCaps": "Link & Yanıt Limitleri",
+    "budgetThresholds": "Bütçe Eşikleri",
     "urlStructureThresholds": "URL Yapı Eşikleri",
     "linkFollowBehaviour": "Link Takip Davranışı",
     "savedProxyProfiles": "Kayıtlı Proxy Profilleri",
@@ -600,6 +601,14 @@
       "lcpCandidate": "LCP aday tespiti",
       "a11yAudit": "Erişilebilirlik denetimi (kontrast + odak)"
     },
+    "performanceBudget": {
+      "intro": "Sayfa başına performans tavanları belirleyin. Her crawl'dan sonra, etkin eşiklerden herhangi birini aşan dahili HTML sayfaları \"Performans Bütçesini Aşan\" issue filtresinde işaretlenir. Yanıt süresi ve sayfa boyutu crawl'dan; LCP ve CLS mevcutsa PageSpeed Insights verisinden gelir. Bir kontrolü devre dışı bırakmak için ilgili alanı 0 yapın.",
+      "enabled": "Performans bütçesini etkinleştir",
+      "maxResponseMs": "Maks yanıt süresi (ms)",
+      "maxPageKb": "Maks sayfa boyutu (KB)",
+      "maxLcpMs": "Maks LCP (ms)",
+      "maxCls": "Maks CLS"
+    },
     "perHostUa": {
       "intro": "User-Agent'ı host bazında geçersiz kıl. Mobil bir alt alan adını mobile-Googlebot UA ile masaüstü sitesiyle aynı koşuda crawl ederken veya bir CDN, isteyene göre farklı sayfa servis ettiğinde faydalı. İlk eşleşen kalıp kazanır; global User-Agent (Requests sekmesi) yedektir.",
       "syntax1": "Kalıp söz dizimi: tam host",
@@ -734,6 +743,8 @@
   "structured": {
     "blocks": "blok",
     "invalid": "{{n}} geçersiz",
+    "missingRequired": "{{n}} gerekli eksik",
+    "missingRecommended": "{{n}} önerilen eksik",
     "microdataItems": "microdata öğesi",
     "rdfaAttrs": "RDFa özniteliği",
     "empty": "Bu sayfada yapısal veri yok (JSON-LD, microdata veya RDFa yok).",

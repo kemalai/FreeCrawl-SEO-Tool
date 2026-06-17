@@ -149,6 +149,7 @@ const TR_LABELS: Record<string, string> = {
   'Very Slow (>3s)': 'Çok Yavaş (>3sn)',
   'TTFB Slow (>600ms)': 'TTFB Yavaş (>600ms)',
   'TTFB Very Slow (>1.8s)': 'TTFB Çok Yavaş (>1.8sn)',
+  'Over Performance Budget': 'Performans Bütçesini Aşan',
   'Large (>1MB)': 'Büyük (>1MB)',
   'Critical Size (>3MB)': 'Kritik Boyut (>3MB)',
   'Render-Blocking Head (>5)': 'Render-Blocking Head (>5)',
@@ -232,6 +233,7 @@ const TR_LABELS: Record<string, string> = {
   'Duplicate @id': 'Yinelenen @id',
   'Malformed @type': 'Bozuk @type',
   'Missing Required Property': 'Gerekli Özellik Eksik',
+  'Missing Recommended Property': 'Önerilen Özellik Eksik',
 
   // Social / OG
   'OpenGraph Tags Missing': 'OpenGraph Etiketleri Eksik',
@@ -247,6 +249,7 @@ const TR_LABELS: Record<string, string> = {
   'Low Contrast Text': 'Düşük Kontrastlı Metin',
   'Focus Outline Suppressed': 'Odak Çerçevesi Bastırılmış',
   'Low Contrast Elements': 'Düşük Kontrastlı Öğeler',
+  'Performance Budget': 'Performans Bütçesi',
 
   // PWA / icons
   'Viewport Meta Missing': 'Viewport Meta Eksik',

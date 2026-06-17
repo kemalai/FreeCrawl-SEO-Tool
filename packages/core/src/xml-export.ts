@@ -124,6 +124,7 @@ const XML_COLUMNS: (keyof CrawlUrlRow)[] = [
   'schemaDuplicateIds',
   'schemaUnknownTypes',
   'schemaMissingRequired',
+  'schemaMissingRecommended',
   'jsOnlyLinksCount',
   'textCodeRatio',
   'fleschReadingEase',

@@ -804,6 +804,9 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.setOp('post-crawl:social-image-probes');
     await this.runSocialImageProbes();
+    await yieldToEventLoop();
+    this.setOp('post-crawl:performance-budget');
+    this.runBudgetPass();
     this.running = false;
     this.stopMemoryMonitor();
     // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
@@ -1126,6 +1129,38 @@ export class Crawler extends EventEmitter {
     );
   }
 
+  /**
+   * V2 Faz 15 — performance budget pass. Stamps each internal 200 HTML
+   * page with a bitmask of which configured ceilings it exceeded
+   * (response time / transfer size / LCP / CLS). Pure SQL on the DB, so
+   * it runs synchronously; when the budget is disabled the column is
+   * wiped to NULL. No-ops when unsupported (older DB without the method).
+   */
+  private runBudgetPass(): void {
+    if (this.stopped) return;
+    const budget = this.config.performanceBudget;
+    if (!budget) return;
+    if (typeof this.db.recomputeBudgetViolations !== 'function') return;
+    try {
+      const result = this.db.recomputeBudgetViolations(budget);
+      if (budget.enabled && result.evaluated > 0) {
+        this.emit(
+          'info',
+          `Performance budget: ${result.overBudget}/${result.evaluated} page(s) over budget`,
+        );
+      }
+    } catch (err) {
+      this.emit(
+        'error',
+        new Error(
+          `recomputeBudgetViolations failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        ),
+      );
+    }
+  }
+
   private async runTlsCertProbes(): Promise<void> {
     if (!this.config.probeTlsCerts) return;
     if (this.stopped) return;
@@ -1336,6 +1371,8 @@ export class Crawler extends EventEmitter {
     await this.runTlsCertProbes();
     await yieldToEventLoop();
     await this.runSocialImageProbes();
+    await yieldToEventLoop();
+    this.runBudgetPass();
     this.running = false;
     this.stopMemoryMonitor();
     this.seen.clear();
@@ -2496,6 +2533,7 @@ export class Crawler extends EventEmitter {
           schemaDuplicateIds: parsed.schemaDuplicateIds,
           schemaUnknownTypes: parsed.schemaUnknownTypes,
           schemaMissingRequired: parsed.schemaMissingRequired,
+          schemaMissingRecommended: parsed.schemaMissingRecommended,
           headingOrderViolations: parsed.headingOrderViolations,
           subresourceRequestCount: parsed.subresourceRequestCount,
           headings:

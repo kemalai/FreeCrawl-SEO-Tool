@@ -94,6 +94,12 @@ export interface ParsedPage {
    * VideoObject) and which is missing one or more required properties.
    */
   schemaMissingRequired: number;
+  /**
+   * Count of JSON-LD nodes that satisfy their required properties but
+   * are missing one or more of the type's Google-recommended properties
+   * (warning-level enrichment signal). One count per node.
+   */
+  schemaMissingRecommended: number;
   /** Number of Microdata `itemscope` elements declared on the page. */
   microdataCount: number;
   /** Number of RDFa `typeof` / `vocab` / `property` attribute occurrences. */
@@ -515,6 +521,7 @@ export function parseHtml(
   const schemaIdCounts = new Map<string, number>();
   let schemaUnknownTypes = 0;
   let schemaMissingRequired = 0;
+  let schemaMissingRecommended = 0;
   $('script[type="application/ld+json"]').each((_, el) => {
     const raw = $(el).text().trim();
     if (!raw) return;
@@ -524,6 +531,7 @@ export function parseHtml(
       const validation = walkSchemaForValidation(parsed, schemaIdCounts);
       schemaUnknownTypes += validation.unknownTypeCount;
       schemaMissingRequired += validation.missingRequiredCount;
+      schemaMissingRecommended += validation.missingRecommendedCount;
       schemaBlockCount++;
     } catch {
       // Malformed JSON-LD — still count presence so Structured Data
@@ -1289,6 +1297,7 @@ export function parseHtml(
     schemaDuplicateIds,
     schemaUnknownTypes,
     schemaMissingRequired,
+    schemaMissingRecommended,
     microdataCount,
     rdfaCount,
     insecureFormActionCount,
@@ -1606,26 +1615,99 @@ function collectSchemaTypes(node: unknown, out: Set<string>): void {
  */
 const SCHEMA_REQUIRED_PROPS: Record<
   string,
-  { required: string[]; oneOf?: string[][] }
+  { required: string[]; oneOf?: string[][]; recommended?: string[] }
 > = {
-  Article: { required: ['headline', 'image', 'datePublished'] },
-  NewsArticle: { required: ['headline', 'image', 'datePublished'] },
-  BlogPosting: { required: ['headline', 'image', 'datePublished'] },
-  Product: { required: ['name'], oneOf: [['image', 'offers']] },
+  Article: {
+    required: ['headline', 'image', 'datePublished'],
+    recommended: ['author', 'dateModified', 'publisher'],
+  },
+  NewsArticle: {
+    required: ['headline', 'image', 'datePublished'],
+    recommended: ['author', 'dateModified', 'publisher'],
+  },
+  BlogPosting: {
+    required: ['headline', 'image', 'datePublished'],
+    recommended: ['author', 'dateModified', 'publisher'],
+  },
+  Product: {
+    required: ['name'],
+    oneOf: [['image', 'offers']],
+    recommended: ['description', 'brand', 'review', 'aggregateRating', 'sku'],
+  },
   BreadcrumbList: { required: ['itemListElement'] },
   Recipe: {
     required: ['name', 'image'],
     oneOf: [['recipeIngredient', 'recipeInstructions']],
+    recommended: [
+      'author',
+      'datePublished',
+      'aggregateRating',
+      'nutrition',
+      'prepTime',
+      'cookTime',
+      'totalTime',
+      'recipeYield',
+    ],
   },
-  Event: { required: ['name', 'startDate', 'location'] },
+  Event: {
+    required: ['name', 'startDate', 'location'],
+    recommended: ['endDate', 'offers', 'performer', 'image', 'description'],
+  },
   FAQPage: { required: ['mainEntity'] },
-  HowTo: { required: ['name', 'step'] },
-  Organization: { required: [], oneOf: [['name', 'url']] },
-  VideoObject: { required: ['name', 'thumbnailUrl', 'uploadDate'] },
+  HowTo: {
+    required: ['name', 'step'],
+    recommended: ['image', 'totalTime', 'supply', 'tool'],
+  },
+  Organization: {
+    required: [],
+    oneOf: [['name', 'url']],
+    recommended: ['logo', 'contactPoint', 'sameAs'],
+  },
+  VideoObject: {
+    required: ['name', 'thumbnailUrl', 'uploadDate'],
+    recommended: ['description', 'duration', 'contentUrl', 'embedUrl'],
+  },
+  LocalBusiness: {
+    required: ['name'],
+    recommended: [
+      'address',
+      'telephone',
+      'openingHours',
+      'geo',
+      'priceRange',
+      'image',
+    ],
+  },
+  JobPosting: {
+    required: ['title', 'description', 'datePosted', 'hiringOrganization'],
+    recommended: ['validThrough', 'employmentType', 'jobLocation', 'baseSalary'],
+  },
+  Course: {
+    required: ['name', 'description'],
+    recommended: ['provider', 'offers', 'hasCourseInstance'],
+  },
+  Review: {
+    required: ['reviewRating'],
+    oneOf: [['itemReviewed', 'author']],
+    recommended: ['datePublished', 'publisher'],
+  },
+  Person: {
+    required: ['name'],
+    recommended: ['url', 'image', 'jobTitle', 'sameAs'],
+  },
+  WebSite: {
+    required: ['name', 'url'],
+    recommended: ['potentialAction'],
+  },
+  SoftwareApplication: {
+    required: ['name'],
+    oneOf: [['offers', 'aggregateRating', 'review']],
+    recommended: ['applicationCategory', 'operatingSystem'],
+  },
 };
 
 /**
- * Walk a parsed JSON-LD payload and accumulate three structured-data
+ * Walk a parsed JSON-LD payload and accumulate four structured-data
  * health signals into the caller's tallies / map:
  *
  *   - **Duplicate `@id`** — populated by recording every `@id` value
@@ -1642,13 +1724,24 @@ const SCHEMA_REQUIRED_PROPS: Record<
  *   - **Missing required props** — when a node's `@type` matches an
  *     entry in `SCHEMA_REQUIRED_PROPS`, every entry in `required` and
  *     at least one entry of each `oneOf[i]` group must be present.
+ *   - **Missing recommended props** — a node that satisfies its
+ *     required props but is missing one or more of the type's
+ *     `recommended` props (Google Rich Results "recommended" fields).
+ *     Counted once per node — a warning-level enrichment signal, not a
+ *     hard validation failure. A node already flagged as missing
+ *     *required* props is not double-counted as recommended.
  */
 function walkSchemaForValidation(
   node: unknown,
   idCounts: Map<string, number>,
-): { unknownTypeCount: number; missingRequiredCount: number } {
+): {
+  unknownTypeCount: number;
+  missingRequiredCount: number;
+  missingRecommendedCount: number;
+} {
   let unknownTypeCount = 0;
   let missingRequiredCount = 0;
+  let missingRecommendedCount = 0;
 
   const visit = (n: unknown): void => {
     if (!n) return;
@@ -1685,17 +1778,30 @@ function walkSchemaForValidation(
       // Required-prop check for the curated high-traffic types.
       const rule = SCHEMA_REQUIRED_PROPS[t];
       if (!rule) continue;
+      let nodeMissingRequired = false;
       for (const key of rule.required) {
         if (!isTruthyProp(obj[key])) {
           missingRequiredCount++;
+          nodeMissingRequired = true;
           break; // one failure per node, not per missing prop
         }
       }
-      if (rule.oneOf) {
+      if (!nodeMissingRequired && rule.oneOf) {
         for (const group of rule.oneOf) {
           if (!group.some((k) => isTruthyProp(obj[k]))) {
             missingRequiredCount++;
+            nodeMissingRequired = true;
             break;
+          }
+        }
+      }
+      // Recommended-prop check — only when the node is otherwise valid,
+      // so a node already failing a required prop isn't double-flagged.
+      if (!nodeMissingRequired && rule.recommended) {
+        for (const key of rule.recommended) {
+          if (!isTruthyProp(obj[key])) {
+            missingRecommendedCount++;
+            break; // one warning per node
           }
         }
       }
@@ -1710,7 +1816,7 @@ function walkSchemaForValidation(
   };
 
   visit(node);
-  return { unknownTypeCount, missingRequiredCount };
+  return { unknownTypeCount, missingRequiredCount, missingRecommendedCount };
 }
 
 function isTruthyProp(v: unknown): boolean {

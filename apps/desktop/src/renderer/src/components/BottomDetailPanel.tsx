@@ -1686,6 +1686,20 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
           ? 'No'
           : null,
     ],
+    [
+      'Performance Budget',
+      (() => {
+        const s = row.budgetStatus;
+        if (s === null || s === undefined) return null;
+        if (s === 0) return 'Within budget';
+        const parts: string[] = [];
+        if (s & 1) parts.push('Response');
+        if (s & 2) parts.push('Size');
+        if (s & 4) parts.push('LCP');
+        if (s & 8) parts.push('CLS');
+        return `Over: ${parts.join(', ')}`;
+      })(),
+    ],
     ['Empty Anchor Links', row.emptyAnchorCount > 0 ? row.emptyAnchorCount : null],
     ['Mixed Content (subresources)', row.mixedContentCount > 0 ? row.mixedContentCount : null],
     [
@@ -2920,6 +2934,12 @@ function StructuredDataView({
         </span>
         {row.schemaInvalidCount > 0 && (
           <span className="text-amber-400">{t('structured.invalid', { defaultValue: '{{n}} invalid', n: row.schemaInvalidCount })}</span>
+        )}
+        {row.schemaMissingRequired > 0 && (
+          <span className="text-red-400">{t('structured.missingRequired', { defaultValue: '{{n}} missing required', n: row.schemaMissingRequired })}</span>
+        )}
+        {row.schemaMissingRecommended > 0 && (
+          <span className="text-amber-400">{t('structured.missingRecommended', { defaultValue: '{{n}} missing recommended', n: row.schemaMissingRecommended })}</span>
         )}
         <span>
           <span className="font-medium text-surface-200">{row.microdataCount}</span> {t('structured.microdataItems', { defaultValue: 'microdata items' })}

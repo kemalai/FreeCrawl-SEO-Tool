@@ -38,6 +38,7 @@ import {
   ExternalLink,
   BookOpen,
   Chrome,
+  Target,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -168,6 +169,12 @@ interface FormState {
   jsMobileUsability: boolean;
   jsLcpCandidate: boolean;
   jsA11yAudit: boolean;
+  // V2 Faz 15 — performance budget
+  budgetEnabled: boolean;
+  budgetMaxResponseMs: string;
+  budgetMaxPageKb: string;
+  budgetMaxLcpMs: string;
+  budgetMaxCls: string;
 }
 
 type SectionKey =
@@ -193,6 +200,7 @@ type SectionKey =
   | 'per-host-ua'
   | 'integrations'
   | 'rendering'
+  | 'performance-budget'
   | 'storage'
   | 'privacy'
   | 'language';
@@ -347,6 +355,13 @@ const SECTIONS: SectionDef[] = [
       'rendering javascript js render playwright chromium browser headless headful viewport mobile desktop ajax timeout wait selector resource block image font script media css spa hydration',
   },
   {
+    key: 'performance-budget',
+    label: 'Performance Budget',
+    icon: Target,
+    keywords:
+      'performance budget threshold response time ttfb page size weight lcp cls core web vitals ceiling limit over budget',
+  },
+  {
     key: 'storage',
     label: 'Storage',
     icon: FolderOpen,
@@ -453,6 +468,13 @@ function configToForm(c: CrawlConfig): FormState {
     jsMobileUsability: c.jsRender?.mobileUsability ?? false,
     jsLcpCandidate: c.jsRender?.lcpCandidate ?? false,
     jsA11yAudit: c.jsRender?.a11yAudit ?? false,
+    budgetEnabled: c.performanceBudget?.enabled ?? false,
+    budgetMaxResponseMs: String(c.performanceBudget?.maxResponseMs ?? 800),
+    budgetMaxPageKb: String(
+      Math.round((c.performanceBudget?.maxPageBytes ?? 1048576) / 1024),
+    ),
+    budgetMaxLcpMs: String(c.performanceBudget?.maxLcpMs ?? 2500),
+    budgetMaxCls: String(c.performanceBudget?.maxCls ?? 0.1),
   };
 }
 
@@ -690,6 +712,13 @@ export function SettingsDialog({ open, onClose }: Props) {
         lcpCandidate: form.jsLcpCandidate,
         a11yAudit: form.jsA11yAudit,
       },
+      performanceBudget: {
+        enabled: form.budgetEnabled,
+        maxResponseMs: Math.max(0, num(form.budgetMaxResponseMs, 800)),
+        maxPageBytes: Math.max(0, num(form.budgetMaxPageKb, 1024)) * 1024,
+        maxLcpMs: Math.max(0, num(form.budgetMaxLcpMs, 2500)),
+        maxCls: Math.max(0, Number.parseFloat(form.budgetMaxCls) || 0),
+      },
     });
     onClose();
   }
@@ -854,6 +883,9 @@ export function SettingsDialog({ open, onClose }: Props) {
               {active === 'integrations' && <IntegrationsPanel />}
               {active === 'rendering' && (
                 <RenderingPanel form={form} update={update} />
+              )}
+              {active === 'performance-budget' && (
+                <PerformanceBudgetPanel form={form} update={update} />
               )}
               {active === 'storage' && <StoragePanel />}
               {active === 'privacy' && <PrivacyPanel />}
@@ -3204,6 +3236,68 @@ function RenderingPanel({ form, update }: PanelProps) {
             hint=""
             info="Audits the rendered DOM for WCAG AA colour-contrast failures (4.5:1 normal text, 3:1 large text) and stylesheet rules that suppress the keyboard focus outline without a :focus-visible fallback. Surfaces the Low-Contrast Text and Focus Outline Suppressed issue filters."
             example="On for accessibility / WCAG audits."
+          />
+        </div>
+      </div>
+    </>
+  );
+}
+
+function PerformanceBudgetPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
+  const on = form.budgetEnabled;
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settingsPanels.performanceBudget.intro', {
+          defaultValue:
+            'Set per-page performance ceilings. After each crawl, internal HTML pages that exceed any enabled threshold are flagged under the "Over Performance Budget" issue filter. Response time and page size come from the crawl itself; LCP and CLS use PageSpeed Insights data when present. Set any field to 0 to disable that individual check.',
+        })}
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <Bool
+          label={t('settingsPanels.performanceBudget.enabled', { defaultValue: 'Enable performance budget' })}
+          checked={form.budgetEnabled}
+          onChange={(v) => update('budgetEnabled', v)}
+          hint=""
+          info="When off, no budget evaluation runs and the verdict column is cleared. When on, the post-crawl pass scores every internal 200 HTML page against the ceilings below."
+          example="On for performance-focused audits that should fail pages over a target."
+        />
+      </div>
+
+      <div className={clsx('mb-4 rounded border border-surface-800 bg-surface-950/40 p-3', !on && 'opacity-50')}>
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settingsGroups.budgetThresholds', { defaultValue: 'Budget Thresholds' })}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Num
+            label={t('settingsPanels.performanceBudget.maxResponseMs', { defaultValue: 'Max response time (ms)' })}
+            value={form.budgetMaxResponseMs}
+            onChange={(v) => update('budgetMaxResponseMs', v)}
+            info="Server response time (a TTFB proxy) measured during the crawl. Pages slower than this are flagged. Google considers a good server response time under 800 ms."
+            example="800 default; 200 for CDN-backed static; 0 to disable."
+          />
+          <Num
+            label={t('settingsPanels.performanceBudget.maxPageKb', { defaultValue: 'Max page size (KB)' })}
+            value={form.budgetMaxPageKb}
+            onChange={(v) => update('budgetMaxPageKb', v)}
+            info="HTML transfer size of the page document. Heavy HTML payloads delay first paint. Stored as bytes internally; entered here in kilobytes."
+            example="1024 (1 MB) default; 150 for a lean HTML budget; 0 to disable."
+          />
+          <Num
+            label={t('settingsPanels.performanceBudget.maxLcpMs', { defaultValue: 'Max LCP (ms)' })}
+            value={form.budgetMaxLcpMs}
+            onChange={(v) => update('budgetMaxLcpMs', v)}
+            info="Largest Contentful Paint from PageSpeed Insights lab data, when the URL has been audited. Google's 'good' LCP threshold is 2500 ms. Pages without PSI data are never flagged on this metric."
+            example="2500 default (Google 'good'); 0 to disable."
+          />
+          <Num
+            label={t('settingsPanels.performanceBudget.maxCls', { defaultValue: 'Max CLS' })}
+            value={form.budgetMaxCls}
+            onChange={(v) => update('budgetMaxCls', v)}
+            info="Cumulative Layout Shift from PageSpeed Insights, when present. Google's 'good' CLS threshold is 0.1. Unitless; accepts decimals. Pages without PSI data are never flagged."
+            example="0.1 default (Google 'good'); 0 to disable."
           />
         </div>
       </div>

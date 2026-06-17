@@ -1627,6 +1627,48 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 69,
+    name: 'add_budget_status',
+    // V2 Faz 15 — performance budget verdict. The post-crawl
+    // `recomputeBudgetViolations()` pass writes a bitmask per internal
+    // 200 HTML page when the budget is enabled:
+    //   bit 1 — response time (TTFB proxy) over `maxResponseMs`
+    //   bit 2 — HTML transfer size over `maxPageBytes`
+    //   bit 4 — LCP over `maxLcpMs`   (from PageSpeed lab data, if any)
+    //   bit 8 — CLS over `maxCls`     (from PageSpeed data, if any)
+    // 0 = evaluated and within budget; NULL = budget disabled or the
+    // page wasn't an internal 200 HTML page. LCP/CLS bits only set when
+    // PageSpeed data exists for the URL at crawl-finalize time.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'budget_status')) {
+        db.exec('ALTER TABLE urls ADD COLUMN budget_status INTEGER');
+      }
+    },
+  },
+  {
+    version: 70,
+    name: 'add_schema_missing_recommended',
+    // V2 Faz 16 — structured-data validation v2. Counts JSON-LD nodes
+    // that satisfy their required props but omit one or more of the
+    // type's Google-recommended properties (warning-level enrichment
+    // signal, e.g. an Article without `author`/`dateModified`, a Product
+    // without `aggregateRating`/`review`). Populated by the html-parser
+    // schema-validation pass; 0 = no recommended-prop gaps on the page.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'schema_missing_recommended')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN schema_missing_recommended INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

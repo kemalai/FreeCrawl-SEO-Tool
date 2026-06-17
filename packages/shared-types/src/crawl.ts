@@ -166,6 +166,7 @@ export type UrlCategory =
   | 'issues:schema-duplicate-id'
   | 'issues:schema-unknown-type'
   | 'issues:schema-missing-required'
+  | 'issues:schema-missing-recommended'
   | 'issues:target-blank-no-noopener'
   | 'issues:page-empty'
   | 'issues:og-image-not-absolute'
@@ -215,6 +216,7 @@ export type UrlCategory =
   | 'tab:serp'
   | 'issues:hreflang-inconsistent-lang'
   | 'issues:page-many-requests'
+  | 'issues:over-budget'
 
 export type Indexability =
   | 'indexable'
@@ -318,6 +320,8 @@ export interface CrawlUrlRow {
   schemaUnknownTypes: number;
   /** Nodes failing required-property check for Article/Product/Recipe/Event/FAQ/HowTo/etc. */
   schemaMissingRequired: number;
+  /** Nodes that pass required props but omit one or more Google-recommended props (warning). */
+  schemaMissingRecommended: number;
   /** Total user-facing form inputs (input/textarea/select, excluding hidden/submit/button/image/reset). */
   formInputCount: number;
   /** Form inputs without label / aria-label / title (WCAG 1.3.1, 4.1.2 violation). */
@@ -487,6 +491,13 @@ export interface CrawlUrlRow {
    */
   a11yLowContrast: number | null;
   a11yFocusSuppressed: number | null;
+  /**
+   * V2 Faz 15 — performance budget verdict, a bitmask: 1=response time,
+   * 2=transfer size, 4=LCP, 8=CLS. 0 = evaluated and within budget,
+   * >0 = one or more ceilings exceeded. NULL when the budget pass didn't
+   * run (disabled) or the page wasn't an internal 200 HTML page.
+   */
+  budgetStatus: number | null;
   favicon: string | null;
   /** Resolved `<link rel="apple-touch-icon">` URL, else null. */
   appleTouchIcon: string | null;
@@ -982,6 +993,29 @@ export interface CrawlConfig {
    * crash older projects that pre-date this block.
    */
   jsRender: JsRenderConfig;
+
+  /**
+   * V2 Faz 15 — performance budget. When enabled, the post-crawl pass
+   * flags every internal HTML page whose response time, transfer size,
+   * LCP, or CLS exceeds the configured ceiling. Off by default; the
+   * per-page verdict lands in `urls.budget_status` and drives the
+   * "Over Performance Budget" issue filter.
+   */
+  performanceBudget: PerformanceBudgetConfig;
+}
+
+/** Per-crawl performance budget — surfaces in Settings → Performance. */
+export interface PerformanceBudgetConfig {
+  /** Master switch. When false the budget pass is skipped entirely. */
+  enabled: boolean;
+  /** Max response time (TTFB proxy) in ms; 0 disables this check. */
+  maxResponseMs: number;
+  /** Max HTML transfer size in bytes; 0 disables this check. */
+  maxPageBytes: number;
+  /** Max LCP in ms from PageSpeed lab data; 0 disables this check. */
+  maxLcpMs: number;
+  /** Max CLS (unitless) from PageSpeed; 0 disables this check. */
+  maxCls: number;
 }
 
 /** Per-crawl Playwright settings — surfaces in Settings → Rendering. */
@@ -1341,6 +1375,8 @@ export interface OverviewCounts {
     schemaUnknownType: number;
     /** Pages where a high-traffic JSON-LD type is missing one or more Google-required properties. */
     schemaMissingRequired: number;
+    /** Pages where a JSON-LD type passes required props but omits Google-recommended props (warning). */
+    schemaMissingRecommended: number;
     /** Pages referencing at least one image whose HEAD probe returned a 4xx/5xx status. */
     imageBrokenSrc: number;
     /** Pages with at least one `<a target="_blank">` without `rel="noopener"` (reverse-tabnabbing risk). */
@@ -1516,6 +1552,13 @@ export interface OverviewCounts {
      * party tag injection.
      */
     pageManyRequests: number;
+    /**
+     * V2 Faz 15 — internal HTML pages over the configured performance
+     * budget (response time / transfer size / LCP / CLS). Populated by
+     * the post-crawl `recomputeBudgetViolations()` pass; 0 when the
+     * budget is disabled.
+     */
+    overBudget: number;
   };
 }
 
@@ -1800,5 +1843,12 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
     mobileUsability: false,
     lcpCandidate: false,
     a11yAudit: false,
+  },
+  performanceBudget: {
+    enabled: false,
+    maxResponseMs: 800,
+    maxPageBytes: 1048576,
+    maxLcpMs: 2500,
+    maxCls: 0.1,
   },
 };

@@ -15,6 +15,7 @@ import type {
   InlinkRow,
   OutlinkRow,
   OverviewCounts,
+  PerformanceBudgetConfig,
   PagespeedMetrics,
   PagespeedRow,
   PagespeedStrategy,
@@ -115,6 +116,10 @@ interface UrlRowDb {
    *  NULL when not audited; a11y_low_contrast >=0, a11y_focus_suppressed 0/1. */
   a11y_low_contrast: number | null;
   a11y_focus_suppressed: number | null;
+  /** V2 Faz 15 — performance budget verdict bitmask
+   *  (1=response, 2=size, 4=LCP, 8=CLS). 0 = within budget,
+   *  NULL = budget disabled / page not an internal 200 HTML page. */
+  budget_status: number | null;
   favicon: string | null;
   mixed_content_count: number;
   mixed_content_active: number;
@@ -198,6 +203,7 @@ interface UrlRowDb {
   schema_duplicate_ids: number;
   schema_unknown_types: number;
   schema_missing_required: number;
+  schema_missing_recommended: number;
   heading_order_violations: number;
   subresource_request_count: number;
 }
@@ -330,6 +336,7 @@ export interface UpsertUrlInput {
   schemaDuplicateIds?: number;
   schemaUnknownTypes?: number;
   schemaMissingRequired?: number;
+  schemaMissingRecommended?: number;
   /** Skipped-level heading events on this page (h1→h3 etc.). */
   headingOrderViolations?: number;
   /** Total subresource requests declared (img/script/stylesheet/iframe/video/audio). */
@@ -401,6 +408,7 @@ const UPSERT_URL_SQL = `
     url_malformed, og_type, og_url, og_site_name, og_locale, android_icon,
     landmark_main, skip_link_present, aria_invalid_roles,
     schema_duplicate_ids, schema_unknown_types, schema_missing_required,
+    schema_missing_recommended,
     heading_order_violations, subresource_request_count,
     amp_page, amp_validation_errors
   ) VALUES (
@@ -441,6 +449,7 @@ const UPSERT_URL_SQL = `
     :url_malformed, :og_type, :og_url, :og_site_name, :og_locale, :android_icon,
     :landmark_main, :skip_link_present, :aria_invalid_roles,
     :schema_duplicate_ids, :schema_unknown_types, :schema_missing_required,
+    :schema_missing_recommended,
     :heading_order_violations, :subresource_request_count,
     :amp_page, :amp_validation_errors
   )
@@ -569,6 +578,7 @@ const UPSERT_URL_SQL = `
     schema_duplicate_ids = excluded.schema_duplicate_ids,
     schema_unknown_types = excluded.schema_unknown_types,
     schema_missing_required = excluded.schema_missing_required,
+    schema_missing_recommended = excluded.schema_missing_recommended,
     heading_order_violations = excluded.heading_order_violations,
     subresource_request_count = excluded.subresource_request_count,
     amp_page = excluded.amp_page,
@@ -1378,6 +1388,7 @@ export class ProjectDb {
       schema_duplicate_ids: input.schemaDuplicateIds ?? 0,
       schema_unknown_types: input.schemaUnknownTypes ?? 0,
       schema_missing_required: input.schemaMissingRequired ?? 0,
+      schema_missing_recommended: input.schemaMissingRecommended ?? 0,
       heading_order_violations: input.headingOrderViolations ?? 0,
       subresource_request_count: input.subresourceRequestCount ?? 0,
     };
@@ -2176,6 +2187,94 @@ export class ProjectDb {
       boilerplateShingles: boilerplateSet.size,
       pagesAboveHighThreshold,
     };
+  }
+
+  /**
+   * V2 Faz 15 — performance budget pass. Stamps `urls.budget_status`
+   * for every internal 200 HTML page with a bitmask of which configured
+   * ceilings it blew through:
+   *   1 = response time (TTFB proxy) > maxResponseMs
+   *   2 = HTML transfer size > maxPageBytes
+   *   4 = LCP > maxLcpMs   (from PageSpeed lab data, if present)
+   *   8 = CLS > maxCls     (from PageSpeed data, if present)
+   * A threshold of 0 disables that individual check. LCP/CLS use the
+   * worst (MAX) value across whatever PageSpeed strategies were run for
+   * the URL — a page over budget on mobile OR desktop is flagged. Pages
+   * with no PageSpeed data simply never light those bits.
+   *
+   * Returns the number of pages evaluated and how many exceeded budget.
+   * When the budget is disabled the column is wiped to NULL so a stale
+   * verdict from a prior crawl doesn't linger.
+   */
+  recomputeBudgetViolations(
+    budget: PerformanceBudgetConfig,
+  ): { evaluated: number; overBudget: number } {
+    const wipe = this.db.prepare(
+      "UPDATE urls SET budget_status = NULL WHERE is_external = 0 AND content_kind = 'html'",
+    );
+    if (!budget.enabled) {
+      this.db.exec('BEGIN');
+      try {
+        wipe.run();
+        this.db.exec('COMMIT');
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      }
+      return { evaluated: 0, overBudget: 0 };
+    }
+
+    // A `> 0` threshold means "check enabled". The CASE arms short-
+    // circuit on a 0 threshold so the bit is never set. NULL metric
+    // comparisons evaluate to NULL → ELSE 0, so un-measured pages
+    // (no response time / no PageSpeed) don't false-flag.
+    const update = this.db.prepare(`
+      UPDATE urls SET budget_status =
+          (CASE WHEN :maxResp  > 0 AND response_time_ms IS NOT NULL
+                 AND response_time_ms > :maxResp  THEN 1 ELSE 0 END)
+        + (CASE WHEN :maxBytes > 0 AND content_length IS NOT NULL
+                 AND content_length   > :maxBytes THEN 2 ELSE 0 END)
+        + (CASE WHEN :maxLcp   > 0 AND (
+                 SELECT MAX(p.lcp) FROM pagespeed_results p
+                  WHERE p.url = urls.url AND p.status = 'ok'
+               ) > :maxLcp THEN 4 ELSE 0 END)
+        + (CASE WHEN :maxCls   > 0 AND (
+                 SELECT MAX(p.cls) FROM pagespeed_results p
+                  WHERE p.url = urls.url AND p.status = 'ok'
+               ) > :maxCls THEN 8 ELSE 0 END)
+      WHERE is_external = 0 AND content_kind = 'html' AND status_code = 200
+    `);
+
+    this.db.exec('BEGIN');
+    try {
+      wipe.run();
+      update.run({
+        maxResp: budget.maxResponseMs,
+        maxBytes: budget.maxPageBytes,
+        maxLcp: budget.maxLcpMs,
+        maxCls: budget.maxCls,
+      });
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    const evaluated = (
+      this.db
+        .prepare(
+          'SELECT COUNT(*) AS n FROM urls WHERE budget_status IS NOT NULL',
+        )
+        .get() as { n: number }
+    ).n;
+    const overBudget = (
+      this.db
+        .prepare(
+          'SELECT COUNT(*) AS n FROM urls WHERE budget_status IS NOT NULL AND budget_status > 0',
+        )
+        .get() as { n: number }
+    ).n;
+    return { evaluated, overBudget };
   }
 
   /**
@@ -4404,6 +4503,9 @@ export class ProjectDb {
       schemaMissingRequired: countWhere(
         `${html} AND schema_missing_required > 0`,
       ),
+      schemaMissingRecommended: countWhere(
+        `${html} AND schema_missing_recommended > 0`,
+      ),
       imageBrokenSrc: countWhere(
         `${html} AND EXISTS (
            SELECT 1 FROM image_usages iu
@@ -4589,6 +4691,9 @@ export class ProjectDb {
       ),
       pageManyRequests: countWhere(
         `${html} AND subresource_request_count > 100`,
+      ),
+      overBudget: countWhere(
+        `${html} AND budget_status IS NOT NULL AND budget_status > 0`,
       ),
     };
   }
@@ -6312,6 +6417,7 @@ export class ProjectDb {
     boilerplateCoverage: r.boilerplate_coverage,
     a11yLowContrast: r.a11y_low_contrast ?? null,
     a11yFocusSuppressed: r.a11y_focus_suppressed ?? null,
+    budgetStatus: r.budget_status ?? null,
     favicon: r.favicon,
     mixedContentCount: r.mixed_content_count,
     mixedContentActive: r.mixed_content_active ?? 0,
@@ -6395,6 +6501,7 @@ export class ProjectDb {
     schemaDuplicateIds: r.schema_duplicate_ids ?? 0,
     schemaUnknownTypes: r.schema_unknown_types ?? 0,
     schemaMissingRequired: r.schema_missing_required ?? 0,
+    schemaMissingRecommended: r.schema_missing_recommended ?? 0,
     headingOrderViolations: r.heading_order_violations ?? 0,
     subresourceRequestCount: r.subresource_request_count ?? 0,
     crawledAt: r.crawled_at,
@@ -7503,6 +7610,14 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // more required properties.
       return `is_external = 0 AND content_kind = 'html'
               AND schema_missing_required > 0`;
+    case 'issues:schema-missing-recommended':
+      // Page has at least one JSON-LD node that satisfies its required
+      // props but omits one or more of the type's Google-recommended
+      // properties (e.g. an Article without author/dateModified, a
+      // Product without aggregateRating/review). Warning-level — the
+      // markup is valid but not eligible for richer result features.
+      return `is_external = 0 AND content_kind = 'html'
+              AND schema_missing_recommended > 0`;
     case 'issues:image-broken-src':
       // Pages referencing at least one internal image whose HEAD probe
       // returned a 4xx/5xx status. Uses the existing `probe_status`
@@ -7935,6 +8050,12 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // party tag injection.
       return `is_external = 0 AND content_kind = 'html'
               AND subresource_request_count > 100`;
+    case 'issues:over-budget':
+      // V2 Faz 15 — pages flagged by the post-crawl performance-budget
+      // pass. `budget_status` is a bitmask (1=response, 2=size, 4=LCP,
+      // 8=CLS); >0 means at least one configured ceiling was exceeded.
+      // NULL/0 (budget off, or within budget) is excluded.
+      return 'is_external = 0 AND budget_status IS NOT NULL AND budget_status > 0';
     case 'tab:directives':
       // Wave 4 — Directives tab. Pages declaring any indexability
       // directive: meta robots, X-Robots-Tag header, robots.txt block,
