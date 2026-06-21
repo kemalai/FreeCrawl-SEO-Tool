@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.7.1] — 2026-06-21
+
+### Added
+- SOCKS5 / SOCKS4 proxy support (including the DNS-at-proxy `socks5h` / `socks4a` variants), so crawls can route through Tor or an SSH tunnel — not just HTTP proxies.
+- HTTP Digest authentication alongside Basic and Bearer, for crawling staging sites and APIs protected by Digest auth.
+- Form-based multi-step login that establishes an authenticated session (with CSRF capture) before the crawl so member-only pages are reachable.
+- XPath custom-extraction rules for pulling values off the page with XPath 1.0 location paths and predicates.
+- JSONPath custom-extraction rules for pulling values straight out of JSON API responses, with live preview.
+- PDF metadata extraction that reads each crawled PDF's title, author, page count, creation date, and producer into the detail panel.
+- Issue severity tiers (Critical / Warning / Info) with a "split bulk export by severity" option that writes one rollup file or sheet per tier.
+- Start, watch, and cancel batch PageSpeed / AI / SEO-authority runs from connected AI agents over the MCP server.
+- List and fetch Google Search Console and Analytics 4 data directly from connected AI agents over the MCP server.
+
+### Fixed
+- Batch PageSpeed audits no longer fail under concurrency — fixed the timeout that killed every audit but the first when running many URLs.
+- PageSpeed audits now honor corporate HTTP/HTTPS proxy settings, so they work behind a proxy just like the crawler.
+- A proxy change between crawls in the same session now takes effect instead of the first crawl's proxy sticking for the whole session.
+
 ## [0.7.0] — 2026-06-18
 
 ### Added
