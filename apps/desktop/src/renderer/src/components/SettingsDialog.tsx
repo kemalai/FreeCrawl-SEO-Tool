@@ -46,6 +46,7 @@ import type {
   CrawlConfig,
   CrawlMode,
   CustomExtractionRule,
+  FormLoginStep,
   HttpAuth,
   IntegrationDef,
   IntegrationsState,
@@ -116,6 +117,8 @@ interface FormState {
   webhookUrl: string;
   // auth + network
   auth: HttpAuth;
+  formLoginEnabled: boolean;
+  formLoginSteps: FormLoginStep[];
   proxyUrl: string;
   excludeExtensionsText: string;
   maxRedirects: string;
@@ -274,13 +277,13 @@ const SECTIONS: SectionDef[] = [
     key: 'auth',
     label: 'Authentication',
     icon: Shield,
-    keywords: 'auth authentication basic bearer token password http header',
+    keywords: 'auth authentication basic bearer digest token password http header form login session cookie csrf',
   },
   {
     key: 'network',
     label: 'Network',
     icon: Network,
-    keywords: 'network proxy https extension filter exclude redirect hop limit',
+    keywords: 'network proxy https socks socks5 extension filter exclude redirect hop limit',
   },
   {
     key: 'duplicates',
@@ -423,6 +426,12 @@ function configToForm(c: CrawlConfig): FormState {
     customExtractionRules: (c.customExtractionRules ?? []).map((r) => ({ ...r })),
     webhookUrl: c.webhookUrl ?? '',
     auth: { ...(c.auth ?? { type: 'none' }) },
+    formLoginEnabled: c.formLogin?.enabled ?? false,
+    formLoginSteps: (c.formLogin?.steps ?? []).map((s) => ({
+      ...s,
+      fields: (s.fields ?? []).map((f) => ({ ...f })),
+      captures: (s.captures ?? []).map((cp) => ({ ...cp })),
+    })),
     proxyUrl: c.proxyUrl ?? '',
     excludeExtensionsText: (c.excludeExtensions ?? []).join(', '),
     maxRedirects: String(c.maxRedirects ?? 10),
@@ -629,6 +638,17 @@ export function SettingsDialog({ open, onClose }: Props) {
         .slice(0, 10),
       webhookUrl: form.webhookUrl.trim(),
       auth: form.auth,
+      formLogin: {
+        enabled: form.formLoginEnabled,
+        steps: form.formLoginSteps
+          .map((s) => ({
+            url: s.url.trim(),
+            method: s.method,
+            fields: (s.fields ?? []).filter((f) => f.name.trim()),
+            captures: (s.captures ?? []).filter((c) => c.name.trim() && c.selector.trim()),
+          }))
+          .filter((s) => s.url),
+      },
       proxyUrl: form.proxyUrl.trim(),
       excludeExtensions: form.excludeExtensionsText
         .split(/[\s,]+/)
@@ -1941,29 +1961,45 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                 className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
                 value={r.type}
                 onChange={(e) =>
-                  updateRule(i, { type: e.target.value as 'css' | 'regex' })
+                  updateRule(i, { type: e.target.value as CustomExtractionRule['type'] })
                 }
               >
                 <option value="css">{t('settingsPanels.customExtraction.cssSelector', { defaultValue: 'CSS Selector' })}</option>
+                <option value="xpath">{t('settingsPanels.customExtraction.xpath', { defaultValue: 'XPath' })}</option>
                 <option value="regex">{t('settingsPanels.customExtraction.regex', { defaultValue: 'Regex' })}</option>
+                <option value="jsonpath">{t('settingsPanels.customExtraction.jsonpath', { defaultValue: 'JSONPath (JSON response)' })}</option>
               </select>
             </label>
           </div>
 
           <label className="mb-2 flex flex-col gap-1">
             <FieldLabel
-              label={r.type === 'css'
-                ? t('settingsPanels.customExtraction.cssSelector', { defaultValue: 'CSS Selector' })
-                : t('settingsPanels.customExtraction.regexPattern', { defaultValue: 'Regex Pattern' })}
+              label={
+                r.type === 'css'
+                  ? t('settingsPanels.customExtraction.cssSelector', { defaultValue: 'CSS Selector' })
+                  : r.type === 'xpath'
+                    ? t('settingsPanels.customExtraction.xpathExpr', { defaultValue: 'XPath Expression' })
+                    : r.type === 'jsonpath'
+                      ? t('settingsPanels.customExtraction.jsonpathExpr', { defaultValue: 'JSONPath Expression' })
+                      : t('settingsPanels.customExtraction.regexPattern', { defaultValue: 'Regex Pattern' })
+              }
               info={
                 r.type === 'css'
                   ? 'Standard CSS selector — same syntax as `document.querySelectorAll`.'
-                  : 'JavaScript regex (no flags — /g is implicit). Use a capture group with `output=regex_group` to extract just part of the match.'
+                  : r.type === 'xpath'
+                    ? 'XPath 1.0 subset over the parsed DOM. End in `/@attr` or `/text()` to read an attribute / text node. Predicates: `[n]`, `[@class="x"]`, `[contains(@class,"x")]`, `[last()]`.'
+                    : r.type === 'jsonpath'
+                      ? 'JSONPath against a JSON response body (e.g. `application/json` APIs). Only runs on responses that parse as JSON — ignored on HTML pages.'
+                      : 'JavaScript regex (no flags — /g is implicit). Use a capture group with `output=regex_group` to extract just part of the match.'
               }
               example={
                 r.type === 'css'
                   ? '.price > .amount,  meta[property="og:image"],  .breadcrumb li:last-child'
-                  : 'sku-([A-Z0-9]+),  "price"\\s*:\\s*"([^"]+)"'
+                  : r.type === 'xpath'
+                    ? "//meta[@property='og:title']/@content,  //h1,  //div[@class='price']"
+                    : r.type === 'jsonpath'
+                      ? '$.products[*].price,  $..author,  $.data.items[0].title'
+                      : 'sku-([A-Z0-9]+),  "price"\\s*:\\s*"([^"]+)"'
               }
             />
             <input
@@ -1979,9 +2015,11 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
               <FieldLabel
                 label={t('settingsPanels.customExtraction.output', { defaultValue: 'Output' })}
                 info={
-                  r.type === 'css'
-                    ? 'What to read off each matched element.'
-                    : 'For regex: `regex_group` extracts capture group 1; otherwise the whole match is used.'
+                  r.type === 'css' || r.type === 'xpath'
+                    ? 'What to read off each matched element. Ignored for an XPath `/@attr` or `/text()` terminal — that value is used directly.'
+                    : r.type === 'jsonpath'
+                      ? 'JSONPath returns the matched JSON value as-is; choose `Count` to return the number of matches instead.'
+                      : 'For regex: `regex_group` extracts capture group 1; otherwise the whole match is used.'
                 }
                 example="text for visible content, attribute for href/src, count for occurrence count"
               />
@@ -1992,12 +2030,17 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                   updateRule(i, { output: e.target.value as CustomExtractionRule['output'] })
                 }
               >
-                {r.type === 'css' ? (
+                {r.type === 'css' || r.type === 'xpath' ? (
                   <>
                     <option value="text">{t('settingsPanels.customExtraction.outputText', { defaultValue: 'Text' })}</option>
                     <option value="attribute">{t('settingsPanels.customExtraction.outputAttribute', { defaultValue: 'Attribute' })}</option>
                     <option value="inner_html">{t('settingsPanels.customExtraction.outputInnerHtml', { defaultValue: 'Inner HTML' })}</option>
                     <option value="outer_html">{t('settingsPanels.customExtraction.outputOuterHtml', { defaultValue: 'Outer HTML' })}</option>
+                    <option value="count">{t('settingsPanels.customExtraction.outputCount', { defaultValue: 'Count' })}</option>
+                  </>
+                ) : r.type === 'jsonpath' ? (
+                  <>
+                    <option value="text">{t('settingsPanels.customExtraction.outputValue', { defaultValue: 'Value' })}</option>
                     <option value="count">{t('settingsPanels.customExtraction.outputCount', { defaultValue: 'Count' })}</option>
                   </>
                 ) : (
@@ -2009,7 +2052,7 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                 )}
               </select>
             </label>
-            {r.type === 'css' && r.output === 'attribute' ? (
+            {(r.type === 'css' || r.type === 'xpath') && r.output === 'attribute' ? (
               <label className="flex flex-col gap-1">
                 <FieldLabel
                   label={t('settingsPanels.customExtraction.attribute', { defaultValue: 'Attribute' })}
@@ -2108,15 +2151,15 @@ function AuthPanel({ form, update }: PanelProps) {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        {t('settingsPanels.auth.intro', { defaultValue: 'HTTP authentication applied on every request. Useful for staging environments behind Basic auth, or APIs that require a Bearer token. Digest is not supported (challenge-response state machine).' })}
+        {t('settingsPanels.auth.intro', { defaultValue: 'HTTP authentication applied on every request. Useful for staging environments behind Basic/Digest auth, or APIs that require a Bearer token. For sites behind an HTML login form, use Form Login below instead.' })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <label className="mb-2 flex flex-col gap-1">
           <FieldLabel
             label={t('settingsPanels.auth.scheme', { defaultValue: 'Auth scheme' })}
-            info="`none` disables auth; `basic` adds `Authorization: Basic <base64>`; `bearer` adds `Authorization: Bearer <token>`."
-            example="basic for /staging behind nginx; bearer for protected APIs"
+            info="`none` disables auth; `basic` adds `Authorization: Basic <base64>`; `bearer` adds `Authorization: Bearer <token>`; `digest` performs the RFC 2617 challenge-response on the first 401."
+            example="basic/digest for /staging behind nginx; bearer for protected APIs"
           />
           <select
             className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
@@ -2127,17 +2170,18 @@ function AuthPanel({ form, update }: PanelProps) {
           >
             <option value="none">{t('settingsPanels.auth.schemeNone', { defaultValue: 'None' })}</option>
             <option value="basic">{t('settingsPanels.auth.schemeBasic', { defaultValue: 'Basic (username + password)' })}</option>
+            <option value="digest">{t('settingsPanels.auth.schemeDigest', { defaultValue: 'Digest (username + password)' })}</option>
             <option value="bearer">{t('settingsPanels.auth.schemeBearer', { defaultValue: 'Bearer (token)' })}</option>
           </select>
         </label>
 
-        {auth.type === 'basic' && (
+        {(auth.type === 'basic' || auth.type === 'digest') && (
           <>
             <Text
               label={t('settingsPanels.auth.username', { defaultValue: 'Username' })}
               value={auth.username ?? ''}
               onChange={(v) => setAuth({ username: v })}
-              info="Sent base64-encoded as the first half of the credential pair."
+              info="For Basic, sent base64-encoded; for Digest, hashed into the challenge response."
               example="staging-user"
             />
             <Text
@@ -2160,7 +2204,191 @@ function AuthPanel({ form, update }: PanelProps) {
           />
         )}
       </div>
+
+      <FormLoginEditor form={form} update={update} />
     </>
+  );
+}
+
+function FormLoginEditor({ form, update }: PanelProps) {
+  const { t } = useTranslation();
+  const steps = form.formLoginSteps;
+  const setSteps = (next: FormLoginStep[]) => update('formLoginSteps', next);
+  const updateStep = (i: number, patch: Partial<FormLoginStep>) => {
+    const next = steps.slice();
+    next[i] = { ...next[i]!, ...patch };
+    setSteps(next);
+  };
+  const addStep = () =>
+    setSteps([...steps, { url: '', method: 'POST', fields: [], captures: [] }]);
+
+  return (
+    <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settingsGroups.formLogin', { defaultValue: 'Form-Based Login' })}
+        </div>
+        <Bool
+          label={t('settingsPanels.formLogin.enabled', { defaultValue: 'Enabled' })}
+          checked={form.formLoginEnabled}
+          onChange={(v) => update('formLoginEnabled', v)}
+          info="Run the login steps once before the crawl, then replay the session cookies on every request."
+        />
+      </div>
+      <p className="mb-3 text-[10px] text-surface-500">
+        {t('settingsPanels.formLogin.intro', {
+          defaultValue:
+            'Steps run in order over one shared cookie jar. A GET step can capture a CSRF token from the page; a POST step submits credentials (and the captured token) as a form. Reference captured values with {{name}}.',
+        })}
+      </p>
+
+      {steps.length === 0 && (
+        <p className="mb-2 text-[11px] italic text-surface-500">
+          {t('settingsPanels.formLogin.empty', { defaultValue: 'No steps — add one to define the login flow.' })}
+        </p>
+      )}
+
+      {steps.map((step, i) => (
+        <div key={i} className="mb-3 rounded border border-surface-800 bg-surface-900/40 p-2">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-surface-500">
+              {t('settingsPanels.formLogin.stepN', { defaultValue: 'Step #{{n}}', n: i + 1 })}
+            </div>
+            <button
+              className="rounded p-1 text-surface-500 hover:bg-surface-800 hover:text-red-400"
+              onClick={() => setSteps(steps.filter((_, j) => j !== i))}
+              title={t('settingsPanels.formLogin.removeStep', { defaultValue: 'Remove step' })}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <div className="mb-2 flex gap-2">
+            <select
+              className="w-24 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+              value={step.method}
+              onChange={(e) => updateStep(i, { method: e.target.value as FormLoginStep['method'] })}
+            >
+              <option value="POST">POST</option>
+              <option value="GET">GET</option>
+            </select>
+            <input
+              className="flex-1 rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+              placeholder="https://example.com/login"
+              value={step.url}
+              spellCheck={false}
+              onChange={(e) => updateStep(i, { url: e.target.value })}
+            />
+          </div>
+
+          {step.method === 'POST' && (
+            <div className="mb-2">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-surface-500">
+                {t('settingsPanels.formLogin.fields', { defaultValue: 'Form fields (name = value)' })}
+              </div>
+              {step.fields.map((f, fi) => (
+                <div key={fi} className="mb-1 flex items-center gap-2">
+                  <input
+                    className="w-32 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                    placeholder="username"
+                    value={f.name}
+                    onChange={(e) => {
+                      const next = step.fields.slice();
+                      next[fi] = { ...f, name: e.target.value };
+                      updateStep(i, { fields: next });
+                    }}
+                  />
+                  <input
+                    className="flex-1 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                    placeholder="admin  /  {{csrf}}"
+                    value={f.value}
+                    onChange={(e) => {
+                      const next = step.fields.slice();
+                      next[fi] = { ...f, value: e.target.value };
+                      updateStep(i, { fields: next });
+                    }}
+                  />
+                  <button
+                    className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:border-red-500 hover:text-red-300"
+                    onClick={() => updateStep(i, { fields: step.fields.filter((_, j) => j !== fi) })}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+              <button
+                className="mt-1 flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
+                onClick={() => updateStep(i, { fields: [...step.fields, { name: '', value: '' }] })}
+              >
+                <Plus className="h-3 w-3" /> {t('settingsPanels.formLogin.addField', { defaultValue: 'Add field' })}
+              </button>
+            </div>
+          )}
+
+          <div>
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-surface-500">
+              {t('settingsPanels.formLogin.captures', { defaultValue: 'Capture from response (name ← CSS selector)' })}
+            </div>
+            {step.captures.map((c, ci) => (
+              <div key={ci} className="mb-1 flex items-center gap-2">
+                <input
+                  className="w-28 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  placeholder="csrf"
+                  value={c.name}
+                  onChange={(e) => {
+                    const next = step.captures.slice();
+                    next[ci] = { ...c, name: e.target.value };
+                    updateStep(i, { captures: next });
+                  }}
+                />
+                <input
+                  className="flex-1 rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  placeholder='input[name="_csrf"]'
+                  spellCheck={false}
+                  value={c.selector}
+                  onChange={(e) => {
+                    const next = step.captures.slice();
+                    next[ci] = { ...c, selector: e.target.value };
+                    updateStep(i, { captures: next });
+                  }}
+                />
+                <input
+                  className="w-20 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+                  placeholder="value"
+                  value={c.attribute ?? ''}
+                  onChange={(e) => {
+                    const next = step.captures.slice();
+                    next[ci] = { ...c, attribute: e.target.value };
+                    updateStep(i, { captures: next });
+                  }}
+                />
+                <button
+                  className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:border-red-500 hover:text-red-300"
+                  onClick={() => updateStep(i, { captures: step.captures.filter((_, j) => j !== ci) })}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+            <button
+              className="mt-1 flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
+              onClick={() =>
+                updateStep(i, { captures: [...step.captures, { name: '', selector: '', attribute: 'value' }] })
+              }
+            >
+              <Plus className="h-3 w-3" /> {t('settingsPanels.formLogin.addCapture', { defaultValue: 'Add capture' })}
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <button
+        className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
+        onClick={addStep}
+      >
+        <Plus className="h-3 w-3" /> {t('settingsPanels.formLogin.addStep', { defaultValue: 'Add login step' })}
+      </button>
+    </div>
   );
 }
 
@@ -2177,8 +2405,8 @@ function NetworkPanel({ form, update }: PanelProps) {
           label={t('settingsPanels.network.proxyUrl', { defaultValue: 'Proxy URL (overrides HTTPS_PROXY)' })}
           value={form.proxyUrl}
           onChange={(v) => update('proxyUrl', v)}
-          info="Same syntax as HTTPS_PROXY/HTTP_PROXY env vars. Leave empty to inherit env. Routes via undici's ProxyAgent."
-          example="http://user:pass@proxy.corp:8080, http://10.0.0.5:3128"
+          info="HTTP/HTTPS proxies route via undici's ProxyAgent; SOCKS proxies (socks5://, socks5h://, socks4://, socks4a://) tunnel via the socks client. The `h`/`4a` variants resolve DNS at the proxy. Leave empty to inherit HTTPS_PROXY/HTTP_PROXY env vars."
+          example="http://user:pass@proxy.corp:8080, socks5h://127.0.0.1:9050"
         />
       </div>
 

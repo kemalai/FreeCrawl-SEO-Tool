@@ -33,6 +33,7 @@ import type {
   UrlCategory,
   UrlDetail,
 } from '@freecrawl/shared-types';
+import { issueCategoriesBySeverity } from '@freecrawl/shared-types';
 import { runMigrations } from './migrations.js';
 
 interface UrlRowDb {
@@ -197,6 +198,12 @@ interface UrlRowDb {
   manifest_display: string | null;
   manifest_scope: string | null;
   manifest_icon_count: number;
+  pdf_title: string | null;
+  pdf_author: string | null;
+  pdf_page_count: number | null;
+  pdf_creation_date: string | null;
+  pdf_producer: string | null;
+  pdf_probe_status: number | null;
   landmark_main: number;
   skip_link_present: number;
   aria_invalid_roles: number;
@@ -4338,6 +4345,9 @@ export class ProjectDb {
       http2NotSupported: countWhere(
         `${html} AND http_protocol = 'http/1.1'`,
       ),
+      http3NotSupported: countWhere(
+        `${html} AND http_protocol IS NOT NULL AND http_protocol != 'h3'`,
+      ),
       renderBlocking: countWhere(`${html} AND render_blocking_count > 5`),
       keepaliveDisabled: countWhere('is_external = 0 AND keep_alive = 0'),
       titlePlaceholder: countWhere(
@@ -5716,6 +5726,63 @@ export class ProjectDb {
   }
 
   /**
+   * V2 Faz 16 — internal 2xx PDFs whose metadata hasn't been probed yet
+   * (`pdf_probe_status IS NULL`). A failed/empty probe sets the status
+   * (0 / negative) so the row drops out of this set and isn't re-fetched
+   * next crawl. PDFs are their own URL rows, so this is a plain per-row
+   * update (no fan-out, unlike manifests/images).
+   */
+  unprobedPdfUrls(limit = 1000): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT url FROM urls
+          WHERE content_kind = 'pdf'
+            AND is_external = 0
+            AND status_code >= 200 AND status_code < 300
+            AND pdf_probe_status IS NULL
+          LIMIT ?`,
+      )
+      .all(limit) as { url: string }[];
+    return rows.map((r) => r.url).filter((u) => typeof u === 'string' && u.length > 0);
+  }
+
+  /**
+   * Persist probed PDF metadata onto the PDF's own URL row. `status`:
+   * 1 = metadata found, 0 = probed but nothing parseable, negative =
+   * fetch/parse error. Metadata columns stay NULL unless a value was read.
+   */
+  setPdfMetadata(input: {
+    url: string;
+    title: string | null;
+    author: string | null;
+    pageCount: number | null;
+    creationDate: string | null;
+    producer: string | null;
+    status: number;
+  }): void {
+    this.db
+      .prepare(
+        `UPDATE urls
+            SET pdf_title = :title,
+                pdf_author = :author,
+                pdf_page_count = :page_count,
+                pdf_creation_date = :creation_date,
+                pdf_producer = :producer,
+                pdf_probe_status = :status
+          WHERE url = :url`,
+      )
+      .run({
+        url: input.url,
+        title: input.title,
+        author: input.author,
+        page_count: input.pageCount,
+        creation_date: input.creationDate,
+        producer: input.producer,
+        status: input.status,
+      });
+  }
+
+  /**
    * V2 Faz 16 #1 — Distinct `og:image` / `twitter:image` URLs that
    * haven't had their pixel dimensions probed yet. A single image is
    * usually shared across many pages (site-wide default OG card), so the
@@ -6495,6 +6562,11 @@ export class ProjectDb {
     manifestDisplay: r.manifest_display ?? null,
     manifestScope: r.manifest_scope ?? null,
     manifestIconCount: r.manifest_icon_count ?? 0,
+    pdfTitle: r.pdf_title ?? null,
+    pdfAuthor: r.pdf_author ?? null,
+    pdfPageCount: r.pdf_page_count ?? null,
+    pdfCreationDate: r.pdf_creation_date ?? null,
+    pdfProducer: r.pdf_producer ?? null,
     landmarkMain: r.landmark_main ?? 0,
     skipLinkPresent: r.skip_link_present ?? 0,
     ariaInvalidRoles: r.aria_invalid_roles ?? 0,
@@ -7343,6 +7415,32 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // a free CWV win on multi-resource pages.
       return `is_external = 0 AND content_kind = 'html'
               AND http_protocol = 'http/1.1'`;
+    case 'issues:http3-not-supported':
+      // Origin does not advertise HTTP/3 via Alt-Svc (http_protocol is
+      // 'h2' or 'http/1.1', not 'h3'). Informational — HTTP/3 (QUIC) cuts
+      // connection-setup latency, but adoption is still partial.
+      return `is_external = 0 AND content_kind = 'html'
+              AND http_protocol IS NOT NULL AND http_protocol != 'h3'`;
+    case 'issues:severity-critical':
+    case 'issues:severity-warning':
+    case 'issues:severity-info': {
+      // V2 Faz 15 — virtual severity rollup: OR-compose the WHERE clauses
+      // of every issue category mapped to this tier in ISSUE_SEVERITY, so
+      // a single category yields the deduped set of URLs flagged by any
+      // issue of that severity. Members whose clause is null (none) are
+      // skipped; an empty tier matches nothing rather than everything.
+      const tier =
+        cat === 'issues:severity-critical'
+          ? 'critical'
+          : cat === 'issues:severity-warning'
+            ? 'warning'
+            : 'info';
+      const clauses = issueCategoriesBySeverity(tier)
+        .map((c) => categoryWhereClause(c))
+        .filter((c): c is string => c !== null)
+        .map((c) => `(${c})`);
+      return clauses.length > 0 ? clauses.join(' OR ') : '1 = 0';
+    }
     case 'issues:render-blocking':
       // 5+ render-blocking head resources is the SF threshold — every one
       // delays first-paint until fetched + parsed. Lighthouse flags this
@@ -8112,8 +8210,9 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // V1 Faz 3 — Custom Extraction tab. Pages where at least one
       // custom-extraction rule produced a non-null result. The Detail
       // panel's "Extracted Data" sub-tab shows the full JSON map per
-      // page.
-      return `is_external = 0 AND content_kind = 'html'
+      // page. Content kind is not constrained: JSONPath rules (V2 Faz 6)
+      // produce results on non-HTML JSON responses too.
+      return `is_external = 0
               AND extraction_results IS NOT NULL
               AND extraction_results != ''
               AND extraction_results != '{}'`;

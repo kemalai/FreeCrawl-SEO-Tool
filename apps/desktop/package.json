@@ -43,6 +43,7 @@
     "react-dom": "^19.2.0",
     "react-i18next": "^17.0.8",
     "react-resizable-panels": "^2.1.9",
+    "undici": "^8.0.0",
     "zustand": "^5.0.2"
   },
   "devDependencies": {

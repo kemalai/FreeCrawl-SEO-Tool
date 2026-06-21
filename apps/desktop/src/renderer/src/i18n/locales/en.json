@@ -199,6 +199,11 @@
     "multiCsvNote": "Multiple tables + CSV → you'll be asked to pick a folder; one file is written per table.",
     "folderNote": "Multiple sections + {{fmt}} → you'll be asked to pick a folder; one file is written per section, nested under sub-folders where applicable.",
     "xlsxNote": "Excel output → single .xlsx workbook with one sheet per section.",
+    "splitBySeverity": "Split by issue severity (Critical / Warning / Info)",
+    "severityNote": "Severity split overrides the table selection: three rollups (Critical / Warning / Info), each listing every URL flagged by an issue of that tier, using the columns picked at right.",
+    "severityCritical": "Critical Issues",
+    "severityWarning": "Warning Issues",
+    "severityInfo": "Info Issues",
     "summary": "{{n}} section(s) · {{c}} column(s)",
     "emptyCols": "Pick a table on the left to load its columns.",
     "errorNoColumn": "Pick at least one column.",
@@ -343,6 +348,7 @@
     "urlStructureThresholds": "URL Structure Thresholds",
     "linkFollowBehaviour": "Link Follow Behaviour",
     "savedProxyProfiles": "Saved Proxy Profiles",
+    "formLogin": "Form-Based Login",
     "ruleN": "Rule #{{n}}"
   },
   "settingsPanels": {
@@ -417,17 +423,22 @@
       "intro3": "for literal case-insensitive substring."
     },
     "customExtraction": {
-      "intro1": "Up to 10 custom extraction rules. Each runs against every crawled HTML page; results are stored on the URL row and visible in the URL Details panel under",
+      "intro1": "Up to 10 custom extraction rules. CSS / XPath / regex run on every crawled HTML page; JSONPath runs on JSON responses. Results are stored on the URL row and visible in the URL Details panel under",
       "extractionLabel": "Extraction",
       "empty": "No rules — click \"Add Rule\" to start.",
       "removeRule": "Remove rule",
       "name": "Name",
       "type": "Type",
       "cssSelector": "CSS Selector",
+      "xpath": "XPath",
+      "jsonpath": "JSONPath (JSON response)",
+      "xpathExpr": "XPath Expression",
+      "jsonpathExpr": "JSONPath Expression",
       "regex": "Regex",
       "regexPattern": "Regex Pattern",
       "output": "Output",
       "outputText": "Text",
+      "outputValue": "Value",
       "outputAttribute": "Attribute",
       "outputInnerHtml": "Inner HTML",
       "outputOuterHtml": "Outer HTML",
@@ -484,14 +495,27 @@
       "url": "Webhook URL"
     },
     "auth": {
-      "intro": "HTTP authentication applied on every request. Useful for staging environments behind Basic auth, or APIs that require a Bearer token. Digest is not supported (challenge-response state machine).",
+      "intro": "HTTP authentication applied on every request. Useful for staging environments behind Basic/Digest auth, or APIs that require a Bearer token. For sites behind an HTML login form, use Form Login below instead.",
       "scheme": "Auth scheme",
       "schemeNone": "None",
       "schemeBasic": "Basic (username + password)",
+      "schemeDigest": "Digest (username + password)",
       "schemeBearer": "Bearer (token)",
       "username": "Username",
       "password": "Password",
       "token": "Token"
+    },
+    "formLogin": {
+      "enabled": "Enabled",
+      "intro": "Steps run in order over one shared cookie jar. A GET step can capture a CSRF token from the page; a POST step submits credentials (and the captured token) as a form. Reference captured values with {{name}}.",
+      "empty": "No steps — add one to define the login flow.",
+      "stepN": "Step #{{n}}",
+      "removeStep": "Remove step",
+      "fields": "Form fields (name = value)",
+      "addField": "Add field",
+      "captures": "Capture from response (name ← CSS selector)",
+      "addCapture": "Add capture",
+      "addStep": "Add login step"
     },
     "network": {
       "intro": "Network-level controls: proxy override, file-extension exclusion, redirect hop cap.",

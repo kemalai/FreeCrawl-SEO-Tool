@@ -18,6 +18,7 @@
  *     whole crawl.
  */
 import type { PagespeedMetrics, PagespeedStrategy } from '@freecrawl/shared-types';
+import { Agent, ProxyAgent, fetch as undiciFetch, type Dispatcher } from 'undici';
 import * as logger from './logger.js';
 
 const PSI_ENDPOINT =
@@ -31,6 +32,41 @@ const REQUEST_TIMEOUT_MS = 90_000;
  *  run strictly one at a time. */
 const CONCURRENCY_WITH_KEY = 4;
 const CONCURRENCY_NO_KEY = 1;
+
+/**
+ * Dedicated undici dispatcher for PSI requests.
+ *
+ * PSI runs a Lighthouse audit server-side and withholds the response
+ * headers for 10–30 s+ while it does. The crawler installs a *process-
+ * global* dispatcher (`setGlobalDispatcher`) with `headersTimeout:
+ * 10_000` — correct for crawling (a stuck origin can't freeze the pool)
+ * but fatal here: a plain `fetch` inherits it, so under batch
+ * concurrency Google's per-request response slips past 10 s and every
+ * audit is killed at the transport layer, surfacing as "fetch failed" /
+ * NET. (Single audits usually return just under 10 s, which is why they
+ * pass.) This dispatcher's header + body timeouts sit just above the
+ * 90 s `AbortSignal` that stays the real cap, so the audit gets the time
+ * it legitimately needs. HTTPS_PROXY / HTTP_PROXY are honoured to match
+ * the crawler so corporate-proxy users keep working.
+ */
+function createPsiDispatcher(): Dispatcher {
+  const timeouts = {
+    headersTimeout: REQUEST_TIMEOUT_MS + 5_000,
+    bodyTimeout: REQUEST_TIMEOUT_MS + 5_000,
+  };
+  const proxy =
+    process.env['HTTPS_PROXY'] ??
+    process.env['https_proxy'] ??
+    process.env['HTTP_PROXY'] ??
+    process.env['http_proxy'] ??
+    null;
+  if (proxy) {
+    return new ProxyAgent({ uri: proxy, ...timeouts });
+  }
+  return new Agent({ ...timeouts, connect: { autoSelectFamily: true } });
+}
+
+const psiDispatcher = createPsiDispatcher();
 
 function errorMetrics(fetchedAt: string, message: string): PagespeedMetrics {
   return {
@@ -99,9 +135,12 @@ export async function fetchPagespeedAudit(
   if (apiKey) params.set('key', apiKey);
 
   try {
-    const res = await fetch(`${PSI_ENDPOINT}?${params.toString()}`, {
+    const res = await undiciFetch(`${PSI_ENDPOINT}?${params.toString()}`, {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       headers: { Accept: 'application/json' },
+      // Use PSI's own long-poll dispatcher, NOT the crawler's global one
+      // (whose 10 s headersTimeout strangles Lighthouse audits).
+      dispatcher: psiDispatcher,
     });
     const json = (await res.json().catch(() => null)) as Record<
       string,
@@ -149,13 +188,28 @@ export async function fetchPagespeedAudit(
   } catch (err) {
     // `AbortSignal.timeout` rejects with a DOMException, which is not
     // always an `instanceof Error` in Node — sniff `.name` directly.
+    // undici transport failures reject with a generic "fetch failed"
+    // whose real reason hides on `.cause` (e.g. UND_ERR_HEADERS_TIMEOUT);
+    // read it so the surfaced message reflects the actual failure instead
+    // of a bare, misleading "fetch failed".
     const name = (err as { name?: string } | null)?.name;
-    const message =
-      name === 'TimeoutError' || name === 'AbortError'
-        ? `PageSpeed audit timed out after ${REQUEST_TIMEOUT_MS / 1000}s`
-        : err instanceof Error
-          ? err.message
-          : String(err);
+    const cause = (err as { cause?: unknown } | null)?.cause as
+      | { code?: string; message?: string }
+      | undefined;
+    const code = cause?.code;
+    const isTimeout =
+      name === 'TimeoutError' ||
+      name === 'AbortError' ||
+      code === 'UND_ERR_HEADERS_TIMEOUT' ||
+      code === 'UND_ERR_BODY_TIMEOUT' ||
+      code === 'UND_ERR_CONNECT_TIMEOUT';
+    const message = isTimeout
+      ? `PageSpeed audit timed out after ${REQUEST_TIMEOUT_MS / 1000}s`
+      : err instanceof Error
+        ? cause?.message
+          ? `${err.message} (${cause.message})`
+          : err.message
+        : String(err);
     return errorMetrics(fetchedAt, message);
   }
 }

@@ -1,4 +1,5 @@
 export * from './crawl.js';
+export * from './issue-severity.js';
 export * from './ipc.js';
 export * from './project.js';
 export * from './integrations.js';

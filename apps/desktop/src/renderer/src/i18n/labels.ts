@@ -157,6 +157,7 @@ const TR_LABELS: Record<string, string> = {
   'Compression Missing': 'Sıkıştırma Eksik',
   'Keep-Alive Disabled': 'Keep-Alive Devre Dışı',
   'HTTP/2 Not Advertised': 'HTTP/2 İlan Edilmedi',
+  'HTTP/3 Not Advertised': 'HTTP/3 İlan Edilmedi',
   'Too Many Requests (>100 subresources)': 'Çok Fazla İstek (>100 alt kaynak)',
 
   // URL issues
@@ -496,6 +497,11 @@ const TR_LABELS: Record<string, string> = {
   'Content Kind': 'İçerik Sınıfı',
   'TTFB (ms)': 'TTFB (ms)',
   'HTTP Protocol': 'HTTP Protokolü',
+  'PDF Title': 'PDF Başlığı',
+  'PDF Author': 'PDF Yazarı',
+  'PDF Page Count': 'PDF Sayfa Sayısı',
+  'PDF Created': 'PDF Oluşturulma Tarihi',
+  'PDF Producer': 'PDF Üretici',
   Server: 'Sunucu',
   'Query String Length': 'Sorgu Dizesi Uzunluğu',
   'Render-Blocking (head)': 'Render-Engelleyici (head)',

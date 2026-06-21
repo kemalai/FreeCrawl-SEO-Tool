@@ -217,6 +217,47 @@ let aiCancelRequested = false;
 /** Faz 7 — SEO provider run guard. */
 let seoRunActive = false;
 let seoCancelRequested = false;
+/**
+ * V2 Faz 0.5 Increment 5 — live snapshot of each slow batch-fetch run
+ * (PageSpeed / AI / SEO), polled by the MCP `get_fetch_progress` tool.
+ * The shared run-job helpers below update these whether the run was
+ * triggered from the renderer or the MCP bridge, so an agent can watch a
+ * user-started run too. The renderer keeps consuming its own `*Progress`
+ * IPC events — this snapshot is purely the MCP poll surface.
+ */
+interface FetchRunSnapshot {
+  running: boolean;
+  done: number;
+  total: number;
+  completed: number;
+  failed: number;
+  currentUrl: string | null;
+  cancelled: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Provider id for ai/seo runs; null for pagespeed. */
+  provider: string | null;
+  /** Set when the run threw before finishing. */
+  error: string | null;
+}
+function idleFetchSnapshot(): FetchRunSnapshot {
+  return {
+    running: false,
+    done: 0,
+    total: 0,
+    completed: 0,
+    failed: 0,
+    currentUrl: null,
+    cancelled: false,
+    startedAt: null,
+    finishedAt: null,
+    provider: null,
+    error: null,
+  };
+}
+let pagespeedRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
+let aiRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
+let seoRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
 /** Faz 7 — GSC URL Inspection run guard. */
 let gscInspectRunActive = false;
 let gscInspectCancelRequested = false;
@@ -2362,86 +2403,132 @@ function registerIpc(): void {
     },
   );
 
+  // Shared PSI batch orchestrator — driven by both the renderer's
+  // `pagespeedRun` IPC (which awaits the result) and the MCP bridge's
+  // non-blocking `pagespeed-run` action (which fires-and-forgets and
+  // lets the agent poll `fetch-progress`). Updates `pagespeedRunSnapshot`
+  // throughout so the MCP poll surface reflects either trigger path.
+  async function runPagespeedJob(
+    input: PagespeedRunInput,
+  ): Promise<PagespeedRunResult> {
+    if (pagespeedRunActive) {
+      return { completed: 0, failed: 0, cancelled: true };
+    }
+    const urls = Array.from(
+      new Set(
+        (input.urls ?? []).filter(
+          (u): u is string => typeof u === 'string' && u.length > 0,
+        ),
+      ),
+    );
+    if (urls.length === 0) {
+      pagespeedRunSnapshot = {
+        ...idleFetchSnapshot(),
+        finishedAt: new Date().toISOString(),
+      };
+      return { completed: 0, failed: 0, cancelled: false };
+    }
+    const strategies: PagespeedStrategy[] =
+      input.strategy === 'both' ? ['mobile', 'desktop'] : [input.strategy];
+    const items: PagespeedBatchItem[] = [];
+    for (const url of urls) {
+      for (const strategy of strategies) items.push({ url, strategy });
+    }
+    const apiKeyRaw = resolveCredentials('pagespeed')['apiKey'];
+    const apiKey =
+      apiKeyRaw && apiKeyRaw.trim().length > 0 ? apiKeyRaw.trim() : undefined;
+
+    pagespeedRunActive = true;
+    pagespeedCancelRequested = false;
+    // Set synchronously (before the first await) so the MCP `pagespeed-run`
+    // action can read an accurate snapshot right after kicking us off.
+    pagespeedRunSnapshot = {
+      ...idleFetchSnapshot(),
+      running: true,
+      total: items.length,
+      startedAt: new Date().toISOString(),
+    };
+    // Pin writes to the project that was active when the run started —
+    // a PSI run can last minutes, and resolving `getDb()` per result
+    // would leak audits into a different project if the user opens
+    // one mid-run.
+    const runDb = getDb();
+    logger.log(
+      'info',
+      'pagespeed',
+      `run started — ${items.length} audit(s): ${urls.length} URL(s) × ${strategies.length} strategy${
+        apiKey ? ' (keyed)' : ' (keyless — low rate limit)'
+      }`,
+    );
+    try {
+      const result = await runPagespeedBatch({
+        items,
+        apiKey,
+        isCancelled: () => pagespeedCancelRequested,
+        onResult: (url, strategy, metrics) => {
+          try {
+            runDb.upsertPagespeedResult(url, strategy, metrics);
+          } catch (err) {
+            logger.log(
+              'error',
+              'pagespeed',
+              `DB write failed for ${url}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+          if (metrics.status === 'ok') pagespeedRunSnapshot.completed++;
+          else pagespeedRunSnapshot.failed++;
+        },
+        onProgress: (done, total, currentUrl) => {
+          pagespeedRunSnapshot.done = done;
+          pagespeedRunSnapshot.total = total;
+          pagespeedRunSnapshot.currentUrl = currentUrl;
+          mainWindow?.webContents.send(IPC.pagespeedProgress, {
+            done,
+            total,
+            currentUrl,
+            running: true,
+          });
+        },
+      });
+      pagespeedRunSnapshot = {
+        ...pagespeedRunSnapshot,
+        running: false,
+        done: result.completed + result.failed,
+        completed: result.completed,
+        failed: result.failed,
+        cancelled: result.cancelled,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+      };
+      mainWindow?.webContents.send(IPC.pagespeedProgress, {
+        done: result.completed + result.failed,
+        total: items.length,
+        currentUrl: null,
+        running: false,
+      });
+      fireDataChanged();
+      return result;
+    } catch (err) {
+      pagespeedRunSnapshot = {
+        ...pagespeedRunSnapshot,
+        running: false,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message : String(err),
+      };
+      throw err;
+    } finally {
+      pagespeedRunActive = false;
+      pagespeedCancelRequested = false;
+    }
+  }
+
   ipcMain.handle(
     IPC.pagespeedRun,
-    async (_e, input: PagespeedRunInput): Promise<PagespeedRunResult> => {
-      if (pagespeedRunActive) {
-        return { completed: 0, failed: 0, cancelled: true };
-      }
-      const urls = Array.from(
-        new Set(
-          (input.urls ?? []).filter(
-            (u): u is string => typeof u === 'string' && u.length > 0,
-          ),
-        ),
-      );
-      if (urls.length === 0) {
-        return { completed: 0, failed: 0, cancelled: false };
-      }
-      const strategies: PagespeedStrategy[] =
-        input.strategy === 'both' ? ['mobile', 'desktop'] : [input.strategy];
-      const items: PagespeedBatchItem[] = [];
-      for (const url of urls) {
-        for (const strategy of strategies) items.push({ url, strategy });
-      }
-      const apiKeyRaw = resolveCredentials('pagespeed')['apiKey'];
-      const apiKey =
-        apiKeyRaw && apiKeyRaw.trim().length > 0 ? apiKeyRaw.trim() : undefined;
-
-      pagespeedRunActive = true;
-      pagespeedCancelRequested = false;
-      // Pin writes to the project that was active when the run started —
-      // a PSI run can last minutes, and resolving `getDb()` per result
-      // would leak audits into a different project if the user opens
-      // one mid-run.
-      const runDb = getDb();
-      logger.log(
-        'info',
-        'pagespeed',
-        `run started — ${items.length} audit(s): ${urls.length} URL(s) × ${strategies.length} strategy${
-          apiKey ? ' (keyed)' : ' (keyless — low rate limit)'
-        }`,
-      );
-      try {
-        const result = await runPagespeedBatch({
-          items,
-          apiKey,
-          isCancelled: () => pagespeedCancelRequested,
-          onResult: (url, strategy, metrics) => {
-            try {
-              runDb.upsertPagespeedResult(url, strategy, metrics);
-            } catch (err) {
-              logger.log(
-                'error',
-                'pagespeed',
-                `DB write failed for ${url}: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
-            }
-          },
-          onProgress: (done, total, currentUrl) => {
-            mainWindow?.webContents.send(IPC.pagespeedProgress, {
-              done,
-              total,
-              currentUrl,
-              running: true,
-            });
-          },
-        });
-        mainWindow?.webContents.send(IPC.pagespeedProgress, {
-          done: result.completed + result.failed,
-          total: items.length,
-          currentUrl: null,
-          running: false,
-        });
-        fireDataChanged();
-        return result;
-      } finally {
-        pagespeedRunActive = false;
-        pagespeedCancelRequested = false;
-      }
-    },
+    async (_e, input: PagespeedRunInput): Promise<PagespeedRunResult> =>
+      runPagespeedJob(input),
   );
 
   ipcMain.handle(IPC.pagespeedCancel, () => {
@@ -2686,115 +2773,161 @@ function registerIpc(): void {
       .replace(/\{body\}/g, body);
   };
 
-  ipcMain.handle(
-    IPC.aiRun,
-    async (_e, input: AiRunInput): Promise<AiRunResult> => {
-      if (aiRunActive) {
-        return { completed: 0, failed: 0, cancelled: true };
-      }
-      const urls = Array.from(
-        new Set(
-          (input.urls ?? []).filter(
-            (u): u is string => typeof u === 'string' && u.length > 0,
-          ),
+  // Shared AI batch orchestrator — driven by the renderer's `aiRun` IPC
+  // (awaits) and the MCP bridge's non-blocking `ai-run` action (polls
+  // `fetch-progress`). Updates `aiRunSnapshot` throughout.
+  async function runAiJob(input: AiRunInput): Promise<AiRunResult> {
+    if (aiRunActive) {
+      return { completed: 0, failed: 0, cancelled: true };
+    }
+    const urls = Array.from(
+      new Set(
+        (input.urls ?? []).filter(
+          (u): u is string => typeof u === 'string' && u.length > 0,
         ),
-      );
-      if (urls.length === 0 || !input.prompt?.trim()) {
-        return { completed: 0, failed: 0, cancelled: false };
-      }
-      const runDb = getDb();
-      const model = resolveModel(input.provider, input.model);
-      const concurrency = defaultConcurrency(input.provider);
+      ),
+    );
+    if (urls.length === 0 || !input.prompt?.trim()) {
+      aiRunSnapshot = {
+        ...idleFetchSnapshot(),
+        provider: input.provider,
+        finishedAt: new Date().toISOString(),
+      };
+      return { completed: 0, failed: 0, cancelled: false };
+    }
+    const runDb = getDb();
+    const model = resolveModel(input.provider, input.model);
+    const concurrency = defaultConcurrency(input.provider);
 
-      // Build per-URL prompts up-front so a missing page doesn't get
-      // queued; URLs that aren't in the DB are skipped silently.
-      const items: AiBatchItem[] = [];
-      for (const url of urls) {
-        const ctx = runDb.getAiContext(url);
-        if (!ctx) continue;
-        items.push({
-          url,
-          prompt: substitutePrompt(input.prompt, ctx),
-        });
-      }
-      if (items.length === 0) {
-        return { completed: 0, failed: 0, cancelled: false };
-      }
+    // Build per-URL prompts up-front so a missing page doesn't get
+    // queued; URLs that aren't in the DB are skipped silently.
+    const items: AiBatchItem[] = [];
+    for (const url of urls) {
+      const ctx = runDb.getAiContext(url);
+      if (!ctx) continue;
+      items.push({
+        url,
+        prompt: substitutePrompt(input.prompt, ctx),
+      });
+    }
+    if (items.length === 0) {
+      aiRunSnapshot = {
+        ...idleFetchSnapshot(),
+        provider: input.provider,
+        finishedAt: new Date().toISOString(),
+      };
+      return { completed: 0, failed: 0, cancelled: false };
+    }
 
-      aiRunActive = true;
-      aiCancelRequested = false;
-      logger.log(
-        'info',
-        'ai',
-        `${input.provider}/${model} run started — ${items.length} prompt(s) (concurrency=${concurrency})`,
-      );
-      try {
-        const result = await runAiBatch({
-          provider: input.provider,
-          model,
-          concurrency,
-          items,
-          isCancelled: () => aiCancelRequested,
-          onResult: (outcome) => {
-            try {
-              const fetchedAt = new Date().toISOString();
-              if (outcome.ok && outcome.output) {
-                runDb.upsertAiResult(
-                  outcome.url,
-                  input.provider,
-                  outcome.output.model,
-                  outcome.output.text,
-                  outcome.output.tokensIn,
-                  outcome.output.tokensOut,
-                  'ok',
-                  null,
-                  fetchedAt,
-                );
-              } else {
-                runDb.upsertAiResult(
-                  outcome.url,
-                  input.provider,
-                  model,
-                  '',
-                  null,
-                  null,
-                  'error',
-                  outcome.error ?? 'Unknown error',
-                  fetchedAt,
-                );
-              }
-            } catch (err) {
-              logger.log(
+    aiRunActive = true;
+    aiCancelRequested = false;
+    aiRunSnapshot = {
+      ...idleFetchSnapshot(),
+      running: true,
+      total: items.length,
+      provider: input.provider,
+      startedAt: new Date().toISOString(),
+    };
+    logger.log(
+      'info',
+      'ai',
+      `${input.provider}/${model} run started — ${items.length} prompt(s) (concurrency=${concurrency})`,
+    );
+    try {
+      const result = await runAiBatch({
+        provider: input.provider,
+        model,
+        concurrency,
+        items,
+        isCancelled: () => aiCancelRequested,
+        onResult: (outcome) => {
+          try {
+            const fetchedAt = new Date().toISOString();
+            if (outcome.ok && outcome.output) {
+              runDb.upsertAiResult(
+                outcome.url,
+                input.provider,
+                outcome.output.model,
+                outcome.output.text,
+                outcome.output.tokensIn,
+                outcome.output.tokensOut,
+                'ok',
+                null,
+                fetchedAt,
+              );
+            } else {
+              runDb.upsertAiResult(
+                outcome.url,
+                input.provider,
+                model,
+                '',
+                null,
+                null,
                 'error',
-                'ai',
-                `DB write failed for ${outcome.url}: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
+                outcome.error ?? 'Unknown error',
+                fetchedAt,
               );
             }
-          },
-          onProgress: (done, total, currentUrl) => {
-            mainWindow?.webContents.send(IPC.aiProgress, {
-              done,
-              total,
-              currentUrl,
-              running: true,
-            });
-          },
-        });
-        mainWindow?.webContents.send(IPC.aiProgress, {
-          done: result.completed + result.failed,
-          total: items.length,
-          currentUrl: null,
-          running: false,
-        });
-        fireDataChanged();
-        return result;
-      } finally {
-        aiRunActive = false;
-        aiCancelRequested = false;
-      }
-    },
+          } catch (err) {
+            logger.log(
+              'error',
+              'ai',
+              `DB write failed for ${outcome.url}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+          if (outcome.ok) aiRunSnapshot.completed++;
+          else aiRunSnapshot.failed++;
+        },
+        onProgress: (done, total, currentUrl) => {
+          aiRunSnapshot.done = done;
+          aiRunSnapshot.total = total;
+          aiRunSnapshot.currentUrl = currentUrl;
+          mainWindow?.webContents.send(IPC.aiProgress, {
+            done,
+            total,
+            currentUrl,
+            running: true,
+          });
+        },
+      });
+      aiRunSnapshot = {
+        ...aiRunSnapshot,
+        running: false,
+        done: result.completed + result.failed,
+        completed: result.completed,
+        failed: result.failed,
+        cancelled: result.cancelled,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+      };
+      mainWindow?.webContents.send(IPC.aiProgress, {
+        done: result.completed + result.failed,
+        total: items.length,
+        currentUrl: null,
+        running: false,
+      });
+      fireDataChanged();
+      return result;
+    } catch (err) {
+      aiRunSnapshot = {
+        ...aiRunSnapshot,
+        running: false,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message : String(err),
+      };
+      throw err;
+    } finally {
+      aiRunActive = false;
+      aiCancelRequested = false;
+    }
+  }
+
+  ipcMain.handle(
+    IPC.aiRun,
+    async (_e, input: AiRunInput): Promise<AiRunResult> => runAiJob(input),
   );
 
   ipcMain.handle(IPC.aiCancel, () => {
@@ -2826,69 +2959,112 @@ function registerIpc(): void {
   // Moz / Semrush). Same shape as the AI run: pin the DB to the active
   // project, fan URLs through the provider's per-URL endpoint, persist
   // ok/error rows so partial outages are visible in the UI.
+  // Shared SEO-authority batch orchestrator — driven by the renderer's
+  // `seoRun` IPC (awaits) and the MCP bridge's non-blocking `seo-run`
+  // action (polls `fetch-progress`). Updates `seoRunSnapshot` throughout.
+  async function runSeoJob(input: SeoRunInput): Promise<SeoRunResult> {
+    if (seoRunActive) return { completed: 0, failed: 0, cancelled: true };
+    const urls = Array.from(
+      new Set(
+        (input.urls ?? []).filter(
+          (u): u is string => typeof u === 'string' && u.length > 0,
+        ),
+      ),
+    );
+    if (urls.length === 0) {
+      seoRunSnapshot = {
+        ...idleFetchSnapshot(),
+        provider: input.provider,
+        finishedAt: new Date().toISOString(),
+      };
+      return { completed: 0, failed: 0, cancelled: false };
+    }
+    const runDb = getDb();
+    seoRunActive = true;
+    seoCancelRequested = false;
+    seoRunSnapshot = {
+      ...idleFetchSnapshot(),
+      running: true,
+      total: urls.length,
+      provider: input.provider,
+      startedAt: new Date().toISOString(),
+    };
+    logger.log('info', 'seo', `${input.provider} run started — ${urls.length} URL(s)`);
+    try {
+      const result = await runSeoBatch({
+        provider: input.provider,
+        urls,
+        isCancelled: () => seoCancelRequested,
+        onResult: (outcome) => {
+          try {
+            runDb.upsertSeoResult(
+              outcome.url,
+              input.provider,
+              outcome.metrics,
+              outcome.ok ? 'ok' : 'error',
+              outcome.error,
+              new Date().toISOString(),
+            );
+          } catch (err) {
+            logger.log(
+              'error',
+              'seo',
+              `DB write failed for ${outcome.url}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+          if (outcome.ok) seoRunSnapshot.completed++;
+          else seoRunSnapshot.failed++;
+        },
+        onProgress: (done, total, currentUrl) => {
+          seoRunSnapshot.done = done;
+          seoRunSnapshot.total = total;
+          seoRunSnapshot.currentUrl = currentUrl;
+          mainWindow?.webContents.send(IPC.seoProgress, {
+            done,
+            total,
+            currentUrl,
+            running: true,
+          });
+        },
+      });
+      seoRunSnapshot = {
+        ...seoRunSnapshot,
+        running: false,
+        done: result.completed + result.failed,
+        completed: result.completed,
+        failed: result.failed,
+        cancelled: result.cancelled,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+      };
+      mainWindow?.webContents.send(IPC.seoProgress, {
+        done: result.completed + result.failed,
+        total: urls.length,
+        currentUrl: null,
+        running: false,
+      });
+      fireDataChanged();
+      return result;
+    } catch (err) {
+      seoRunSnapshot = {
+        ...seoRunSnapshot,
+        running: false,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message : String(err),
+      };
+      throw err;
+    } finally {
+      seoRunActive = false;
+      seoCancelRequested = false;
+    }
+  }
+
   ipcMain.handle(
     IPC.seoRun,
-    async (_e, input: SeoRunInput): Promise<SeoRunResult> => {
-      if (seoRunActive) return { completed: 0, failed: 0, cancelled: true };
-      const urls = Array.from(
-        new Set(
-          (input.urls ?? []).filter(
-            (u): u is string => typeof u === 'string' && u.length > 0,
-          ),
-        ),
-      );
-      if (urls.length === 0) return { completed: 0, failed: 0, cancelled: false };
-      const runDb = getDb();
-      seoRunActive = true;
-      seoCancelRequested = false;
-      logger.log('info', 'seo', `${input.provider} run started — ${urls.length} URL(s)`);
-      try {
-        const result = await runSeoBatch({
-          provider: input.provider,
-          urls,
-          isCancelled: () => seoCancelRequested,
-          onResult: (outcome) => {
-            try {
-              runDb.upsertSeoResult(
-                outcome.url,
-                input.provider,
-                outcome.metrics,
-                outcome.ok ? 'ok' : 'error',
-                outcome.error,
-                new Date().toISOString(),
-              );
-            } catch (err) {
-              logger.log(
-                'error',
-                'seo',
-                `DB write failed for ${outcome.url}: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
-            }
-          },
-          onProgress: (done, total, currentUrl) => {
-            mainWindow?.webContents.send(IPC.seoProgress, {
-              done,
-              total,
-              currentUrl,
-              running: true,
-            });
-          },
-        });
-        mainWindow?.webContents.send(IPC.seoProgress, {
-          done: result.completed + result.failed,
-          total: urls.length,
-          currentUrl: null,
-          running: false,
-        });
-        fireDataChanged();
-        return result;
-      } finally {
-        seoRunActive = false;
-        seoCancelRequested = false;
-      }
-    },
+    async (_e, input: SeoRunInput): Promise<SeoRunResult> => runSeoJob(input),
   );
   ipcMain.handle(IPC.seoCancel, () => {
     if (seoRunActive) {
@@ -3621,6 +3797,51 @@ function registerIpc(): void {
   // already requires an authenticated request, and a misshapen payload
   // throws which the bridge wraps into a 500 with the underlying error
   // message. The MCP tool definitions on the other side enforce schema.
+  // Resolve the target URL list for a batch-fetch action (pagespeed-run /
+  // ai-run / seo-run): an explicit `urls` array wins; otherwise pull from
+  // the active project by `category` (+ optional `search`), capped by
+  // `limit` (default 100, max 5000). `truncated` flags when the category
+  // matched more rows than the cap. Category resolution is preferred over
+  // a giant `urls` array because the bridge caps request bodies at 64 KB.
+  function resolveActionUrls(input: {
+    urls?: unknown;
+    category?: unknown;
+    search?: unknown;
+    limit?: unknown;
+  }): { urls: string[]; truncated: boolean } {
+    const explicit = Array.isArray(input.urls)
+      ? input.urls.filter(
+          (u): u is string => typeof u === 'string' && u.length > 0,
+        )
+      : [];
+    if (explicit.length > 0) {
+      return { urls: Array.from(new Set(explicit)), truncated: false };
+    }
+    const category =
+      typeof input.category === 'string'
+        ? (input.category as UrlCategory)
+        : 'all';
+    const search = typeof input.search === 'string' ? input.search : undefined;
+    const limit =
+      typeof input.limit === 'number' && Number.isFinite(input.limit)
+        ? Math.max(1, Math.min(5000, Math.floor(input.limit)))
+        : 100;
+    const { rows, total } = getDb().queryUrls({
+      category,
+      search,
+      limit,
+      offset: 0,
+    });
+    const urls = Array.from(
+      new Set(
+        rows
+          .map((r) => r.url)
+          .filter((u): u is string => typeof u === 'string' && u.length > 0),
+      ),
+    );
+    return { urls, truncated: total > urls.length };
+  }
+
   const mcpActions: Record<string, (input: unknown) => Promise<unknown>> = {
     'crawl-add-url': async (input) => {
       const url = (input as { url?: string }).url ?? '';
@@ -4080,6 +4301,222 @@ function registerIpc(): void {
       const id = (input as { integrationId?: string }).integrationId ?? '';
       if (!id) throw new Error('integrationId is required (e.g. "gsc" or "ga4").');
       return getAuthState(id);
+    },
+
+    // ---- Faz 0.5 Increment 5 — slow batch-fetch triggers (PSI / AI /
+    // SEO). Non-blocking: each *-run kicks off the shared run-job WITHOUT
+    // awaiting it (the job populates its snapshot synchronously before its
+    // first await, so the response below is accurate) and returns at once.
+    // The agent polls `fetch-progress` and may `fetch-cancel`. This
+    // mirrors crawl start / progress / stop — the MCP wire protocol can't
+    // stream, so the same poll model is reused.
+
+    'pagespeed-run': async (input) => {
+      const i = (input ?? {}) as {
+        urls?: unknown;
+        category?: unknown;
+        search?: unknown;
+        limit?: unknown;
+        strategy?: unknown;
+      };
+      if (pagespeedRunActive) {
+        return {
+          started: false,
+          reason:
+            'A PageSpeed run is already in progress — poll get_fetch_progress or cancel_fetch first.',
+          state: pagespeedRunSnapshot,
+        };
+      }
+      const { urls, truncated } = resolveActionUrls(i);
+      if (urls.length === 0) {
+        return {
+          started: false,
+          reason:
+            'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
+          state: pagespeedRunSnapshot,
+        };
+      }
+      const strategy =
+        i.strategy === 'desktop'
+          ? ('desktop' as const)
+          : i.strategy === 'both'
+            ? ('both' as const)
+            : ('mobile' as const);
+      void runPagespeedJob({ urls, strategy }).catch((err) => {
+        logger.log(
+          'error',
+          'pagespeed',
+          `MCP-triggered run failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      return {
+        started: pagespeedRunActive,
+        total: pagespeedRunSnapshot.total,
+        truncated,
+        state: pagespeedRunSnapshot,
+      };
+    },
+
+    'ai-run': async (input) => {
+      const i = (input ?? {}) as {
+        provider?: unknown;
+        model?: unknown;
+        prompt?: unknown;
+        urls?: unknown;
+        category?: unknown;
+        search?: unknown;
+        limit?: unknown;
+      };
+      const provider = typeof i.provider === 'string' ? i.provider : '';
+      if (
+        provider !== 'openai' &&
+        provider !== 'anthropic' &&
+        provider !== 'ollama'
+      ) {
+        throw new Error(
+          'ai_run requires `provider` to be one of: openai, anthropic, ollama.',
+        );
+      }
+      const prompt = typeof i.prompt === 'string' ? i.prompt : '';
+      if (prompt.trim() === '') {
+        throw new Error(
+          'ai_run requires a non-empty `prompt` (supports {url}/{title}/{description}/{h1}/{body} placeholders).',
+        );
+      }
+      if (aiRunActive) {
+        return {
+          started: false,
+          reason:
+            'An AI run is already in progress — poll get_fetch_progress or cancel_fetch first.',
+          state: aiRunSnapshot,
+        };
+      }
+      const { urls, truncated } = resolveActionUrls(i);
+      if (urls.length === 0) {
+        return {
+          started: false,
+          reason:
+            'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
+          state: aiRunSnapshot,
+        };
+      }
+      const model = typeof i.model === 'string' ? i.model : undefined;
+      void runAiJob({ provider, model, prompt, urls }).catch((err) => {
+        logger.log(
+          'error',
+          'ai',
+          `MCP-triggered run failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      // runAiJob skips URLs with no crawled page context; if that leaves
+      // nothing it returns synchronously without flipping the active flag.
+      if (!aiRunActive) {
+        return {
+          started: false,
+          reason:
+            'None of the matched URLs are crawled in this project, so there is no page context to build prompts from.',
+          state: aiRunSnapshot,
+        };
+      }
+      return {
+        started: true,
+        total: aiRunSnapshot.total,
+        truncated,
+        state: aiRunSnapshot,
+      };
+    },
+
+    'seo-run': async (input) => {
+      const i = (input ?? {}) as {
+        provider?: unknown;
+        urls?: unknown;
+        category?: unknown;
+        search?: unknown;
+        limit?: unknown;
+      };
+      const provider = typeof i.provider === 'string' ? i.provider : '';
+      if (
+        provider !== 'ahrefs' &&
+        provider !== 'majestic' &&
+        provider !== 'moz' &&
+        provider !== 'semrush'
+      ) {
+        throw new Error(
+          'seo_run requires `provider` to be one of: ahrefs, majestic, moz, semrush.',
+        );
+      }
+      if (seoRunActive) {
+        return {
+          started: false,
+          reason:
+            'An SEO run is already in progress — poll get_fetch_progress or cancel_fetch first.',
+          state: seoRunSnapshot,
+        };
+      }
+      const { urls, truncated } = resolveActionUrls(i);
+      if (urls.length === 0) {
+        return {
+          started: false,
+          reason:
+            'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
+          state: seoRunSnapshot,
+        };
+      }
+      void runSeoJob({ provider, urls }).catch((err) => {
+        logger.log(
+          'error',
+          'seo',
+          `MCP-triggered run failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      return {
+        started: seoRunActive,
+        total: seoRunSnapshot.total,
+        truncated,
+        state: seoRunSnapshot,
+      };
+    },
+
+    'fetch-progress': async (input) => {
+      const kind = (input as { kind?: unknown } | null)?.kind;
+      const all = {
+        pagespeed: pagespeedRunSnapshot,
+        ai: aiRunSnapshot,
+        seo: seoRunSnapshot,
+      };
+      if (kind === 'pagespeed' || kind === 'ai' || kind === 'seo') {
+        return { [kind]: all[kind] };
+      }
+      return all;
+    },
+
+    'fetch-cancel': async (input) => {
+      const kind = (input as { kind?: unknown } | null)?.kind;
+      const cancelled: Record<string, { wasRunning: boolean }> = {};
+      const cancelPagespeed = (): void => {
+        const was = pagespeedRunActive;
+        if (was) pagespeedCancelRequested = true;
+        cancelled.pagespeed = { wasRunning: was };
+      };
+      const cancelAi = (): void => {
+        const was = aiRunActive;
+        if (was) aiCancelRequested = true;
+        cancelled.ai = { wasRunning: was };
+      };
+      const cancelSeo = (): void => {
+        const was = seoRunActive;
+        if (was) seoCancelRequested = true;
+        cancelled.seo = { wasRunning: was };
+      };
+      if (kind === 'pagespeed') cancelPagespeed();
+      else if (kind === 'ai') cancelAi();
+      else if (kind === 'seo') cancelSeo();
+      else {
+        cancelPagespeed();
+        cancelAi();
+        cancelSeo();
+      }
+      return { ok: true, cancelled };
     },
   };
 

@@ -1140,6 +1140,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               category: 'issues:http2-not-supported',
             },
             {
+              key: 'issues-http3-not-supported',
+              label: 'HTTP/3 Not Advertised',
+              count: o.issues.http3NotSupported,
+              category: 'issues:http3-not-supported',
+            },
+            {
               key: 'issues-render-blocking',
               label: 'Render-Blocking Head (>5)',
               count: o.issues.renderBlocking,

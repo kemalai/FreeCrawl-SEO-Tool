@@ -1669,6 +1669,33 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 71,
+    name: 'add_pdf_metadata',
+    // V2 Faz 16 — PDF document metadata, extracted by the post-crawl
+    // `runPdfMetadataProbes` pass (XMP packet preferred — uncompressed by
+    // the PDF spec, so parseable without a full PDF library — with an
+    // uncompressed Info-dictionary fallback). `pdf_probe_status`:
+    // NULL = unprobed, 1 = probed with metadata, 0 = probed but nothing
+    // found, <0 = fetch/parse error. The other columns are NULL until a
+    // successful probe fills them.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      const add = (name: string, type: string): void => {
+        if (!cols.some((c) => c.name === name)) {
+          db.exec(`ALTER TABLE urls ADD COLUMN ${name} ${type}`);
+        }
+      };
+      add('pdf_title', 'TEXT');
+      add('pdf_author', 'TEXT');
+      add('pdf_page_count', 'INTEGER');
+      add('pdf_creation_date', 'TEXT');
+      add('pdf_producer', 'TEXT');
+      add('pdf_probe_status', 'INTEGER');
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

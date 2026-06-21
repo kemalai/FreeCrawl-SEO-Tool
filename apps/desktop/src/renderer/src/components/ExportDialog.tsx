@@ -177,6 +177,10 @@ export function ExportDialog({
 
   const [format, setFormat] = useState<Format>('xlsx');
   const [csvBom, setCsvBom] = useState<boolean>(true);
+  // V2 Faz 15 — when on, ignore the table tree and emit three rollups
+  // (Critical / Warning / Info) via the virtual `issues:severity-*`
+  // categories instead.
+  const [splitBySeverity, setSplitBySeverity] = useState<boolean>(false);
 
   // Picked leaves — childless tabs use the tab key, child rows use
   // `<tabKey>:<filename>`. Defaults to the active tab's first leaf so
@@ -218,6 +222,9 @@ export function ExportDialog({
    *  column picker (union of selected tabs' columns). */
   const pickedTabKeys = useMemo(() => {
     const set = new Set<TabKey>();
+    // Severity-split export emits standard URL rows, so offer the
+    // "internal" tab's columns even when no section leaf is picked.
+    if (splitBySeverity) set.add('internal');
     for (const node of tree) {
       if (node.children.length === 0) {
         if (pickedLeaves.has(leafId(node))) set.add(node.tabKey);
@@ -231,7 +238,7 @@ export function ExportDialog({
       }
     }
     return set;
-  }, [pickedLeaves, tree]);
+  }, [pickedLeaves, tree, splitBySeverity]);
 
   const offeredColumns = useMemo(() => {
     const seen = new Set<string>();
@@ -367,34 +374,73 @@ export function ExportDialog({
     setPickedColumns(new Set());
   };
 
+  const toggleSplitBySeverity = () => {
+    const entering = !splitBySeverity;
+    setSplitBySeverity(entering);
+    // Entering severity mode with only non-internal columns picked would
+    // leave the offered (internal) column set empty — seed it once.
+    if (entering) {
+      setPickedColumns((prev) => {
+        const specs = COLUMN_SPECS['internal'] ?? [];
+        if (specs.some((s) => prev.has(s.key as string))) return prev;
+        const next = new Set(prev);
+        for (const s of specs) next.add(s.key as string);
+        return next;
+      });
+    }
+  };
+
   const submit = async () => {
     if (orderedColumnList.length === 0) {
       setStatus(t('export.errorNoColumn', { defaultValue: 'Pick at least one column.' }));
       return;
     }
-    if (totalLeafSelections === 0) {
+    if (!splitBySeverity && totalLeafSelections === 0) {
       setStatus(t('export.errorNoTable', { defaultValue: 'Pick at least one table.' }));
       return;
     }
     setBusy(true);
     setStatus('');
     try {
-      const sections: ExportTabularSection[] = [];
-      for (const node of tree) {
-        if (node.children.length === 0) {
-          if (pickedLeaves.has(leafId(node))) {
-            sections.push({ label: node.label, category: node.category });
+      let sections: ExportTabularSection[];
+      if (splitBySeverity) {
+        // Three rollups via the virtual severity categories. Each yields
+        // the deduped set of URLs flagged by any issue of that tier.
+        sections = [
+          {
+            label: t('export.severityCritical', { defaultValue: 'Critical Issues' }),
+            category: 'issues:severity-critical',
+            filename: 'critical-issues',
+          },
+          {
+            label: t('export.severityWarning', { defaultValue: 'Warning Issues' }),
+            category: 'issues:severity-warning',
+            filename: 'warning-issues',
+          },
+          {
+            label: t('export.severityInfo', { defaultValue: 'Info Issues' }),
+            category: 'issues:severity-info',
+            filename: 'info-issues',
+          },
+        ];
+      } else {
+        sections = [];
+        for (const node of tree) {
+          if (node.children.length === 0) {
+            if (pickedLeaves.has(leafId(node))) {
+              sections.push({ label: node.label, category: node.category });
+            }
+            continue;
           }
-          continue;
-        }
-        for (const child of node.children) {
-          if (!pickedLeaves.has(leafId(node, child))) continue;
-          sections.push({
-            label: `${node.label} — ${child.label}`,
-            category: child.category,
-            subdir: node.subdir,
-            filename: child.filename,
-          });
+          for (const child of node.children) {
+            if (!pickedLeaves.has(leafId(node, child))) continue;
+            sections.push({
+              label: `${node.label} — ${child.label}`,
+              category: child.category,
+              subdir: node.subdir,
+              filename: child.filename,
+            });
+          }
         }
       }
       const result = await window.freecrawl.exportTabular({
@@ -430,7 +476,8 @@ export function ExportDialog({
     }
   };
 
-  const showFolderHint = format !== 'xlsx' && (totalLeafSelections > 1);
+  const showFolderHint =
+    format !== 'xlsx' && (totalLeafSelections > 1 || splitBySeverity);
 
   return (
     <div
@@ -702,6 +749,19 @@ export function ExportDialog({
                 </span>
               </label>
             )}
+
+            <label className="flex cursor-pointer items-center gap-2 text-[12px] text-surface-200">
+              <input
+                type="checkbox"
+                checked={splitBySeverity}
+                onChange={toggleSplitBySeverity}
+              />
+              <span>
+                {t('export.splitBySeverity', {
+                  defaultValue: 'Split by issue severity (Critical / Warning / Info)',
+                })}
+              </span>
+            </label>
           </div>
 
           {showFolderHint && (
@@ -714,11 +774,20 @@ export function ExportDialog({
             </div>
           )}
 
-          {format === 'xlsx' && totalLeafSelections > 1 && (
+          {format === 'xlsx' && (totalLeafSelections > 1 || splitBySeverity) && (
             <div className="mt-2 rounded border border-blue-700/40 bg-blue-900/20 px-2 py-1 text-[11px] text-blue-200">
               {t('export.xlsxNote', {
                 defaultValue:
                   'Excel output → single .xlsx workbook with one sheet per section.',
+              })}
+            </div>
+          )}
+
+          {splitBySeverity && (
+            <div className="mt-2 rounded border border-blue-700/40 bg-blue-900/20 px-2 py-1 text-[11px] text-blue-200">
+              {t('export.severityNote', {
+                defaultValue:
+                  'Severity split overrides the table selection: three rollups (Critical / Warning / Info), each listing every URL flagged by an issue of that tier, using the columns picked at right.',
               })}
             </div>
           )}

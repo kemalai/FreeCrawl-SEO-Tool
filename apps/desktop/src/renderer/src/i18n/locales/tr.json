@@ -199,6 +199,11 @@
     "multiCsvNote": "Birden çok tablo + CSV → bir klasör seçmen istenecek; tablo başına bir dosya yazılır.",
     "folderNote": "Birden çok bölüm + {{fmt}} → bir klasör seçmen istenecek; her bölüm için bir dosya, uygun yerlerde alt-klasörler altında yazılır.",
     "xlsxNote": "Excel çıktı → tek .xlsx çalışma kitabı, bölüm başına bir sayfa.",
+    "splitBySeverity": "Önem derecesine göre böl (Kritik / Uyarı / Bilgi)",
+    "severityNote": "Önem derecesi bölünmesi tablo seçimini geçersiz kılar: üç derleme (Kritik / Uyarı / Bilgi), her biri o derecedeki bir sorunla işaretlenmiş tüm URL'leri sağdaki seçili kolonlarla listeler.",
+    "severityCritical": "Kritik Sorunlar",
+    "severityWarning": "Uyarı Sorunları",
+    "severityInfo": "Bilgi Sorunları",
     "summary": "{{n}} bölüm · {{c}} kolon",
     "emptyCols": "Solda bir tablo seç — kolonları buraya yüklensin.",
     "errorNoColumn": "En az bir kolon seç.",
@@ -342,6 +347,7 @@
     "urlStructureThresholds": "URL Yapı Eşikleri",
     "linkFollowBehaviour": "Link Takip Davranışı",
     "savedProxyProfiles": "Kayıtlı Proxy Profilleri",
+    "formLogin": "Form Tabanlı Giriş",
     "ruleN": "Kural #{{n}}"
   },
   "settingsPanels": {
@@ -416,17 +422,22 @@
       "intro3": "için harf duyarsız literal substring."
     },
     "customExtraction": {
-      "intro1": "10'a kadar özel çıkarım kuralı. Her biri her crawl edilmiş HTML sayfasına karşı çalışır; sonuçlar URL satırında saklanır ve URL Detayları panelinde",
+      "intro1": "10'a kadar özel çıkarım kuralı. CSS / XPath / regex her crawl edilmiş HTML sayfasında, JSONPath ise JSON yanıtlarında çalışır. Sonuçlar URL satırında saklanır ve URL Detayları panelinde",
       "extractionLabel": "Extraction",
       "empty": "Kural yok — başlamak için \"Add Rule\" tıkla.",
       "removeRule": "Kuralı kaldır",
       "name": "İsim",
       "type": "Tür",
       "cssSelector": "CSS Seçici",
+      "xpath": "XPath",
+      "jsonpath": "JSONPath (JSON yanıtı)",
+      "xpathExpr": "XPath İfadesi",
+      "jsonpathExpr": "JSONPath İfadesi",
       "regex": "Regex",
       "regexPattern": "Regex Kalıbı",
       "output": "Çıktı",
       "outputText": "Metin",
+      "outputValue": "Değer",
       "outputAttribute": "Öznitelik",
       "outputInnerHtml": "Inner HTML",
       "outputOuterHtml": "Outer HTML",
@@ -483,14 +494,27 @@
       "url": "Webhook URL"
     },
     "auth": {
-      "intro": "Her istekte uygulanan HTTP kimlik doğrulaması. Basic auth arkasındaki staging ortamları veya Bearer token gerektiren API'ler için faydalı. Digest desteklenmiyor (meydan okuma-yanıt durum makinesi).",
+      "intro": "Her istekte uygulanan HTTP kimlik doğrulaması. Basic/Digest auth arkasındaki staging ortamları veya Bearer token gerektiren API'ler için faydalı. HTML giriş formu arkasındaki siteler için aşağıdaki Form Login'i kullanın.",
       "scheme": "Auth şeması",
       "schemeNone": "Yok",
       "schemeBasic": "Basic (kullanıcı adı + şifre)",
+      "schemeDigest": "Digest (kullanıcı adı + şifre)",
       "schemeBearer": "Bearer (token)",
       "username": "Kullanıcı adı",
       "password": "Şifre",
       "token": "Token"
+    },
+    "formLogin": {
+      "enabled": "Etkin",
+      "intro": "Adımlar tek bir paylaşılan çerez kavanozu üzerinde sırayla çalışır. GET adımı sayfadan bir CSRF token'ı yakalayabilir; POST adımı kimlik bilgilerini (ve yakalanan token'ı) form olarak gönderir. Yakalanan değerlere {{name}} ile başvurun.",
+      "empty": "Adım yok — giriş akışını tanımlamak için bir tane ekleyin.",
+      "stepN": "Adım #{{n}}",
+      "removeStep": "Adımı kaldır",
+      "fields": "Form alanları (ad = değer)",
+      "addField": "Alan ekle",
+      "captures": "Yanıttan yakala (ad ← CSS seçici)",
+      "addCapture": "Yakalama ekle",
+      "addStep": "Giriş adımı ekle"
     },
     "network": {
       "intro": "Ağ seviyesi kontroller: proxy override, dosya-uzantısı hariç tutma, yönlendirme hop limiti.",

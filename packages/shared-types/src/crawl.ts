@@ -217,6 +217,14 @@ export type UrlCategory =
   | 'issues:hreflang-inconsistent-lang'
   | 'issues:page-many-requests'
   | 'issues:over-budget'
+  | 'issues:http3-not-supported'
+  // V2 Faz 15 — virtual severity-rollup categories: the union of every
+  // issue category mapped to that tier in ISSUE_SEVERITY (issue-severity.ts).
+  // Backs the "split bulk export by severity" feature and is queryable
+  // anywhere a UrlCategory is accepted (query_urls, sidebar, MCP).
+  | 'issues:severity-critical'
+  | 'issues:severity-warning'
+  | 'issues:severity-info'
 
 export type Indexability =
   | 'indexable'
@@ -308,6 +316,16 @@ export interface CrawlUrlRow {
   manifestScope: string | null;
   /** Number of icons in the parsed manifest's `icons` array. */
   manifestIconCount: number;
+  /** V2 Faz 16 — PDF document title (XMP `dc:title` or Info `/Title`). Null when not a PDF or no metadata found. */
+  pdfTitle: string | null;
+  /** PDF author (XMP `dc:creator` or Info `/Author`). */
+  pdfAuthor: string | null;
+  /** PDF page count (best-effort; null when undeterminable from the fetched bytes). */
+  pdfPageCount: number | null;
+  /** PDF creation date as ISO-8601 (parsed from XMP `xmp:CreateDate` or Info `/CreationDate D:...`). */
+  pdfCreationDate: string | null;
+  /** PDF producer / generator string (XMP `pdf:Producer` or Info `/Producer`). */
+  pdfProducer: string | null;
   /** 1 when the page has a `<main>` element OR `role="main"`. */
   landmarkMain: number;
   /** 1 when the first focusable `<a href="#…">` matches a skip-link convention. */
@@ -763,13 +781,22 @@ export interface CrawlConfig {
   /**
    * HTTP authentication applied on every fetch. `none` is the default.
    * `basic` sends `Authorization: Basic <base64(user:pass)>`; `bearer`
-   * sends `Authorization: Bearer <token>`. Digest auth is not supported
-   * yet (challenge/response state-machine).
+   * sends `Authorization: Bearer <token>`; `digest` performs the RFC 2617
+   * challenge-response handshake on the first 401.
    */
   auth: HttpAuth;
   /**
+   * Form-based (cookie session) login run once before the crawl. Lets
+   * FreeCrawl crawl content behind a multi-step HTML login form by
+   * establishing the session cookies first and injecting them into every
+   * subsequent request.
+   */
+  formLogin: FormLoginConfig;
+  /**
    * Proxy URL — overrides `HTTPS_PROXY` / `HTTP_PROXY` env vars when
-   * non-empty. Same syntax: `http://user:pass@host:port`.
+   * non-empty. HTTP/HTTPS proxies use `http://user:pass@host:port`;
+   * SOCKS proxies use `socks5://`, `socks5h://`, `socks4://` or
+   * `socks4a://` (the `h`/`4a` variants resolve DNS at the proxy).
    */
   proxyUrl: string;
   /**
@@ -854,6 +881,15 @@ export interface CrawlConfig {
    * each image is read (enough for the header), so cost is minimal.
    */
   probeSocialImages: boolean;
+  /**
+   * V2 Faz 16 — after the crawl, fetch each internal PDF (ranged GET,
+   * first few MB) and extract document metadata: title, author, page
+   * count, creation date, producer. Prefers the XMP packet (uncompressed
+   * by the PDF spec, so reliably parseable without a full PDF library)
+   * and falls back to an uncompressed Info-dictionary scan. Default
+   * `true`. No new dependency — a lightweight hand-rolled parser.
+   */
+  probePdfMetadata: boolean;
   /**
    * When the post-norm "Duplicate URL" issue filter runs, normalise
    * URLs (lowercase, strip query, trim trailing slash) before
@@ -1082,10 +1118,53 @@ export interface JsRenderConfig {
 }
 
 export interface HttpAuth {
-  type: 'none' | 'basic' | 'bearer';
+  /**
+   *  - `none`   — no Authorization header.
+   *  - `basic`  — `Authorization: Basic <base64(user:pass)>`.
+   *  - `bearer` — `Authorization: Bearer <token>`.
+   *  - `digest` — RFC 2617/7616 challenge-response. The first request that
+   *               returns `401 WWW-Authenticate: Digest …` is retried with a
+   *               computed `Authorization: Digest …` header (MD5 / SHA-256,
+   *               `qop=auth`, `MD5-sess` supported).
+   */
+  type: 'none' | 'basic' | 'bearer' | 'digest';
   username?: string;
   password?: string;
   token?: string;
+}
+
+/**
+ * A single step in a form-based login sequence. Steps run in order before
+ * the crawl starts, sharing one session cookie jar so the authenticated
+ * session cookies established here are injected into every crawl request.
+ *
+ * Field values and the step URL may reference variables captured by an
+ * earlier step via `{{name}}` interpolation — the canonical multi-step
+ * pattern is: GET the login page → capture the CSRF token → POST the
+ * credentials together with the token.
+ */
+export interface FormLoginStep {
+  /** Absolute URL to request. Supports `{{var}}` interpolation. */
+  url: string;
+  /** `GET` (e.g. to fetch a login page for CSRF capture) or `POST`
+   *  (submit credentials as `application/x-www-form-urlencoded`). */
+  method: 'GET' | 'POST';
+  /** Form fields sent as the POST body. Values support `{{var}}`
+   *  interpolation. Ignored for GET (kept for editing convenience). */
+  fields: { name: string; value: string }[];
+  /** After the response, capture values into named variables usable by
+   *  later steps. `selector` is a CSS selector against the response HTML;
+   *  `attribute` (default `value`) is the attribute to read — typically
+   *  `input[name="_csrf"]` / `value` for a hidden CSRF token. */
+  captures: { name: string; selector: string; attribute?: string }[];
+}
+
+export interface FormLoginConfig {
+  /** Master switch — when off the login sequence never runs and no
+   *  session cookies are injected. */
+  enabled: boolean;
+  /** Ordered login steps. Empty = nothing to do even when enabled. */
+  steps: FormLoginStep[];
 }
 
 /**
@@ -1097,20 +1176,37 @@ export interface HttpAuth {
 export interface CustomExtractionRule {
   /** User-visible name. Stored verbatim — also used as the JSON key. */
   name: string;
-  /** Extraction strategy. `css` uses cheerio; `regex` runs against raw HTML. */
-  type: 'css' | 'regex';
-  /** CSS selector when `type = 'css'`; regex pattern (no flags) when `type = 'regex'`. */
+  /**
+   * Extraction strategy:
+   *  - `css`      — cheerio CSS selector against the parsed DOM.
+   *  - `regex`    — JavaScript RegExp against the raw HTML string.
+   *  - `xpath`    — XPath 1.0 subset evaluated over the parsed DOM.
+   *  - `jsonpath` — JSONPath against a non-HTML JSON response body. Only
+   *                 runs on responses whose body parses as JSON (e.g.
+   *                 `application/json` APIs); ignored on HTML pages.
+   */
+  type: 'css' | 'regex' | 'xpath' | 'jsonpath';
+  /**
+   * `css`  → CSS selector.
+   * `regex`→ regex pattern (no flags — /g is implicit).
+   * `xpath`→ XPath location path, e.g. `//meta[@property='og:title']/@content`.
+   * `jsonpath` → JSONPath expression, e.g. `$.products[*].price`.
+   */
   selector: string;
-  /** Attribute to read when `output = 'attribute'`. Ignored otherwise. */
+  /** Attribute to read when `output = 'attribute'`. Ignored otherwise.
+   *  For `xpath`, an `.../@attr` terminal step reads the attribute directly
+   *  and overrides this field. */
   attribute?: string;
   /**
    * What to read off each match.
-   *  - `text`        — visible text content (CSS only).
-   *  - `attribute`   — value of `attribute` (CSS only).
-   *  - `inner_html`  — innerHTML (CSS only).
-   *  - `outer_html`  — outerHTML (CSS only).
+   *  - `text`        — visible text content (CSS / XPath element matches).
+   *  - `attribute`   — value of `attribute` (CSS / XPath element matches).
+   *  - `inner_html`  — innerHTML (CSS / XPath).
+   *  - `outer_html`  — outerHTML (CSS / XPath).
    *  - `count`       — match count, ignores `multi`.
    *  - `regex_group` — regex capture group 1 (regex only).
+   * For `jsonpath` and XPath `@attr` / `text()` terminals the matched value
+   * is used directly (this field is then ignored).
    */
   output: 'text' | 'attribute' | 'inner_html' | 'outer_html' | 'count' | 'regex_group';
   /**
@@ -1322,6 +1418,8 @@ export interface OverviewCounts {
     queryStringTooLong: number;
     folderDepthTooDeep: number;
     http2NotSupported: number;
+    /** Indexable HTML pages whose origin does not advertise HTTP/3 via Alt-Svc. */
+    http3NotSupported: number;
     renderBlocking: number;
     keepaliveDisabled: number;
     titlePlaceholder: number;
@@ -1788,6 +1886,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   webhookUrl: '',
   customExtractionRules: [],
   auth: { type: 'none' },
+  formLogin: { enabled: false, steps: [] },
   proxyUrl: '',
   excludeExtensions: [],
   maxRedirects: 10,
@@ -1801,6 +1900,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   probeTlsCerts: true,
   probeManifestJson: true,
   probeSocialImages: true,
+  probePdfMetadata: true,
   dedupePreNormalize: true,
   cdnHosts: [],
   maxLinksPerPage: 100,

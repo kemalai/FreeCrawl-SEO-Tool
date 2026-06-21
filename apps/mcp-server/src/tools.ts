@@ -1484,7 +1484,7 @@ export function buildTools(): Tool[] {
       requiresDb: false,
       name: 'extraction_preview',
       description:
-        'Test custom extraction rules against a live URL fetch — same primitive as Settings → Custom Extraction "Preview". Returns per-rule values (or compile errors) plus the response\'s status / content-type / byte size / fetch ms. The agent can iterate on selectors without running a full crawl.',
+        'Test custom extraction rules against a live URL fetch — same primitive as Settings → Custom Extraction "Preview". Rule types: `css` (cheerio selector), `xpath` (XPath 1.0 subset over the DOM), `regex` (raw HTML), `jsonpath` (against a JSON response body). Returns per-rule values (or compile errors) plus the response\'s status / content-type / byte size / fetch ms. The agent can iterate on selectors without running a full crawl.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1495,7 +1495,7 @@ export function buildTools(): Tool[] {
               type: 'object',
               properties: {
                 name: { type: 'string' },
-                type: { type: 'string', enum: ['css', 'regex'] },
+                type: { type: 'string', enum: ['css', 'xpath', 'regex', 'jsonpath'] },
                 selector: { type: 'string' },
                 attribute: { type: 'string' },
                 output: { type: 'string', enum: ['text', 'attribute', 'inner_html', 'outer_html', 'count', 'regex_group'] },
@@ -1528,8 +1528,10 @@ export function buildTools(): Tool[] {
         bridgeRequest<unknown>('POST', '/v1/action/graph-snapshot', args),
     },
 
-    // ---- Faz 0.5 Increment 4 — Integration fetch (GSC + GA4 only;
-    // PSI/AI/SEO have progress streaming and stay in the desktop UI). ----
+    // ---- Faz 0.5 Increment 4 — Integration fetch (GSC + GA4 — single
+    // blocking API calls, no progress streaming). PSI / AI / SEO have
+    // multi-URL batches with progress + cancellation and are exposed via
+    // the non-blocking start/poll/cancel tools in Increment 5 below. ----
 
     {
       requiresDb: false,
@@ -1630,6 +1632,165 @@ export function buildTools(): Tool[] {
           rowCount: number;
           meta: unknown;
         }>('POST', '/v1/action/ga4-fetch', args),
+    },
+
+    // ---- Faz 0.5 Increment 5 — slow batch-fetch run triggers
+    // (PageSpeed / AI / SEO). These are the multi-URL fetchers that
+    // stream progress + support cancellation. The MCP wire protocol
+    // can't stream, so — exactly like start_crawl — each *_run tool
+    // returns immediately after kicking off the batch; poll
+    // get_fetch_progress to watch it and cancel_fetch to stop. Target
+    // URLs come from an explicit `urls` list OR a `category` resolved
+    // server-side (preferred for large sets — the bridge caps request
+    // bodies at 64 KB, so a big `urls` array is rejected). ----
+
+    {
+      requiresDb: false,
+      name: 'pagespeed_run',
+      description:
+        'Kick off a PageSpeed Insights (Lighthouse) batch audit in the desktop app and return immediately — it does NOT block (audits take ~10–30 s each). Poll `get_fetch_progress` (kind "pagespeed") to watch it and `cancel_fetch` to stop. Pick targets with an explicit `urls` array OR a `category` resolved server-side (preferred for large sets). Keyless PageSpeed has a near-zero daily quota — add a free key under Settings → Integrations → PageSpeed Insights for real throughput. Results land where `query_pagespeed` / `get_url_analytics` read. Returns `{started, total, truncated, state}`; `started:false` + `reason` when a run is already active or nothing matched.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          urls: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Explicit URLs to audit. Wins over `category`. Keep the list small — the bridge caps the request body at 64 KB.',
+          },
+          category: {
+            type: 'string',
+            enum: URL_CATEGORY_VALUES,
+            description: 'Resolve target URLs from the active project by category (e.g. "internal:html") when `urls` is omitted.',
+          },
+          search: {
+            type: 'string',
+            description: 'Optional substring filter applied when resolving via `category`.',
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 5000,
+            description: 'Max URLs to pull when resolving via `category`. Default 100.',
+          },
+          strategy: {
+            type: 'string',
+            enum: ['mobile', 'desktop', 'both'],
+            description: 'Form factor. `both` doubles the API calls. Default "mobile".',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/pagespeed-run', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'ai_run',
+      description:
+        'Kick off an AI batch over the matched URLs and return immediately (non-blocking). Each page\'s fields can be interpolated into `prompt` via {url}/{title}/{description}/{h1}/{body}. Poll `get_fetch_progress` (kind "ai") and `cancel_fetch` to stop. COSTS REAL MONEY for hosted providers (openai/anthropic) — one API call per matched URL — so scope tightly with `category` + `limit` first. The provider must be configured in Settings → AI. URLs not crawled in this project are skipped (no page context). Results land where `query_ai` reads. Returns `{started, total, truncated, state}`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          provider: {
+            type: 'string',
+            enum: ['openai', 'anthropic', 'ollama'],
+          },
+          prompt: {
+            type: 'string',
+            description: 'Prompt template, substituted per URL. Supports {url}/{title}/{description}/{h1}/{body} placeholders.',
+          },
+          model: {
+            type: 'string',
+            description: 'Optional model override; blank uses the provider default.',
+          },
+          urls: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Explicit URLs. Wins over `category`. Keep small (64 KB body cap).',
+          },
+          category: {
+            type: 'string',
+            enum: URL_CATEGORY_VALUES,
+            description: 'Resolve targets by category when `urls` is omitted.',
+          },
+          search: { type: 'string' },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 5000,
+            description: 'Max URLs when resolving via `category`. Default 100.',
+          },
+        },
+        required: ['provider', 'prompt'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/ai-run', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'seo_run',
+      description:
+        'Kick off an SEO-authority batch (domain authority / backlinks / referring domains) over the matched URLs and return immediately (non-blocking). Poll `get_fetch_progress` (kind "seo") and `cancel_fetch` to stop. The provider must be configured in Settings → SEO Authority. Results land where `query_seo` reads. Returns `{started, total, truncated, state}`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          provider: {
+            type: 'string',
+            enum: ['ahrefs', 'majestic', 'moz', 'semrush'],
+          },
+          urls: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Explicit URLs. Wins over `category`. Keep small (64 KB body cap).',
+          },
+          category: {
+            type: 'string',
+            enum: URL_CATEGORY_VALUES,
+            description: 'Resolve targets by category when `urls` is omitted.',
+          },
+          search: { type: 'string' },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 5000,
+            description: 'Max URLs when resolving via `category`. Default 100.',
+          },
+        },
+        required: ['provider'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/seo-run', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'get_fetch_progress',
+      description:
+        'Poll the live state of the PageSpeed / AI / SEO batch fetchers started by pagespeed_run / ai_run / seo_run (or by the desktop UI — the snapshot is shared). Returns per-kind `{running, done, total, completed, failed, currentUrl, cancelled, startedAt, finishedAt, provider, error}`. Omit `kind` for all three; pass one to narrow. Poll every 1–2 s; once `running` flips to false the batch is done. This is the fetch-side analogue of get_crawl_progress.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['pagespeed', 'ai', 'seo'] },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/fetch-progress', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'cancel_fetch',
+      description:
+        'Request cooperative cancellation of a running batch fetcher. In-flight items finish and are saved; queued items are skipped. Pass `kind` ("pagespeed" / "ai" / "seo") to cancel one, or omit to cancel all three. Returns which kinds were running when the cancel landed. No-op for kinds that are idle.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['pagespeed', 'ai', 'seo'] },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/fetch-cancel', args),
     },
   ];
 }

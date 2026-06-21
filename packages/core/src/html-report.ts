@@ -153,6 +153,7 @@ const ISSUES: IssueDef[] = [
   { key: 'queryStringTooLong', label: 'Query String >100 Chars', severity: 'info' },
   { key: 'folderDepthTooDeep', label: 'Folder Depth >4', severity: 'info' },
   { key: 'http2NotSupported', label: 'HTTP/2 Not Advertised', severity: 'info' },
+  { key: 'http3NotSupported', label: 'HTTP/3 Not Advertised', severity: 'info' },
   { key: 'renderBlocking', label: 'Render-Blocking Head Resources >5', severity: 'warn' },
   { key: 'keepaliveDisabled', label: 'Keep-Alive Disabled (Connection: close)', severity: 'warn' },
   { key: 'titlePlaceholder', label: 'Title Placeholder (Untitled / Default)', severity: 'error' },

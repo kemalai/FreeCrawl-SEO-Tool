@@ -1,8 +1,13 @@
 import dns from 'node:dns';
-import { Agent, ProxyAgent, setGlobalDispatcher } from 'undici';
+import crypto from 'node:crypto';
+import { Agent, ProxyAgent, buildConnector, setGlobalDispatcher } from 'undici';
+import { SocksClient, type SocksProxy } from 'socks';
 import { createResilientLookup, type DnsResolverHook } from './dns-resolver.js';
 
-let initialized = false;
+let dnsInitialized = false;
+/** Effective proxy applied to the global dispatcher on the last call, so we
+ *  only rebuild when it actually changes (a second crawl can switch proxy). */
+let lastProxyKey: string | null = null;
 
 /**
  * Configure the global undici dispatcher and Node DNS once per process.
@@ -19,21 +24,27 @@ let initialized = false;
  * - If HTTPS_PROXY / HTTP_PROXY env vars are set (corporate networks),
  *   route through ProxyAgent so packaged-app users don't get ECONNREFUSED
  *   against origins they can only reach via their company proxy.
+ * - SOCKS proxies (`socks5://`, `socks5h://`, `socks4://`, `socks4a://`)
+ *   are routed through a custom undici Agent whose `connect` dials the
+ *   destination over a SOCKS tunnel (TLS upgraded for https origins).
  * - The Agent is tuned for crawler-style workloads: many concurrent
  *   connections per origin, long keep-alive, tight headers timeout so a
  *   stuck origin can't freeze the pool.
+ *
+ * Idempotent per effective-proxy: DNS is configured once, and the global
+ * dispatcher is only rebuilt when the resolved proxy changes — so a second
+ * crawl can switch to a different proxy instead of the first crawl's
+ * dispatcher winning for the whole process lifetime.
  */
 export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsResolverHook } = {}): void {
-  if (initialized) return;
-  initialized = true;
-
-  dns.setDefaultResultOrder('ipv4first');
-
-  const lookup = createResilientLookup({ onEvent: opts.onDnsEvent });
+  if (!dnsInitialized) {
+    dnsInitialized = true;
+    dns.setDefaultResultOrder('ipv4first');
+  }
 
   // Corporate proxy detection — env vars are the universal contract,
   // matching curl / git / npm / pip behaviour. A non-empty config
-  // override (Settings → Auth → Proxy URL) takes precedence so the
+  // override (Settings → Network → Proxy URL) takes precedence so the
   // user can route a single project through a different proxy.
   // ECMAScript forbids mixing `||` with `??` in the same expression
   // without parentheses (SyntaxError on parse). The `??` chain must be
@@ -44,14 +55,23 @@ export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsR
     process.env['HTTP_PROXY'] ??
     process.env['http_proxy'] ??
     null;
-  const proxyUrl =
-    (opts.proxyOverride && opts.proxyOverride.trim()) || envProxy;
+  const proxyUrl = (opts.proxyOverride && opts.proxyOverride.trim()) || envProxy || '';
+
+  const key = proxyUrl || '<direct>';
+  if (key === lastProxyKey) return;
+  lastProxyKey = key;
 
   if (proxyUrl) {
+    const scheme = proxyUrl.slice(0, Math.max(0, proxyUrl.indexOf(':'))).toLowerCase();
+    if (scheme.startsWith('socks')) {
+      setGlobalDispatcher(buildSocksDispatcher(proxyUrl));
+      return;
+    }
     setGlobalDispatcher(new ProxyAgent({ uri: proxyUrl }));
     return;
   }
 
+  const lookup = createResilientLookup({ onEvent: opts.onDnsEvent });
   const agent = new Agent({
     connections: 128,
     pipelining: 1,
@@ -74,6 +94,65 @@ export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsR
 }
 
 /**
+ * Build an undici dispatcher that tunnels every connection through a SOCKS
+ * proxy. undici's own `ProxyAgent` only speaks HTTP CONNECT, so for SOCKS
+ * we supply a custom `connect`: the `socks` client opens the tunnel to the
+ * destination, then for `https:` origins we hand the raw socket to undici's
+ * TLS connector (`httpSocket`) so the certificate handshake still happens
+ * end-to-end. `socks5h` / `socks4a` resolve DNS at the proxy (the default
+ * here, since we pass the destination host name through untouched).
+ */
+function buildSocksDispatcher(proxyUrl: string): Agent {
+  const u = new URL(proxyUrl);
+  const scheme = u.protocol.replace(':', '').toLowerCase();
+  const type: 4 | 5 = scheme === 'socks4' || scheme === 'socks4a' ? 4 : 5;
+  const proxy: SocksProxy = {
+    host: u.hostname,
+    port: Number(u.port) || 1080,
+    type,
+    ...(u.username ? { userId: decodeURIComponent(u.username) } : {}),
+    ...(u.password ? { password: decodeURIComponent(u.password) } : {}),
+  };
+
+  const tlsConnector = buildConnector({});
+  const connect: typeof tlsConnector = (options, callback) => {
+    void (async () => {
+      const host = options.hostname;
+      const port = Number(options.port) || (options.protocol === 'https:' ? 443 : 80);
+      let socket;
+      try {
+        const result = await SocksClient.createConnection({
+          proxy,
+          command: 'connect',
+          destination: { host, port },
+          timeout: 10_000,
+        });
+        socket = result.socket;
+      } catch (err) {
+        callback(err as Error, null);
+        return;
+      }
+      if (options.protocol === 'https:') {
+        tlsConnector({ ...options, httpSocket: socket }, callback);
+        return;
+      }
+      socket.setNoDelay(true);
+      callback(null, socket);
+    })();
+  };
+
+  return new Agent({
+    connections: 128,
+    pipelining: 1,
+    keepAliveTimeout: 60_000,
+    keepAliveMaxTimeout: 120_000,
+    headersTimeout: 10_000,
+    bodyTimeout: 30_000,
+    connect,
+  });
+}
+
+/**
  * Best-effort HTTP protocol detector. We can't ask undici-fetch which
  * ALPN/protocol was actually negotiated for the connection that served
  * the response — that information is buried in the dispatcher and not
@@ -92,8 +171,13 @@ export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsR
 export function detectHttpProtocol(altSvcHeader: string | null): string | null {
   if (altSvcHeader === null) return 'http/1.1';
   const v = altSvcHeader.toLowerCase();
-  if (v.includes('h3=')) return 'h3';
-  if (v.includes('h2=')) return 'h2';
+  // Alt-Svc is a comma-separated list of advertised protocols, e.g.
+  // `h3=":443"; ma=2592000, h3-29=":443", h2=":443"`. Match the `h3`
+  // token at a boundary INCLUDING draft variants (`h3-29=`, `h3-Q050=`)
+  // — a plain `includes('h3=')` misses draft-only origins. `Alt-Svc:
+  // clear` (origin withdrawing advertisements) matches neither token.
+  if (/(?:^|[\s,])h3(?:-[a-z0-9]+)?=/.test(v)) return 'h3';
+  if (/(?:^|[\s,])h2=/.test(v)) return 'h2';
   return 'http/1.1';
 }
 
@@ -245,7 +329,12 @@ export function defaultRequestHeaders(
   userAgent: string,
   acceptLanguage: string,
   custom: Record<string, string> = {},
-  auth?: { type: 'none' | 'basic' | 'bearer'; username?: string; password?: string; token?: string },
+  auth?: {
+    type: 'none' | 'basic' | 'bearer' | 'digest';
+    username?: string;
+    password?: string;
+    token?: string;
+  },
 ): Record<string, string> {
   const headers: Record<string, string> = {
     'user-agent': userAgent,
@@ -275,4 +364,95 @@ export function defaultRequestHeaders(
     headers[key] = value;
   }
   return headers;
+}
+
+/* ------------------------------------------------------------------ */
+/* HTTP Digest authentication (RFC 2617 / RFC 7616)                    */
+/* ------------------------------------------------------------------ */
+
+export interface DigestChallenge {
+  realm: string;
+  nonce: string;
+  /** May be a comma-separated list, e.g. `auth,auth-int`. */
+  qop?: string;
+  opaque?: string;
+  /** `MD5` | `MD5-sess` | `SHA-256` | `SHA-256-sess` (default MD5). */
+  algorithm?: string;
+}
+
+/**
+ * Parse a `WWW-Authenticate` response header and extract the Digest
+ * challenge parameters. Returns `null` when the header isn't a Digest
+ * challenge (e.g. it advertises only Basic), so the caller can skip the
+ * digest round-trip. Tolerates a header that lists multiple schemes by
+ * scanning from the `Digest` token.
+ */
+export function parseDigestChallenge(headerValue: string | null): DigestChallenge | null {
+  if (!headerValue) return null;
+  const idx = headerValue.toLowerCase().indexOf('digest ');
+  if (idx === -1) return null;
+  const params = headerValue.slice(idx + 'digest '.length);
+  const map: Record<string, string> = {};
+  // key=value pairs, value either quoted ("...") or a bare token.
+  const re = /([A-Za-z0-9_-]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^,\s]+))/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(params)) !== null) {
+    const key = m[1]!.toLowerCase();
+    map[key] = m[2] !== undefined ? m[2].replace(/\\(.)/g, '$1') : (m[3] ?? '');
+  }
+  if (!map['nonce'] || map['realm'] === undefined) return null;
+  return {
+    realm: map['realm'] ?? '',
+    nonce: map['nonce'] ?? '',
+    qop: map['qop'],
+    opaque: map['opaque'],
+    algorithm: map['algorithm'],
+  };
+}
+
+/**
+ * Compute the `Authorization: Digest …` header value for a request, given
+ * a parsed challenge and the request's method + request-target URI.
+ * Supports MD5 / SHA-256, the `-sess` variants, and `qop=auth`. `auth-int`
+ * (which needs a body hash) falls back to the legacy RFC 2069 form.
+ */
+export function buildDigestAuthHeader(
+  challenge: DigestChallenge,
+  req: { method: string; uri: string; username: string; password: string; nc?: string; cnonce?: string },
+): string {
+  const algo = challenge.algorithm ?? 'MD5';
+  const hashName = algo.toUpperCase().startsWith('SHA-256') ? 'sha256' : 'md5';
+  const sess = algo.toLowerCase().endsWith('-sess');
+  const H = (s: string): string => crypto.createHash(hashName).update(s).digest('hex');
+
+  const cnonce = req.cnonce ?? crypto.randomBytes(8).toString('hex');
+  const nc = req.nc ?? '00000001';
+
+  let ha1 = H(`${req.username}:${challenge.realm}:${req.password}`);
+  if (sess) ha1 = H(`${ha1}:${challenge.nonce}:${cnonce}`);
+  const ha2 = H(`${req.method}:${req.uri}`);
+
+  const qops = (challenge.qop ?? '')
+    .split(',')
+    .map((q) => q.trim().toLowerCase())
+    .filter(Boolean);
+  const useQop = qops.includes('auth') ? 'auth' : '';
+
+  const parts = [
+    `username="${req.username}"`,
+    `realm="${challenge.realm}"`,
+    `nonce="${challenge.nonce}"`,
+    `uri="${req.uri}"`,
+  ];
+  let response: string;
+  if (useQop) {
+    response = H(`${ha1}:${challenge.nonce}:${nc}:${cnonce}:${useQop}:${ha2}`);
+    parts.push(`qop=${useQop}`, `nc=${nc}`, `cnonce="${cnonce}"`);
+  } else {
+    response = H(`${ha1}:${challenge.nonce}:${ha2}`);
+  }
+  parts.push(`response="${response}"`);
+  if (challenge.algorithm) parts.push(`algorithm=${challenge.algorithm}`);
+  if (challenge.opaque) parts.push(`opaque="${challenge.opaque}"`);
+  return `Digest ${parts.join(', ')}`;
 }

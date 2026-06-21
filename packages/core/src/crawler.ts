@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import * as os from 'node:os';
 import { fetch as undiciFetch } from 'undici';
+import { load as cheerioLoad } from 'cheerio';
 import PQueue from 'p-queue';
 import type {
   ContentKind,
@@ -26,14 +27,18 @@ import { parseHtml, estimatePixelWidth } from './html-parser.js';
 import { analyseCookies, extractSetCookies } from './cookies.js';
 import { loadRobots, type RobotsChecker } from './robots.js';
 import {
+  buildDigestAuthHeader,
   collectNetworkDiagnostics,
   defaultRequestHeaders,
   detectHttpProtocol,
   formatFetchError,
   initHttpClient,
+  parseDigestChallenge,
 } from './http-client.js';
 import { setActiveDnsHook } from './dns-resolver.js';
 import { discoverSitemapUrls, fetchSitemaps } from './sitemap.js';
+import { runJsonExtractionRules } from './extraction.js';
+import { SessionCookieJar } from './cookie-jar.js';
 
 export interface CrawlerEvents {
   progress: (p: CrawlProgress) => void;
@@ -100,6 +105,9 @@ export class Crawler extends EventEmitter {
    * adds itself in `try` and removes itself in `finally`.
    */
   private inFlightFetchControllers = new Set<AbortController>();
+  /** Authenticated session cookies established by the pre-crawl form-login
+   *  sequence, replayed on every request. Null when form login is off. */
+  private sessionJar: SessionCookieJar | null = null;
   private robots: RobotsChecker | null = null;
   private progressTimer: NodeJS.Timeout | null = null;
   private memoryWatchdogTimer: NodeJS.Timeout | null = null;
@@ -518,6 +526,11 @@ export class Crawler extends EventEmitter {
     // disabled TLS validation, all of which affect what crawls can reach.
     this.emitEnvDiagnostics();
 
+    // V2 Faz 2 — establish an authenticated session before any fetch when
+    // form-based login is configured. Best-effort; the crawl proceeds
+    // either way. Runs for both spider and list mode.
+    await this.runFormLogin();
+
     if (this.config.mode === 'list') {
       await this.startListMode();
       return;
@@ -804,6 +817,9 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.setOp('post-crawl:social-image-probes');
     await this.runSocialImageProbes();
+    await yieldToEventLoop();
+    this.setOp('post-crawl:pdf-probes');
+    await this.runPdfMetadataProbes();
     await yieldToEventLoop();
     this.setOp('post-crawl:performance-budget');
     this.runBudgetPass();
@@ -1130,6 +1146,100 @@ export class Crawler extends EventEmitter {
   }
 
   /**
+   * V2 Faz 16 — extract document metadata (title / author / page count /
+   * creation date / producer) from internal PDFs. Mirrors the manifest /
+   * social-image probe shape, but PDFs are their own URL rows so each
+   * result is a plain per-row update (no fan-out). Small concurrency pool;
+   * each probe is ranged + best-effort so one bad PDF never aborts the
+   * pass. `pdf_probe_status` records 1 / 0 / negative so a probed PDF
+   * drops out of `unprobedPdfUrls` and isn't re-fetched on the next crawl.
+   */
+  private async runPdfMetadataProbes(): Promise<void> {
+    if (!this.config.probePdfMetadata) return;
+    if (this.stopped) return;
+    let urls: string[] = [];
+    try {
+      urls = this.db.unprobedPdfUrls(2_000);
+    } catch (err) {
+      this.emit(
+        'info',
+        `PDF metadata probe skipped (DB query failed): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    if (urls.length === 0) return;
+    this.emit('info', `Probing ${urls.length} PDF(s) for metadata…`);
+
+    const { probePdfMetadata } = await import('./pdf-probe.js');
+    const concurrency = Math.max(1, Math.min(this.config.maxConcurrency, 6));
+    let cursor = 0;
+    let withMeta = 0;
+    let failed = 0;
+
+    const worker = async (): Promise<void> => {
+      while (!this.stopped) {
+        const idx = cursor++;
+        if (idx >= urls.length) return;
+        const url = urls[idx];
+        if (!url) return;
+        try {
+          const result = await probePdfMetadata(url, {
+            userAgent: this.resolveUserAgent(url),
+            acceptLanguage: this.config.acceptLanguage,
+            customHeaders: this.config.customHeaders,
+            auth: this.config.auth,
+          });
+          const hasMeta =
+            result.title !== null ||
+            result.author !== null ||
+            result.pageCount !== null ||
+            result.creationDate !== null ||
+            result.producer !== null;
+          // 1 = metadata found, 0 = probed-but-empty, -1 = fetch/parse error.
+          const status = result.error ? -1 : hasMeta ? 1 : 0;
+          this.db.setPdfMetadata({
+            url,
+            title: result.title,
+            author: result.author,
+            pageCount: result.pageCount,
+            creationDate: result.creationDate,
+            producer: result.producer,
+            status,
+          });
+          if (result.error) failed++;
+          else if (hasMeta) withMeta++;
+        } catch {
+          // Couldn't even fetch/record — mark errored so we don't loop on it.
+          try {
+            this.db.setPdfMetadata({
+              url,
+              title: null,
+              author: null,
+              pageCount: null,
+              creationDate: null,
+              producer: null,
+              status: -1,
+            });
+          } catch {
+            /* best-effort */
+          }
+          failed++;
+        }
+      }
+    };
+
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < concurrency; i++) workers.push(worker());
+    await Promise.all(workers);
+    this.emit(
+      'info',
+      `PDF metadata probe complete: ${withMeta}/${urls.length} with metadata, ${failed} failed`,
+    );
+  }
+
+  /**
    * V2 Faz 15 — performance budget pass. Stamps each internal 200 HTML
    * page with a bitmask of which configured ceilings it exceeded
    * (response time / transfer size / LCP / CLS). Pure SQL on the DB, so
@@ -1371,6 +1481,8 @@ export class Crawler extends EventEmitter {
     await this.runTlsCertProbes();
     await yieldToEventLoop();
     await this.runSocialImageProbes();
+    await yieldToEventLoop();
+    await this.runPdfMetadataProbes();
     await yieldToEventLoop();
     this.runBudgetPass();
     this.running = false;
@@ -2224,10 +2336,31 @@ export class Crawler extends EventEmitter {
       }
 
       if (kind !== 'html' || statusCode >= 400) {
+        // Non-HTML / error responses are normally body-less in our model.
+        // Exception: JSON responses (`application/json` APIs) are routed to
+        // the JSONPath custom-extraction path — the only place non-HTML
+        // bodies are parsed. We capture the body once so a configured
+        // jsonpath rule can read it; otherwise it's drained and discarded.
+        const needsJsonExtraction =
+          statusCode < 400 &&
+          (this.config.customExtractionRules ?? []).some((r) => r.type === 'jsonpath');
+        let nonHtmlBody = '';
         try {
-          await res.text();
+          nonHtmlBody = await res.text();
         } catch {
           /* ignore */
+        }
+        let jsonExtraction: Record<string, unknown> | null = null;
+        if (needsJsonExtraction) {
+          const ctLower = (contentType ?? '').toLowerCase();
+          const looksJson = ctLower.includes('json') || /^\s*[[{]/.test(nonHtmlBody);
+          if (looksJson) {
+            try {
+              jsonExtraction = runJsonExtractionRules(nonHtmlBody, this.config.customExtractionRules);
+            } catch {
+              jsonExtraction = null;
+            }
+          }
         }
         const indexability: Indexability =
           statusCode >= 500
@@ -2245,6 +2378,7 @@ export class Crawler extends EventEmitter {
             indexability,
             indexabilityReason: indexability === 'indexable' ? null : `HTTP ${statusCode}`,
             contentType,
+            extractionResults: jsonExtraction ? JSON.stringify(jsonExtraction) : null,
             contentLength: parseIntSafe(contentLengthHeader),
             xRobotsTag,
             responseTimeMs,
@@ -2774,6 +2908,163 @@ export class Crawler extends EventEmitter {
     return this.config.userAgent;
   }
 
+  /**
+   * Build request headers for a crawl fetch: defaults + auth + any
+   * established session cookies. A user-supplied `Cookie` header (via
+   * customHeaders) always wins over the session jar; `extra` (e.g. a
+   * computed Digest Authorization) is applied last.
+   */
+  private requestHeaders(url: string, extra?: Record<string, string>): Record<string, string> {
+    const headers = defaultRequestHeaders(
+      this.resolveUserAgent(url),
+      this.config.acceptLanguage,
+      this.config.customHeaders,
+      this.config.auth,
+    );
+    if (this.sessionJar) {
+      const hasCookie = Object.keys(headers).some((k) => k.toLowerCase() === 'cookie');
+      if (!hasCookie) {
+        const ck = this.sessionJar.cookieHeader(url);
+        if (ck) headers['cookie'] = ck;
+      }
+    }
+    if (extra) Object.assign(headers, extra);
+    return headers;
+  }
+
+  /** Capture Set-Cookie from a response into the session jar so a rotating
+   *  login session stays alive. No-op when form login is off. */
+  private refreshSessionJar(url: string, res: Response): void {
+    if (!this.sessionJar) return;
+    try {
+      const setCookies =
+        (res.headers as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+      if (setCookies.length) this.sessionJar.setFromResponse(url, setCookies);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * Execute the form-based login sequence before the crawl starts. Steps
+   * run in order over one shared cookie jar; each step can capture values
+   * (CSRF tokens, etc.) from its response via CSS selectors for `{{var}}`
+   * interpolation in later steps. On success the jar is installed so its
+   * cookies are replayed on every crawl request. Best-effort — a failed
+   * step is logged and the crawl proceeds unauthenticated.
+   */
+  private async runFormLogin(): Promise<void> {
+    const cfg = this.config.formLogin;
+    if (!cfg || !cfg.enabled || cfg.steps.length === 0) return;
+
+    const jar = new SessionCookieJar();
+    const vars: Record<string, string> = {};
+    const interp = (s: string): string =>
+      s.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_m, name: string) => vars[name] ?? '');
+    const cookieHeaderFor = (target: string): Record<string, string> => {
+      const h = defaultRequestHeaders(
+        this.config.userAgent,
+        this.config.acceptLanguage,
+        this.config.customHeaders,
+        this.config.auth,
+      );
+      const ck = jar.cookieHeader(target);
+      if (ck && !Object.keys(h).some((k) => k.toLowerCase() === 'cookie')) h['cookie'] = ck;
+      return h;
+    };
+
+    this.setOp('crawl:login');
+    for (let i = 0; i < cfg.steps.length; i++) {
+      const step = cfg.steps[i]!;
+      const stepUrl = interp(step.url).trim();
+      if (!stepUrl) continue;
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(),
+        Math.max(5000, this.config.requestTimeoutMs),
+      );
+      try {
+        const headers = cookieHeaderFor(stepUrl);
+        let body: string | undefined;
+        if (step.method === 'POST') {
+          const form = new URLSearchParams();
+          for (const f of step.fields) {
+            if (f.name.trim()) form.append(f.name, interp(f.value));
+          }
+          body = form.toString();
+          headers['content-type'] = 'application/x-www-form-urlencoded';
+        }
+        let current = await undiciFetch(stepUrl, {
+          method: step.method,
+          headers,
+          body,
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+        // Capture cookies, then follow up to 5 redirects manually so the
+        // Set-Cookie on a post-login 30x is captured too.
+        let hops = 0;
+        for (;;) {
+          const sc =
+            (current.headers as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+          if (sc.length) jar.setFromResponse(stepUrl, sc);
+          const loc = current.headers.get('location');
+          if (!loc || hops >= 5 || current.status < 300 || current.status >= 400) break;
+          hops++;
+          const next = new URL(loc, stepUrl).toString();
+          try {
+            await current.body?.cancel();
+          } catch {
+            /* ignore */
+          }
+          current = await undiciFetch(next, {
+            method: 'GET',
+            headers: cookieHeaderFor(next),
+            redirect: 'manual',
+            signal: controller.signal,
+          });
+        }
+        if (step.captures.length) {
+          const html = await current.text().catch(() => '');
+          if (html) {
+            const $ = cheerioLoad(html);
+            for (const cap of step.captures) {
+              if (!cap.name.trim() || !cap.selector.trim()) continue;
+              const el = $(cap.selector).first();
+              const attr = (cap.attribute ?? 'value').trim() || 'value';
+              const val = attr.toLowerCase() === 'text' ? el.text() : el.attr(attr);
+              if (val !== undefined && val !== null) vars[cap.name.trim()] = String(val).trim();
+            }
+          }
+        } else {
+          try {
+            await current.body?.cancel();
+          } catch {
+            /* ignore */
+          }
+        }
+        this.emit(
+          'info',
+          `Form login step ${i + 1}/${cfg.steps.length}: ${step.method} ${stepUrl} -> ${current.status}`,
+        );
+      } catch (err) {
+        this.emit(
+          'warn',
+          `Form login step ${i + 1} failed (${stepUrl}): ${formatFetchError(err)} — continuing unauthenticated`,
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    if (jar.size > 0) {
+      this.sessionJar = jar;
+      this.emit('info', `Form login established ${jar.size} session cookie(s).`);
+    } else {
+      this.emit('warn', 'Form login produced no cookies — the crawl will run unauthenticated.');
+    }
+  }
+
   private async fetchWithRetry(
     url: string,
     signal: AbortSignal,
@@ -2799,17 +3090,44 @@ export class Crawler extends EventEmitter {
           this.config.renderingMode === 'ajax'
             ? toEscapedFragmentUrl(url)
             : url;
-        const res = await undiciFetch(fetchUrl, {
+        let res = await undiciFetch(fetchUrl, {
           method: 'GET',
-          headers: defaultRequestHeaders(
-            this.resolveUserAgent(url),
-            this.config.acceptLanguage,
-            this.config.customHeaders,
-            this.config.auth,
-          ),
+          headers: this.requestHeaders(url),
           redirect: 'manual',
           signal,
         });
+        // HTTP Digest — the first 401 carries the `WWW-Authenticate: Digest`
+        // challenge; recompute the Authorization header from it and retry
+        // once. Only when digest auth is configured with a username.
+        if (
+          res.status === 401 &&
+          this.config.auth.type === 'digest' &&
+          (this.config.auth.username ?? '')
+        ) {
+          const challenge = parseDigestChallenge(res.headers.get('www-authenticate'));
+          if (challenge) {
+            try {
+              await res.body?.cancel();
+            } catch {
+              /* ignore */
+            }
+            const u = new URL(fetchUrl);
+            const authHeader = buildDigestAuthHeader(challenge, {
+              method: 'GET',
+              uri: u.pathname + u.search,
+              username: this.config.auth.username ?? '',
+              password: this.config.auth.password ?? '',
+            });
+            res = await undiciFetch(fetchUrl, {
+              method: 'GET',
+              headers: this.requestHeaders(url, { authorization: authHeader }),
+              redirect: 'manual',
+              signal,
+            });
+          }
+        }
+        // Keep the login session alive — capture any rotated session cookies.
+        this.refreshSessionJar(url, res);
         const ttfbMs = Date.now() - tStart;
         // Final attempt or non-retryable status — return as-is. We attach
         // ttfbMs as a non-enumerable property so the existing call sites
