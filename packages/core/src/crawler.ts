@@ -23,7 +23,7 @@ import {
   compileUrlRegexRewrites,
   toEscapedFragmentUrl,
 } from './url-utils.js';
-import { parseHtml, estimatePixelWidth } from './html-parser.js';
+import { parseHtml, estimatePixelWidth, type ParsedPage } from './html-parser.js';
 import { analyseCookies, extractSetCookies } from './cookies.js';
 import { loadRobots, type RobotsChecker } from './robots.js';
 import {
@@ -903,18 +903,19 @@ export class Crawler extends EventEmitter {
   }
 
   /**
-   * Post-crawl HEAD probe over internal images so the DB knows their byte
-   * size for the "Large Image" issue. HEAD-only — no body download — so
-   * cost is one round-trip per image. Concurrency is bounded by the same
-   * setting as the main crawl; failures are silent (probe_status stays
-   * null and the issue check skips them rather than false-positives).
+   * Post-crawl HEAD probe over images (internal + external) so the DB knows
+   * their byte size for the "Large Image" issue and their status for the
+   * "Broken Image src" issue (incl. dead external/CDN images). HEAD-only —
+   * no body download — so cost is one round-trip per image. Concurrency is
+   * bounded by the same setting as the main crawl; failures are silent
+   * (probe_status stays null and the issue check skips them).
    */
   private async runImageSizeProbes(): Promise<void> {
     if (!this.config.probeImageSizes) return;
     if (this.stopped) return;
     let unprobed: { id: number; src: string }[] = [];
     try {
-      unprobed = this.db.unprobedInternalImages(20_000);
+      unprobed = this.db.unprobedImages(20_000);
     } catch (err) {
       this.emit(
         'info',
@@ -2040,6 +2041,92 @@ export class Crawler extends EventEmitter {
       });
   }
 
+  /**
+   * Enqueue the internal subresources of a freshly-parsed HTML page so they
+   * become their own `urls` rows (Screaming Frog "Check Images / CSS / JS").
+   * Gated per-type by the `checkImages` / `checkCss` / `checkJs` config flags.
+   *
+   * Resources are enqueued at the *referring page's* depth (not depth+1) so a
+   * page within the depth limit always has its assets crawled. Only internal
+   * resources are followed; the standard `enqueue` guards (maxUrls, robots,
+   * include/exclude filters, dedupe) still apply. Non-HTML responses never
+   * reach the link-follow path, so resources stay leaf nodes.
+   */
+  private enqueueResources(parsed: ParsedPage, depth: number): void {
+    if (this.config.checkImages) {
+      for (const img of parsed.images) {
+        if (img.isInternal) this.enqueue({ url: img.src, depth });
+        // External images: status/size are filled by the post-crawl image
+        // probe (images table), which now covers external images too — so
+        // a dead external/CDN image still trips "Broken Image src".
+      }
+    }
+    // Whether a resource kind should be crawled at all. Fonts ride with the
+    // CSS toggle (they're declared by CSS / font preloads); images obey the
+    // image toggle so `<link rel=preload as=image>` matches `<img>` behaviour.
+    const shouldFollow = (kind: ContentKind): boolean => {
+      if (kind === 'css') return this.config.checkCss;
+      if (kind === 'js') return this.config.checkJs;
+      if (kind === 'image') return this.config.checkImages;
+      if (kind === 'font') return this.config.checkCss;
+      return false;
+    };
+    for (const r of parsed.resources) {
+      if (!shouldFollow(r.kind)) continue;
+      if (r.isInternal) {
+        this.enqueue({ url: r.url, depth });
+      } else {
+        // External CSS/JS/font resources have no dedicated probe, so route
+        // them through the external-stub probe to surface their status
+        // (broken third-party scripts/styles show up in Broken Links).
+        this.enqueueExternal(r.url);
+      }
+    }
+  }
+
+  /**
+   * Mine a fetched stylesheet for the resources it references — `url(...)`
+   * targets (web fonts, background / mask images) and `@import` targets
+   * (nested stylesheets) — and enqueue the INTERNAL ones so they land in the
+   * Internal tab. This is the path that populates the "Font" filter, since
+   * most web fonts are declared in CSS `@font-face` rather than on the page.
+   * External CSS-referenced assets are intentionally skipped to avoid fanning
+   * out into third-party font/CDN hosts. Iteration is capped so a pathological
+   * stylesheet can't stall the crawl.
+   */
+  private enqueueCssResources(css: string, baseUrl: string, depth: number): void {
+    const opts = {
+      includeSubdomains: this.config.scope === 'all-subdomains',
+      cdnHosts: this.config.cdnHosts,
+    };
+    const seenRaw = new Set<string>();
+    const consider = (raw: string | undefined): void => {
+      if (!raw) return;
+      const ref = raw.trim().replace(/^['"]|['"]$/g, '').trim();
+      if (!ref || ref.startsWith('data:') || ref.startsWith('#')) return;
+      if (seenRaw.has(ref)) return;
+      seenRaw.add(ref);
+      const normalized = normalizeUrl(ref, baseUrl, this.urlRewrites);
+      if (!normalized || !/^https?:/.test(normalized)) return;
+      if (isSameHost(baseUrl, normalized, opts)) {
+        this.enqueue({ url: normalized, depth });
+      }
+    };
+    let m: RegExpExecArray | null;
+    let count = 0;
+    const urlRe = /url\(\s*([^)]+?)\s*\)/gi;
+    while ((m = urlRe.exec(css)) !== null && count < 500) {
+      count++;
+      consider(m[1]);
+    }
+    const importRe = /@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)/gi;
+    count = 0;
+    while ((m = importRe.exec(css)) !== null && count < 200) {
+      count++;
+      consider(m[1]);
+    }
+  }
+
   private async fetchAndProcess(item: QueueItem): Promise<void> {
     if (this.stopped) return;
     this.setOp(`crawl:fetch:${item.url}`);
@@ -2344,11 +2431,33 @@ export class Crawler extends EventEmitter {
         const needsJsonExtraction =
           statusCode < 400 &&
           (this.config.customExtractionRules ?? []).some((r) => r.type === 'jsonpath');
+        // We also read the body for a successful CSS resource so we can mine
+        // its `url(...)` / `@import` references (fonts, background images,
+        // nested stylesheets) and crawl the internal ones — this is what
+        // actually populates the Internal tab's "Font" filter.
+        const needsCssParse =
+          kind === 'css' &&
+          statusCode >= 200 &&
+          statusCode < 300 &&
+          this.config.checkCss;
+        // Otherwise only download the body when a JSONPath rule needs it.
+        // `contentLength` is read from the Content-Length header (below), not
+        // the body, so for plain resources (images, fonts, JS, PDFs) we
+        // discard the stream without buffering megabytes into memory — this is
+        // what makes "Check Images / CSS / JS" resource crawling lightweight.
         let nonHtmlBody = '';
-        try {
-          nonHtmlBody = await res.text();
-        } catch {
-          /* ignore */
+        if (needsJsonExtraction || needsCssParse) {
+          try {
+            nonHtmlBody = await res.text();
+          } catch {
+            /* ignore */
+          }
+        } else {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* ignore */
+          }
         }
         let jsonExtraction: Record<string, unknown> | null = null;
         if (needsJsonExtraction) {
@@ -2408,6 +2517,9 @@ export class Crawler extends EventEmitter {
         ]);
         if (nonHtmlUrlId) await this.dbCall<void>('setUrlHeaders', [nonHtmlUrlId, allHeaders]);
         this.crawled++;
+        if (needsCssParse && nonHtmlBody) {
+          this.enqueueCssResources(nonHtmlBody, item.url, item.depth);
+        }
         return;
       }
 
@@ -2748,6 +2860,14 @@ export class Crawler extends EventEmitter {
         if (!link.isInternal) this.enqueueExternal(link.toUrl);
       }
       this.crawled++;
+
+      // Subresource crawling — fetch internal images / CSS / JS referenced by
+      // this page so they appear in the Internal tab with their own status
+      // code, content type, and size (Screaming Frog "Check Images/CSS/JS").
+      // Done before the noindex/nofollow early-return so a page's assets are
+      // crawled regardless of its own indexability. Resources are leaf nodes:
+      // the non-HTML fetch path stores them without extracting further links.
+      this.enqueueResources(parsed, item.depth);
 
       if (parsed.hasNofollow || indexability === 'non-indexable:noindex') {
         return;

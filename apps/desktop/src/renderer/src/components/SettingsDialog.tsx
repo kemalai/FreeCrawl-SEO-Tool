@@ -84,6 +84,9 @@ interface FormState {
   followRedirects: boolean;
   respectRobotsTxt: boolean;
   crawlExternal: boolean;
+  checkImages: boolean;
+  checkCss: boolean;
+  checkJs: boolean;
   storeNofollowLinks: boolean;
   discoverSitemaps: boolean;
   // requests
@@ -399,6 +402,9 @@ function configToForm(c: CrawlConfig): FormState {
     followRedirects: c.followRedirects,
     respectRobotsTxt: c.respectRobotsTxt,
     crawlExternal: c.crawlExternal,
+    checkImages: c.checkImages,
+    checkCss: c.checkCss,
+    checkJs: c.checkJs,
     storeNofollowLinks: c.storeNofollowLinks,
     discoverSitemaps: c.discoverSitemaps,
     userAgent: c.userAgent,
@@ -598,6 +604,9 @@ export function SettingsDialog({ open, onClose }: Props) {
       followRedirects: form.followRedirects,
       respectRobotsTxt: form.respectRobotsTxt,
       crawlExternal: form.crawlExternal,
+      checkImages: form.checkImages,
+      checkCss: form.checkCss,
+      checkJs: form.checkJs,
       storeNofollowLinks: form.storeNofollowLinks,
       discoverSitemaps: form.discoverSitemaps,
       userAgent: form.userAgent.trim() || config.userAgent,
@@ -1264,6 +1273,27 @@ function CrawlerPanel({ form, update }: PanelProps) {
           onChange={(v) => update('crawlExternal', v)}
           info="Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."
           example="On for outbound link audits; off for fast internal-only crawls."
+        />
+        <Bool
+          label={t('settingsPanels.crawler.checkImages', { defaultValue: 'Check Images' })}
+          checked={form.checkImages}
+          onChange={(v) => update('checkImages', v)}
+          info="Fetch internal <img> resources (incl. srcset / <picture> sources) so they appear in the Internal tab with their own status code, content type, and size. Each counts toward Max URLs. Screaming Frog: 'Check Images' (Configuration → Spider → Crawl)."
+          example="On (default) so the Internal tab shows images, not just HTML; off for HTML-only crawls."
+        />
+        <Bool
+          label={t('settingsPanels.crawler.checkCss', { defaultValue: 'Check CSS' })}
+          checked={form.checkCss}
+          onChange={(v) => update('checkCss', v)}
+          info="Fetch internal <link rel=stylesheet> resources so they appear in the Internal tab with status code, content type, and size. Each counts toward Max URLs. Screaming Frog: 'Check CSS' (Configuration → Spider → Crawl)."
+          example="On (default); off for HTML-only crawls."
+        />
+        <Bool
+          label={t('settingsPanels.crawler.checkJs', { defaultValue: 'Check JavaScript' })}
+          checked={form.checkJs}
+          onChange={(v) => update('checkJs', v)}
+          info="Fetch internal <script src> resources so they appear in the Internal tab with status code, content type, and size. Each counts toward Max URLs. Screaming Frog: 'Check JavaScript' (Configuration → Spider → Crawl)."
+          example="On (default); off for HTML-only crawls."
         />
         <Bool
           label={t('settingsPanels.crawler.storeNofollow', { defaultValue: 'Follow / Store Nofollow Links' })}

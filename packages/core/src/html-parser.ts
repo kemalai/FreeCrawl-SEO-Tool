@@ -1,8 +1,10 @@
 import * as cheerio from 'cheerio';
 import type {
+  ContentKind,
   CustomExtractionRule,
   DiscoveredImage,
   DiscoveredLink,
+  DiscoveredResource,
   LinkPathType,
   LinkPosition,
 } from '@freecrawl/shared-types';
@@ -311,6 +313,12 @@ export interface ParsedPage {
   analyticsTrackers: AnalyticsTracker[];
   links: DiscoveredLink[];
   images: DiscoveredImage[];
+  /**
+   * Non-anchor subresources (`<script src>`, `<link rel="stylesheet">`) the
+   * crawler can fetch so they surface in the Internal tab. Images are carried
+   * separately in `images`.
+   */
+  resources: DiscoveredResource[];
   hasNoindex: boolean;
   hasNofollow: boolean;
 }
@@ -637,6 +645,46 @@ export function parseHtml(
   subresourceRequestCount += $('iframe[src]').length;
   subresourceRequestCount += $('video[src]').length;
   subresourceRequestCount += $('audio[src]').length;
+
+  // Subresource URLs the crawler can fetch so they surface in the Internal
+  // tab as their own rows (status code, content type, size). Images are
+  // gathered separately in `imageMap`; here we collect scripts + stylesheets.
+  // Each unique URL is recorded once with its kind pre-classified from the tag.
+  const resourceMap = new Map<string, DiscoveredResource>();
+  const addResource = (raw: string | undefined, kind: ContentKind): void => {
+    const trimmed = (raw ?? '').trim();
+    if (!trimmed || trimmed.startsWith('data:')) return;
+    const normalized = normalizeUrl(trimmed, pageUrl, opts.urlRewrites);
+    if (!normalized) return;
+    if (!/^https?:/.test(normalized)) return;
+    if (resourceMap.has(normalized)) return;
+    resourceMap.set(normalized, {
+      url: normalized,
+      kind,
+      isInternal: isSameHost(pageUrl, normalized, opts),
+    });
+  };
+  $('script[src]').each((_, el) => addResource($(el).attr('src'), 'js'));
+  $('link[rel="stylesheet"][href]').each((_, el) =>
+    addResource($(el).attr('href'), 'css'),
+  );
+  // Preloaded subresources (`<link rel="preload" as="font|style|script|image">`).
+  // The `as` attribute pre-classifies the kind. This is the main way modern
+  // sites declare web fonts on the page itself — without it the Internal tab's
+  // "Font" filter stays empty (most other fonts live in CSS `@font-face`).
+  const PRELOAD_AS_TO_KIND: Record<string, ContentKind> = {
+    font: 'font',
+    style: 'css',
+    script: 'js',
+    image: 'image',
+  };
+  $('link[rel="preload"][as][href], link[rel="modulepreload"][href]').each((_, el) => {
+    const $el = $(el);
+    const rel = ($el.attr('rel') ?? '').trim().toLowerCase();
+    const as = ($el.attr('as') ?? '').trim().toLowerCase();
+    const kind = rel === 'modulepreload' ? 'js' : PRELOAD_AS_TO_KIND[as];
+    if (kind) addResource($el.attr('href'), kind);
+  });
 
   // Pagination — `<link rel="next">` / `<link rel="prev">`. Resolved to
   // absolute via normalizeUrl so the values are comparable to the URLs
@@ -1347,6 +1395,7 @@ export function parseHtml(
     analyticsTrackers,
     links: [...linkMap.values()],
     images: [...imageMap.values()],
+    resources: [...resourceMap.values()],
     hasNoindex,
     hasNofollow,
   };

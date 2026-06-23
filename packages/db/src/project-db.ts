@@ -36,6 +36,26 @@ import type {
 import { issueCategoriesBySeverity } from '@freecrawl/shared-types';
 import { runMigrations } from './migrations.js';
 
+/**
+ * Best-effort `Content-Type` → {@link ContentKind} classifier. Used to
+ * re-classify external probe stubs (which are inserted as 'other' before the
+ * HEAD/GET probe resolves) so the `external:html` / `external:other` filters
+ * separate correctly. Returns null when the type is absent/unrecognised so
+ * callers can keep the prior value rather than clobbering it with 'other'.
+ */
+function contentKindFromType(ct: string | null | undefined): ContentKind | null {
+  if (!ct) return null;
+  const t = ct.toLowerCase();
+  if (t.includes('text/html') || t.includes('application/xhtml')) return 'html';
+  if (t.includes('text/css')) return 'css';
+  if (t.includes('javascript') || t.includes('ecmascript')) return 'js';
+  if (t.startsWith('image/')) return 'image';
+  if (t.includes('application/pdf')) return 'pdf';
+  if (t.includes('font/') || t.includes('woff') || t.includes('application/vnd.ms-fontobject'))
+    return 'font';
+  return 'other';
+}
+
 interface UrlRowDb {
   id: number;
   url: string;
@@ -1198,12 +1218,19 @@ export class ProjectDb {
       responseTimeMs?: number | null;
     },
   ): void {
+    // Re-classify the external stub's content_kind from the probed
+    // Content-Type. Stubs are inserted as 'other' before they're probed;
+    // without this an external HTML page never leaves the 'other' bucket,
+    // so the `external:html` filter stays empty. COALESCE keeps the prior
+    // value when the probe returned no usable Content-Type.
+    const contentKind = contentKindFromType(patch.contentType);
     this.db
       .prepare(
         `UPDATE urls SET
            status_code = :status_code,
            status_text = :status_text,
            content_type = :content_type,
+           content_kind = COALESCE(:content_kind, content_kind),
            content_length = :content_length,
            response_time_ms = :response_time_ms
          WHERE url = :url AND is_external = 1`,
@@ -1213,6 +1240,7 @@ export class ProjectDb {
         status_code: patch.statusCode,
         status_text: patch.statusText ?? null,
         content_type: patch.contentType ?? null,
+        content_kind: contentKind,
         content_length: patch.contentLength ?? null,
         response_time_ms: patch.responseTimeMs ?? null,
       });
@@ -4011,8 +4039,15 @@ export class ProjectDb {
     const totalInternalUrls = countWhere('is_external = 0');
     const totalExternalUrls = countWhere('is_external = 1');
     const internalKinds = groupByInternal('content_kind');
-    const totalIndexable = countWhere("is_external = 0 AND indexability = 'indexable' AND status_code IS NOT NULL");
-    const totalNonIndexable = countWhere("is_external = 0 AND indexability LIKE 'non-indexable%'");
+    // Headline indexability reflects PAGES only (content_kind = 'html').
+    // Resources (image/css/js/font) are all `indexable` with a 2xx status,
+    // so without this guard they would inflate the "Indexable URLs" stat.
+    const totalIndexable = countWhere(
+      "is_external = 0 AND content_kind = 'html' AND indexability = 'indexable' AND status_code IS NOT NULL",
+    );
+    const totalNonIndexable = countWhere(
+      "is_external = 0 AND content_kind = 'html' AND indexability LIKE 'non-indexable%'",
+    );
 
     return {
       summary: {
@@ -4158,16 +4193,16 @@ export class ProjectDb {
          )`,
       ),
       contentThin: countWhere(`${html} AND word_count IS NOT NULL AND word_count < 300`),
-      responseSlow: countWhere('is_external = 0 AND response_time_ms > 1000'),
-      responseVerySlow: countWhere('is_external = 0 AND response_time_ms > 3000'),
+      responseSlow: countWhere(`${html} AND response_time_ms > 1000`),
+      responseVerySlow: countWhere(`${html} AND response_time_ms > 3000`),
       pageLarge: countWhere(`${html} AND content_length > 1048576`),
-      urlTooLong: countWhere('is_external = 0 AND LENGTH(url) > 2048'),
-      urlUppercase: countWhere("is_external = 0 AND url GLOB '*[A-Z]*'"),
-      urlUnderscore: countWhere("is_external = 0 AND INSTR(url, '_') > 0"),
+      urlTooLong: countWhere(`${html} AND LENGTH(url) > 2048`),
+      urlUppercase: countWhere(`${html} AND url GLOB '*[A-Z]*'`),
+      urlUnderscore: countWhere(`${html} AND INSTR(url, '_') > 0`),
       urlMultipleSlashes: countWhere(
-        "is_external = 0 AND INSTR(SUBSTR(url, INSTR(url, '://') + 3), '//') > 0",
+        `${html} AND INSTR(SUBSTR(url, INSTR(url, '://') + 3), '//') > 0`,
       ),
-      urlNonAscii: countWhere('is_external = 0 AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)'),
+      urlNonAscii: countWhere(`${html} AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)`),
       langMissing: countWhere(`${html} AND (lang IS NULL OR lang = '')`),
       viewportMissing: countWhere(`${html} AND (viewport IS NULL OR viewport = '')`),
       ogMissing: countWhere(
@@ -4182,7 +4217,7 @@ export class ProjectDb {
          AND (twitter_image IS NULL OR twitter_image = '')`,
       ),
       hstsMissing: countWhere(
-        "is_external = 0 AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')",
+        `${html} AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')`,
       ),
       xFrameOptionsMissing: countWhere(
         `${html} AND (x_frame_options IS NULL OR x_frame_options = '')`,
@@ -4221,12 +4256,12 @@ export class ProjectDb {
         `${html} AND url LIKE 'https://%' AND mixed_content_passive > 0`,
       ),
       faviconMissing: countWhere(`${html} AND (favicon IS NULL OR favicon = '')`),
-      redirectLoop: countWhere('is_external = 0 AND redirect_loop = 1'),
-      redirectChainLong: countWhere('is_external = 0 AND redirect_chain_length > 3'),
+      redirectLoop: countWhere(`${html} AND redirect_loop = 1`),
+      redirectChainLong: countWhere(`${html} AND redirect_chain_length > 3`),
       redirectSelf: countWhere(
-        'is_external = 0 AND redirect_target IS NOT NULL AND redirect_target = url',
+        `${html} AND redirect_target IS NOT NULL AND redirect_target = url`,
       ),
-      urlManyParams: countWhere('is_external = 0 AND query_param_count > 5'),
+      urlManyParams: countWhere(`${html} AND query_param_count > 5`),
       compressionMissing: countWhere(
         `${html} AND status_code >= 200 AND status_code < 300
          AND (content_encoding IS NULL OR content_encoding = '')`,
@@ -4306,11 +4341,11 @@ export class ProjectDb {
       h1Empty: countWhere(`${html} AND h1_count > 0 AND (h1 IS NULL OR h1 = '')`),
       h1TooLong: countWhere(`${html} AND h1_length > 70`),
       titleMultiple: countWhere(`${html} AND title_count > 1`),
-      urlFragment: countWhere("is_external = 0 AND INSTR(url, '#') > 0"),
+      urlFragment: countWhere(`${html} AND INSTR(url, '#') > 0`),
       urlSpaces: countWhere(
-        "is_external = 0 AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)",
+        `${html} AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)`,
       ),
-      urlMalformed: countWhere('is_external = 0 AND url_malformed = 1'),
+      urlMalformed: countWhere(`${html} AND url_malformed = 1`),
       imageEmptyAlt: countWhere(`${html} AND images_empty_alt > 0`),
       linkEmptyAnchor: countWhere(`${html} AND empty_anchor_count > 0`),
       appleTouchIconMissing: countWhere(
@@ -4331,17 +4366,17 @@ export class ProjectDb {
         `${html} AND url LIKE 'https://%' AND insecure_form_action_count > 0`,
       ),
       missingSri: countWhere(`${html} AND missing_sri_count > 0`),
-      ttfbSlow: countWhere('is_external = 0 AND ttfb_ms IS NOT NULL AND ttfb_ms > 600'),
+      ttfbSlow: countWhere(`${html} AND ttfb_ms IS NOT NULL AND ttfb_ms > 600`),
       ttfbVerySlow: countWhere(
-        'is_external = 0 AND ttfb_ms IS NOT NULL AND ttfb_ms > 1800',
+        `${html} AND ttfb_ms IS NOT NULL AND ttfb_ms > 1800`,
       ),
       cookieNoSecure: countWhere(
-        "is_external = 0 AND cookies_insecure > 0 AND url LIKE 'https://%'",
+        `${html} AND cookies_insecure > 0 AND url LIKE 'https://%'`,
       ),
-      cookieNoHttpOnly: countWhere('is_external = 0 AND cookies_no_httponly > 0'),
-      cookieNoSameSite: countWhere('is_external = 0 AND cookies_no_samesite > 0'),
-      queryStringTooLong: countWhere('is_external = 0 AND query_string_length > 100'),
-      folderDepthTooDeep: countWhere('is_external = 0 AND folder_depth > 4'),
+      cookieNoHttpOnly: countWhere(`${html} AND cookies_no_httponly > 0`),
+      cookieNoSameSite: countWhere(`${html} AND cookies_no_samesite > 0`),
+      queryStringTooLong: countWhere(`${html} AND query_string_length > 100`),
+      folderDepthTooDeep: countWhere(`${html} AND folder_depth > 4`),
       http2NotSupported: countWhere(
         `${html} AND http_protocol = 'http/1.1'`,
       ),
@@ -4349,7 +4384,7 @@ export class ProjectDb {
         `${html} AND http_protocol IS NOT NULL AND http_protocol != 'h3'`,
       ),
       renderBlocking: countWhere(`${html} AND render_blocking_count > 5`),
-      keepaliveDisabled: countWhere('is_external = 0 AND keep_alive = 0'),
+      keepaliveDisabled: countWhere(`${html} AND keep_alive = 0`),
       titlePlaceholder: countWhere(
         `${html} AND title IS NOT NULL AND title != ''
          AND (
@@ -4366,13 +4401,13 @@ export class ProjectDb {
          AND (analytics_trackers IS NULL OR analytics_trackers = '[]' OR analytics_trackers = '')`,
       ),
       analyticsMultipleGa4: countWhere(
-        `is_external = 0 AND analytics_trackers IS NOT NULL
+        `${html} AND analytics_trackers IS NOT NULL
          AND (
            LENGTH(analytics_trackers) - LENGTH(REPLACE(analytics_trackers, '"name":"Google Analytics 4"', ''))
          ) / LENGTH('"name":"Google Analytics 4"') > 1`,
       ),
       analyticsUaLegacy: countWhere(
-        `is_external = 0 AND analytics_trackers IS NOT NULL
+        `${html} AND analytics_trackers IS NOT NULL
          AND analytics_trackers LIKE '%"name":"Google Analytics (UA)"%'`,
       ),
       analyticsPixelWithoutPolicy: countWhere(
@@ -4394,7 +4429,7 @@ export class ProjectDb {
          )`,
       ),
       sslCertExpired: countWhere(
-        `is_external = 0 AND url LIKE 'https://%'
+        `${html} AND url LIKE 'https://%'
          AND EXISTS (
            SELECT 1 FROM host_certs hc
             WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
@@ -4403,7 +4438,7 @@ export class ProjectDb {
          )`,
       ),
       sslCertExpiringSoon: countWhere(
-        `is_external = 0 AND url LIKE 'https://%'
+        `${html} AND url LIKE 'https://%'
          AND EXISTS (
            SELECT 1 FROM host_certs hc
             WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
@@ -4413,7 +4448,7 @@ export class ProjectDb {
          )`,
       ),
       sslProtocolOld: countWhere(
-        `is_external = 0 AND url LIKE 'https://%'
+        `${html} AND url LIKE 'https://%'
          AND EXISTS (
            SELECT 1 FROM host_certs hc
             WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
@@ -4422,7 +4457,7 @@ export class ProjectDb {
          )`,
       ),
       sslSignatureWeak: countWhere(
-        `is_external = 0 AND url LIKE 'https://%'
+        `${html} AND url LIKE 'https://%'
          AND EXISTS (
            SELECT 1 FROM host_certs hc
             WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
@@ -4635,13 +4670,13 @@ export class ProjectDb {
         `${html} AND gunning_fog_index IS NOT NULL AND gunning_fog_index > 17`,
       ),
       corsWildcardWithCredentials: countWhere(
-        `is_external = 0 AND TRIM(cors_allow_origin) = '*' AND cors_allow_credentials = 1`,
+        `${html} AND TRIM(cors_allow_origin) = '*' AND cors_allow_credentials = 1`,
       ),
       corsWildcardOrigin: countWhere(
-        `is_external = 0 AND TRIM(cors_allow_origin) = '*' AND cors_allow_credentials != 1`,
+        `${html} AND TRIM(cors_allow_origin) = '*' AND cors_allow_credentials != 1`,
       ),
       httpNotHttps: countWhere(
-        `is_external = 0
+        `${html}
          AND url LIKE 'http://%'
          AND url NOT LIKE 'http://localhost%'
          AND url NOT LIKE 'http://127.0.0.1%'
@@ -5916,16 +5951,18 @@ export class ProjectDb {
   }
 
   /**
-   * Internal images that haven't been HEAD-probed yet — used by the
-   * post-crawl image-size pass to discover oversize PNGs/JPEGs without
-   * re-probing already-sized rows on subsequent crawls.
+   * Images that haven't been HEAD-probed yet — used by the post-crawl
+   * image-size pass to discover oversize PNGs/JPEGs and broken image src
+   * (4xx/5xx) without re-probing already-sized rows on subsequent crawls.
+   * Covers BOTH internal and external images so the "Broken Image src"
+   * issue fires on dead external/CDN images too; the "Large Image" issue
+   * stays internal-only via its own `is_internal = 1` join filter.
    */
-  unprobedInternalImages(limit = 20_000): { id: number; src: string }[] {
+  unprobedImages(limit = 20_000): { id: number; src: string }[] {
     return this.db
       .prepare(
         `SELECT id, src FROM images
-          WHERE is_internal = 1
-            AND probe_status IS NULL
+          WHERE probe_status IS NULL
             AND src LIKE 'http%'
           ORDER BY id
           LIMIT ?`,
@@ -6738,10 +6775,11 @@ export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string
   ],
   [
     'issues:duplicate-url-post-norm',
-    `is_external = 0 AND EXISTS (
+    `is_external = 0 AND content_kind = 'html' AND EXISTS (
        SELECT 1 FROM urls u2
         WHERE u2.id <> urls.id
           AND u2.is_external = 0
+          AND u2.content_kind = 'html'
           AND RTRIM(
                 LOWER(
                   CASE
@@ -7098,26 +7136,26 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     case 'issues:content-thin':
       return "is_external = 0 AND content_kind = 'html' AND word_count IS NOT NULL AND word_count < 300";
     case 'issues:response-slow':
-      return 'is_external = 0 AND response_time_ms > 1000';
+      return "is_external = 0 AND content_kind = 'html' AND response_time_ms > 1000";
     case 'issues:response-very-slow':
-      return 'is_external = 0 AND response_time_ms > 3000';
+      return "is_external = 0 AND content_kind = 'html' AND response_time_ms > 3000";
     case 'issues:page-large':
       return "is_external = 0 AND content_kind = 'html' AND content_length > 1048576";
     case 'issues:url-too-long':
-      return 'is_external = 0 AND LENGTH(url) > 2048';
+      return "is_external = 0 AND content_kind = 'html' AND LENGTH(url) > 2048";
     case 'issues:url-uppercase':
       // GLOB with [A-Z] is case-sensitive — unlike LIKE which isn't.
-      return "is_external = 0 AND url GLOB '*[A-Z]*'";
+      return "is_external = 0 AND content_kind = 'html' AND url GLOB '*[A-Z]*'";
     case 'issues:url-underscore':
-      return "is_external = 0 AND INSTR(url, '_') > 0";
+      return "is_external = 0 AND content_kind = 'html' AND INSTR(url, '_') > 0";
     case 'issues:url-multiple-slashes':
       // Strip the `scheme://` prefix, then check for any `//` that remains
       // (path / query doubled slashes aren't usually intentional).
-      return "is_external = 0 AND INSTR(SUBSTR(url, INSTR(url, '://') + 3), '//') > 0";
+      return "is_external = 0 AND content_kind = 'html' AND INSTR(SUBSTR(url, INSTR(url, '://') + 3), '//') > 0";
     case 'issues:url-non-ascii':
       // Byte-length (BLOB cast) > character length only when the string
       // contains multi-byte UTF-8, i.e. any non-ASCII code point.
-      return 'is_external = 0 AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)';
+      return "is_external = 0 AND content_kind = 'html' AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)";
     case 'issues:lang-missing':
       return "is_external = 0 AND content_kind = 'html' AND (lang IS NULL OR lang = '')";
     case 'issues:viewport-missing':
@@ -7137,7 +7175,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     // and X-Content-Type-Options matter on any HTML response regardless
     // of scheme, so they're only scheme-gated on a per-page basis.
     case 'issues:hsts-missing':
-      return "is_external = 0 AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')";
+      return "is_external = 0 AND content_kind = 'html' AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')";
     case 'issues:x-frame-options-missing':
       return `is_external = 0 AND content_kind = 'html'
               AND (x_frame_options IS NULL OR x_frame_options = '')`;
@@ -7185,18 +7223,18 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND (favicon IS NULL OR favicon = '')`;
     case 'issues:redirect-loop':
-      return 'is_external = 0 AND redirect_loop = 1';
+      return "is_external = 0 AND content_kind = 'html' AND redirect_loop = 1";
     case 'issues:redirect-chain-long':
       // 3 hops is the conservative SF threshold — every extra redirect
       // multiplies link-equity loss and crawl-budget waste.
-      return 'is_external = 0 AND redirect_chain_length > 3';
+      return "is_external = 0 AND content_kind = 'html' AND redirect_chain_length > 3";
     case 'issues:redirect-self':
       // Redirect target equals the URL itself — a self-loop. Always
       // broken regardless of `followRedirects`.
-      return 'is_external = 0 AND redirect_target IS NOT NULL AND redirect_target = url';
+      return "is_external = 0 AND content_kind = 'html' AND redirect_target IS NOT NULL AND redirect_target = url";
     case 'issues:url-many-params':
       // 5+ query params usually means session IDs / faceted-nav explosion.
-      return 'is_external = 0 AND query_param_count > 5';
+      return "is_external = 0 AND content_kind = 'html' AND query_param_count > 5";
     case 'issues:compression-missing':
       // No Content-Encoding on a successful HTML response = ~70% wasted
       // bandwidth. Skip the scheme-less and non-200 noise.
@@ -7323,17 +7361,17 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // A `#` in the URL means the crawler reached a fragment that wasn't
       // stripped earlier (URL normaliser usually does, but List-mode +
       // some redirect chains can leave it).
-      return "is_external = 0 AND INSTR(url, '#') > 0";
+      return "is_external = 0 AND content_kind = 'html' AND INSTR(url, '#') > 0";
     case 'issues:url-spaces':
       // Literal space or `%20` in URL — encoding bug, often from CMS that
       // produced filenames with spaces.
-      return "is_external = 0 AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)";
+      return "is_external = 0 AND content_kind = 'html' AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)";
     case 'issues:url-malformed':
       // Computed by `isUrlMalformed` at upsert time. Captures the
       // ambiguities the URL parser tolerates but middleware diverges on:
       // multiple `?`/`#`, control chars, unescaped reserved chars,
       // double-encoding sequences (`%2520` etc).
-      return 'is_external = 0 AND url_malformed = 1';
+      return "is_external = 0 AND content_kind = 'html' AND url_malformed = 1";
     case 'issues:image-empty-alt':
       // alt="" specifically. Decorative images use this intentionally, but
       // many sites apply it to content images by mistake.
@@ -7385,30 +7423,30 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // TTFB > 600 ms is the Core Web Vitals "needs improvement" boundary
       // (Google CrUX). Crawls measure ttfb_ms as request → headers, so
       // it's not exactly equivalent to a real-user RTT but tracks closely.
-      return `is_external = 0 AND ttfb_ms IS NOT NULL AND ttfb_ms > 600`;
+      return `is_external = 0 AND content_kind = 'html' AND ttfb_ms IS NOT NULL AND ttfb_ms > 600`;
     case 'issues:ttfb-very-slow':
       // > 1.8 s is the CrUX "poor" boundary.
-      return `is_external = 0 AND ttfb_ms IS NOT NULL AND ttfb_ms > 1800`;
+      return `is_external = 0 AND content_kind = 'html' AND ttfb_ms IS NOT NULL AND ttfb_ms > 1800`;
     case 'issues:cookie-no-secure':
       // At least one Set-Cookie missing the `Secure` flag — over HTTPS
       // this lets a downgrade-attack snoop the cookie.
-      return `is_external = 0 AND cookies_insecure > 0 AND url LIKE 'https://%'`;
+      return `is_external = 0 AND content_kind = 'html' AND cookies_insecure > 0 AND url LIKE 'https://%'`;
     case 'issues:cookie-no-httponly':
       // Missing HttpOnly — JS can read the cookie, expanding the XSS blast
       // radius. Session cookies should always be HttpOnly.
-      return `is_external = 0 AND cookies_no_httponly > 0`;
+      return `is_external = 0 AND content_kind = 'html' AND cookies_no_httponly > 0`;
     case 'issues:cookie-no-samesite':
       // Missing SameSite — Chrome treats absent as `Lax` since 80, but
       // explicit declaration is recommended for cross-browser parity.
-      return `is_external = 0 AND cookies_no_samesite > 0`;
+      return `is_external = 0 AND content_kind = 'html' AND cookies_no_samesite > 0`;
     case 'issues:query-string-too-long':
       // Long query strings indicate session-id explosion or faceted-nav
       // gone wrong; >100 chars is a practical Screaming-Frog warn.
-      return `is_external = 0 AND query_string_length > 100`;
+      return `is_external = 0 AND content_kind = 'html' AND query_string_length > 100`;
     case 'issues:folder-depth-too-deep':
       // Path-segment depth beyond the conservative SF threshold of 4
       // hides content from Googlebot's link-graph crawl heuristics.
-      return `is_external = 0 AND folder_depth > 4`;
+      return `is_external = 0 AND content_kind = 'html' AND folder_depth > 4`;
     case 'issues:http2-not-supported':
       // Origin advertises only HTTP/1.1 (no Alt-Svc / no h2 token).
       // Informational — modern browsers still work fine, but HTTP/2 is
@@ -7451,7 +7489,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // Server explicitly closed the connection. -1 sentinel = no signal,
       // 0 = Connection: close seen, 1 = keep-alive (or implicit). Only
       // flag when we have a positive signal of `close`.
-      return `is_external = 0 AND keep_alive = 0`;
+      return `is_external = 0 AND content_kind = 'html' AND keep_alive = 0`;
     case 'issues:title-placeholder':
       // Common CMS placeholders: "Untitled", "Default Title", "New Page",
       // "Home" / "Page N". Catches default theme/template values that
@@ -7480,14 +7518,14 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // (Tag Manager + hardcoded gtag, or two property IDs). The pattern
       // ".*?\"name\":\"Google Analytics 4\".*?\"name\":\"Google Analytics 4\""
       // is awkward in SQL, so we use a position-based check.
-      return `is_external = 0 AND analytics_trackers IS NOT NULL
+      return `is_external = 0 AND content_kind = 'html' AND analytics_trackers IS NOT NULL
               AND (
                 LENGTH(analytics_trackers) - LENGTH(REPLACE(analytics_trackers, '"name":"Google Analytics 4"', ''))
               ) / LENGTH('"name":"Google Analytics 4"') > 1`;
     case 'issues:analytics-ua-legacy':
       // Universal Analytics (UA-XXXXX-Y) was sunset 2023-07-01. Any page
       // still loading it is gathering no data — pure dead weight.
-      return `is_external = 0 AND analytics_trackers IS NOT NULL
+      return `is_external = 0 AND content_kind = 'html' AND analytics_trackers IS NOT NULL
               AND analytics_trackers LIKE '%"name":"Google Analytics (UA)"%'`;
     case 'issues:analytics-pixel-without-policy':
       // Tracking pixels (FB / TikTok / Pinterest / LinkedIn) that share
@@ -7519,7 +7557,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // HTTPS pages whose host's certificate is past `valid_to`. The
       // host is parsed inline from the URL because storing it as a column
       // would balloon the row count for an aggregation we run rarely.
-      return `is_external = 0 AND url LIKE 'https://%'
+      return `is_external = 0 AND content_kind = 'html' AND url LIKE 'https://%'
               AND EXISTS (
                 SELECT 1 FROM host_certs hc
                  WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
@@ -7529,7 +7567,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     case 'issues:ssl-cert-expiring-soon':
       // 30-day warning window — matches Let's Encrypt's reminder cadence
       // and the Mozilla Observatory's "expiring soon" threshold.
-      return `is_external = 0 AND url LIKE 'https://%'
+      return `is_external = 0 AND content_kind = 'html' AND url LIKE 'https://%'
               AND EXISTS (
                 SELECT 1 FROM host_certs hc
                  WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
@@ -7541,7 +7579,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // TLSv1.0 / TLSv1.1 are deprecated by all major browsers (2020).
       // Sites still negotiating them fail PCI-DSS and many corporate
       // proxies block them.
-      return `is_external = 0 AND url LIKE 'https://%'
+      return `is_external = 0 AND content_kind = 'html' AND url LIKE 'https://%'
               AND EXISTS (
                 SELECT 1 FROM host_certs hc
                  WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
@@ -7552,7 +7590,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // SHA-1 / MD5 signature algorithms are cryptographically broken
       // for cert chains. Browsers stopped accepting SHA-1 in 2017 but
       // self-signed / internal certs sometimes still use it.
-      return `is_external = 0 AND url LIKE 'https://%'
+      return `is_external = 0 AND content_kind = 'html' AND url LIKE 'https://%'
               AND EXISTS (
                 SELECT 1 FROM host_certs hc
                  WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
@@ -7891,11 +7929,12 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // issue and a fragment-only difference is rare in real corpora.
       // EXISTS pattern matches at least one OTHER row with the same
       // normalised key; current row excluded by `urls.id <> u2.id`.
-      return `is_external = 0
+      return `is_external = 0 AND content_kind = 'html'
               AND EXISTS (
                 SELECT 1 FROM urls u2
                  WHERE u2.id <> urls.id
                    AND u2.is_external = 0
+                   AND u2.content_kind = 'html'
                    AND RTRIM(
                          LOWER(
                            CASE
@@ -7994,14 +8033,14 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // `Access-Control-Allow-Credentials: true`. Browsers reject this
       // combination per the CORS spec, but misconfigured servers reach
       // it and any working XSS could exfiltrate cookies cross-origin.
-      return `is_external = 0
+      return `is_external = 0 AND content_kind = 'html'
               AND TRIM(cors_allow_origin) = '*'
               AND cors_allow_credentials = 1`;
     case 'issues:cors-wildcard-origin':
       // `Access-Control-Allow-Origin: *` without credentials. Not always
       // wrong (public APIs do this) but worth reviewing on production
       // HTML so an audit can confirm intent.
-      return `is_external = 0
+      return `is_external = 0 AND content_kind = 'html'
               AND TRIM(cors_allow_origin) = '*'
               AND cors_allow_credentials != 1`;
     case 'issues:http-not-https':
@@ -8009,7 +8048,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // HTTPS as a positive signal and Chrome marks HTTP pages as "Not
       // Secure". Excludes the localhost / 127.0.0.1 / .local hosts a
       // user might legitimately crawl over HTTP for local dev work.
-      return `is_external = 0
+      return `is_external = 0 AND content_kind = 'html'
               AND url LIKE 'http://%'
               AND url NOT LIKE 'http://localhost%'
               AND url NOT LIKE 'http://127.0.0.1%'
@@ -8153,7 +8192,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // pass. `budget_status` is a bitmask (1=response, 2=size, 4=LCP,
       // 8=CLS); >0 means at least one configured ceiling was exceeded.
       // NULL/0 (budget off, or within budget) is excluded.
-      return 'is_external = 0 AND budget_status IS NOT NULL AND budget_status > 0';
+      return "is_external = 0 AND content_kind = 'html' AND budget_status IS NOT NULL AND budget_status > 0";
     case 'tab:directives':
       // Wave 4 — Directives tab. Pages declaring any indexability
       // directive: meta robots, X-Robots-Tag header, robots.txt block,

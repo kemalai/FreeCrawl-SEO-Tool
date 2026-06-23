@@ -644,6 +644,20 @@ export interface CrawlConfig {
   followRedirects: boolean;
   respectRobotsTxt: boolean;
   crawlExternal: boolean;
+  /**
+   * Crawl internal page subresources so they appear in the Internal tab as
+   * their own rows (status code, content type, size) — exactly like
+   * Screaming Frog's "Check Images / CSS / JavaScript". Each fetched resource
+   * counts toward `maxUrls`. Resources are leaf nodes: fetched once (headers
+   * only, body discarded) but never parsed for further links. All default
+   * `true` so the Internal tab shows every internal resource, not just HTML.
+   *  - `checkImages` — `<img src>` + `srcset` candidates + `<picture>` sources
+   *  - `checkCss`    — `<link rel="stylesheet">`
+   *  - `checkJs`     — `<script src>`
+   */
+  checkImages: boolean;
+  checkCss: boolean;
+  checkJs: boolean;
   acceptLanguage: string;
   /** Per-worker delay inserted *after* each request (ms). 0 = disabled. */
   crawlDelayMs: number;
@@ -1721,6 +1735,21 @@ export interface DiscoveredImage {
   isInternal: boolean;
 }
 
+/**
+ * A non-anchor subresource referenced by a page — currently `<script src>`
+ * and `<link rel="stylesheet">`. When the matching "Check CSS / JavaScript"
+ * toggle is on, the crawler fetches each internal resource so it appears in
+ * the Internal tab as its own row with status code, content type, and size
+ * (mirrors Screaming Frog's resource crawling). `kind` is pre-classified from
+ * the tag so the crawler can apply the right per-type toggle without
+ * re-sniffing. Images are carried separately in {@link DiscoveredImage}.
+ */
+export interface DiscoveredResource {
+  url: string;
+  kind: ContentKind;
+  isInternal: boolean;
+}
+
 export interface ImageRow {
   id: number;
   src: string;
@@ -1861,6 +1890,9 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   followRedirects: true,
   respectRobotsTxt: true,
   crawlExternal: false,
+  checkImages: true,
+  checkCss: true,
+  checkJs: true,
   acceptLanguage: 'tr,en;q=0.8',
   crawlDelayMs: 0,
   retryAttempts: 2,
