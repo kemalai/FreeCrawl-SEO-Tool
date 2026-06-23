@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2] — 2026-06-23
+
+### Added
+- The Internal tab now lists images, CSS, JavaScript, and fonts — each with its own status code, type, and size — not just HTML pages.
+- New "Check Images / CSS / JavaScript" toggles let you include or exclude page resources from the crawl, mirroring Screaming Frog.
+- Broken external resources (third-party scripts, stylesheets, images) and external HTML pages are now probed and classified, so dead third-party assets surface in Broken Links.
+
 ## [0.7.1] — 2026-06-21
 
 ### Added
