@@ -32,6 +32,17 @@ import type {
   UrlAnalyticsDetail,
   UrlCategory,
   UrlDetail,
+  LogIngestInput,
+  LogImportSummary,
+  LogOverview,
+  LogUrlStatRow,
+  LogUrlStatsInput,
+  LogUrlStatsResult,
+  LogBotRow,
+  LogStatusRow,
+  LogTrendRow,
+  LogCrawlBudgetRow,
+  LogDiscoveryRow,
 } from '@freecrawl/shared-types';
 import { issueCategoriesBySeverity } from '@freecrawl/shared-types';
 import { runMigrations } from './migrations.js';
@@ -5492,6 +5503,405 @@ export class ProjectDb {
     };
   }
 
+  // ===================================================================
+  // V2 Faz 2 — Log File Analyzer. Aggregate-on-ingest storage + the
+  // crawl × log joins. The desktop main process flattens the core
+  // analyzer's Map aggregates into `LogIngestInput` before calling
+  // `ingestLogAnalysis`; everything else here is read-side.
+  // ===================================================================
+
+  /** Cumulatively merge one analyzed log file's aggregates into the DB. */
+  ingestLogAnalysis(input: LogIngestInput): LogImportSummary {
+    const f = input.file;
+    this.db.exec('BEGIN');
+    try {
+      const ins = this.db
+        .prepare(
+          `INSERT INTO log_ingests
+             (file_path, file_name, format, total_lines, parsed_lines, skipped_lines, min_ts, max_ts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          f.filePath,
+          f.fileName,
+          f.format,
+          f.totalLines,
+          f.parsedLines,
+          f.skippedLines,
+          f.minTs,
+          f.maxTs,
+        );
+
+      const upUrl = this.db.prepare(
+        `INSERT INTO log_url_stats
+           (path, total_hits, bot_hits, googlebot_hits, bingbot_hits, yandexbot_hits, other_bot_hits, last_status, first_ts, last_ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET
+           total_hits     = total_hits + excluded.total_hits,
+           bot_hits       = bot_hits + excluded.bot_hits,
+           googlebot_hits = googlebot_hits + excluded.googlebot_hits,
+           bingbot_hits   = bingbot_hits + excluded.bingbot_hits,
+           yandexbot_hits = yandexbot_hits + excluded.yandexbot_hits,
+           other_bot_hits = other_bot_hits + excluded.other_bot_hits,
+           last_status = CASE
+             WHEN excluded.last_ts IS NULL THEN last_status
+             WHEN last_ts IS NULL OR excluded.last_ts >= last_ts THEN excluded.last_status
+             ELSE last_status END,
+           first_ts = CASE
+             WHEN first_ts IS NULL THEN excluded.first_ts
+             WHEN excluded.first_ts IS NULL THEN first_ts
+             ELSE MIN(first_ts, excluded.first_ts) END,
+           last_ts = CASE
+             WHEN last_ts IS NULL THEN excluded.last_ts
+             WHEN excluded.last_ts IS NULL THEN last_ts
+             ELSE MAX(last_ts, excluded.last_ts) END`,
+      );
+      for (const u of input.urlStats) {
+        upUrl.run(
+          u.path,
+          u.totalHits,
+          u.botHits,
+          u.googlebotHits,
+          u.bingbotHits,
+          u.yandexbotHits,
+          u.otherBotHits,
+          u.lastStatus,
+          u.firstTs,
+          u.lastTs,
+        );
+      }
+
+      const upDaily = this.db.prepare(
+        `INSERT INTO log_daily (day, bucket, hits) VALUES (?, ?, ?)
+         ON CONFLICT(day, bucket) DO UPDATE SET hits = hits + excluded.hits`,
+      );
+      for (const d of input.daily) upDaily.run(d.day, d.bucket, d.hits);
+
+      const upStatus = this.db.prepare(
+        `INSERT INTO log_status (status, count, bot_count) VALUES (?, ?, ?)
+         ON CONFLICT(status) DO UPDATE SET
+           count = count + excluded.count,
+           bot_count = bot_count + excluded.bot_count`,
+      );
+      for (const s of input.status) upStatus.run(s.status, s.count, s.botCount);
+
+      const upBot = this.db.prepare(
+        `INSERT INTO log_bots (bot, family, hits, total_ips, verified_ips, verifiable)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bot) DO UPDATE SET
+           hits = hits + excluded.hits,
+           total_ips = total_ips + excluded.total_ips,
+           verified_ips = verified_ips + excluded.verified_ips,
+           verifiable = excluded.verifiable`,
+      );
+      for (const b of input.bots) {
+        upBot.run(b.bot, b.family, b.hits, b.totalIps, b.verifiedIps, b.verifiable ? 1 : 0);
+      }
+
+      const upUrlBot = this.db.prepare(
+        `INSERT INTO log_url_bot (path, bot, hits) VALUES (?, ?, ?)
+         ON CONFLICT(path, bot) DO UPDATE SET hits = hits + excluded.hits`,
+      );
+      for (const ub of input.urlBots) upUrlBot.run(ub.path, ub.bot, ub.hits);
+
+      this.db.exec('COMMIT');
+      const row = this.db
+        .prepare('SELECT ingested_at FROM log_ingests WHERE id = ?')
+        .get(ins.lastInsertRowid as number) as { ingested_at: string } | undefined;
+      return {
+        filePath: f.filePath,
+        fileName: f.fileName,
+        format: f.format,
+        totalLines: f.totalLines,
+        parsedLines: f.parsedLines,
+        skippedLines: f.skippedLines,
+        minTs: f.minTs,
+        maxTs: f.maxTs,
+        ingestedAt: row?.ingested_at ?? '',
+      };
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  /** True when at least one log file has been ingested. */
+  hasLogData(): boolean {
+    const r = this.db.prepare('SELECT COUNT(*) AS n FROM log_ingests').get() as { n: number };
+    return r.n > 0;
+  }
+
+  /** Top-level roll-up across every ingested log file. */
+  getLogOverview(): LogOverview {
+    const files = (
+      this.db
+        .prepare(
+          `SELECT file_path, file_name, format, total_lines, parsed_lines, skipped_lines, min_ts, max_ts, ingested_at
+             FROM log_ingests ORDER BY id DESC`,
+        )
+        .all() as {
+        file_path: string;
+        file_name: string;
+        format: string;
+        total_lines: number;
+        parsed_lines: number;
+        skipped_lines: number;
+        min_ts: number | null;
+        max_ts: number | null;
+        ingested_at: string;
+      }[]
+    ).map((r) => ({
+      filePath: r.file_path,
+      fileName: r.file_name,
+      format: r.format as LogImportSummary['format'],
+      totalLines: r.total_lines,
+      parsedLines: r.parsed_lines,
+      skippedLines: r.skipped_lines,
+      minTs: r.min_ts,
+      maxTs: r.max_ts,
+      ingestedAt: r.ingested_at,
+    }));
+
+    const agg = this.db
+      .prepare(
+        `SELECT
+            COALESCE(SUM(total_hits), 0) AS total,
+            COALESCE(SUM(bot_hits), 0) AS bots,
+            COUNT(*) AS urls
+           FROM log_url_stats`,
+      )
+      .get() as { total: number; bots: number; urls: number };
+    const span = this.db
+      .prepare('SELECT MIN(min_ts) AS lo, MAX(max_ts) AS hi FROM log_ingests')
+      .get() as { lo: number | null; hi: number | null };
+
+    // Estimate verified bot hits: per bot, scale its hits by the
+    // verified-IP fraction (0 when no IPs / not verifiable).
+    const botRows = this.db
+      .prepare('SELECT hits, total_ips, verified_ips FROM log_bots')
+      .all() as { hits: number; total_ips: number; verified_ips: number }[];
+    let verifiedBotHits = 0;
+    for (const b of botRows) {
+      if (b.total_ips > 0 && b.verified_ips > 0) {
+        verifiedBotHits += Math.round((b.hits * b.verified_ips) / b.total_ips);
+      }
+    }
+
+    return {
+      hasData: files.length > 0,
+      files,
+      totalHits: agg.total,
+      botHits: agg.bots,
+      humanHits: Math.max(0, agg.total - agg.bots),
+      verifiedBotHits,
+      distinctUrls: agg.urls,
+      minTs: span.lo,
+      maxTs: span.hi,
+    };
+  }
+
+  /** Per-bot roll-up (item 5). */
+  getLogBots(): LogBotRow[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT bot, family, hits, total_ips, verified_ips, verifiable
+             FROM log_bots ORDER BY hits DESC, bot ASC`,
+        )
+        .all() as {
+        bot: string;
+        family: string;
+        hits: number;
+        total_ips: number;
+        verified_ips: number;
+        verifiable: number;
+      }[]
+    ).map((r) => ({
+      bot: r.bot,
+      family: r.family,
+      hits: r.hits,
+      totalIps: r.total_ips,
+      verifiedIps: r.verified_ips,
+      verifiable: r.verifiable === 1,
+    }));
+  }
+
+  /** Response-code distribution from the log (item 8). */
+  getLogStatusDistribution(): LogStatusRow[] {
+    return this.db
+      .prepare('SELECT status, count, bot_count AS botCount FROM log_status ORDER BY status ASC')
+      .all() as { status: number; count: number; botCount: number }[];
+  }
+
+  /** Daily bot/human hit trend (item 10). */
+  getLogTrend(): LogTrendRow[] {
+    return this.db
+      .prepare('SELECT day, bucket, hits FROM log_daily ORDER BY day ASC, bucket ASC')
+      .all() as { day: string; bucket: string; hits: number }[];
+  }
+
+  /** Build a Set of crawled internal-URL paths (pathname + search). */
+  private crawlInternalPathSet(): Set<string> {
+    const rows = this.db
+      .prepare('SELECT url FROM urls WHERE is_external = 0')
+      .all() as { url: string }[];
+    const set = new Set<string>();
+    for (const r of rows) {
+      const p = urlToPath(r.url);
+      if (p) set.add(p);
+    }
+    return set;
+  }
+
+  /**
+   * Paginated per-URL log activity (items 6, 9, 11). `filter` `orphans`
+   * keeps only paths NOT crawled; `crawled` the inverse; `bots` only
+   * bot-touched paths. The crawl membership join is done in JS.
+   */
+  queryLogUrlStats(input: LogUrlStatsInput): LogUrlStatsResult {
+    const limit = Math.max(1, Math.min(input.limit, 1000));
+    const offset = Math.max(0, input.offset);
+    const filter = input.filter ?? 'all';
+    const sortCol =
+      input.sortBy === 'botHits'
+        ? 'bot_hits'
+        : input.sortBy === 'googlebotHits'
+          ? 'googlebot_hits'
+          : input.sortBy === 'lastHitAt'
+            ? 'last_ts'
+            : 'total_hits';
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (input.search && input.search.trim()) {
+      where.push('path LIKE ?');
+      args.push(`%${input.search.trim()}%`);
+    }
+    if (filter === 'bots') where.push('bot_hits > 0');
+    if (input.bot && input.bot.trim()) {
+      // Per-named-bot filter — only paths this specific bot hit.
+      where.push(
+        'EXISTS (SELECT 1 FROM log_url_bot b WHERE b.path = log_url_stats.path AND b.bot = ? AND b.hits > 0)',
+      );
+      args.push(input.bot.trim());
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const orderSql = `ORDER BY ${sortCol} DESC, path ASC`;
+
+    const needsJoin = filter === 'orphans' || filter === 'crawled';
+    // Always needed — even non-join filters set the per-row `inCrawl` flag.
+    const crawlPaths = this.crawlInternalPathSet();
+
+    if (!needsJoin) {
+      const total = (
+        this.db.prepare(`SELECT COUNT(*) AS n FROM log_url_stats ${whereSql}`).get(...args) as {
+          n: number;
+        }
+      ).n;
+      const rows = this.db
+        .prepare(`SELECT * FROM log_url_stats ${whereSql} ${orderSql} LIMIT ? OFFSET ?`)
+        .all(...args, limit, offset) as LogUrlStatDbRow[];
+      return { rows: rows.map((r) => toLogUrlStatRow(r, crawlPaths)), total };
+    }
+
+    // Membership filter requires the JS join — fetch a bounded candidate
+    // set (sorted), filter, then slice for pagination.
+    const JOIN_CAP = 100_000;
+    const candidates = this.db
+      .prepare(`SELECT * FROM log_url_stats ${whereSql} ${orderSql} LIMIT ?`)
+      .all(...args, JOIN_CAP) as LogUrlStatDbRow[];
+    const matched = candidates.filter((r) => {
+      const inCrawl = crawlPaths.has(r.path);
+      return filter === 'orphans' ? !inCrawl : inCrawl;
+    });
+    const page = matched.slice(offset, offset + limit);
+    return {
+      rows: page.map((r) => toLogUrlStatRow(r, crawlPaths)),
+      total: matched.length,
+    };
+  }
+
+  /** Crawl budget — crawled URLs ranked by Googlebot hit count (item 7). */
+  getLogCrawlBudget(limit = 200): LogCrawlBudgetRow[] {
+    const logMap = new Map<string, LogUrlStatDbRow>();
+    const logRows = this.db
+      .prepare('SELECT * FROM log_url_stats WHERE bot_hits > 0')
+      .all() as LogUrlStatDbRow[];
+    for (const r of logRows) logMap.set(r.path, r);
+
+    const crawlRows = this.db
+      .prepare(
+        `SELECT url, status_code, indexability, depth FROM urls
+          WHERE is_external = 0 AND content_kind = 'html'`,
+      )
+      .all() as {
+      url: string;
+      status_code: number | null;
+      indexability: string | null;
+      depth: number | null;
+    }[];
+
+    const out: LogCrawlBudgetRow[] = [];
+    for (const c of crawlRows) {
+      const p = urlToPath(c.url);
+      if (!p) continue;
+      const stat = logMap.get(p);
+      if (!stat || stat.googlebot_hits === 0) continue;
+      out.push({
+        url: c.url,
+        path: p,
+        googlebotHits: stat.googlebot_hits,
+        botHits: stat.bot_hits,
+        totalHits: stat.total_hits,
+        statusCode: c.status_code,
+        indexability: c.indexability,
+        depth: c.depth,
+      });
+    }
+    out.sort((a, b) => b.googlebotHits - a.googlebotHits || b.totalHits - a.totalHits);
+    return out.slice(0, Math.max(1, Math.min(limit, 5000)));
+  }
+
+  /** Log URLs absent from the crawl, eligible to be seeded (item 12). */
+  getLogDiscovery(limit = 500): LogDiscoveryRow[] {
+    const crawlPaths = this.crawlInternalPathSet();
+    const rows = this.db
+      .prepare(
+        `SELECT path, total_hits, bot_hits FROM log_url_stats
+          ORDER BY bot_hits DESC, total_hits DESC LIMIT ?`,
+      )
+      .all(Math.max(1, Math.min(limit, 50_000)) * 4) as {
+      path: string;
+      total_hits: number;
+      bot_hits: number;
+    }[];
+    const out: LogDiscoveryRow[] = [];
+    for (const r of rows) {
+      if (crawlPaths.has(r.path)) continue;
+      // Only seed real page paths (skip static assets / querystring noise
+      // is left to the crawler's own scope rules at enqueue time).
+      out.push({ path: r.path, totalHits: r.total_hits, botHits: r.bot_hits });
+      if (out.length >= Math.max(1, Math.min(limit, 50_000))) break;
+    }
+    return out;
+  }
+
+  /** Wipe every ingested log aggregate. */
+  clearLogData(): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM log_url_stats');
+      this.db.exec('DELETE FROM log_url_bot');
+      this.db.exec('DELETE FROM log_daily');
+      this.db.exec('DELETE FROM log_status');
+      this.db.exec('DELETE FROM log_bots');
+      this.db.exec('DELETE FROM log_ingests');
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
   /**
    * Top anchor texts across all internal links, ranked by frequency.
    * Used by the Visualization tab's anchor-text word cloud.
@@ -8321,6 +8731,50 @@ function isValidHreflangCode(raw: string): boolean {
   if (!code) return false;
   if (code === 'x-default') return true;
   return /^[a-z]{2,3}(-[a-z]{2}|-[0-9]{3})?$/.test(code);
+}
+
+/**
+ * V2 Faz 2 — raw `log_url_stats` row shape (snake_case columns). Declared
+ * as a `type` (not `interface`) so it gets an implicit index signature and
+ * stays assertion-compatible with node:sqlite's `Record<string, …>` rows.
+ */
+type LogUrlStatDbRow = {
+  path: string;
+  total_hits: number;
+  bot_hits: number;
+  googlebot_hits: number;
+  bingbot_hits: number;
+  yandexbot_hits: number;
+  other_bot_hits: number;
+  last_status: number | null;
+  first_ts: number | null;
+  last_ts: number | null;
+};
+
+/** Map a raw log_url_stats row to the camelCase IPC row + crawl-join flag. */
+function toLogUrlStatRow(r: LogUrlStatDbRow, crawlPaths: Set<string>): LogUrlStatRow {
+  return {
+    path: r.path,
+    totalHits: r.total_hits,
+    botHits: r.bot_hits,
+    googlebotHits: r.googlebot_hits,
+    bingbotHits: r.bingbot_hits,
+    yandexbotHits: r.yandexbot_hits,
+    otherBotHits: r.other_bot_hits,
+    lastStatus: r.last_status,
+    lastHitAt: r.last_ts,
+    inCrawl: crawlPaths.has(r.path),
+  };
+}
+
+/** Extract `pathname + search` from a full crawl URL for log path joins. */
+function urlToPath(rawUrl: string): string | null {
+  try {
+    const u = new URL(rawUrl);
+    return u.pathname + u.search;
+  } catch {
+    return null;
+  }
 }
 
 /**

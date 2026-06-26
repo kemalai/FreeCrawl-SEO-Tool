@@ -46,6 +46,9 @@ export interface MenuLabels {
   openVisualizationWindow: string;
   reports: string;
   reportsItem: string;
+  logAnalyzer: string;
+  openLogAnalyzerWindow: string;
+  openLogAnalyzerWindowTooltip: string;
   help: string;
   documentation: string;
   showLogs: string;
@@ -98,6 +101,10 @@ const MENU_EN: MenuLabels = {
   openVisualizationWindow: 'Open Visualization Window…',
   reports: 'Reports',
   reportsItem: 'Reports…',
+  logAnalyzer: 'Log Analyzer',
+  openLogAnalyzerWindow: 'Open Log Analyzer Window…',
+  openLogAnalyzerWindowTooltip:
+    'Analyze server access logs (Apache / Nginx / IIS) — bot hits per URL, crawl budget, and crawl × log orphan detection in a standalone window.',
   help: 'Help',
   documentation: 'Documentation',
   showLogs: 'Show Logs…',
@@ -155,6 +162,10 @@ const MENU_TR: MenuLabels = {
   openVisualizationWindow: 'Görselleştirme Penceresini Aç…',
   reports: 'Raporlar',
   reportsItem: 'Raporlar…',
+  logAnalyzer: 'Log Analizi',
+  openLogAnalyzerWindow: 'Log Analiz Penceresini Aç…',
+  openLogAnalyzerWindowTooltip:
+    'Sunucu erişim loglarını analiz et (Apache / Nginx / IIS) — URL başına bot isabeti, crawl bütçesi ve crawl × log yetim tespiti ayrı bir pencerede.',
   help: 'Yardım',
   documentation: 'Dokümantasyon',
   showLogs: 'Logları Göster…',

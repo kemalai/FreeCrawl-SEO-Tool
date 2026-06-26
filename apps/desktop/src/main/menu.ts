@@ -28,6 +28,8 @@ export interface AppMenuHandlers {
    * update available with "Open release page" button / network error).
    */
   onCheckForUpdates: () => void;
+  /** V2 Faz 2 — open the standalone Log File Analyzer window. */
+  onOpenLogAnalyzer: () => void;
   /** UI language for menu labels. Falls back to `en` when missing. */
   lang?: MenuLang;
 }
@@ -179,6 +181,16 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: L.reportsItem,
           accelerator: 'CmdOrCtrl+R',
           click: () => send('open-reports'),
+        },
+      ],
+    },
+    {
+      label: L.logAnalyzer,
+      submenu: [
+        {
+          label: L.openLogAnalyzerWindow,
+          toolTip: L.openLogAnalyzerWindowTooltip,
+          click: () => handlers.onOpenLogAnalyzer(),
         },
       ],
     },

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
-import { DEFAULT_CRAWL_CONFIG } from '@freecrawl/shared-types';
+import { DEFAULT_CRAWL_CONFIG, type LogIngestInput } from '@freecrawl/shared-types';
 import {
   Crawler,
   compareCrawls,
@@ -11,6 +11,8 @@ import {
   testUrlAgainstRobots,
   fetchSitemaps,
   validateSitemap,
+  analyzeLogFile,
+  type LogAnalysisResult,
 } from '@freecrawl/core';
 import { ProjectDb } from '@freecrawl/db';
 
@@ -24,6 +26,9 @@ Usage:
   freecrawl audit-robots <url> [--user-agent UA]  Test if a URL is allowed by robots.txt
   freecrawl compare <before.seoproject> <after.seoproject>
                                                   Cross-project diff (added / removed / status / title / meta / h1 / canonical / indexability / response_time)
+  freecrawl analyze-logs <access.log> [--project file]
+                                                  Parse a server access log (Apache / Nginx / IIS / custom), detect bots,
+                                                  and merge the aggregates into a project for crawl × log analysis
 
 Options:
   --depth <n>         Max crawl depth (default: ${DEFAULT_CRAWL_CONFIG.maxDepth})
@@ -46,6 +51,12 @@ Options:
                         any other → CSV (subset of common columns)
   --json              Print a machine-readable JSON summary to stdout (instead of human progress).
                         Useful for CI/CD pipelines.
+
+analyze-logs options:
+  --project <file>    Project to merge log aggregates into (default: ./crawl.seoproject)
+  --format <fmt>      auto | apache-combined | apache-common | nginx | iis-w3c | custom (default: auto)
+  --regex <pattern>   Named-group regex for --format custom (groups: ip ts method path status bytes ua referer)
+  --verify-bots       Reverse-DNS verify a sample of bot IPs (slower; catches spoofed user-agents)
   -h, --help          Show this help
 `);
 }
@@ -69,6 +80,10 @@ async function main(): Promise<void> {
       db: { type: 'string' },
       out: { type: 'string' },
       json: { type: 'boolean' },
+      project: { type: 'string' },
+      format: { type: 'string' },
+      regex: { type: 'string' },
+      'verify-bots': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -109,6 +124,20 @@ async function main(): Promise<void> {
       resolve(positionals[1]),
       resolve(positionals[2]),
     );
+    process.exit(exitCode);
+  }
+  if (positionals[0] === 'analyze-logs') {
+    if (!positionals[1]) {
+      console.error('Usage: freecrawl analyze-logs <access.log> [--project file] [--format f] [--regex p] [--verify-bots]');
+      process.exit(2);
+    }
+    const exitCode = await runAnalyzeLogs(resolve(positionals[1]), {
+      projectPath: resolve(values.project ?? values.db ?? 'crawl.seoproject'),
+      format: (values.format as LogIngestInput['file']['format'] | 'auto' | undefined) ?? 'auto',
+      regex: values.regex,
+      verifyBots: Boolean(values['verify-bots']),
+      json: Boolean(values.json),
+    });
     process.exit(exitCode);
   }
 
@@ -406,6 +435,128 @@ function runCompare(beforePath: string, afterPath: string): number {
   } finally {
     before.close();
     after.close();
+  }
+}
+
+/**
+ * V2 Faz 2 — flatten the core analyzer's Map aggregates into the plain
+ * arrays `ProjectDb.ingestLogAnalysis` expects (mirrors the desktop's
+ * `ingestLogResult`). Kept in the CLI so headless log ingestion needs no
+ * Electron / desktop process.
+ */
+function flattenLogResult(filePath: string, result: LogAnalysisResult): LogIngestInput {
+  return {
+    file: {
+      filePath,
+      fileName: basename(filePath),
+      format: result.format,
+      totalLines: result.totalLines,
+      parsedLines: result.parsedLines,
+      skippedLines: result.skippedLines,
+      minTs: result.minTs,
+      maxTs: result.maxTs,
+    },
+    urlStats: Array.from(result.urlStats.values()).map((u) => ({
+      path: u.path,
+      totalHits: u.totalHits,
+      botHits: u.botHits,
+      googlebotHits: u.googlebotHits,
+      bingbotHits: u.bingbotHits,
+      yandexbotHits: u.yandexbotHits,
+      otherBotHits: u.otherBotHits,
+      lastStatus: u.lastStatus,
+      firstTs: u.firstTs,
+      lastTs: u.lastTs,
+    })),
+    daily: Array.from(result.daily.entries()).map(([key, hits]) => {
+      const sp = key.indexOf(' ');
+      return { day: key.slice(0, sp), bucket: key.slice(sp + 1), hits };
+    }),
+    status: Array.from(result.status.entries()).map(([status, v]) => ({
+      status,
+      count: v.count,
+      botCount: v.botCount,
+    })),
+    bots: Array.from(result.bots.entries()).map(([bot, agg]) => ({
+      bot,
+      family: agg.family,
+      hits: agg.hits,
+      totalIps: agg.ips.size,
+      verifiedIps: agg.verifiedIps,
+      verifiable: agg.verifiable,
+    })),
+    urlBots: Array.from(result.urlStats.values()).flatMap((u) =>
+      Array.from(u.botCounts.entries()).map(([bot, hits]) => ({ path: u.path, bot, hits })),
+    ),
+  };
+}
+
+/**
+ * Parse an access log, detect bots, and merge the aggregates into a
+ * project DB. Prints a summary (or JSON). Exit 0 on success, 2 on error.
+ */
+async function runAnalyzeLogs(
+  logPath: string,
+  opts: {
+    projectPath: string;
+    format: 'auto' | 'apache-combined' | 'apache-common' | 'nginx' | 'iis-w3c' | 'custom';
+    regex: string | undefined;
+    verifyBots: boolean;
+    json: boolean;
+  },
+): Promise<number> {
+  let db: ProjectDb;
+  try {
+    db = new ProjectDb(opts.projectPath);
+  } catch (err) {
+    console.error(`Cannot open project ${opts.projectPath}: ${(err as Error).message}`);
+    return 2;
+  }
+  try {
+    const result = await analyzeLogFile(logPath, {
+      format: opts.format,
+      customRegex: opts.regex,
+      verifyBots: opts.verifyBots,
+    });
+    const summary = db.ingestLogAnalysis(flattenLogResult(logPath, result));
+    const overview = db.getLogOverview();
+    const bots = db.getLogBots().slice(0, 10);
+    const topUrls = db
+      .queryLogUrlStats({ limit: 10, offset: 0, sortBy: 'botHits', filter: 'bots' })
+      .rows;
+
+    if (opts.json) {
+      process.stdout.write(
+        JSON.stringify({ ok: true, imported: summary, overview, topBots: bots, topBotUrls: topUrls }, null, 2) + '\n',
+      );
+    } else {
+      console.log(`Log: ${summary.fileName} (${summary.format})`);
+      console.log(`  Lines:  ${summary.parsedLines}/${summary.totalLines} parsed, ${summary.skippedLines} skipped`);
+      console.log(`  Hits:   ${overview.totalHits} total · ${overview.botHits} bot · ${overview.humanHits} human`);
+      if (overview.minTs) {
+        const d = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+        console.log(`  Range:  ${d(overview.minTs)} → ${overview.maxTs ? d(overview.maxTs) : '?'}`);
+      }
+      if (bots.length > 0) {
+        console.log('  Top bots:');
+        for (const b of bots) {
+          const v = b.verifiable ? ` (${b.verifiedIps}/${b.totalIps} IPs verified)` : '';
+          console.log(`    ${b.bot.padEnd(28)} ${String(b.hits).padStart(8)}${v}`);
+        }
+      }
+      if (topUrls.length > 0) {
+        console.log('  Top bot-hit URLs:');
+        for (const u of topUrls) {
+          console.log(`    ${String(u.botHits).padStart(8)}  ${u.path}${u.inCrawl ? '' : '  [orphan]'}`);
+        }
+      }
+    }
+    return 0;
+  } catch (err) {
+    console.error(`analyze-logs failed: ${(err as Error).message}`);
+    return 2;
+  } finally {
+    db.close();
   }
 }
 

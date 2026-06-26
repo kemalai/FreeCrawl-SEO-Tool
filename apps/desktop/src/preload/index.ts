@@ -128,6 +128,19 @@ import {
   type ExportBigqueryInput,
   type ExportBigqueryResult,
   type UrlAnalyticsDetail,
+  type LogAnalyzeInput,
+  type LogAnalyzeResult,
+  type LogOverview,
+  type LogUrlStatsInput,
+  type LogUrlStatsResult,
+  type LogBotRow,
+  type LogStatusRow,
+  type LogTrendRow,
+  type LogCrawlBudgetRow,
+  type LogDiscoveryRow,
+  type LogSeedDiscoveryResult,
+  type LogExportInput,
+  type LogExportResult,
 } from '@freecrawl/shared-types';
 
 function subscribe<T>(
@@ -382,6 +395,27 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.exportBigquery, input),
   urlAnalyticsGet: (url: string): Promise<UrlAnalyticsDetail | null> =>
     ipcRenderer.invoke(IPC.urlAnalyticsGet, url),
+  logAnalyzerOpenWindow: (): Promise<void> =>
+    ipcRenderer.invoke(IPC.logAnalyzerOpenWindow),
+  logAnalyze: (input: LogAnalyzeInput): Promise<LogAnalyzeResult> =>
+    ipcRenderer.invoke(IPC.logAnalyze, input),
+  logOverview: (): Promise<LogOverview> => ipcRenderer.invoke(IPC.logOverview),
+  logUrlStats: (input: LogUrlStatsInput): Promise<LogUrlStatsResult> =>
+    ipcRenderer.invoke(IPC.logUrlStats, input),
+  logBots: (): Promise<LogBotRow[]> => ipcRenderer.invoke(IPC.logBots),
+  logStatus: (): Promise<LogStatusRow[]> => ipcRenderer.invoke(IPC.logStatus),
+  logTrend: (): Promise<LogTrendRow[]> => ipcRenderer.invoke(IPC.logTrend),
+  logCrawlBudget: (limit?: number): Promise<LogCrawlBudgetRow[]> =>
+    ipcRenderer.invoke(IPC.logCrawlBudget, limit),
+  logOrphans: (input: LogUrlStatsInput): Promise<LogUrlStatsResult> =>
+    ipcRenderer.invoke(IPC.logOrphans, input),
+  logDiscovery: (limit?: number): Promise<LogDiscoveryRow[]> =>
+    ipcRenderer.invoke(IPC.logDiscovery, limit),
+  logSeedDiscovery: (limit?: number): Promise<LogSeedDiscoveryResult> =>
+    ipcRenderer.invoke(IPC.logSeedDiscovery, limit),
+  logExport: (input: LogExportInput): Promise<LogExportResult> =>
+    ipcRenderer.invoke(IPC.logExport, input),
+  logClear: (): Promise<void> => ipcRenderer.invoke(IPC.logClear),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
   onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),

@@ -1696,6 +1696,87 @@ const MIGRATIONS: Migration[] = [
       add('pdf_probe_status', 'INTEGER');
     },
   },
+  {
+    version: 72,
+    name: 'log_file_analyzer',
+    // V2 Faz 2 — Log File Analyzer storage. Aggregate-on-ingest: the core
+    // analyzer streams an access log and rolls it up into these compact
+    // tables (no raw per-hit rows — a multi-GB log would be millions of
+    // rows). Cumulative across files: re-ingesting another log merges into
+    // the same aggregates. Everything is keyed on the request PATH; the
+    // crawl × log join (orphans / crawl-budget) is done in JS against the
+    // `urls` table since SQLite can't parse URLs.
+    up: `
+      CREATE TABLE IF NOT EXISTS log_ingests (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_path     TEXT NOT NULL,
+        file_name     TEXT NOT NULL,
+        format        TEXT NOT NULL,
+        total_lines   INTEGER NOT NULL DEFAULT 0,
+        parsed_lines  INTEGER NOT NULL DEFAULT 0,
+        skipped_lines INTEGER NOT NULL DEFAULT 0,
+        min_ts        INTEGER,
+        max_ts        INTEGER,
+        ingested_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS log_url_stats (
+        path            TEXT PRIMARY KEY,
+        total_hits      INTEGER NOT NULL DEFAULT 0,
+        bot_hits        INTEGER NOT NULL DEFAULT 0,
+        googlebot_hits  INTEGER NOT NULL DEFAULT 0,
+        bingbot_hits    INTEGER NOT NULL DEFAULT 0,
+        yandexbot_hits  INTEGER NOT NULL DEFAULT 0,
+        other_bot_hits  INTEGER NOT NULL DEFAULT 0,
+        last_status     INTEGER,
+        first_ts        INTEGER,
+        last_ts         INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_log_url_total ON log_url_stats(total_hits);
+      CREATE INDEX IF NOT EXISTS idx_log_url_bot ON log_url_stats(bot_hits);
+      CREATE INDEX IF NOT EXISTS idx_log_url_googlebot ON log_url_stats(googlebot_hits);
+
+      CREATE TABLE IF NOT EXISTS log_daily (
+        day    TEXT NOT NULL,
+        bucket TEXT NOT NULL,
+        hits   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, bucket)
+      );
+
+      CREATE TABLE IF NOT EXISTS log_status (
+        status    INTEGER PRIMARY KEY,
+        count     INTEGER NOT NULL DEFAULT 0,
+        bot_count INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS log_bots (
+        bot          TEXT PRIMARY KEY,
+        family       TEXT NOT NULL,
+        hits         INTEGER NOT NULL DEFAULT 0,
+        total_ips    INTEGER NOT NULL DEFAULT 0,
+        verified_ips INTEGER NOT NULL DEFAULT 0,
+        verifiable   INTEGER NOT NULL DEFAULT 0
+      );
+    `,
+  },
+  {
+    version: 73,
+    name: 'log_url_bot',
+    // V2 Faz 2 — per-(URL, bot) hit counts. The aggregate `log_url_stats`
+    // only carries family-level columns (googlebot/bing/yandex/other), so
+    // it can't answer "which pages did SemrushBot specifically hit?". This
+    // table backs the URL Hits tab's per-bot filter. Cumulative across
+    // ingests, same as the other log tables.
+    up: `
+      CREATE TABLE IF NOT EXISTS log_url_bot (
+        path TEXT NOT NULL,
+        bot  TEXT NOT NULL,
+        hits INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (path, bot)
+      );
+      CREATE INDEX IF NOT EXISTS idx_log_url_bot_bot ON log_url_bot(bot);
+    `,
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

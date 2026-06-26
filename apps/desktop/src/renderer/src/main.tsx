@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
 import { LogsView } from './LogsView.js';
 import { VisualizationView } from './VisualizationView.js';
+import { LogAnalyzerView } from './LogAnalyzerView.js';
 import './styles.css';
 import './i18n/index.js';
 
@@ -12,6 +13,7 @@ import './i18n/index.js';
 const search = typeof window !== 'undefined' ? window.location.search : '';
 const isLogsWindow = /[?&]logs=1\b/.test(search);
 const isVisualizationWindow = /[?&]visualization=1\b/.test(search);
+const isLogAnalyzerWindow = /[?&]loganalyzer=1\b/.test(search);
 
 const root = document.getElementById('root');
 if (root) {
@@ -21,6 +23,8 @@ if (root) {
         <LogsView />
       ) : isVisualizationWindow ? (
         <VisualizationView />
+      ) : isLogAnalyzerWindow ? (
+        <LogAnalyzerView />
       ) : (
         <App />
       )}

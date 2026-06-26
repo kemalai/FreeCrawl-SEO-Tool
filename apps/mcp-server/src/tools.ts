@@ -1792,5 +1792,88 @@ export function buildTools(): Tool[] {
       handler: async (args) =>
         bridgeRequest<unknown>('POST', '/v1/action/fetch-cancel', args),
     },
+
+    // ---- Faz 0.5 closeout — bulk export + project-file actions (the
+    // last `[⏸]` items). Dialog-driven in the desktop; here every path is
+    // explicit because an agent can't drive a save/open dialog. ----
+
+    {
+      requiresDb: false,
+      name: 'export_bulk',
+      description:
+        'Write one CSV per category/issue family (all URLs, internal HTML, 2xx/3xx/4xx/5xx, every issue filter, redirects/canonicals/hreflang/duplicates/security/AMP, etc.) into a folder — the same dump File → Bulk Export produces. Zero-row categories are skipped. Pass an absolute `outputDir`. Returns `{outputDir, files:[{filePath,label,category,rowsWritten}], errors}`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          outputDir: { type: 'string', description: 'Absolute output folder. Created files land directly inside it.' },
+        },
+        required: ['outputDir'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/export-bulk', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'project_save_as',
+      description:
+        'Snapshot the desktop\'s active project to a new `.seoproject` file via SQLite VACUUM INTO (atomic, WAL-safe). Unlike the desktop "Save Project As", this does NOT switch the active project — it just writes a copy. Pass an absolute `filePath`. Returns `{filePath, bytesWritten}`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Absolute destination `.seoproject` path.' },
+        },
+        required: ['filePath'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string; bytesWritten: number }>(
+          'POST',
+          '/v1/action/project-save-as',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'project_save_encrypted',
+      description:
+        'Export the active project as an AES-256-GCM-encrypted `.seoproject.enc` snapshot protected by a password. Keep the password safe — it cannot be recovered. Pass absolute `filePath` + `password`. Returns `{filePath, bytesWritten}`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Absolute destination `.seoproject.enc` path.' },
+          password: { type: 'string', description: 'Encryption password.' },
+        },
+        required: ['filePath', 'password'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string; bytesWritten: number }>(
+          'POST',
+          '/v1/action/project-save-encrypted',
+          args,
+        ),
+    },
+
+    {
+      requiresDb: false,
+      name: 'project_open_encrypted',
+      description:
+        'Decrypt a `.seoproject.enc` snapshot to a destination `.seoproject` and make it the desktop\'s ACTIVE project (this DOES switch the UI). Pass absolute `filePath` (source `.enc`), `destPath` (output `.seoproject`), and `password`. Returns `{filePath}` (the opened destination).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Absolute source `.seoproject.enc` path.' },
+          destPath: { type: 'string', description: 'Absolute output `.seoproject` path for the decrypted project.' },
+          password: { type: 'string', description: 'Decryption password.' },
+        },
+        required: ['filePath', 'destPath', 'password'],
+      },
+      handler: async (args) =>
+        bridgeRequest<{ filePath: string }>(
+          'POST',
+          '/v1/action/project-open-encrypted',
+          args,
+        ),
+    },
   ];
 }

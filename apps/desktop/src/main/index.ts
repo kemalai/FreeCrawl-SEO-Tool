@@ -40,7 +40,6 @@ import {
   type CrashRecoveryStatus,
   type ExportHtmlReportInput,
   type ExportHtmlReportResult,
-  type BulkExportFile,
   type BulkExportResult,
   type UrlCategory,
   type CompareLoadInput,
@@ -132,6 +131,21 @@ import {
   type ExportBigqueryResult,
   type GscInspectionResult,
   type UrlAnalyticsDetail,
+  type LogAnalyzeInput,
+  type LogAnalyzeResult,
+  type LogOverview,
+  type LogUrlStatsInput,
+  type LogUrlStatsResult,
+  type LogBotRow,
+  type LogStatusRow,
+  type LogTrendRow,
+  type LogCrawlBudgetRow,
+  type LogDiscoveryRow,
+  type LogSeedDiscoveryResult,
+  type LogIngestInput,
+  type LogImportSummary,
+  type LogExportInput,
+  type LogExportResult,
 } from '@freecrawl/shared-types';
 import {
   BrowserPool,
@@ -156,6 +170,12 @@ import {
   normalizeUrl,
   compileUrlRegexRewrites,
   previewExtractionRules,
+  runBulkExport,
+  analyzeLogFile,
+  buildLogExportXlsx,
+  buildLogExportCsv,
+  type LogAnalysisResult,
+  type LogExportTables,
 } from '@freecrawl/core';
 import { fetch as undiciFetch } from 'undici';
 import { ProjectDb } from '@freecrawl/db';
@@ -202,6 +222,8 @@ let mainWindow: BrowserWindow | null = null;
 let logsWindow: BrowserWindow | null = null;
 /** Standalone Visualization popup — single-instance, native window. */
 let visualizationWindow: BrowserWindow | null = null;
+/** V2 Faz 2 — standalone Log File Analyzer popup, single-instance. */
+let logAnalyzerWindow: BrowserWindow | null = null;
 let db: ProjectDb | null = null;
 let activeCrawler: Crawler | null = null;
 /** V2 Faz 1 — Playwright browser pool, lazily started when a JS-mode
@@ -362,6 +384,11 @@ function fireDataChanged(): void {
   // Cytoscape graph repaints when a crawl finishes or rows change.
   if (visualizationWindow && !visualizationWindow.isDestroyed()) {
     visualizationWindow.webContents.send(IPC.dataChanged);
+  }
+  // V2 Faz 2 — keep the Log Analyzer window's crawl × log joins fresh
+  // when the crawl mutates (orphan/budget reports depend on the URL set).
+  if (logAnalyzerWindow && !logAnalyzerWindow.isDestroyed()) {
+    logAnalyzerWindow.webContents.send(IPC.dataChanged);
   }
 }
 
@@ -929,6 +956,7 @@ function rebuildMenu(): void {
       onResetDiagnosticDialogs: () => resetDiagnosticDialogs(),
       onOpenLogsFolder: () => openLogsFolder(),
       onCheckForUpdates: () => void checkForUpdates(),
+      onOpenLogAnalyzer: () => openLogAnalyzerWindow(),
     }),
   );
 }
@@ -1706,6 +1734,160 @@ function openVisualizationWindow(): void {
   logger.log('info', 'main', 'Visualization window opened');
 }
 
+/**
+ * V2 Faz 2 — Standalone Log File Analyzer window. Same renderer bundle
+ * with `?loganalyzer=1` so React mounts `LogAnalyzerView` only. Keeps the
+ * log-analysis surface off the main tab strip; single-instance.
+ */
+function openLogAnalyzerWindow(): void {
+  if (logAnalyzerWindow && !logAnalyzerWindow.isDestroyed()) {
+    logAnalyzerWindow.show();
+    logAnalyzerWindow.focus();
+    return;
+  }
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    minWidth: 720,
+    minHeight: 480,
+    show: false,
+    backgroundColor: '#0a0a0a',
+    title: 'FreeCrawl — Log Analyzer',
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+  win.setMenu(null);
+  win.on('ready-to-show', () => win.show());
+  win.on('page-title-updated', (e) => e.preventDefault());
+  win.on('closed', () => {
+    if (logAnalyzerWindow === win) logAnalyzerWindow = null;
+  });
+  win.webContents.on('before-input-event', (e, input) => {
+    if (input.type !== 'keyDown') return;
+    const key = input.key.toLowerCase();
+    const mod = input.control || input.meta;
+    const isF12 = key === 'f12';
+    const isCtrlShiftI = mod && input.shift && key === 'i';
+    const isCtrlAltI = mod && input.alt && key === 'i';
+    const isCtrlShiftJ = mod && input.shift && key === 'j';
+    const isCtrlShiftC = mod && input.shift && key === 'c';
+    if (isF12 || isCtrlShiftI || isCtrlAltI || isCtrlShiftJ || isCtrlShiftC) {
+      e.preventDefault();
+    }
+  });
+  win.webContents.on('devtools-opened', () => {
+    win.webContents.closeDevTools();
+  });
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    void win.loadURL(process.env['ELECTRON_RENDERER_URL'] + '?loganalyzer=1');
+  } else {
+    void win.loadFile(join(__dirname, '../renderer/index.html'), {
+      search: 'loganalyzer=1',
+    });
+  }
+  logAnalyzerWindow = win;
+  logger.log('info', 'main', 'Log Analyzer window opened');
+}
+
+/**
+ * V2 Faz 2 — flatten the core analyzer's Map aggregates into the plain
+ * arrays the DB ingest expects, then persist. Returns the import summary.
+ */
+function ingestLogResult(filePath: string, result: LogAnalysisResult): LogImportSummary {
+  const fileName = basename(filePath);
+  const payload: LogIngestInput = {
+    file: {
+      filePath,
+      fileName,
+      format: result.format,
+      totalLines: result.totalLines,
+      parsedLines: result.parsedLines,
+      skippedLines: result.skippedLines,
+      minTs: result.minTs,
+      maxTs: result.maxTs,
+    },
+    urlStats: Array.from(result.urlStats.values()).map((u) => ({
+      path: u.path,
+      totalHits: u.totalHits,
+      botHits: u.botHits,
+      googlebotHits: u.googlebotHits,
+      bingbotHits: u.bingbotHits,
+      yandexbotHits: u.yandexbotHits,
+      otherBotHits: u.otherBotHits,
+      lastStatus: u.lastStatus,
+      firstTs: u.firstTs,
+      lastTs: u.lastTs,
+    })),
+    daily: Array.from(result.daily.entries()).map(([key, hits]) => {
+      const sp = key.indexOf(' ');
+      return { day: key.slice(0, sp), bucket: key.slice(sp + 1), hits };
+    }),
+    status: Array.from(result.status.entries()).map(([status, v]) => ({
+      status,
+      count: v.count,
+      botCount: v.botCount,
+    })),
+    bots: Array.from(result.bots.entries()).map(([bot, agg]) => ({
+      bot,
+      family: agg.family,
+      hits: agg.hits,
+      totalIps: agg.ips.size,
+      verifiedIps: agg.verifiedIps,
+      verifiable: agg.verifiable,
+    })),
+    urlBots: Array.from(result.urlStats.values()).flatMap((u) =>
+      Array.from(u.botCounts.entries()).map(([bot, hits]) => ({ path: u.path, bot, hits })),
+    ),
+  };
+  return getDb().ingestLogAnalysis(payload);
+}
+
+/**
+ * V2 Faz 2 (item 12) — inject log-discovered URLs (paths the crawl never
+ * reached) into the active crawl as fresh seeds. Reconstructs absolute
+ * URLs from the project's base origin; no-op when no crawl is running.
+ */
+function seedDiscoveryUrls(limit: number): LogSeedDiscoveryResult {
+  const db = getDb();
+  let origin: string | null = null;
+  const start = db.getMeta('lastStartUrl');
+  if (start) {
+    try {
+      origin = new URL(start).origin;
+    } catch {
+      origin = null;
+    }
+  }
+  if (!origin) {
+    const sample = db.queryUrls({ category: 'internal:all', limit: 1, offset: 0 }).rows[0];
+    if (sample?.url) {
+      try {
+        origin = new URL(sample.url).origin;
+      } catch {
+        origin = null;
+      }
+    }
+  }
+  if (!origin) {
+    return { enqueued: 0, hasActiveCrawl: activeCrawler?.isRunning === true, reason: 'no-base-origin' };
+  }
+  if (!activeCrawler || !activeCrawler.isRunning) {
+    return { enqueued: 0, hasActiveCrawl: false, reason: 'no-active-crawl' };
+  }
+  const rows = db.getLogDiscovery(limit);
+  let enqueued = 0;
+  for (const r of rows) {
+    if (activeCrawler.enqueueManual(origin + r.path)) enqueued++;
+  }
+  if (enqueued > 0) fireDataChanged();
+  return { enqueued, hasActiveCrawl: true };
+}
+
 function registerIpc(): void {
   ipcMain.handle(IPC.appVersion, () => app.getVersion());
 
@@ -1756,6 +1938,132 @@ function registerIpc(): void {
   });
   ipcMain.handle(IPC.logsOpenWindow, () => openLogsWindow());
   ipcMain.handle(IPC.visualizationOpenWindow, () => openVisualizationWindow());
+
+  // ── V2 Faz 2 — Log File Analyzer IPC surface ───────────────────────
+  ipcMain.handle(IPC.logAnalyzerOpenWindow, () => openLogAnalyzerWindow());
+
+  ipcMain.handle(
+    IPC.logAnalyze,
+    async (e, input: LogAnalyzeInput): Promise<LogAnalyzeResult> => {
+      let filePath = input?.filePath;
+      if (!filePath) {
+        const parent =
+          BrowserWindow.fromWebContents(e.sender) ?? logAnalyzerWindow ?? mainWindow;
+        if (!parent) {
+          return { ok: false, error: 'No window available for the file picker.', imported: null, overview: null };
+        }
+        const res = await dialog.showOpenDialog(parent, {
+          title: 'Open Access Log',
+          properties: ['openFile'],
+          filters: [
+            { name: 'Log Files', extensions: ['log', 'txt', 'gz', 'out', 'access'] },
+            { name: 'All Files', extensions: ['*'] },
+          ],
+        });
+        if (res.canceled || res.filePaths.length === 0) {
+          return { ok: false, error: undefined, imported: null, overview: getDb().getLogOverview() };
+        }
+        filePath = res.filePaths[0]!;
+      }
+      try {
+        const result = await analyzeLogFile(filePath, {
+          format: input?.format ?? 'auto',
+          customRegex: input?.customRegex,
+          verifyBots: input?.verifyBots === true,
+        });
+        const imported = ingestLogResult(filePath, result);
+        if (result.urlCapHit) {
+          logger.log('warn', 'main', `Log Analyzer: distinct-URL cap hit while ingesting ${basename(filePath)}; some long-tail URLs were dropped.`);
+        }
+        logger.log(
+          'info',
+          'main',
+          `Log Analyzer ingested ${basename(filePath)} (${result.format}): ${result.parsedLines}/${result.totalLines} lines, ${result.bots.size} bot type(s).`,
+        );
+        fireDataChanged();
+        return { ok: true, imported, overview: getDb().getLogOverview() };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        logger.log('warn', 'main', `Log Analyzer failed on ${filePath}: ${error}`);
+        return { ok: false, error, imported: null, overview: getDb().getLogOverview() };
+      }
+    },
+  );
+
+  ipcMain.handle(IPC.logOverview, (): LogOverview => getDb().getLogOverview());
+  ipcMain.handle(
+    IPC.logUrlStats,
+    (_e, input: LogUrlStatsInput): LogUrlStatsResult => getDb().queryLogUrlStats(input),
+  );
+  ipcMain.handle(IPC.logBots, (): LogBotRow[] => getDb().getLogBots());
+  ipcMain.handle(IPC.logStatus, (): LogStatusRow[] => getDb().getLogStatusDistribution());
+  ipcMain.handle(IPC.logTrend, (): LogTrendRow[] => getDb().getLogTrend());
+  ipcMain.handle(
+    IPC.logCrawlBudget,
+    (_e, limit?: number): LogCrawlBudgetRow[] => getDb().getLogCrawlBudget(limit ?? 200),
+  );
+  ipcMain.handle(
+    IPC.logOrphans,
+    (_e, input: LogUrlStatsInput): LogUrlStatsResult =>
+      getDb().queryLogUrlStats({ ...input, filter: 'orphans' }),
+  );
+  ipcMain.handle(
+    IPC.logDiscovery,
+    (_e, limit?: number): LogDiscoveryRow[] => getDb().getLogDiscovery(limit ?? 500),
+  );
+  ipcMain.handle(
+    IPC.logSeedDiscovery,
+    (_e, limit?: number): LogSeedDiscoveryResult => seedDiscoveryUrls(limit ?? 500),
+  );
+  ipcMain.handle(
+    IPC.logExport,
+    async (e, input: LogExportInput): Promise<LogExportResult> => {
+      const format = input?.format === 'csv' ? 'csv' : 'xlsx';
+      let filePath = input?.filePath;
+      if (!filePath) {
+        const parent =
+          BrowserWindow.fromWebContents(e.sender) ?? logAnalyzerWindow ?? mainWindow;
+        if (!parent) return { filePath: '', bytesWritten: 0 };
+        const res = await dialog.showSaveDialog(parent, {
+          title: 'Export Log Analysis',
+          defaultPath: `log-analysis.${format}`,
+          filters: [
+            format === 'csv'
+              ? { name: 'CSV', extensions: ['csv'] }
+              : { name: 'Excel Workbook', extensions: ['xlsx'] },
+          ],
+        });
+        if (res.canceled || !res.filePath) return { filePath: '', bytesWritten: 0 };
+        filePath = res.filePath;
+      }
+      const db = getDb();
+      const tables: LogExportTables = {
+        overview: db.getLogOverview(),
+        urlStats: db.queryLogUrlStats({ limit: 100_000, offset: 0, sortBy: 'totalHits', filter: 'all' }).rows,
+        orphans: db.queryLogUrlStats({ limit: 100_000, offset: 0, filter: 'orphans' }).rows,
+        bots: db.getLogBots(),
+        status: db.getLogStatusDistribution(),
+        trend: db.getLogTrend(),
+        crawlBudget: db.getLogCrawlBudget(5000),
+        discovery: db.getLogDiscovery(50_000),
+      };
+      const { writeFileSync } = await import('node:fs');
+      if (format === 'csv') {
+        const csv = buildLogExportCsv(tables);
+        writeFileSync(filePath, csv, 'utf8');
+        return { filePath, bytesWritten: Buffer.byteLength(csv, 'utf8') };
+      }
+      const buf = buildLogExportXlsx(tables);
+      writeFileSync(filePath, buf);
+      return { filePath, bytesWritten: buf.length };
+    },
+  );
+  ipcMain.handle(IPC.logClear, (): void => {
+    getDb().clearLogData();
+    fireDataChanged();
+    logger.log('info', 'main', 'Log Analyzer data cleared');
+  });
+
   ipcMain.handle(
     IPC.screenshotRead,
     async (_e, absolutePath: string): Promise<string | null> => {
@@ -4518,6 +4826,76 @@ function registerIpc(): void {
       }
       return { ok: true, cancelled };
     },
+
+    // ---- Faz 0.5 closeout — bulk export + project-file actions. These
+    // were the last `[⏸]` items: dialog-driven in the desktop, exposed
+    // here with explicit paths (an agent can't drive a save/open dialog). ----
+
+    'export-bulk': async (input) => {
+      const dir = (input as { outputDir?: string }).outputDir;
+      if (!dir) throw new Error('outputDir is required (MCP cannot open dialogs).');
+      return runBulkExport(getDb(), dir);
+    },
+
+    'project-save-as': async (input) => {
+      // Snapshot the live DB to a new .seoproject via VACUUM INTO (atomic,
+      // WAL-safe). Unlike the desktop handler this does NOT switch the
+      // active project — an agent snapshotting shouldn't yank the UI.
+      const target = (input as { filePath?: string }).filePath;
+      if (!target) throw new Error('filePath is required (MCP cannot open dialogs).');
+      const database = getDb();
+      try {
+        database.walCheckpoint();
+      } catch {
+        /* best-effort */
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawDb = (database as any).db as { exec: (sql: string) => void };
+      rawDb.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+      const { statSync } = await import('node:fs');
+      return { filePath: target, bytesWritten: statSync(target).size };
+    },
+
+    'project-save-encrypted': async (input) => {
+      const i = input as { filePath?: string; password?: string };
+      if (!i.filePath) throw new Error('filePath is required.');
+      if (!i.password) throw new Error('password is required.');
+      const tmpPath = join(app.getPath('temp'), `freecrawl-enc-${Date.now()}.seoproject`);
+      try {
+        const database = getDb();
+        try {
+          database.walCheckpoint();
+        } catch {
+          /* best-effort */
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rawDb = (database as any).db as { exec: (sql: string) => void };
+        rawDb.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
+        const { encryptFile } = await import('./project-encryption.js');
+        const result = encryptFile(tmpPath, i.filePath, i.password);
+        return { filePath: i.filePath, bytesWritten: result.bytesWritten };
+      } finally {
+        try {
+          const { unlinkSync } = await import('node:fs');
+          unlinkSync(tmpPath);
+        } catch {
+          /* best-effort tmp cleanup */
+        }
+      }
+    },
+
+    'project-open-encrypted': async (input) => {
+      // Decrypt a .seoproject.enc to an explicit destination, then make it
+      // the desktop's active project (this DOES switch the UI).
+      const i = input as { filePath?: string; password?: string; destPath?: string };
+      if (!i.filePath) throw new Error('filePath is required (source .seoproject.enc).');
+      if (!i.password) throw new Error('password is required.');
+      if (!i.destPath) throw new Error('destPath is required (output .seoproject path).');
+      const { decryptFile } = await import('./project-encryption.js');
+      decryptFile(i.filePath, i.destPath, i.password);
+      openProjectAtPath(i.destPath);
+      return { filePath: i.destPath };
+    },
   };
 
   crawlController = {
@@ -5411,279 +5789,9 @@ function registerIpc(): void {
       return { outputDir: '', files: [], errors: [] };
     }
     const outputDir = dirRes.filePaths[0]!;
-    const tasks: { label: string; file: string; category: UrlCategory }[] = [
-      { label: 'All URLs', file: 'all-urls.csv', category: 'all' },
-      { label: 'Internal HTML', file: 'internal-html.csv', category: 'internal:html' },
-      { label: 'Internal All', file: 'internal-all.csv', category: 'internal:all' },
-      { label: 'External All', file: 'external-all.csv', category: 'external:all' },
-      { label: '2xx Success', file: 'status-2xx.csv', category: 'status:2xx' },
-      { label: '3xx Redirects', file: 'status-3xx.csv', category: 'status:3xx' },
-      { label: '4xx Client Errors', file: 'status-4xx.csv', category: 'status:4xx' },
-      { label: '5xx Server Errors', file: 'status-5xx.csv', category: 'status:5xx' },
-      { label: 'Indexable', file: 'indexable.csv', category: 'indexability:indexable' },
-      {
-        label: 'Non-Indexable',
-        file: 'non-indexable.csv',
-        category: 'indexability:non-indexable',
-      },
-      {
-        label: 'Title Issues — Missing',
-        file: 'issues-title-missing.csv',
-        category: 'issues:title-missing',
-      },
-      {
-        label: 'Title Issues — Duplicate',
-        file: 'issues-title-duplicate.csv',
-        category: 'issues:title-duplicate',
-      },
-      {
-        label: 'Meta Description Issues — Missing',
-        file: 'issues-meta-missing.csv',
-        category: 'issues:meta-missing',
-      },
-      {
-        label: 'H1 Issues — Missing',
-        file: 'issues-h1-missing.csv',
-        category: 'issues:h1-missing',
-      },
-      {
-        label: 'Canonical Issues — Missing',
-        file: 'issues-canonical-missing.csv',
-        category: 'issues:canonical-missing',
-      },
-      {
-        label: 'Pagination Broken',
-        file: 'issues-pagination-broken.csv',
-        category: 'issues:pagination-broken',
-      },
-      {
-        label: 'Mixed Content',
-        file: 'issues-mixed-content.csv',
-        category: 'issues:mixed-content',
-      },
-      {
-        label: 'Insecure Form Action',
-        file: 'issues-insecure-form-action.csv',
-        category: 'issues:insecure-form-action',
-      },
-      {
-        label: 'Hreflang — Reciprocity Missing',
-        file: 'hreflang-reciprocity-missing.csv',
-        category: 'issues:hreflang-reciprocity-missing',
-      },
-      {
-        label: 'Sitemap — Crawled, Not Listed',
-        file: 'sitemap-crawled-not-in-sitemap.csv',
-        category: 'issues:crawled-not-in-sitemap',
-      },
-      {
-        label: 'Image Missing Alt',
-        file: 'issues-image-missing-alt.csv',
-        category: 'issues:image-missing-alt',
-      },
-      {
-        label: 'Near-Duplicate Content',
-        file: 'issues-near-duplicate.csv',
-        category: 'issues:near-duplicate',
-      },
-      // V1 Faz 4 — Redirects family.
-      { label: 'All Redirects', file: 'all-redirects.csv', category: 'tab:redirects' },
-      {
-        label: 'Redirect Chains (Long)',
-        file: 'redirect-chains-long.csv',
-        category: 'issues:redirect-chain-long',
-      },
-      { label: 'Redirect Loops', file: 'redirect-loops.csv', category: 'issues:redirect-loop' },
-      {
-        label: 'Self-Redirects',
-        file: 'redirect-self.csv',
-        category: 'issues:redirect-self',
-      },
-      // V1 Faz 4 — Canonical family.
-      { label: 'All Canonicals', file: 'all-canonicals.csv', category: 'tab:canonicals' },
-      {
-        label: 'Canonical — Non Self-Referencing',
-        file: 'canonical-non-self.csv',
-        category: 'issues:canonical-non-self',
-      },
-      {
-        label: 'Canonical — To Non-200',
-        file: 'canonical-to-non-200.csv',
-        category: 'issues:canonical-to-non-200',
-      },
-      {
-        label: 'Canonical — To Redirect',
-        file: 'canonical-to-redirect.csv',
-        category: 'issues:canonical-to-redirect',
-      },
-      {
-        label: 'Canonical — To Noindex',
-        file: 'canonical-to-noindex.csv',
-        category: 'issues:canonical-to-noindex',
-      },
-      {
-        label: 'Canonical — Multi-Hop Chain',
-        file: 'canonical-chain-multi-hop.csv',
-        category: 'issues:canonical-chain-multi-hop',
-      },
-      {
-        label: 'Multiple Canonicals',
-        file: 'canonical-multiple.csv',
-        category: 'issues:multiple-canonicals',
-      },
-      // V1 Faz 4 — Pagination family.
-      { label: 'All Pagination', file: 'all-pagination.csv', category: 'tab:pagination' },
-      {
-        label: 'Pagination — Sequence Break',
-        file: 'pagination-sequence-break.csv',
-        category: 'issues:pagination-sequence-break',
-      },
-      {
-        label: 'Pagination — Canonical Conflict',
-        file: 'pagination-canonical-conflict.csv',
-        category: 'issues:pagination-canonical-conflict',
-      },
-      // V1 Faz 4 — Hreflang family (7 variants).
-      { label: 'Hreflang — All', file: 'hreflang-all.csv', category: 'tab:hreflang' },
-      {
-        label: 'Hreflang — x-default Missing',
-        file: 'hreflang-x-default-missing.csv',
-        category: 'issues:hreflang-x-default-missing',
-      },
-      {
-        label: 'Hreflang — Invalid Language Code',
-        file: 'hreflang-invalid-code.csv',
-        category: 'issues:hreflang-invalid-code',
-      },
-      {
-        label: 'Hreflang — Self-Ref Missing',
-        file: 'hreflang-self-ref-missing.csv',
-        category: 'issues:hreflang-self-ref-missing',
-      },
-      {
-        label: 'Hreflang — Target Issues',
-        file: 'hreflang-target-issues.csv',
-        category: 'issues:hreflang-target-issues',
-      },
-      {
-        label: 'Hreflang — Inconsistent Language',
-        file: 'hreflang-inconsistent-lang.csv',
-        category: 'issues:hreflang-inconsistent-lang',
-      },
-      // V1 Faz 4 — Duplicates (cluster + exact).
-      { label: 'Duplicate Pages', file: 'duplicate-pages.csv', category: 'tab:duplicates' },
-      {
-        label: 'Duplicate Content — Exact',
-        file: 'duplicate-content-exact.csv',
-        category: 'issues:duplicate-content-exact',
-      },
-      // V1 Faz 4 — Custom data exports.
-      {
-        label: 'Custom Extraction Results',
-        file: 'custom-extraction.csv',
-        category: 'tab:custom-extraction',
-      },
-      { label: 'Custom Search Hits', file: 'custom-search.csv', category: 'tab:custom-search' },
-      // V1 Faz 4 — Structured data validation errors.
-      {
-        label: 'Structured Data — Missing',
-        file: 'structured-data-missing.csv',
-        category: 'issues:structured-data-missing',
-      },
-      {
-        label: 'Structured Data — Invalid',
-        file: 'structured-data-invalid.csv',
-        category: 'issues:structured-data-invalid',
-      },
-      {
-        label: 'Structured Data — Duplicate @id',
-        file: 'structured-data-duplicate-id.csv',
-        category: 'issues:schema-duplicate-id',
-      },
-      {
-        label: 'Structured Data — Missing Required Property',
-        file: 'structured-data-missing-required.csv',
-        category: 'issues:schema-missing-required',
-      },
-      // V1 Faz 4 — AMP.
-      { label: 'AMP Pages', file: 'amp-pages.csv', category: 'tab:amp' },
-      // V1 Faz 4 — Image variants.
-      {
-        label: 'Image — Missing Alt',
-        file: 'image-missing-alt.csv',
-        category: 'issues:image-missing-alt',
-      },
-      {
-        label: 'Image — Empty Alt',
-        file: 'image-empty-alt.csv',
-        category: 'issues:image-empty-alt',
-      },
-      {
-        label: 'Image — Too Large',
-        file: 'image-too-large.csv',
-        category: 'issues:image-too-large',
-      },
-      {
-        label: 'Image — Broken Src',
-        file: 'image-broken-src.csv',
-        category: 'issues:image-broken-src',
-      },
-      // V1 Faz 4 — Security.
-      { label: 'Security Audit', file: 'security-audit.csv', category: 'tab:security' },
-      {
-        label: 'Mixed Content — Active',
-        file: 'mixed-content-active.csv',
-        category: 'issues:mixed-content-active',
-      },
-      {
-        label: 'Mixed Content — Passive',
-        file: 'mixed-content-passive.csv',
-        category: 'issues:mixed-content-passive',
-      },
-      {
-        label: 'HSTS Missing',
-        file: 'security-hsts-missing.csv',
-        category: 'issues:hsts-missing',
-      },
-      {
-        label: 'CSP Missing',
-        file: 'security-csp-missing.csv',
-        category: 'issues:csp-missing',
-      },
-      // V1 Faz 4 — SERP summary.
-      { label: 'SERP Summary', file: 'serp-summary.csv', category: 'tab:serp' },
-      // V1 Faz 4 — Outlinks Zero (dead-end pages: no outbound links).
-      {
-        label: 'Outlinks Zero',
-        file: 'outlinks-zero.csv',
-        category: 'issues:outlinks-zero',
-      },
-    ];
-    const files: BulkExportFile[] = [];
-    const errors: { label: string; error: string }[] = [];
-    const database = getDb();
-    for (const task of tasks) {
-      const filePath = join(outputDir, task.file);
-      try {
-        const { rowsWritten } = await exportUrlsToCsv(database, filePath, {
-          category: task.category,
-        });
-        // Skip 0-row files — they bloat the bulk dump and the user almost
-        // certainly doesn't want empty CSVs cluttering the directory.
-        if (rowsWritten === 0) {
-          try {
-            const { unlinkSync } = await import('node:fs');
-            unlinkSync(filePath);
-          } catch {
-            /* ignore */
-          }
-          continue;
-        }
-        files.push({ filePath, label: task.label, category: task.category, rowsWritten });
-      } catch (err) {
-        errors.push({ label: task.label, error: (err as Error).message });
-      }
-    }
+    // Task list + per-category writing live in @freecrawl/core's runBulkExport
+    // so the desktop handler and the MCP `export_bulk` action stay in sync.
+    const { files, errors } = await runBulkExport(getDb(), outputDir);
     if (mainWindow) {
       const totalRows = files.reduce((s, f) => s + f.rowsWritten, 0);
       await dialog.showMessageBox(mainWindow, {
@@ -6151,6 +6259,14 @@ function performShutdown(): void {
       /* ignore */
     }
     visualizationWindow = null;
+  }
+  if (logAnalyzerWindow && !logAnalyzerWindow.isDestroyed()) {
+    try {
+      logAnalyzerWindow.close();
+    } catch {
+      /* ignore */
+    }
+    logAnalyzerWindow = null;
   }
   activeCrawler?.stop();
   // V2 Faz 1 — Tear down Playwright before worker pools so a hung

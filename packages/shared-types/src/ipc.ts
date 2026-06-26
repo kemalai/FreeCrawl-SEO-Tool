@@ -36,6 +36,22 @@ import type {
 } from './google.js';
 import type { AiProvider, AiRow } from './ai.js';
 import type { SeoProvider, SeoRow } from './seo.js';
+import type {
+  LogAnalyzeInput,
+  LogAnalyzeResult,
+  LogOverview,
+  LogUrlStatsInput,
+  LogUrlStatsResult,
+  LogBotRow,
+  LogStatusRow,
+  LogTrendRow,
+  LogCrawlBudgetRow,
+  LogOrphanRow,
+  LogDiscoveryRow,
+  LogSeedDiscoveryResult,
+  LogExportInput,
+  LogExportResult,
+} from './loganalyzer.js';
 
 export const IPC = {
   crawlStart: 'crawl:start',
@@ -274,6 +290,23 @@ export const IPC = {
   /** Cross-source orphan-pages report — URLs seen in sitemap / GSC /
    *  GA4 but not in the crawled `urls` table. */
   reportsOrphanCrossSource: 'reports:orphan-cross-source',
+  /** V2 Faz 2 — Log File Analyzer. `logAnalyzerOpenWindow` opens the
+   *  standalone analysis window; `logAnalyze` ingests one access-log file
+   *  (parse, bot-detect, aggregate, persist); the remaining channels read
+   *  the persisted aggregates the window renders. */
+  logAnalyzerOpenWindow: 'loganalyzer:open-window',
+  logAnalyze: 'loganalyzer:analyze',
+  logOverview: 'loganalyzer:overview',
+  logUrlStats: 'loganalyzer:url-stats',
+  logBots: 'loganalyzer:bots',
+  logStatus: 'loganalyzer:status',
+  logTrend: 'loganalyzer:trend',
+  logCrawlBudget: 'loganalyzer:crawl-budget',
+  logOrphans: 'loganalyzer:orphans',
+  logDiscovery: 'loganalyzer:discovery',
+  logSeedDiscovery: 'loganalyzer:seed-discovery',
+  logExport: 'loganalyzer:export',
+  logClear: 'loganalyzer:clear',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -388,6 +421,7 @@ export type MenuEvent =
   | 'open-robots-tester'
   | 'open-sitemap-validator'
   | 'open-reports'
+  | 'open-log-analyzer'
   | 'open-settings'
   | 'open-scheduled-crawl'
   | 'about';
@@ -1517,6 +1551,33 @@ export interface FreeCrawlApi {
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onLogsBatch(cb: (entries: LogEntry[]) => void): () => void;
   onLogsBusy(cb: (busy: boolean) => void): () => void;
+  /** V2 Faz 2 — open (or focus) the standalone Log Analyzer window. */
+  logAnalyzerOpenWindow(): Promise<void>;
+  /** Ingest one access-log file: parse → bot-detect → aggregate → persist.
+   *  Omitting `filePath` opens a native file picker. */
+  logAnalyze(input: LogAnalyzeInput): Promise<LogAnalyzeResult>;
+  /** Top-level roll-up across every ingested log file. */
+  logOverview(): Promise<LogOverview>;
+  /** Paginated per-URL log activity, joined with the crawl. */
+  logUrlStats(input: LogUrlStatsInput): Promise<LogUrlStatsResult>;
+  /** Per-bot roll-up (hits + verified-IP counts). */
+  logBots(): Promise<LogBotRow[]>;
+  /** Response-code distribution from the log. */
+  logStatus(): Promise<LogStatusRow[]>;
+  /** Daily bot/human hit trend. */
+  logTrend(): Promise<LogTrendRow[]>;
+  /** Crawled URLs ranked by Googlebot hit count (crawl budget). */
+  logCrawlBudget(limit?: number): Promise<LogCrawlBudgetRow[]>;
+  /** Bot-hit log URLs the crawl never reached (orphan candidates). */
+  logOrphans(input: LogUrlStatsInput): Promise<LogUrlStatsResult>;
+  /** Log URLs absent from the crawl, eligible to be seeded. */
+  logDiscovery(limit?: number): Promise<LogDiscoveryRow[]>;
+  /** Inject discovered log URLs into the active crawl (item 12). */
+  logSeedDiscovery(limit?: number): Promise<LogSeedDiscoveryResult>;
+  /** Export every analyzer table to a single CSV or multi-sheet XLSX. */
+  logExport(input: LogExportInput): Promise<LogExportResult>;
+  /** Wipe every ingested log aggregate from the project. */
+  logClear(): Promise<void>;
   onProgress(cb: (p: CrawlProgress) => void): () => void;
   onDone(cb: (summary: CrawlSummary) => void): () => void;
   onError(cb: (message: string) => void): () => void;

@@ -85,3 +85,40 @@ export {
   type SitemapEntry,
   type SitemapDiscoveryResult,
 } from './sitemap.js';
+export {
+  runBulkExport,
+  BULK_EXPORT_TASKS,
+  type BulkExportTask,
+} from './bulk-export.js';
+export {
+  createLogParser,
+  detectLogFormat,
+  parseApacheTimestamp,
+  DIRECTIVE,
+  type LogParser,
+  type ParsedLogLine,
+} from './log-parser.js';
+export {
+  detectBot,
+  verifyBotByRdns,
+  type BotInfo,
+  type BotFamily,
+} from './bot-detect.js';
+export {
+  analyzeLogFile,
+  type LogAnalysisResult,
+  type LogUrlStat,
+  type LogBotAgg,
+  type LogAnalyzeOptions,
+} from './log-analyzer.js';
+export {
+  buildLogExportXlsx,
+  buildLogExportCsv,
+  type LogExportTables,
+} from './log-export.js';
+export {
+  buildXlsx,
+  buildCsvTable,
+  type SheetSpec,
+  type SheetColumn,
+} from './spreadsheet.js';
