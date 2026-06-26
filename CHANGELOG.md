@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.3] — 2026-06-26
+
+### Added
+- Log File Analyzer — a standalone window that parses Apache / Nginx / IIS / custom access logs into bot hits per URL, crawl budget, response-code distribution, and a daily trend.
+- Crawl × log join that surfaces URLs search-engine bots hit but the crawl never reached, with one click to seed them into a running crawl.
+- Bot detection across 40+ crawlers (Googlebot, Bingbot, YandexBot, GPTBot, …) with optional reverse-DNS verification to catch spoofed user-agents.
+- A per-bot filter on the URL Hits table to see exactly which pages any one bot crawled.
+- One-click export of every Log Analyzer table to a single CSV or a multi-sheet Excel workbook.
+- A headless `analyze-logs` CLI command to ingest access logs without opening the app.
+- New MCP tools to run a bulk export and to save / open (encrypted) project snapshots from an AI agent.
+
 ## [0.7.2] — 2026-06-23
 
 ### Added
