@@ -96,7 +96,7 @@ export interface McpBridgeDeps {
   /** Absolute path to the active `.seoproject`, or null if none. */
   getProjectPath: () => string | null;
   /** Row count for the active project — useful for confirming the
-   * MCP-side read-only view is targetting the same DB. */
+   * MCP-side read-only view is targeting the same DB. */
   getUrlCount: () => number;
   /** Optional logger (info / warn / error). When omitted, the bridge
    *  swallows internal trace; only HTTP-visible errors propagate. */
