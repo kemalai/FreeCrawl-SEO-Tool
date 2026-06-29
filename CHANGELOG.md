@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0] — 2026-06-29
+
+### Added
+- Three new site-graph layouts — Force-Directed Tree, Radial Tree, and Directory Tree — for clearer structural views of the crawl.
+- Crawl Path Report — click any page in the graph to trace its shortest discovery path from the homepage.
+- A "By LCP" graph colour overlay that flags pages whose largest above-the-fold element is an image, a prime optimisation target.
+- Browser-driven login mode that drives a real Chromium through JS-heavy SPA login forms, then reuses the session for the crawl.
+- XPath parent, ancestor, and sibling axes in custom extraction, for pulling values plain CSS selectors can't reach.
+- A new MCP `get_crawl_path` tool so AI agents can fetch any page's crawl path.
+
+### Changed
+- HTTP Digest auth now caches each host's challenge and authenticates proactively, avoiding a 401 round-trip on every URL.
+
+### Fixed
+- Importing custom-extraction rules no longer silently drops XPath and JSONPath rules.
+
 ## [0.7.3] — 2026-06-26
 
 ### Added
