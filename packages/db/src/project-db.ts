@@ -5445,12 +5445,23 @@ export class ProjectDb {
    * Cost: two indexed SELECTs + a JOIN. ~200 ms at 100K URLs / 5K cap.
    */
   graphSnapshot(nodeLimit = 1000): {
-    nodes: { id: number; url: string; statusCode: number | null; depth: number; inlinks: number; indexability: Indexability }[];
+    nodes: {
+      id: number;
+      url: string;
+      statusCode: number | null;
+      depth: number;
+      inlinks: number;
+      indexability: Indexability;
+      lcpTag: string | null;
+      lcpResourceUrl: string | null;
+      lcpCoverage: number | null;
+    }[];
     edges: { source: number; target: number }[];
   } {
     const nodes = this.db
       .prepare(
-        `SELECT id, url, status_code, depth, inlinks, indexability
+        `SELECT id, url, status_code, depth, inlinks, indexability,
+                lcp_tag, lcp_resource_url, lcp_coverage
            FROM urls
           WHERE is_external = 0 AND content_kind = 'html'
           ORDER BY inlinks DESC, id ASC
@@ -5463,6 +5474,9 @@ export class ProjectDb {
       depth: number;
       inlinks: number;
       indexability: Indexability;
+      lcp_tag: string | null;
+      lcp_resource_url: string | null;
+      lcp_coverage: number | null;
     }[];
 
     if (nodes.length === 0) return { nodes: [], edges: [] };
@@ -5498,8 +5512,72 @@ export class ProjectDb {
         depth: n.depth,
         inlinks: n.inlinks,
         indexability: n.indexability,
+        lcpTag: n.lcp_tag,
+        lcpResourceUrl: n.lcp_resource_url,
+        lcpCoverage: n.lcp_coverage,
       })),
       edges,
+    };
+  }
+
+  /**
+   * Reconstruct the shortest discovery path from the crawl root (depth 0)
+   * to `targetUrlId` — the SF-style "Crawl Path Report". Walks backwards
+   * from the target along internal inlinks, preferring at each hop a parent
+   * exactly one depth shallower (a BFS-tree parent, which guarantees the
+   * shortest path). Falls back to the shallowest available parent when the
+   * link graph is irregular (sitemap-discovered pages, redirect chains).
+   *
+   * Returns the path ordered root → target. `reachedRoot` is false when the
+   * walk stalled before depth 0 (e.g. an orphan reachable only via sitemap).
+   */
+  crawlPath(
+    targetUrlId: number,
+    maxHops = 60,
+  ): {
+    path: { id: number; url: string; depth: number; statusCode: number | null }[];
+    reachedRoot: boolean;
+  } {
+    type PathRow = { id: number; url: string; depth: number; status_code: number | null };
+    const target = this.db
+      .prepare('SELECT id, url, depth, status_code FROM urls WHERE id = ?')
+      .get(targetUrlId) as PathRow | undefined;
+    if (!target) return { path: [], reachedRoot: false };
+
+    const parentStmt = this.db.prepare(
+      `SELECT f.id AS id, f.url AS url, f.depth AS depth, f.status_code AS status_code
+         FROM links l
+         JOIN urls f ON l.from_url_id = f.id
+        WHERE l.to_url = ? AND l.is_internal = 1 AND f.id != ?
+        ORDER BY f.depth ASC, f.inlinks DESC
+        LIMIT 200`,
+    );
+
+    const chain: PathRow[] = [target];
+    const seen = new Set<number>([target.id]);
+    let cur = target;
+    let reachedRoot = cur.depth <= 0;
+    while (!reachedRoot && chain.length < maxHops) {
+      const parents = parentStmt.all(cur.url, cur.id) as PathRow[];
+      const next =
+        parents.find((p) => p.depth === cur.depth - 1 && !seen.has(p.id)) ??
+        parents.find((p) => p.depth < cur.depth && !seen.has(p.id)) ??
+        parents.find((p) => !seen.has(p.id));
+      if (!next) break;
+      chain.push(next);
+      seen.add(next.id);
+      cur = next;
+      if (cur.depth <= 0) reachedRoot = true;
+    }
+    chain.reverse();
+    return {
+      path: chain.map((r) => ({
+        id: r.id,
+        url: r.url,
+        depth: r.depth,
+        statusCode: r.status_code,
+      })),
+      reachedRoot,
     };
   }
 

@@ -1,14 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
-import { RefreshCw, Sparkles, Settings2, RotateCcw, Download } from 'lucide-react';
+import { RefreshCw, Sparkles, Settings2, RotateCcw, Download, Route } from 'lucide-react';
 import cytoscape, { type Core } from 'cytoscape';
+import dagre from 'cytoscape-dagre';
 import { useTranslation } from 'react-i18next';
 import type {
   AnchorTextRow,
+  CrawlPathResult,
   GraphSnapshotResult,
   Indexability,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { translateLabel } from '../i18n/labels.js';
+
+// Register the dagre (Sugiyama layered DAG) layout extension once at module
+// load. Wrapped because Vite HMR can re-evaluate this module and cytoscape
+// throws on a duplicate registration.
+try {
+  cytoscape.use(dagre);
+} catch {
+  /* already registered (HMR re-import) */
+}
 
 /**
  * User-tunable layout knobs. Persisted in prefs under the
@@ -160,16 +171,102 @@ function exportStandaloneHtml(
   downloadBlob(new Blob([html], { type: 'text/html' }), filename);
 }
 
-type LayoutKind = 'cose' | 'breadthfirst' | 'circle' | 'concentric';
+type LayoutKind =
+  | 'cose'
+  | 'breadthfirst'
+  | 'dagre'
+  | 'radial'
+  | 'directory'
+  | 'circle'
+  | 'concentric';
 
 const LAYOUTS: { key: LayoutKind; label: string; hint: string }[] = [
   { key: 'cose', label: 'Force-Directed', hint: 'Compound spring embedder' },
   { key: 'breadthfirst', label: 'Tree (BFS)', hint: 'Roots-to-leaves layered' },
+  { key: 'dagre', label: 'Force-Directed Tree', hint: 'Sugiyama layered DAG (dagre)' },
+  { key: 'radial', label: 'Radial Tree', hint: 'Roots at centre, leaves outward' },
+  { key: 'directory', label: 'Directory Tree', hint: 'Grouped by URL path segments' },
   { key: 'circle', label: 'Circle', hint: 'Equal radial spacing' },
   { key: 'concentric', label: 'Concentric', hint: 'By inlinks (centre = most-linked)' },
 ];
 
-type ColorMode = 'status' | 'depth' | 'indexability';
+type ColorMode = 'status' | 'depth' | 'indexability' | 'lcp';
+
+/** Colour a node by its Largest-Contentful-Paint candidate: grey when no
+ *  render data, amber when the LCP is an image (a prime optimisation
+ *  target), green when it is text / other markup. */
+function lcpColor(n: GraphSnapshotResult['nodes'][number]): string {
+  if (!n.lcpTag) return '#737373';
+  const tag = n.lcpTag.toLowerCase();
+  const isImage = !!n.lcpResourceUrl || tag === 'img' || tag === 'image' || tag === 'svg';
+  return isImage ? '#ea580c' : '#16a34a';
+}
+
+/**
+ * Build a directory-hierarchy element set from the link-graph nodes: a
+ * synthetic folder node per URL path segment, with each page hanging under
+ * its containing directory. Pure renderer-side transform — no extra query.
+ */
+function buildDirectoryElements(
+  nodes: GraphSnapshotResult['nodes'],
+  colorFn: (n: GraphSnapshotResult['nodes'][number]) => string,
+  sizeScale: number,
+): { data: Record<string, unknown> }[] {
+  const elements: { data: Record<string, unknown> }[] = [];
+  const dirSeen = new Set<string>();
+  const edgeSeen = new Set<string>();
+  const ensureDir = (id: string, label: string) => {
+    if (dirSeen.has(id)) return;
+    dirSeen.add(id);
+    elements.push({ data: { id, label, kind: 'dir', color: '#475569', size: 12 } });
+  };
+  const ensureEdge = (source: string, target: string) => {
+    const key = `${source}>${target}`;
+    if (edgeSeen.has(key)) return;
+    edgeSeen.add(key);
+    elements.push({ data: { id: `de:${key}`, source, target } });
+  };
+  for (const n of nodes) {
+    let host = '';
+    let segs: string[] = [];
+    try {
+      const u = new URL(n.url);
+      host = u.host;
+      segs = u.pathname.split('/').filter(Boolean);
+    } catch {
+      continue;
+    }
+    const rootId = `dir:${host}/`;
+    ensureDir(rootId, host);
+    // All but the final segment are the page's containing folders.
+    const dirSegs = segs.slice(0, Math.max(0, segs.length - 1));
+    let parentId = rootId;
+    let acc = '';
+    for (const seg of dirSegs) {
+      acc += `/${seg}`;
+      const id = `dir:${host}${acc}`;
+      ensureDir(id, `${seg}/`);
+      ensureEdge(parentId, id);
+      parentId = id;
+    }
+    const leafLabel = segs.length > 0 ? segs[segs.length - 1]! : host;
+    elements.push({
+      data: {
+        id: String(n.id),
+        label: leafLabel,
+        fullUrl: n.url,
+        statusCode: n.statusCode ?? '',
+        inlinks: n.inlinks,
+        color: colorFn(n),
+        size: nodeSize(n.inlinks, sizeScale),
+        kind: 'page',
+        isTop: 0,
+      },
+    });
+    ensureEdge(parentId, String(n.id));
+  }
+  return elements;
+}
 
 function statusColor(code: number | null): string {
   if (code === null) return '#737373';
@@ -213,6 +310,18 @@ export function VisualizationTab() {
   const [colorMode, setColorMode] = useState<ColorMode>('status');
   const [nodeLimit, setNodeLimit] = useState(150);
   const [labelMode, setLabelMode] = useState<LabelMode>('hover');
+  // Crawl-path trace: when enabled, selecting a node fetches & highlights
+  // the shortest discovery path from the crawl root to that page.
+  const [pathMode, setPathMode] = useState(false);
+  const [crawlPath, setCrawlPath] = useState<CrawlPathResult | null>(null);
+  const pathModeRef = useRef(false);
+  useEffect(() => {
+    pathModeRef.current = pathMode;
+    if (!pathMode) {
+      setCrawlPath(null);
+      cyRef.current?.elements().removeClass('onpath pathedge');
+    }
+  }, [pathMode]);
   const [loading, setLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<Core | null>(null);
@@ -286,6 +395,7 @@ export function VisualizationTab() {
     const colorFn = (n: GraphSnapshotResult['nodes'][number]) => {
       if (colorMode === 'depth') return depthColor(n.depth);
       if (colorMode === 'indexability') return indexColor(n.indexability);
+      if (colorMode === 'lcp') return lcpColor(n);
       return statusColor(n.statusCode);
     };
 
@@ -295,27 +405,32 @@ export function VisualizationTab() {
       .slice(0, TOP_LABEL_COUNT);
     const topIds = new Set(topByInlinks.map((n) => String(n.id)));
 
-    const elements = [
-      ...graph.nodes.map((n) => ({
-        data: {
-          id: String(n.id),
-          label: shortenUrl(n.url),
-          fullUrl: n.url,
-          statusCode: n.statusCode ?? '',
-          inlinks: n.inlinks,
-          color: colorFn(n),
-          size: nodeSize(n.inlinks, debouncedTuning.nodeSizeScale),
-          isTop: topIds.has(String(n.id)) ? 1 : 0,
-        },
-      })),
-      ...graph.edges.map((e) => ({
-        data: {
-          id: `e${e.source}-${e.target}`,
-          source: String(e.source),
-          target: String(e.target),
-        },
-      })),
-    ];
+    // Directory mode swaps the link graph for a path-segment hierarchy; all
+    // other layouts render the actual internal link graph.
+    const elements =
+      layout === 'directory'
+        ? buildDirectoryElements(graph.nodes, colorFn, debouncedTuning.nodeSizeScale)
+        : [
+            ...graph.nodes.map((n) => ({
+              data: {
+                id: String(n.id),
+                label: shortenUrl(n.url),
+                fullUrl: n.url,
+                statusCode: n.statusCode ?? '',
+                inlinks: n.inlinks,
+                color: colorFn(n),
+                size: nodeSize(n.inlinks, debouncedTuning.nodeSizeScale),
+                isTop: topIds.has(String(n.id)) ? 1 : 0,
+              },
+            })),
+            ...graph.edges.map((e) => ({
+              data: {
+                id: `e${e.source}-${e.target}`,
+                source: String(e.source),
+                target: String(e.target),
+              },
+            })),
+          ];
 
     if (cyRef.current) {
       cyRef.current.destroy();
@@ -329,12 +444,27 @@ export function VisualizationTab() {
           ? 'node[isTop = 1]'
           : 'node.focus';
 
+    // `radial` and `directory` are UI choices that map onto real cytoscape
+    // layout algorithms (breadthfirst-circle / dagre respectively).
+    const layoutName =
+      layout === 'radial' ? 'breadthfirst' : layout === 'directory' ? 'dagre' : layout;
     const layoutCfg: Record<string, unknown> = {
-      name: layout,
+      name: layoutName,
       animate: false,
       padding: 30,
     };
-    if (layout === 'cose') {
+    if (layout === 'dagre' || layout === 'directory') {
+      // Sugiyama layered DAG — top-to-bottom ranks, crossing-minimised.
+      layoutCfg.rankDir = 'TB';
+      layoutCfg.nodeSep = layout === 'directory' ? 24 : 36;
+      layoutCfg.rankSep = layout === 'directory' ? 55 : 70;
+      layoutCfg.edgeSep = 12;
+      layoutCfg.ranker = 'network-simplex';
+    } else if (layout === 'radial') {
+      layoutCfg.circle = true;
+      layoutCfg.directed = true;
+      layoutCfg.spacingFactor = 1.5;
+    } else if (layout === 'cose') {
       layoutCfg.nodeRepulsion = () => 1_000_000 * debouncedTuning.repulsionScale;
       layoutCfg.idealEdgeLength = () => 400 * debouncedTuning.edgeLengthScale;
       layoutCfg.edgeElasticity = () => 20;
@@ -414,6 +544,32 @@ export function VisualizationTab() {
           },
         },
         {
+          selector: "node[kind = 'dir']",
+          style: {
+            shape: 'round-rectangle',
+            'background-color': '#334155',
+            'border-width': 1,
+            'border-color': '#475569',
+            label: 'data(label)',
+            color: '#94a3b8',
+            'font-size': 9,
+            'text-valign': 'center',
+            'text-halign': 'center',
+            'text-outline-width': 0,
+            'text-background-opacity': 0,
+            width: 'data(size)',
+            height: 'data(size)',
+          },
+        },
+        {
+          selector: 'node.onpath',
+          style: {
+            'border-width': 3,
+            'border-color': '#22d3ee',
+            'z-index': 1001,
+          },
+        },
+        {
           selector: 'node.faded',
           style: {
             opacity: 0.25,
@@ -448,6 +604,16 @@ export function VisualizationTab() {
             opacity: 0.08,
           },
         },
+        {
+          selector: 'edge.pathedge',
+          style: {
+            'line-color': '#22d3ee',
+            'target-arrow-color': '#22d3ee',
+            width: 2,
+            opacity: 1,
+            'z-index': 1000,
+          },
+        },
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ] as any),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -467,6 +633,23 @@ export function VisualizationTab() {
         x: pos.x,
         y: pos.y,
         radius,
+      });
+    };
+
+    const highlightPath = (res: CrawlPathResult) => {
+      cy.batch(() => {
+        cy.elements().removeClass('onpath pathedge');
+        const ids = res.path.map((p) => String(p.id));
+        const idSet = new Set(ids);
+        cy.nodes().forEach((nd) => {
+          if (idSet.has(nd.id())) nd.addClass('onpath');
+        });
+        // Highlight link-graph edges that connect consecutive path hops
+        // (present only when both endpoints survived the node cap).
+        for (let i = 0; i < ids.length - 1; i++) {
+          const e1 = cy.$id(`e${ids[i]}-${ids[i + 1]}`);
+          if (e1.nonempty()) e1.addClass('pathedge');
+        }
       });
     };
 
@@ -513,16 +696,26 @@ export function VisualizationTab() {
         keep.removeClass('faded');
         keep.edges().addClass('focus');
       });
+      const kind = String(node.data('kind') ?? 'page');
+      const idNum = Number(node.data('id'));
+      if (pathModeRef.current && kind !== 'dir' && Number.isFinite(idNum)) {
+        void window.freecrawl.crawlPath({ urlId: idNum }).then((res) => {
+          setCrawlPath(res);
+          highlightPath(res);
+        });
+      }
     });
     cy.on('tap', (e) => {
       if (e.target !== cy) return;
       if (selectedUrlRef.current) {
         setSelectedUrl(null);
         setLabelOverlay(null);
+        setCrawlPath(null);
         cy.batch(() => {
           cy.elements().removeClass('selected');
           cy.elements().removeClass('faded');
           cy.elements().removeClass('focus');
+          cy.elements().removeClass('onpath pathedge');
         });
       }
     });
@@ -584,6 +777,7 @@ export function VisualizationTab() {
               <option value="status">{t('viz.byStatus', { defaultValue: 'By Status' })}</option>
               <option value="depth">{t('viz.byDepth', { defaultValue: 'By Depth' })}</option>
               <option value="indexability">{t('viz.byIndexability', { defaultValue: 'By Indexability' })}</option>
+              <option value="lcp">{t('viz.byLcp', { defaultValue: 'By LCP (above-fold)' })}</option>
             </select>
           </label>
           <label className="flex items-center gap-1 text-surface-400">
@@ -621,6 +815,20 @@ export function VisualizationTab() {
             title={t('viz.fitTitle', { defaultValue: 'Fit graph to view' })}
           >
             {t('viz.fit', { defaultValue: 'Fit' })}
+          </button>
+          <button
+            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] ${
+              pathMode
+                ? 'border-cyan-500 bg-surface-800 text-cyan-200'
+                : 'border-surface-700 text-surface-200 hover:border-blue-500 hover:bg-surface-800'
+            }`}
+            onClick={() => setPathMode((v) => !v)}
+            title={t('viz.crawlPathTitle', {
+              defaultValue: 'Crawl Path mode — click a page node to trace its shortest path from the crawl root',
+            })}
+          >
+            <Route className="h-3 w-3" />
+            {t('viz.crawlPath', { defaultValue: 'Crawl Path' })}
           </button>
           <button
             className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
@@ -759,6 +967,61 @@ export function VisualizationTab() {
         </div>
 
         <aside className="flex w-72 flex-col border-l border-surface-800 bg-surface-950/40">
+          {pathMode && (
+            <div className="border-b border-surface-800">
+              <div className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-surface-400">
+                <div className="flex items-center gap-1">
+                  <Route className="h-3 w-3" /> {t('viz.crawlPath', { defaultValue: 'Crawl Path' })}
+                </div>
+              </div>
+              <div className="max-h-64 overflow-auto px-3 pb-2">
+                {!crawlPath && (
+                  <div className="px-1 py-2 text-[11px] italic text-surface-500">
+                    {t('viz.crawlPathHint', {
+                      defaultValue: 'Select a page node to trace its shortest path from the crawl root.',
+                    })}
+                  </div>
+                )}
+                {crawlPath && crawlPath.path.length === 0 && (
+                  <div className="px-1 py-2 text-[11px] italic text-surface-500">
+                    {t('viz.crawlPathNone', { defaultValue: 'No path data for this node.' })}
+                  </div>
+                )}
+                {crawlPath && crawlPath.path.length > 0 && (
+                  <ol className="flex flex-col gap-1">
+                    {crawlPath.path.map((p, i) => (
+                      <li
+                        key={p.id}
+                        className="flex items-center gap-1.5"
+                        style={{ paddingLeft: `${Math.min(i, 8) * 8}px` }}
+                      >
+                        <span
+                          className="shrink-0 rounded bg-surface-800 px-1 text-[9px] font-mono text-surface-400"
+                          title={t('viz.crawlPathDepth', { defaultValue: 'Crawl depth' })}
+                        >
+                          {p.depth}
+                        </span>
+                        <span
+                          className="truncate font-mono text-[10px] text-surface-200"
+                          title={p.url}
+                        >
+                          {shortenUrl(p.url)}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+                {crawlPath && crawlPath.path.length > 0 && !crawlPath.reachedRoot && (
+                  <div className="mt-1.5 px-1 text-[10px] leading-snug text-amber-400/80">
+                    {t('viz.crawlPathOrphan', {
+                      defaultValue:
+                        'Did not reach the crawl root — possible orphan (sitemap-only) page.',
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           <div className="border-b border-surface-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-surface-400">
             <div className="flex items-center gap-1">
               <Sparkles className="h-3 w-3" /> {t('viz.topAnchorTexts', { defaultValue: 'Top Anchor Texts' })}

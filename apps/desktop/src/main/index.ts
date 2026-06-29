@@ -46,6 +46,8 @@ import {
   type CompareLoadResult,
   type GraphSnapshotInput,
   type GraphSnapshotResult,
+  type CrawlPathInput,
+  type CrawlPathResult,
   type AnchorTextRow,
   type RobotsTestInput,
   type SitemapValidateInput,
@@ -2304,6 +2306,7 @@ function registerIpc(): void {
           error: 'File does not contain a rules array.',
         };
       }
+      const validTypes = new Set(['css', 'regex', 'xpath', 'jsonpath']);
       const validOutputs = new Set([
         'text',
         'attribute',
@@ -2324,7 +2327,8 @@ function registerIpc(): void {
         if (
           typeof o['name'] !== 'string' ||
           typeof o['selector'] !== 'string' ||
-          (o['type'] !== 'css' && o['type'] !== 'regex') ||
+          typeof o['type'] !== 'string' ||
+          !validTypes.has(o['type']) ||
           typeof o['output'] !== 'string' ||
           !validOutputs.has(o['output'] as string) ||
           typeof o['multi'] !== 'string' ||
@@ -2341,7 +2345,7 @@ function registerIpc(): void {
         }
         const rule: CustomExtractionRule = {
           name: o['name'] as string,
-          type: o['type'] as 'css' | 'regex',
+          type: o['type'] as CustomExtractionRule['type'],
           selector: o['selector'] as string,
           output: o['output'] as CustomExtractionRule['output'],
           multi: o['multi'] as CustomExtractionRule['multi'],
@@ -4487,6 +4491,18 @@ function registerIpc(): void {
       return getDb().graphSnapshot(i.nodeLimit ?? 5000);
     },
 
+    'crawl-path': async (input) => {
+      const i = (input ?? {}) as { urlId?: number; url?: string };
+      let id = i.urlId;
+      if (id === undefined && typeof i.url === 'string') {
+        id = getDb().getUrlIdByUrl(i.url) ?? undefined;
+      }
+      if (id === undefined) {
+        return { path: [], reachedRoot: false };
+      }
+      return getDb().crawlPath(id);
+    },
+
     // ---- Faz 0.5 Increment 4 — Integration fetch triggers (simple ones). ----
     // GSC and GA4 fetches are single blocking API calls, no progress
     // streaming — safe to expose to MCP. PSI / AI / SEO have multi-URL
@@ -5958,6 +5974,13 @@ function registerIpc(): void {
       } finally {
         otherDb.close();
       }
+    },
+  );
+
+  ipcMain.handle(
+    IPC.crawlPath,
+    (_e, input: CrawlPathInput): CrawlPathResult => {
+      return getDb().crawlPath(input.urlId);
     },
   );
 

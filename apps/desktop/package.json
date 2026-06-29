@@ -37,6 +37,8 @@
     "@types/cytoscape": "^3.21.9",
     "clsx": "^2.1.1",
     "cytoscape": "^3.33.2",
+    "cytoscape-dagre": "^2.5.0",
+    "dagre": "^0.8.5",
     "i18next": "^26.2.0",
     "lucide-react": "^0.544.0",
     "react": "^19.2.0",
@@ -47,6 +49,8 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@types/cytoscape-dagre": "^2.3.4",
+    "@types/dagre": "^0.7.54",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",

@@ -43,6 +43,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import type {
+  BrowserLoginConfig,
   CrawlConfig,
   CrawlMode,
   CustomExtractionRule,
@@ -121,7 +122,9 @@ interface FormState {
   // auth + network
   auth: HttpAuth;
   formLoginEnabled: boolean;
+  formLoginMode: 'http' | 'browser';
   formLoginSteps: FormLoginStep[];
+  formLoginBrowser: BrowserLoginConfig;
   proxyUrl: string;
   excludeExtensionsText: string;
   maxRedirects: string;
@@ -433,11 +436,22 @@ function configToForm(c: CrawlConfig): FormState {
     webhookUrl: c.webhookUrl ?? '',
     auth: { ...(c.auth ?? { type: 'none' }) },
     formLoginEnabled: c.formLogin?.enabled ?? false,
+    formLoginMode: c.formLogin?.mode ?? 'http',
     formLoginSteps: (c.formLogin?.steps ?? []).map((s) => ({
       ...s,
       fields: (s.fields ?? []).map((f) => ({ ...f })),
       captures: (s.captures ?? []).map((cp) => ({ ...cp })),
     })),
+    formLoginBrowser: {
+      loginUrl: c.formLogin?.browser?.loginUrl ?? '',
+      usernameSelector: c.formLogin?.browser?.usernameSelector ?? '',
+      usernameValue: c.formLogin?.browser?.usernameValue ?? '',
+      passwordSelector: c.formLogin?.browser?.passwordSelector ?? '',
+      passwordValue: c.formLogin?.browser?.passwordValue ?? '',
+      submitSelector: c.formLogin?.browser?.submitSelector ?? '',
+      successSelector: c.formLogin?.browser?.successSelector ?? '',
+      waitMs: c.formLogin?.browser?.waitMs ?? 0,
+    },
     proxyUrl: c.proxyUrl ?? '',
     excludeExtensionsText: (c.excludeExtensions ?? []).join(', '),
     maxRedirects: String(c.maxRedirects ?? 10),
@@ -649,6 +663,7 @@ export function SettingsDialog({ open, onClose }: Props) {
       auth: form.auth,
       formLogin: {
         enabled: form.formLoginEnabled,
+        mode: form.formLoginMode,
         steps: form.formLoginSteps
           .map((s) => ({
             url: s.url.trim(),
@@ -657,6 +672,16 @@ export function SettingsDialog({ open, onClose }: Props) {
             captures: (s.captures ?? []).filter((c) => c.name.trim() && c.selector.trim()),
           }))
           .filter((s) => s.url),
+        browser: {
+          loginUrl: form.formLoginBrowser.loginUrl.trim(),
+          usernameSelector: form.formLoginBrowser.usernameSelector.trim(),
+          usernameValue: form.formLoginBrowser.usernameValue,
+          passwordSelector: form.formLoginBrowser.passwordSelector.trim(),
+          passwordValue: form.formLoginBrowser.passwordValue,
+          submitSelector: form.formLoginBrowser.submitSelector.trim(),
+          successSelector: (form.formLoginBrowser.successSelector ?? '').trim(),
+          waitMs: Math.max(0, num(String(form.formLoginBrowser.waitMs ?? 0), 0)),
+        },
       },
       proxyUrl: form.proxyUrl.trim(),
       excludeExtensions: form.excludeExtensionsText
@@ -2251,6 +2276,9 @@ function FormLoginEditor({ form, update }: PanelProps) {
   };
   const addStep = () =>
     setSteps([...steps, { url: '', method: 'POST', fields: [], captures: [] }]);
+  const browser = form.formLoginBrowser;
+  const updateBrowser = (patch: Partial<BrowserLoginConfig>) =>
+    update('formLoginBrowser', { ...browser, ...patch });
 
   return (
     <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
@@ -2272,6 +2300,80 @@ function FormLoginEditor({ form, update }: PanelProps) {
         })}
       </p>
 
+      <label className="mb-3 flex items-center gap-2 text-[11px] text-surface-300">
+        {t('settingsPanels.formLogin.mode', { defaultValue: 'Login method' })}
+        <select
+          className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+          value={form.formLoginMode}
+          onChange={(e) => update('formLoginMode', e.target.value as 'http' | 'browser')}
+        >
+          <option value="http">
+            {t('settingsPanels.formLogin.modeHttp', { defaultValue: 'HTTP (form POST + CSRF)' })}
+          </option>
+          <option value="browser">
+            {t('settingsPanels.formLogin.modeBrowser', { defaultValue: 'Browser (SPA / JS login)' })}
+          </option>
+        </select>
+      </label>
+
+      {form.formLoginMode === 'browser' && (
+        <div className="mb-2 rounded border border-surface-800 bg-surface-900/40 p-2">
+          <p className="mb-2 text-[10px] text-surface-500">
+            {t('settingsPanels.formLogin.browserIntro', {
+              defaultValue:
+                'Drives a real Chromium through the login form once (for JS-heavy / SPA logins), then replays the captured session cookies on the undici crawl. Requires the bundled Playwright browser.',
+            })}
+          </p>
+          <Text
+            label={t('settingsPanels.formLogin.loginUrl', { defaultValue: 'Login page URL' })}
+            value={browser.loginUrl}
+            onChange={(v) => updateBrowser({ loginUrl: v })}
+            placeholder="https://app.example.com/login"
+          />
+          <div className="grid grid-cols-2 gap-2">
+            <Text
+              label={t('settingsPanels.formLogin.userSelector', { defaultValue: 'Username selector' })}
+              value={browser.usernameSelector}
+              onChange={(v) => updateBrowser({ usernameSelector: v })}
+              placeholder="#email"
+            />
+            <Text
+              label={t('settingsPanels.formLogin.userValue', { defaultValue: 'Username' })}
+              value={browser.usernameValue}
+              onChange={(v) => updateBrowser({ usernameValue: v })}
+            />
+            <Text
+              label={t('settingsPanels.formLogin.passSelector', { defaultValue: 'Password selector' })}
+              value={browser.passwordSelector}
+              onChange={(v) => updateBrowser({ passwordSelector: v })}
+              placeholder="#password"
+            />
+            <Text
+              label={t('settingsPanels.formLogin.passValue', { defaultValue: 'Password' })}
+              value={browser.passwordValue}
+              onChange={(v) => updateBrowser({ passwordValue: v })}
+              type="password"
+            />
+            <Text
+              label={t('settingsPanels.formLogin.submitSelector', { defaultValue: 'Submit selector' })}
+              value={browser.submitSelector}
+              onChange={(v) => updateBrowser({ submitSelector: v })}
+              placeholder="button[type=submit]"
+            />
+            <Text
+              label={t('settingsPanels.formLogin.successSelector', {
+                defaultValue: 'Logged-in selector (optional)',
+              })}
+              value={browser.successSelector ?? ''}
+              onChange={(v) => updateBrowser({ successSelector: v })}
+              placeholder="a[href*='logout']"
+            />
+          </div>
+        </div>
+      )}
+
+      {form.formLoginMode === 'http' && (
+        <>
       {steps.length === 0 && (
         <p className="mb-2 text-[11px] italic text-surface-500">
           {t('settingsPanels.formLogin.empty', { defaultValue: 'No steps — add one to define the login flow.' })}
@@ -2418,6 +2520,8 @@ function FormLoginEditor({ form, update }: PanelProps) {
       >
         <Plus className="h-3 w-3" /> {t('settingsPanels.formLogin.addStep', { defaultValue: 'Add login step' })}
       </button>
+        </>
+      )}
     </div>
   );
 }
@@ -3048,18 +3152,23 @@ function Text({
   onChange,
   info,
   example,
+  placeholder,
+  type = 'text',
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
 } & FieldInfo) {
   return (
     <label className="mb-3 flex flex-col gap-1">
       <FieldLabel label={label} info={info} example={example} />
       <input
-        type="text"
+        type={type}
         className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
         value={value}
+        placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
         spellCheck={false}
       />

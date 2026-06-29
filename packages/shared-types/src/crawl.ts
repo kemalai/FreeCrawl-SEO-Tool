@@ -1173,12 +1173,49 @@ export interface FormLoginStep {
   captures: { name: string; selector: string; attribute?: string }[];
 }
 
+/**
+ * Browser-driven login for JS-heavy SPA login forms that the plain
+ * undici+cheerio `steps` flow can't handle (client-rendered fields,
+ * JS-built CSRF tokens, XHR-based auth). A one-shot Playwright browser
+ * navigates the login page, fills the credential selectors, submits, waits
+ * for the logged-in state, and its session cookies are bridged into the
+ * same jar that the undici crawl path replays. Requires Playwright
+ * (Faz 1 — already bundled).
+ */
+export interface BrowserLoginConfig {
+  /** Login page URL to navigate to. */
+  loginUrl: string;
+  /** CSS selector for the username/email input. */
+  usernameSelector: string;
+  /** Username/email to type. */
+  usernameValue: string;
+  /** CSS selector for the password input. */
+  passwordSelector: string;
+  /** Password to type. */
+  passwordValue: string;
+  /** CSS selector for the submit button (clicked after filling). */
+  submitSelector: string;
+  /** Optional selector that appears only once logged in — waited for
+   *  before cookies are captured (e.g. an avatar / logout link). */
+  successSelector?: string;
+  /** Extra settle time after submit, ms (for slow SPA redirects). */
+  waitMs?: number;
+}
+
 export interface FormLoginConfig {
   /** Master switch — when off the login sequence never runs and no
    *  session cookies are injected. */
   enabled: boolean;
-  /** Ordered login steps. Empty = nothing to do even when enabled. */
+  /**
+   * Login strategy:
+   *  - `http`    — undici + cheerio `steps` flow (default; fast, no browser).
+   *  - `browser` — Playwright-driven `browser` flow for SPA login forms.
+   */
+  mode?: 'http' | 'browser';
+  /** Ordered login steps for `http` mode. Empty = nothing to do. */
   steps: FormLoginStep[];
+  /** Configuration for `browser` mode. */
+  browser?: BrowserLoginConfig;
 }
 
 /**

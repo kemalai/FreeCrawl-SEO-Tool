@@ -14,6 +14,13 @@ export {
   type MobileUsabilityResult,
 } from './render-fetcher.js';
 export {
+  runBrowserLogin,
+  type BrowserLoginInput,
+  type BrowserLoginOptions,
+  type BrowserLoginResult,
+  type BrowserCookie,
+} from './browser-login.js';
+export {
   normalizeUrl,
   isSameHost,
   resolveStartUrl,

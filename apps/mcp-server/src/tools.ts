@@ -1528,6 +1528,22 @@ export function buildTools(): Tool[] {
         bridgeRequest<unknown>('POST', '/v1/action/graph-snapshot', args),
     },
 
+    {
+      requiresDb: false,
+      name: 'get_crawl_path',
+      description:
+        "Crawl Path Report for one page — the shortest discovery path from the crawl root (homepage, depth 0) to the target, following internal links. Answers 'how did the crawler reach this URL'. Pass `urlId` or `url`. `reachedRoot` is false for orphan pages reachable only via sitemap.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          urlId: { type: 'integer', minimum: 1 },
+          url: { type: 'string' },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/crawl-path', args),
+    },
+
     // ---- Faz 0.5 Increment 4 — Integration fetch (GSC + GA4 — single
     // blocking API calls, no progress streaming). PSI / AI / SEO have
     // multi-URL batches with progress + cancellation and are exposed via

@@ -13,6 +13,11 @@
  *   /step  //step                absolute child / descendant axis
  *   //div   //*                  element name test / wildcard
  *   a/b//c                       chained child + descendant steps
+ *   ..   parent::x               parent axis (abbreviated + explicit)
+ *   ancestor::x  ancestor-or-self::x   upward traversal cheerio CSS can't do
+ *   following-sibling::x  preceding-sibling::x   sibling axes
+ *   self::x   .                  self axis
+ *   attribute::x                 == @x
  *   .../@attr   .../@*           attribute terminal (reads attribute values)
  *   .../text()                   direct text-node terminal
  *   [n]  [last()]  [last()-1]    positional predicates (per-parent, like XPath)
@@ -64,8 +69,37 @@ interface PredEnv {
 
 type PredFn = (env: PredEnv) => XVal;
 
+/** Axis a step navigates. `child` / `descendant` are the abbreviated `/`
+ *  and `//` defaults; the rest are explicit `axis::` forms. */
+type Axis =
+  | 'child'
+  | 'descendant'
+  | 'descendant-or-self'
+  | 'parent'
+  | 'ancestor'
+  | 'ancestor-or-self'
+  | 'self'
+  | 'following-sibling'
+  | 'preceding-sibling';
+
+/** The axis implied purely by the step separator (`/` vs `//`). An explicit
+ *  `axis::` prefix or `..` / `.` abbreviation overrides it. */
+type SepAxis = 'child' | 'descendant';
+
+const KNOWN_AXES = new Set<string>([
+  'child',
+  'descendant',
+  'descendant-or-self',
+  'parent',
+  'ancestor',
+  'ancestor-or-self',
+  'self',
+  'following-sibling',
+  'preceding-sibling',
+]);
+
 interface PathStep {
-  axis: 'child' | 'descendant';
+  axis: Axis;
   nodeTest: NodeTest;
   predicates: PredFn[];
 }
@@ -112,7 +146,7 @@ function evalElementStep($: CheerioAPI, ctxNodes: AnyNode[], step: PathStep): El
   const seen = new Set<AnyNode>();
   const cand: Element[] = [];
   for (const ctx of ctxNodes) {
-    const pool = step.axis === 'descendant' ? descendantElements(ctx) : elementChildren(ctx);
+    const pool = axisPool(ctx, step.axis);
     for (const el of pool) {
       if (matchNodeTest(el, step.nodeTest) && !seen.has(el)) {
         seen.add(el);
@@ -121,6 +155,38 @@ function evalElementStep($: CheerioAPI, ctxNodes: AnyNode[], step: PathStep): El
     }
   }
   return applyPredicates($, cand, step.predicates);
+}
+
+/** Candidate elements reachable from `ctx` along `axis`, in the order XPath
+ *  predicates expect (reverse axes return nearest-first). Note: positional
+ *  predicates on reverse / sibling axes are evaluated per-parent in
+ *  {@link applyPredicates}, which is exact for the common single-context
+ *  case and a documented approximation for multi-context node-sets. */
+function axisPool(ctx: AnyNode, axis: Axis): Element[] {
+  switch (axis) {
+    case 'child':
+      return elementChildren(ctx);
+    case 'descendant':
+      return descendantElements(ctx);
+    case 'descendant-or-self':
+      return isTag(ctx) ? [ctx, ...descendantElements(ctx)] : descendantElements(ctx);
+    case 'parent': {
+      const p = parentElement(ctx);
+      return p ? [p] : [];
+    }
+    case 'ancestor':
+      return ancestorElements(ctx);
+    case 'ancestor-or-self':
+      return isTag(ctx) ? [ctx, ...ancestorElements(ctx)] : ancestorElements(ctx);
+    case 'self':
+      return isTag(ctx) ? [ctx] : [];
+    case 'following-sibling':
+      return followingSiblings(ctx);
+    case 'preceding-sibling':
+      return precedingSiblings(ctx);
+    default:
+      return [];
+  }
 }
 
 function applyPredicates($: CheerioAPI, cand: Element[], predicates: PredFn[]): Element[] {
@@ -189,6 +255,46 @@ function extractTerminal(ctxNodes: AnyNode[], test: NodeTest): string[] {
 function elementChildren(node: AnyNode): Element[] {
   const kids = (node as { children?: AnyNode[] }).children ?? [];
   return kids.filter(isTag);
+}
+
+function parentOf(node: AnyNode): AnyNode | null {
+  return (node as { parent?: AnyNode | null }).parent ?? null;
+}
+
+/** Immediate parent element (skips the document root / non-element parents). */
+function parentElement(node: AnyNode): Element | null {
+  const p = parentOf(node);
+  return p && isTag(p) ? p : null;
+}
+
+/** Ancestor elements, nearest-first (XPath reverse document order). */
+function ancestorElements(node: AnyNode): Element[] {
+  const out: Element[] = [];
+  let p = parentOf(node);
+  while (p) {
+    if (isTag(p)) out.push(p);
+    p = parentOf(p);
+  }
+  return out;
+}
+
+/** Sibling elements after `node` among its parent's element children, in
+ *  document order. */
+function followingSiblings(node: AnyNode): Element[] {
+  const parent = parentOf(node);
+  if (!parent) return [];
+  const sibs = elementChildren(parent);
+  const idx = sibs.indexOf(node as Element);
+  return idx < 0 ? [] : sibs.slice(idx + 1);
+}
+
+/** Sibling elements before `node`, nearest-first (XPath reverse order). */
+function precedingSiblings(node: AnyNode): Element[] {
+  const parent = parentOf(node);
+  if (!parent) return [];
+  const sibs = elementChildren(parent);
+  const idx = sibs.indexOf(node as Element);
+  return idx <= 0 ? [] : sibs.slice(0, idx).reverse();
 }
 
 /** All descendant elements of `node` in document order (pre-order DFS),
@@ -279,7 +385,7 @@ function readStepRaw(expr: string, start: number): { raw: string; next: number }
   return { raw: expr.slice(start, i).trim(), next: i };
 }
 
-function parseStep(raw: string, axis: 'child' | 'descendant'): PathStep {
+function parseStep(raw: string, axis: SepAxis): PathStep {
   // Node test ends at the first top-level '['.
   let testEnd = raw.length;
   let depth = 0;
@@ -300,7 +406,7 @@ function parseStep(raw: string, axis: 'child' | 'descendant'): PathStep {
     }
   }
   const testStr = raw.slice(0, testEnd).trim();
-  const nodeTest = parseNodeTest(testStr);
+  const { axis: resolvedAxis, nodeTest } = parseAxisAndTest(testStr, axis);
   const predicates: PredFn[] = [];
   let i = testEnd;
   while (i < raw.length) {
@@ -314,7 +420,31 @@ function parseStep(raw: string, axis: 'child' | 'descendant'): PathStep {
       throw new XPathError(`unexpected '${raw[i]}' after node test in '${raw}'`);
     }
   }
-  return { axis, nodeTest, predicates };
+  return { axis: resolvedAxis, nodeTest, predicates };
+}
+
+/** Resolve an explicit `axis::test`, the `..` / `.` abbreviations, or a bare
+ *  node test evaluated against the separator-implied default axis. */
+function parseAxisAndTest(
+  testStr: string,
+  defaultAxis: SepAxis,
+): { axis: Axis; nodeTest: NodeTest } {
+  if (testStr === '..') return { axis: 'parent', nodeTest: { kind: 'node' } };
+  if (testStr === '.') return { axis: 'self', nodeTest: { kind: 'node' } };
+  const m = /^([A-Za-z][\w-]*)::(.*)$/.exec(testStr);
+  if (m) {
+    const axisName = m[1]!;
+    const rest = m[2]!.trim();
+    if (axisName === 'attribute') {
+      // attribute::x is the long form of @x — an attribute terminal.
+      return { axis: defaultAxis, nodeTest: parseNodeTest('@' + rest) };
+    }
+    if (!KNOWN_AXES.has(axisName)) {
+      throw new XPathError(`unsupported axis: ${axisName}::`);
+    }
+    return { axis: axisName as Axis, nodeTest: parseNodeTest(rest) };
+  }
+  return { axis: defaultAxis, nodeTest: parseNodeTest(testStr) };
 }
 
 function parseNodeTest(s: string): NodeTest {

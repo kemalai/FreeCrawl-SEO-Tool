@@ -31,6 +31,7 @@ import {
   collectNetworkDiagnostics,
   defaultRequestHeaders,
   detectHttpProtocol,
+  type DigestChallenge,
   formatFetchError,
   initHttpClient,
   parseDigestChallenge,
@@ -39,6 +40,7 @@ import { setActiveDnsHook } from './dns-resolver.js';
 import { discoverSitemapUrls, fetchSitemaps } from './sitemap.js';
 import { runJsonExtractionRules } from './extraction.js';
 import { SessionCookieJar } from './cookie-jar.js';
+import { runBrowserLogin } from './browser-login.js';
 
 export interface CrawlerEvents {
   progress: (p: CrawlProgress) => void;
@@ -3029,6 +3031,43 @@ export class Crawler extends EventEmitter {
   }
 
   /**
+   * Per-origin Digest challenge cache. The first request to a protection
+   * space still costs one 401 to learn the realm/nonce; every subsequent
+   * request to the same origin reuses the cached challenge and sends the
+   * `Authorization: Digest …` header proactively (no 401 round-trip),
+   * incrementing the nonce-count (`nc`) each time per RFC 2617/7616.
+   */
+  private readonly digestChallenges = new Map<
+    string,
+    { challenge: DigestChallenge; nc: number }
+  >();
+
+  /** Compute a proactive Digest Authorization header for `fetchUrl` from a
+   *  previously-cached same-origin challenge, bumping the nonce count.
+   *  Returns null when digest auth isn't configured or the origin's realm
+   *  hasn't been learned yet (that first request still pays one 401). */
+  private digestAuthHeader(fetchUrl: string, method = 'GET'): string | null {
+    if (this.config.auth.type !== 'digest' || !(this.config.auth.username ?? '')) return null;
+    let origin: string;
+    try {
+      origin = new URL(fetchUrl).origin;
+    } catch {
+      return null;
+    }
+    const entry = this.digestChallenges.get(origin);
+    if (!entry) return null;
+    entry.nc += 1;
+    const u = new URL(fetchUrl);
+    return buildDigestAuthHeader(entry.challenge, {
+      method,
+      uri: u.pathname + u.search,
+      username: this.config.auth.username ?? '',
+      password: this.config.auth.password ?? '',
+      nc: entry.nc.toString(16).padStart(8, '0'),
+    });
+  }
+
+  /**
    * Build request headers for a crawl fetch: defaults + auth + any
    * established session cookies. A user-supplied `Cookie` header (via
    * customHeaders) always wins over the session jar; `extra` (e.g. a
@@ -3075,7 +3114,12 @@ export class Crawler extends EventEmitter {
    */
   private async runFormLogin(): Promise<void> {
     const cfg = this.config.formLogin;
-    if (!cfg || !cfg.enabled || cfg.steps.length === 0) return;
+    if (!cfg || !cfg.enabled) return;
+    if (cfg.mode === 'browser') {
+      await this.runBrowserLogin();
+      return;
+    }
+    if (cfg.steps.length === 0) return;
 
     const jar = new SessionCookieJar();
     const vars: Record<string, string> = {};
@@ -3185,6 +3229,69 @@ export class Crawler extends EventEmitter {
     }
   }
 
+  /**
+   * Browser-driven login (`formLogin.mode === 'browser'`). Drives a one-shot
+   * Playwright Chromium through the SPA login form, then bridges the
+   * resulting session cookies into the same jar the undici crawl replays.
+   * Best-effort — a failure logs a warning and the crawl proceeds
+   * unauthenticated.
+   */
+  private async runBrowserLogin(): Promise<void> {
+    const b = this.config.formLogin.browser;
+    if (!b || !b.loginUrl.trim()) {
+      this.emit(
+        'warn',
+        'Browser login enabled but no login URL configured — running unauthenticated.',
+      );
+      return;
+    }
+    this.setOp('crawl:login');
+    const jr = this.config.jsRender;
+    try {
+      const result = await runBrowserLogin(
+        {
+          loginUrl: b.loginUrl,
+          usernameSelector: b.usernameSelector,
+          usernameValue: b.usernameValue,
+          passwordSelector: b.passwordSelector,
+          passwordValue: b.passwordValue,
+          submitSelector: b.submitSelector,
+          successSelector: b.successSelector,
+          waitMs: b.waitMs,
+        },
+        {
+          headless: jr?.headless ?? true,
+          channel: jr?.browserChannel || undefined,
+          userAgent: this.config.userAgent,
+          acceptLanguage: this.config.acceptLanguage,
+          viewport: jr
+            ? { width: jr.viewportWidth, height: jr.viewportHeight }
+            : undefined,
+          timeoutMs: Math.max(5000, this.config.requestTimeoutMs),
+        },
+      );
+      const jar = new SessionCookieJar();
+      jar.setFromBrowserCookies(result.cookies);
+      if (jar.size > 0) {
+        this.sessionJar = jar;
+        this.emit(
+          'info',
+          `Browser login established ${jar.size} session cookie(s) (settled at ${result.finalUrl}).`,
+        );
+      } else {
+        this.emit(
+          'warn',
+          'Browser login produced no cookies — the crawl will run unauthenticated.',
+        );
+      }
+    } catch (err) {
+      this.emit(
+        'warn',
+        `Browser login failed: ${formatFetchError(err)} — continuing unauthenticated.`,
+      );
+    }
+  }
+
   private async fetchWithRetry(
     url: string,
     signal: AbortSignal,
@@ -3210,15 +3317,22 @@ export class Crawler extends EventEmitter {
           this.config.renderingMode === 'ajax'
             ? toEscapedFragmentUrl(url)
             : url;
+        // Proactive Digest — if we already learned this origin's realm on
+        // an earlier URL, send the Authorization header up-front so the
+        // server doesn't need to issue a 401 first.
+        const proactiveDigest = this.digestAuthHeader(fetchUrl);
         let res = await undiciFetch(fetchUrl, {
           method: 'GET',
-          headers: this.requestHeaders(url),
+          headers: proactiveDigest
+            ? this.requestHeaders(url, { authorization: proactiveDigest })
+            : this.requestHeaders(url),
           redirect: 'manual',
           signal,
         });
-        // HTTP Digest — the first 401 carries the `WWW-Authenticate: Digest`
-        // challenge; recompute the Authorization header from it and retry
-        // once. Only when digest auth is configured with a username.
+        // HTTP Digest — a 401 carries the `WWW-Authenticate: Digest`
+        // challenge (or a fresh nonce on `stale=true`); cache it per-origin,
+        // recompute the Authorization header, and retry once. Only when
+        // digest auth is configured with a username.
         if (
           res.status === 401 &&
           this.config.auth.type === 'digest' &&
@@ -3231,19 +3345,24 @@ export class Crawler extends EventEmitter {
             } catch {
               /* ignore */
             }
-            const u = new URL(fetchUrl);
-            const authHeader = buildDigestAuthHeader(challenge, {
-              method: 'GET',
-              uri: u.pathname + u.search,
-              username: this.config.auth.username ?? '',
-              password: this.config.auth.password ?? '',
-            });
-            res = await undiciFetch(fetchUrl, {
-              method: 'GET',
-              headers: this.requestHeaders(url, { authorization: authHeader }),
-              redirect: 'manual',
-              signal,
-            });
+            let origin: string;
+            try {
+              origin = new URL(fetchUrl).origin;
+            } catch {
+              origin = fetchUrl;
+            }
+            // Cache the (possibly rotated) challenge and reset its nonce
+            // counter; digestAuthHeader bumps it to 1 for this retry.
+            this.digestChallenges.set(origin, { challenge, nc: 0 });
+            const authHeader = this.digestAuthHeader(fetchUrl);
+            if (authHeader) {
+              res = await undiciFetch(fetchUrl, {
+                method: 'GET',
+                headers: this.requestHeaders(url, { authorization: authHeader }),
+                redirect: 'manual',
+                signal,
+              });
+            }
           }
         }
         // Keep the login session alive — capture any rotated session cookies.

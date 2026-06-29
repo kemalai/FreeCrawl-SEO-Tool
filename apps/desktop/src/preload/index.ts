@@ -27,6 +27,8 @@ import {
   type CompareLoadResult,
   type GraphSnapshotInput,
   type GraphSnapshotResult,
+  type CrawlPathInput,
+  type CrawlPathResult,
   type AnchorTextRow,
   type FreeCrawlApi,
   type BrokenLinksQueryInput,
@@ -230,6 +232,8 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.compareLoad, input),
   graphSnapshot: (input: GraphSnapshotInput): Promise<GraphSnapshotResult> =>
     ipcRenderer.invoke(IPC.graphSnapshot, input),
+  crawlPath: (input: CrawlPathInput): Promise<CrawlPathResult> =>
+    ipcRenderer.invoke(IPC.crawlPath, input),
   topAnchorTexts: (limit?: number): Promise<AnchorTextRow[]> =>
     ipcRenderer.invoke(IPC.topAnchorTexts, limit),
   sitemapGenerate: (input: SitemapGenerateInput): Promise<SitemapGenerateResult> =>

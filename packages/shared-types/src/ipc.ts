@@ -116,6 +116,7 @@ export const IPC = {
   exportBulk: 'export:bulk',
   compareLoad: 'compare:load',
   graphSnapshot: 'graph:snapshot',
+  crawlPath: 'graph:crawl-path',
   topAnchorTexts: 'graph:anchor-texts',
   sitemapGenerate: 'sitemap:generate',
   menuEvent: 'menu:event',
@@ -644,6 +645,12 @@ export interface GraphNode {
   depth: number;
   inlinks: number;
   indexability: Indexability;
+  /** Largest-Contentful-Paint candidate captured during JS render (null
+   *  when JS rendering wasn't used or no candidate was found). Powers the
+   *  "LCP / above-the-fold" visualization overlay. */
+  lcpTag: string | null;
+  lcpResourceUrl: string | null;
+  lcpCoverage: number | null;
 }
 
 export interface GraphEdge {
@@ -658,6 +665,24 @@ export interface GraphSnapshotInput {
 export interface GraphSnapshotResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
+}
+
+export interface CrawlPathInput {
+  urlId: number;
+}
+
+export interface CrawlPathNode {
+  id: number;
+  url: string;
+  depth: number;
+  statusCode: number | null;
+}
+
+export interface CrawlPathResult {
+  /** Ordered crawl root → target. Empty when the target id is unknown. */
+  path: CrawlPathNode[];
+  /** False when the walk stalled before the depth-0 root (orphan page). */
+  reachedRoot: boolean;
 }
 
 export interface AnchorTextRow {
@@ -1405,6 +1430,7 @@ export interface FreeCrawlApi {
   exportBulk(): Promise<BulkExportResult>;
   compareLoad(input: CompareLoadInput): Promise<CompareLoadResult>;
   graphSnapshot(input: GraphSnapshotInput): Promise<GraphSnapshotResult>;
+  crawlPath(input: CrawlPathInput): Promise<CrawlPathResult>;
   topAnchorTexts(limit?: number): Promise<AnchorTextRow[]>;
   sitemapGenerate(input: SitemapGenerateInput): Promise<SitemapGenerateResult>;
   appVersion(): Promise<string>;
