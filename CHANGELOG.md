@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.1] — 2026-07-02
+
+### Added
+- Full Turkish and English localization across right-click menus, native dialogs, and settings panels.
+
+### Changed
+- The requests-per-second limit and robots.txt crawl-delay are now honoured during crawls.
+- Various performance, reliability, and UI polish improvements.
+
+### Fixed
+- Crawls now keep your configured proxy instead of silently dropping it after the first page.
+- Links with encoded characters are now fetched as the correct URL instead of a broken duplicate.
+- Legacy-encoded pages (e.g. older Turkish sites) no longer render as garbled text.
+- Country-code domains like .com.tr no longer let broad-scope crawls escape onto unrelated sites.
+- Image usage counts no longer inflate when the same pages are re-crawled.
+- External integrations no longer time out after running a crawl in the same session.
+- Large in-page link and report tables no longer freeze the interface.
+
 ## [0.8.0] — 2026-06-29
 
 ### Added

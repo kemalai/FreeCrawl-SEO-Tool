@@ -1,6 +1,6 @@
 {
   "name": "freecrawl-seo",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Open-source desktop SEO crawler â€” a free alternative to Screaming Frog",
   "license": "MIT",
@@ -39,6 +39,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "eslint": "^9.17.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "prettier": "^3.4.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.20.0"
