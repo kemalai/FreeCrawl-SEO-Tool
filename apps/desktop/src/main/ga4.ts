@@ -14,6 +14,7 @@
  */
 import type { Ga4Property } from '@freecrawl/shared-types';
 import { getAccessToken } from './google-oauth.js';
+import { apiFetch } from './api-fetch.js';
 import * as logger from './logger.js';
 
 const ADMIN_BASE = 'https://analyticsadmin.googleapis.com/v1beta';
@@ -53,7 +54,7 @@ export async function listProperties(): Promise<Ga4Property[]> {
     const url = `${ADMIN_BASE}/accountSummaries?pageSize=200${
       pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''
     }`;
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(30_000),
     });
@@ -119,7 +120,7 @@ export async function runReport(
   let offset = 0;
 
   for (;;) {
-    const res = await fetch(endpoint, {
+    const res = await apiFetch(endpoint, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,

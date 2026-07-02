@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type {
@@ -471,6 +472,20 @@ export function ReportsDialog({ open, onClose }: Props) {
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose]);
 
+  // Reports fetch up to 1000 rows (pages-per-dir, orphans, …); rendering them
+  // all as <tr> inside a modal is a visible jank hit and violates the >500-row
+  // rule (CLAUDE.md 4.5). Virtualize with dynamic measurement because the key
+  // column wraps (break-all on long URLs / paths), so rows aren't fixed-height.
+  // Declared BEFORE the `!open` early return so the hook order stays stable.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 28,
+    overscan: 15,
+    measureElement: (el) => el.getBoundingClientRect().height,
+  });
+
   if (!open) return null;
 
   const total = rows.reduce((sum, r) => sum + r.count, 0);
@@ -537,42 +552,45 @@ export function ReportsDialog({ open, onClose }: Props) {
           </span>
         </div>
 
-        <div className="flex-1 overflow-auto px-4 py-3 text-[11px]">
+        <div ref={scrollRef} className="flex-1 overflow-auto px-4 py-3 text-[11px]">
           {rows.length === 0 && !loading && (
             <div className="p-6 text-center text-surface-500">
               {t('reports.noData', { defaultValue: 'No data — run a crawl first.' })}
             </div>
           )}
           {rows.length > 0 && (
-            <table className="w-full">
-              <thead className="sticky top-0 bg-surface-900">
-                <tr className="text-surface-400">
-                  <th className="w-2/3 py-1 pr-3 text-left font-medium">{keyLabels[kind]}</th>
-                  <th className="w-24 py-1 pr-3 text-right font-medium">{t('reports.count', { defaultValue: 'Count' })}</th>
-                  <th className="py-1 text-left font-medium">{t('reports.share', { defaultValue: 'Share' })}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
+            <div className="w-full">
+              <div className="sticky top-0 z-10 flex bg-surface-900 text-surface-400">
+                <div className="w-2/3 py-1 pr-3 text-left font-medium">{keyLabels[kind]}</div>
+                <div className="w-24 py-1 pr-3 text-right font-medium">{t('reports.count', { defaultValue: 'Count' })}</div>
+                <div className="flex-1 py-1 text-left font-medium">{t('reports.share', { defaultValue: 'Share' })}</div>
+              </div>
+              <div className="relative" style={{ height: rowVirtualizer.getTotalSize() }}>
+                {rowVirtualizer.getVirtualItems().map((vi) => {
+                  const r = rows[vi.index];
+                  if (!r) return null;
                   const widthPct = max > 0 ? Math.round((r.count / max) * 100) : 0;
                   const sharePct = total > 0 ? ((r.count / total) * 100).toFixed(1) : '0.0';
                   return (
-                    <tr
+                    <div
                       key={r.key}
-                      className="border-b border-surface-900 last:border-0 hover:bg-surface-900/50"
+                      data-index={vi.index}
+                      ref={rowVirtualizer.measureElement}
+                      className="absolute left-0 top-0 flex w-full border-b border-surface-900 hover:bg-surface-900/50"
+                      style={{ transform: `translateY(${vi.start}px)` }}
                     >
-                      <td className="break-all py-1 pr-3 align-top font-mono text-surface-100">
+                      <div className="w-2/3 break-all py-1 pr-3 align-top font-mono text-surface-100">
                         {r.badge && (
                           <span className="mr-2 rounded bg-surface-800 px-1.5 py-0.5 text-[9px] uppercase text-surface-400">
                             {r.badge}
                           </span>
                         )}
                         {r.key}
-                      </td>
-                      <td className="py-1 pr-3 text-right align-top font-mono text-surface-100">
+                      </div>
+                      <div className="w-24 py-1 pr-3 text-right align-top font-mono text-surface-100">
                         {r.valueLabel ?? r.count.toLocaleString()}
-                      </td>
-                      <td className="py-1 align-top">
+                      </div>
+                      <div className="flex-1 py-1 align-top">
                         <div className="flex items-center gap-2">
                           <div className="h-1.5 w-32 rounded bg-surface-800">
                             <div
@@ -584,12 +602,12 @@ export function ReportsDialog({ open, onClose }: Props) {
                             {sharePct}%
                           </span>
                         </div>
-                      </td>
-                    </tr>
+                      </div>
+                    </div>
                   );
                 })}
-              </tbody>
-            </table>
+              </div>
+            </div>
           )}
         </div>
 

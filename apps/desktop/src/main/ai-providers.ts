@@ -13,6 +13,7 @@
  */
 import type { AiProvider } from '@freecrawl/shared-types';
 import { resolveCredentials } from './credentials.js';
+import { apiFetch } from './api-fetch.js';
 
 const REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_TOKENS = 800;
@@ -95,7 +96,7 @@ async function runOpenAi(model: string, prompt: string): Promise<AiRunOutput> {
       model,
     );
   }
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+  const res = await apiFetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -137,7 +138,7 @@ async function runAnthropic(model: string, prompt: string): Promise<AiRunOutput>
       model,
     );
   }
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const res = await apiFetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -184,7 +185,7 @@ async function runOllama(model: string, prompt: string): Promise<AiRunOutput> {
   const endpoint = (creds['endpoint'] ?? 'http://localhost:11434').trim() || 'http://localhost:11434';
   let res: Response;
   try {
-    res = await fetch(`${endpoint.replace(/\/+$/, '')}/api/generate`, {
+    res = await apiFetch(`${endpoint.replace(/\/+$/, '')}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, prompt, stream: false }),

@@ -30,32 +30,19 @@ export interface Tool {
   requiresDb?: boolean;
 }
 
-const URL_CATEGORY_VALUES: UrlCategory[] = [
-  'all',
-  'internal:all',
-  'internal:html',
-  'internal:js',
-  'internal:css',
-  'internal:image',
-  'internal:pdf',
-  'internal:font',
-  'internal:other',
-  'external:all',
-  'external:html',
-  'external:other',
-  'status:2xx',
-  'status:3xx',
-  'status:4xx',
-  'status:5xx',
-  'status:no-response',
-  'status:blocked-robots',
-  'security:https',
-  'security:http',
-  'indexability:indexable',
-  'indexability:non-indexable',
-  'indexability:noindex',
-  'indexability:canonicalised',
-];
+// The `category` filter accepts the full UrlCategory union (200+ values:
+// internal/external content kinds, status:* buckets, security:*,
+// indexability:*, tab:* groupings, and per-issue drill-downs like
+// "issues:title-missing" / "issues:severity-critical"). The union is a
+// type, not a runtime list, so we validate at the DB layer (categoryWhereClause)
+// and describe rather than `enum`-constrain — an enum of a hand-picked subset
+// would reject the very `issues:*` drill-downs that `top_issues` returns.
+const URL_CATEGORY_DESC =
+  'UrlCategory filter matching the desktop UI categories. Accepts "all"; ' +
+  'internal:*/external:* content kinds; status:2xx/3xx/4xx/5xx/no-response/blocked-robots; ' +
+  'security:https/http; indexability:*; tab:* groupings; and per-issue drill-downs ' +
+  'such as "issues:title-missing" or severity rollups like "issues:severity-critical". ' +
+  'Defaults to "all".';
 
 const COMMON_URL_FIELDS = [
   'id',
@@ -157,7 +144,6 @@ export function buildTools(): Tool[] {
           category: {
             type: 'string',
             description: 'UrlCategory filter (e.g. "all", "internal:html", "issues:title-missing", "status:4xx"). Defaults to "all".',
-            enum: URL_CATEGORY_VALUES,
           },
           search: {
             type: 'string',
@@ -1054,7 +1040,6 @@ export function buildTools(): Tool[] {
           filePath: { type: 'string', description: 'Absolute output path.' },
           category: {
             type: 'string',
-            enum: URL_CATEGORY_VALUES,
             description: 'Optional UrlCategory subset filter. Default exports the whole project.',
           },
           selectedIds: {
@@ -1081,7 +1066,7 @@ export function buildTools(): Tool[] {
         type: 'object',
         properties: {
           filePath: { type: 'string' },
-          category: { type: 'string', enum: URL_CATEGORY_VALUES },
+          category: { type: 'string', description: URL_CATEGORY_DESC },
           selectedIds: { type: 'array', items: { type: 'integer' } },
           pretty: { type: 'boolean' },
         },
@@ -1103,7 +1088,7 @@ export function buildTools(): Tool[] {
         type: 'object',
         properties: {
           filePath: { type: 'string' },
-          category: { type: 'string', enum: URL_CATEGORY_VALUES },
+          category: { type: 'string', description: URL_CATEGORY_DESC },
           selectedIds: { type: 'array', items: { type: 'integer' } },
         },
         required: ['filePath'],
@@ -1408,7 +1393,7 @@ export function buildTools(): Tool[] {
               type: 'object',
               properties: {
                 label: { type: 'string' },
-                category: { type: 'string', enum: URL_CATEGORY_VALUES },
+                category: { type: 'string', description: URL_CATEGORY_DESC },
                 subdir: { type: 'string' },
                 filename: { type: 'string' },
               },
@@ -1675,7 +1660,6 @@ export function buildTools(): Tool[] {
           },
           category: {
             type: 'string',
-            enum: URL_CATEGORY_VALUES,
             description: 'Resolve target URLs from the active project by category (e.g. "internal:html") when `urls` is omitted.',
           },
           search: {
@@ -1726,7 +1710,6 @@ export function buildTools(): Tool[] {
           },
           category: {
             type: 'string',
-            enum: URL_CATEGORY_VALUES,
             description: 'Resolve targets by category when `urls` is omitted.',
           },
           search: { type: 'string' },
@@ -1762,7 +1745,6 @@ export function buildTools(): Tool[] {
           },
           category: {
             type: 'string',
-            enum: URL_CATEGORY_VALUES,
             description: 'Resolve targets by category when `urls` is omitted.',
           },
           search: { type: 'string' },

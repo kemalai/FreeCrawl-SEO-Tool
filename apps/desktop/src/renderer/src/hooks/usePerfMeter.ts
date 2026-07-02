@@ -53,7 +53,7 @@ export function usePerfMeter(): PerfSample {
   useEffect(() => {
     let cancelled = false;
     let rafId = 0;
-    let frameTimes: number[] = [];
+    const frameTimes: number[] = [];
     let lastEmittedFps = -1;
     let lastEmittedHeap = -1;
     let lastEmittedLag = -1;

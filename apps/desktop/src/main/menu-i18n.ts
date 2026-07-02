@@ -65,6 +65,73 @@ export interface MenuLabels {
   checkForUpdates: string;
   checkForUpdatesTooltip: string;
   about: string;
+
+  // ── Right-click context menus (URL table) ──
+  ctxCopy: string;
+  ctxOpenInBrowser: string;
+  ctxRespider: string;
+  ctxStartCrawlFirst: string;
+  ctxRemove: string;
+  ctxOpenRobotsTxt: string;
+  /** `{n}` placeholder → selection count. */
+  ctxCopyNUrls: string;
+  ctxOpenNUrlsInBrowser: string;
+  ctxOpenLimitTooltip: string;
+  ctxRespiderNUrls: string;
+  ctxRemoveNUrls: string;
+  ctxExportNUrlsAsCsv: string;
+
+  // ── Recurring dialog buttons ──
+  btnOk: string;
+  btnCancel: string;
+  btnClose: string;
+  btnClear: string;
+  btnOpenFolder: string;
+  btnLater: string;
+  btnOpenReleasePage: string;
+  btnOpenReleasesPage: string;
+  btnDownloadInstaller: string;
+  btnDownloadNow: string;
+  btnSkipJsRender: string;
+
+  // ── Native dialog titles ──
+  dlgOpenProjectTitle: string;
+  dlgOpenProjectFailedTitle: string;
+  dlgLogsFolderUnavailableTitle: string;
+  dlgLogsFolderUnavailableMsg: string;
+  dlgDiagResetTitle: string;
+  dlgDiagResetNoneMsg: string;
+  dlgDownloadCompleteTitle: string;
+  dlgDownloadFailedTitle: string;
+  dlgDownloadStartFailedMsg: string;
+  dlgUpdateCheckFailedTitle: string;
+  dlgUpdateCheckFailedMsg: string;
+  dlgUpToDateTitle: string;
+  dlgUpdateAvailableTitle: string;
+  dlgOpenAccessLogTitle: string;
+  dlgExportLogAnalysisTitle: string;
+  dlgExportExtractionRulesTitle: string;
+  dlgImportExtractionRulesTitle: string;
+  dlgExportSettingsTitle: string;
+  dlgImportSettingsTitle: string;
+  dlgImportFailedTitle: string;
+  dlgImportFailedNoSettingsMsg: string;
+  dlgChooseFolderTitle: string;
+  dlgPlaywrightTitle: string;
+  dlgPlaywrightMsg: string;
+  dlgBrowserInstallFailedTitle: string;
+  dlgProjectSavedTitle: string;
+  dlgEncSnapshotSavedTitle: string;
+  dlgSaveDecryptedProjectTitle: string;
+  dlgBulkExportFolderTitle: string;
+  dlgBulkExportCompleteTitle: string;
+  dlgHtmlReportSavedTitle: string;
+  dlgSitemapGeneratedTitle: string;
+
+  // ── Clear-crawl confirmation (migrated off inline isTr) ──
+  dlgConfirmClearMsg: string;
+  dlgConfirmClearDetail: string;
+  dlgDontAskAgain: string;
 }
 
 const MENU_EN: MenuLabels = {
@@ -126,6 +193,71 @@ const MENU_EN: MenuLabels = {
   checkForUpdatesTooltip:
     'Fetch the latest GitHub release and compare it with your installed version. No background polling — runs only when you click.',
   about: 'About FreeCrawl SEO',
+
+  ctxCopy: 'Copy',
+  ctxOpenInBrowser: 'Open in Browser',
+  ctxRespider: 'Re-Spider',
+  ctxStartCrawlFirst: 'Start a crawl first',
+  ctxRemove: 'Remove',
+  ctxOpenRobotsTxt: 'Open robots.txt',
+  ctxCopyNUrls: 'Copy {n} URLs',
+  ctxOpenNUrlsInBrowser: 'Open {n} URLs in Browser',
+  ctxOpenLimitTooltip: 'Limited to 20 URLs to avoid spawning too many tabs',
+  ctxRespiderNUrls: 'Re-Spider {n} URLs',
+  ctxRemoveNUrls: 'Remove {n} URLs',
+  ctxExportNUrlsAsCsv: 'Export {n} URLs as CSV…',
+
+  btnOk: 'OK',
+  btnCancel: 'Cancel',
+  btnClose: 'Close',
+  btnClear: 'Clear',
+  btnOpenFolder: 'Open Folder',
+  btnLater: 'Later',
+  btnOpenReleasePage: 'Open Release Page',
+  btnOpenReleasesPage: 'Open Releases Page',
+  btnDownloadInstaller: 'Download Installer',
+  btnDownloadNow: 'Download now',
+  btnSkipJsRender: 'Skip — disable JS render for this run',
+
+  dlgOpenProjectTitle: 'Open Project',
+  dlgOpenProjectFailedTitle: 'Open Project Failed',
+  dlgLogsFolderUnavailableTitle: 'Logs Folder Unavailable',
+  dlgLogsFolderUnavailableMsg:
+    'Disk logging has not been initialised. Logs are kept in memory only for this session.',
+  dlgDiagResetTitle: 'Diagnostic Warnings Reset',
+  dlgDiagResetNoneMsg: 'No suppressed diagnostic warnings to reset.',
+  dlgDownloadCompleteTitle: 'Download Complete',
+  dlgDownloadFailedTitle: 'Download Failed',
+  dlgDownloadStartFailedMsg: 'Could not start the download.',
+  dlgUpdateCheckFailedTitle: 'Update Check Failed',
+  dlgUpdateCheckFailedMsg: "Couldn't reach the GitHub Releases API.",
+  dlgUpToDateTitle: 'Up to Date',
+  dlgUpdateAvailableTitle: 'Update Available',
+  dlgOpenAccessLogTitle: 'Open Access Log',
+  dlgExportLogAnalysisTitle: 'Export Log Analysis',
+  dlgExportExtractionRulesTitle: 'Export Extraction Rules',
+  dlgImportExtractionRulesTitle: 'Import Extraction Rules',
+  dlgExportSettingsTitle: 'Export Settings',
+  dlgImportSettingsTitle: 'Import Settings',
+  dlgImportFailedTitle: 'Import Failed',
+  dlgImportFailedNoSettingsMsg: 'Imported file does not contain a settings object.',
+  dlgChooseFolderTitle: 'Choose Folder',
+  dlgPlaywrightTitle: 'JavaScript Rendering — Browser Missing',
+  dlgPlaywrightMsg:
+    'Playwright needs to download a Chromium browser before JavaScript rendering can run.',
+  dlgBrowserInstallFailedTitle: 'Browser Install Failed',
+  dlgProjectSavedTitle: 'Project Saved',
+  dlgEncSnapshotSavedTitle: 'Encrypted Snapshot Saved',
+  dlgSaveDecryptedProjectTitle: 'Save Decrypted Project As…',
+  dlgBulkExportFolderTitle: 'Bulk Export — choose output folder',
+  dlgBulkExportCompleteTitle: 'Bulk Export Complete',
+  dlgHtmlReportSavedTitle: 'HTML Report Saved',
+  dlgSitemapGeneratedTitle: 'Sitemap Generated',
+
+  dlgConfirmClearMsg: 'Clear all crawl data?',
+  dlgConfirmClearDetail:
+    'This permanently deletes every crawled URL, link, image, header and source snapshot in the active project. This cannot be undone.',
+  dlgDontAskAgain: "Don't ask me again",
 };
 
 const MENU_TR: MenuLabels = {
@@ -187,6 +319,71 @@ const MENU_TR: MenuLabels = {
   checkForUpdatesTooltip:
     'En son GitHub release\'ini çek ve kurulu sürümünüzle karşılaştır. Arka planda yoklama yok — yalnızca tıkladığınızda çalışır.',
   about: 'FreeCrawl SEO Hakkında',
+
+  ctxCopy: 'Kopyala',
+  ctxOpenInBrowser: 'Tarayıcıda Aç',
+  ctxRespider: 'Yeniden Tara',
+  ctxStartCrawlFirst: 'Önce bir crawl başlatın',
+  ctxRemove: 'Kaldır',
+  ctxOpenRobotsTxt: 'robots.txt\'yi Aç',
+  ctxCopyNUrls: '{n} URL\'yi Kopyala',
+  ctxOpenNUrlsInBrowser: '{n} URL\'yi Tarayıcıda Aç',
+  ctxOpenLimitTooltip: 'Çok fazla sekme açılmasını önlemek için 20 URL ile sınırlı',
+  ctxRespiderNUrls: '{n} URL\'yi Yeniden Tara',
+  ctxRemoveNUrls: '{n} URL\'yi Kaldır',
+  ctxExportNUrlsAsCsv: '{n} URL\'yi CSV Olarak Dışa Aktar…',
+
+  btnOk: 'Tamam',
+  btnCancel: 'İptal',
+  btnClose: 'Kapat',
+  btnClear: 'Temizle',
+  btnOpenFolder: 'Klasörü Aç',
+  btnLater: 'Sonra',
+  btnOpenReleasePage: 'Release Sayfasını Aç',
+  btnOpenReleasesPage: 'Release Sayfasını Aç',
+  btnDownloadInstaller: 'Kurulumu İndir',
+  btnDownloadNow: 'Şimdi indir',
+  btnSkipJsRender: 'Atla — bu çalıştırmada JS render\'ı devre dışı bırak',
+
+  dlgOpenProjectTitle: 'Proje Aç',
+  dlgOpenProjectFailedTitle: 'Proje Açılamadı',
+  dlgLogsFolderUnavailableTitle: 'Log Klasörü Kullanılamıyor',
+  dlgLogsFolderUnavailableMsg:
+    'Diske log yazma başlatılmadı. Loglar bu oturum için yalnızca bellekte tutuluyor.',
+  dlgDiagResetTitle: 'Tanı Uyarıları Sıfırlandı',
+  dlgDiagResetNoneMsg: 'Sıfırlanacak bastırılmış tanı uyarısı yok.',
+  dlgDownloadCompleteTitle: 'İndirme Tamamlandı',
+  dlgDownloadFailedTitle: 'İndirme Başarısız',
+  dlgDownloadStartFailedMsg: 'İndirme başlatılamadı.',
+  dlgUpdateCheckFailedTitle: 'Güncelleme Kontrolü Başarısız',
+  dlgUpdateCheckFailedMsg: 'GitHub Releases API\'sine ulaşılamadı.',
+  dlgUpToDateTitle: 'Güncel',
+  dlgUpdateAvailableTitle: 'Güncelleme Mevcut',
+  dlgOpenAccessLogTitle: 'Erişim Logu Aç',
+  dlgExportLogAnalysisTitle: 'Log Analizini Dışa Aktar',
+  dlgExportExtractionRulesTitle: 'Çıkarım Kurallarını Dışa Aktar',
+  dlgImportExtractionRulesTitle: 'Çıkarım Kurallarını İçe Aktar',
+  dlgExportSettingsTitle: 'Ayarları Dışa Aktar',
+  dlgImportSettingsTitle: 'Ayarları İçe Aktar',
+  dlgImportFailedTitle: 'İçe Aktarma Başarısız',
+  dlgImportFailedNoSettingsMsg: 'İçe aktarılan dosya bir ayarlar nesnesi içermiyor.',
+  dlgChooseFolderTitle: 'Klasör Seç',
+  dlgPlaywrightTitle: 'JavaScript Render — Tarayıcı Eksik',
+  dlgPlaywrightMsg:
+    'JavaScript render çalışabilmeden önce Playwright\'ın bir Chromium tarayıcısı indirmesi gerekiyor.',
+  dlgBrowserInstallFailedTitle: 'Tarayıcı Kurulumu Başarısız',
+  dlgProjectSavedTitle: 'Proje Kaydedildi',
+  dlgEncSnapshotSavedTitle: 'Şifreli Snapshot Kaydedildi',
+  dlgSaveDecryptedProjectTitle: 'Çözülmüş Projeyi Farklı Kaydet…',
+  dlgBulkExportFolderTitle: 'Toplu Dışa Aktarım — çıktı klasörünü seçin',
+  dlgBulkExportCompleteTitle: 'Toplu Dışa Aktarım Tamamlandı',
+  dlgHtmlReportSavedTitle: 'HTML Rapor Kaydedildi',
+  dlgSitemapGeneratedTitle: 'Sitemap Oluşturuldu',
+
+  dlgConfirmClearMsg: 'Tüm crawl verileri temizlensin mi?',
+  dlgConfirmClearDetail:
+    'Bu işlem, aktif projedeki taranmış her URL, link, görsel, başlık ve kaynak snapshot\'ını kalıcı olarak siler. Geri alınamaz.',
+  dlgDontAskAgain: 'Bir daha sorma',
 };
 
 export function getMenuLabels(lang: MenuLang): MenuLabels {

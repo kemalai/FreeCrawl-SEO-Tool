@@ -90,7 +90,18 @@
     "running": "Running",
     "paused": "Paused",
     "idle": "Idle",
-    "dismiss": "dismiss"
+    "dismiss": "dismiss",
+    "fpsSmoothTitle": "Renderer is smooth (≥ 50 fps)",
+    "fpsDegradedTitle": "Renderer is degraded (30–49 fps) — likely competing with crawl IPC",
+    "fpsStalledTitle": "Renderer is stalled (< 30 fps) — main thread starved; pause crawl or close Logs window",
+    "heapTitle": "Renderer JS heap. >500 MB = warm, >1 GB = likely a listener / cache leak",
+    "rssTitle": "Main-process resident set size (Electron + workers). System total: {{total}}.",
+    "sysFreeTitle": "OS-reported free memory. < 10% of system total triggers swap; pause the crawl before that. System total: {{total}}.",
+    "perUrlTitle": "Average bytes of RSS per crawled URL ({{urls}} URLs). Includes Electron overhead, so the marginal cost on real-world large crawls is typically lower.",
+    "capacityTitle": "Estimated additional URLs that fit in remaining system memory at the current per-URL cost. Calc: systemFree / perUrlCost. Treat as an upper bound — sustained throughput is usually CPU-bound first.",
+    "lagResponsiveTitle": "Main thread is responsive — input feels instant",
+    "lagContendedTitle": "Main thread is contended — light click stutter",
+    "lagBusyTitle": "Main thread is busy — IPC backed up; most likely sidebar SQL or table chunk fetch competing with the crawler"
   },
   "menu": {
     "file": "File",
@@ -233,7 +244,13 @@
     "aggregatingFirst": "aggregating first {{n}}",
     "perPagePrefix": "This tab is per-page — showing data for",
     "perPageSuffix": "(primary URL of the selection).",
-    "selectUrl": "Select a URL from the table to see details."
+    "selectUrl": "Select a URL from the table to see details.",
+    "httpResponseTab": "Response ({{count}})",
+    "httpRequestTab": "Request ({{count}})",
+    "headersReconstructedNote": "Reconstructed from active crawl config — actual values may have differed if config changed since crawl.",
+    "headersCapturedNote": "Captured at crawl time.",
+    "noResponseHeaders": "No response headers captured for this URL.",
+    "noRequestHeaders": "No request headers — config may be empty."
   },
   "filter": {
     "title": "Advanced Table Search",
@@ -404,7 +421,15 @@
       "crawlDelayMs": "Per-Worker Delay (ms after each request)",
       "retriesHeading": "Retries",
       "retryAttempts": "Retry Attempts (per URL on transient errors)",
-      "retryInitialDelayMs": "Initial Retry Delay (ms — exponential backoff)"
+      "retryInitialDelayMs": "Initial Retry Delay (ms — exponential backoff)",
+      "tipsHeading": "Throughput tips",
+      "ceilingValue": "~{{rps}} URL/s ({{workers}} parallel workers, ≤ {{cap}} RPS rate-limit{{delaySuffix}})",
+      "ceilingDelaySuffix": ", +{{delay}} ms post-request delay per worker",
+      "ceilingEmpty": "Set Max Concurrency and Max RPS to see the projected throughput.",
+      "worstCaseDelay": "Worst-case delay per failed URL ≈ initialDelay × (2 ^ attempts − 1) = {{value}}",
+      "tip1": "For a quick first sweep on a healthy site try the <bold>Fast</bold> preset (Settings → Presets) — concurrency 40, RPS 40, no retries.",
+      "tip2": "For unreliable origins or slow APIs try <bold>Thorough</bold> — concurrency 10, 3 retries, 30 s timeout.",
+      "tip3": "Concurrency × HTTP keep-alive = the steady-state connection count. Most servers comfortably handle 20–40; corporate proxies / WAFs often cap at 8–10."
     },
     "requests": {
       "intro": "HTTP headers sent with every request.",
@@ -466,7 +491,9 @@
       "exportTitle": "Save the current rule set as a JSON file. Versioned envelope, safe to commit to source control.",
       "exportDisabled": "Add at least one rule before exporting.",
       "importConfirm": "Replace {{existing}} existing rule(s) with {{incoming}} imported rule(s)?",
-      "importSkipped": "Imported {{ok}} rule(s). {{skipped}} entries were skipped (invalid shape or over the 10-rule cap)."
+      "importSkipped": "Imported {{ok}} rule(s). {{skipped}} entries were skipped (invalid shape or over the 10-rule cap).",
+      "importFailedAlert": "Import failed: {{error}}",
+      "noValidRules": "No valid rules found in the file."
     },
     "urlRewriting": {
       "intro": "Normalisation applied before URLs are deduplicated and queued.",
@@ -638,7 +665,11 @@
       "advancedAudits": "Advanced Audits",
       "mobileUsability": "Mobile Usability audit",
       "lcpCandidate": "LCP candidate detection",
-      "a11yAudit": "Accessibility audit (contrast + focus)"
+      "a11yAudit": "Accessibility audit (contrast + focus)",
+      "screenshotNone": "None (default)",
+      "screenshotFold": "Above the fold",
+      "screenshotFull": "Full page",
+      "screenshotBoth": "Both (full page + fold)"
     },
     "performanceBudget": {
       "intro": "Set per-page performance ceilings. After each crawl, internal HTML pages that exceed any enabled threshold are flagged under the \"Over Performance Budget\" issue filter. Response time and page size come from the crawl itself; LCP and CLS use PageSpeed Insights data when present. Set any field to 0 to disable that individual check.",
@@ -806,7 +837,8 @@
     "external": "external",
     "largeCount": "{{n}} > 100 KB",
     "multiEmpty": "No <img> tags discovered across the {{n}} selected pages.",
-    "multiSummary": "images across {{n}} pages"
+    "multiSummary": "images across {{n}} pages",
+    "showingFirst": "showing first {{shown}} of {{total}}"
   },
   "links": {
     "showing": "Showing",
@@ -928,7 +960,9 @@
     "edgeOpacity": "Edge opacity",
     "edgeOpacityHint": "Lower = less visual noise on dense graphs.",
     "changesNeedRerun": "Some changes need a layout re-run.",
-    "rerunLayout": "Re-run layout"
+    "rerunLayout": "Re-run layout",
+    "title": "Visualization",
+    "occurrences": "{{count}} occurrences"
   },
   "imagesTab": {
     "searchPlaceholder": "Search image URLs / alt…",
@@ -1161,7 +1195,27 @@
     "treeLoading": "Loading URL tree…",
     "treeEmpty": "No URLs to display — crawl a site or change the filter.",
     "expandAll": "Expand all",
-    "collapseAll": "Collapse all"
+    "collapseAll": "Collapse all",
+    "noUrlsHint": "Start a crawl or choose a different category.",
+    "statusUrls": "URLs:",
+    "statusLoaded": "{{count}} loaded",
+    "statusSelectedRows": "Selected Rows:",
+    "statusSelectedCells": "Selected Cells:",
+    "statusSelectedColumns": "Selected Columns:",
+    "rowHeader": "Row",
+    "rowNumberTitle": "Row number",
+    "rowSelectHint": "Click to select row · drag to select multiple rows",
+    "resizeHint": "Drag to resize · double-click to reset",
+    "sortByColumn": "Sort by this column",
+    "columnSortedAscHint": "Sorted ascending — click to flip",
+    "columnSortedDescHint": "Sorted descending — click to flip",
+    "columnSortedHint": "Sorted {{dir}} — click to flip",
+    "sortAsc": "ascending",
+    "sortDesc": "descending"
+  },
+  "errorBoundary": {
+    "panelBroke": "Something broke in this panel.",
+    "dismiss": "Dismiss"
   },
   "settings": {
     "title": "Settings",

@@ -1030,9 +1030,9 @@ export function UrlsTab() {
                 zIndex: 13,
                 background: 'rgb(23 23 23)',
               }}
-              title="Row number"
+              title={t('urlsTab.rowNumberTitle', { defaultValue: 'Row number' })}
             >
-              Row
+              {t('urlsTab.rowHeader', { defaultValue: 'Row' })}
               <div
                 className="absolute -right-1 top-0 bottom-0 z-20 w-2 cursor-col-resize group hover:bg-accent-500/40"
                 onMouseDown={(e) => {
@@ -1046,7 +1046,9 @@ export function UrlsTab() {
                   resetColumn(ROW_NUM_KEY);
                 }}
                 onClick={(e) => e.stopPropagation()}
-                title="Drag to resize · double-click to reset"
+                title={t('urlsTab.resizeHint', {
+                  defaultValue: 'Drag to resize · double-click to reset',
+                })}
               />
             </div>
             <DndContext
@@ -1185,7 +1187,9 @@ export function UrlsTab() {
                     onMouseEnter={() => {
                       if (dragRef.current?.kind === 'row') applyRowDrag(vi.index);
                     }}
-                    title="Click to select row · drag to select multiple rows"
+                    title={t('urlsTab.rowSelectHint', {
+                      defaultValue: 'Click to select row · drag to select multiple rows',
+                    })}
                   >
                     {vi.index + 1}
                   </div>
@@ -1236,7 +1240,7 @@ export function UrlsTab() {
                           }
                         }}
                       >
-                        <Cell row={row} spec={c} />
+                        <Cell row={row} spec={c} lang={lang} />
                       </div>
                     );
                   })}
@@ -1263,7 +1267,9 @@ export function UrlsTab() {
             <div className="max-w-md text-center">
               <div className="mb-1 text-sm font-semibold text-surface-300">{t('urlsTab.noUrlsToShow', { defaultValue: 'No URLs to show' })}</div>
               <div className="text-xs text-surface-500">
-                Start a crawl or choose a different category.
+                {t('urlsTab.noUrlsHint', {
+                  defaultValue: 'Start a crawl or choose a different category.',
+                })}
               </div>
             </div>
           </div>
@@ -1275,28 +1281,31 @@ export function UrlsTab() {
         style={{ height: STATUS_BAR_HEIGHT }}
       >
         <span>
-          URLs:{' '}
+          {t('urlsTab.statusUrls', { defaultValue: 'URLs:' })}{' '}
           <span className="font-mono tabular-nums text-surface-200">
             {lazy.total.toLocaleString()}
           </span>
           <span className="ml-1 text-surface-600">
-            ({lazy.loadedRows.toLocaleString()} loaded)
+            ({t('urlsTab.statusLoaded', {
+              defaultValue: '{{count}} loaded',
+              count: lazy.loadedRows.toLocaleString(),
+            })})
           </span>
         </span>
         <span>
-          Selected Rows:{' '}
+          {t('urlsTab.statusSelectedRows', { defaultValue: 'Selected Rows:' })}{' '}
           <span className="font-mono tabular-nums text-surface-200">
             {selectedIds.size.toLocaleString()}
           </span>
         </span>
         <span>
-          Selected Cells:{' '}
+          {t('urlsTab.statusSelectedCells', { defaultValue: 'Selected Cells:' })}{' '}
           <span className="font-mono tabular-nums text-surface-200">
             {selectedCells.size.toLocaleString()}
           </span>
         </span>
         <span>
-          Selected Columns:{' '}
+          {t('urlsTab.statusSelectedColumns', { defaultValue: 'Selected Columns:' })}{' '}
           <span className="font-mono tabular-nums text-surface-200">
             {selectedColumns.size.toLocaleString()}
           </span>
@@ -1466,8 +1475,14 @@ function SortableHeaderCell(props: {
         onMouseDown={(e) => e.stopPropagation()}
         title={
           isSortCol
-            ? `Sorted ${sortDir === 'asc' ? 'ascending' : 'descending'} — click to flip`
-            : 'Sort by this column'
+            ? t('urlsTab.columnSortedHint', {
+                defaultValue: 'Sorted {{dir}} — click to flip',
+                dir:
+                  sortDir === 'asc'
+                    ? t('urlsTab.sortAsc', { defaultValue: 'ascending' })
+                    : t('urlsTab.sortDesc', { defaultValue: 'descending' }),
+              })
+            : t('urlsTab.sortByColumn', { defaultValue: 'Sort by this column' })
         }
       >
         {isSortCol ? (
@@ -1489,7 +1504,9 @@ function SortableHeaderCell(props: {
           onResetColumn(id);
         }}
         onClick={(e) => e.stopPropagation()}
-        title="Drag to resize · double-click to reset"
+        title={t('urlsTab.resizeHint', {
+          defaultValue: 'Drag to resize · double-click to reset',
+        })}
       />
     </div>
   );
@@ -1687,7 +1704,15 @@ function ColumnPickerPopover({
   );
 }
 
-function Cell({ row, spec }: { row: CrawlUrlRow | null; spec: ColumnSpec }) {
+function Cell({
+  row,
+  spec,
+  lang,
+}: {
+  row: CrawlUrlRow | null;
+  spec: ColumnSpec;
+  lang: string;
+}) {
   if (row === null) {
     return <span className="text-surface-700">…</span>;
   }
@@ -1723,7 +1748,7 @@ function Cell({ row, spec }: { row: CrawlUrlRow | null; spec: ColumnSpec }) {
         className={clsx('truncate', v === 'indexable' ? 'text-emerald-400' : 'text-amber-400')}
         title={v}
       >
-        {v === 'indexable' ? 'Indexable' : 'Non-Indexable'}
+        {translateLabel(v === 'indexable' ? 'Indexable' : 'Non-Indexable', lang)}
       </span>
     );
   }
@@ -1733,9 +1758,10 @@ function Cell({ row, spec }: { row: CrawlUrlRow | null; spec: ColumnSpec }) {
     if (label === '') {
       return <span className="text-surface-700">—</span>;
     }
+    const localized = translateLabel(label, lang);
     return (
-      <span className="block truncate text-surface-200" title={label}>
-        {label}
+      <span className="block truncate text-surface-200" title={localized}>
+        {localized}
       </span>
     );
   }

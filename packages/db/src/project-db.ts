@@ -1063,6 +1063,19 @@ export class ProjectDb {
         // DELETEs are index-backed) so the page's link + image set
         // always reflects the latest fetch.
         this.db.prepare('DELETE FROM links WHERE from_url_id = ?').run(urlId);
+        // `images.occurrences` is a running tally of how many pages use each
+        // image. Deleting this page's usage rows must first decrement that
+        // tally for the affected images, otherwise the re-insert via
+        // `insertImages` (which does `occurrences + 1`) drifts the count
+        // upward without bound on every re-crawl / Re-Spider / resume.
+        // Decrement-then-reinsert nets zero for images still on the page and
+        // correctly drops images that vanished from it.
+        this.db
+          .prepare(
+            `UPDATE images SET occurrences = occurrences - 1
+             WHERE id IN (SELECT image_id FROM image_usages WHERE from_url_id = ?)`,
+          )
+          .run(urlId);
         this.db
           .prepare('DELETE FROM image_usages WHERE from_url_id = ?')
           .run(urlId);
@@ -1098,19 +1111,31 @@ export class ProjectDb {
    * not yet present in the urls table (never crawled). Returns the minimum
    * depth at which each pending URL was discovered.
    */
+  /** url-keyed audit tables with no FK to `urls` — must be wiped explicitly
+   *  on delete (ON DELETE CASCADE doesn't reach them). Kept in sync with
+   *  `deleteByDomain`, which clears the same six. */
+  private static readonly URL_KEYED_AUDIT_TABLES = [
+    'pagespeed_results',
+    'gsc_results',
+    'ga4_results',
+    'ai_results',
+    'seo_results',
+    'gsc_inspection_results',
+  ] as const;
+
   deleteUrl(id: number): void {
-    // `urls_issues` and `pagespeed_results` have no FK to `urls`, so the
-    // `ON DELETE CASCADE` that cleans links/headers/images doesn't reach
-    // them — wipe them explicitly or a deleted URL leaves orphan rows
-    // that inflate `getIssueCounts()` and re-attach stale audit data on
-    // re-crawl. The `pagespeed_results` delete must run before the parent
-    // `urls` row vanishes (it resolves the URL string from `urls`).
+    // `urls_issues` and the url-keyed audit tables have no FK to `urls`, so
+    // the `ON DELETE CASCADE` that cleans links/headers/images doesn't reach
+    // them — wipe them explicitly or a deleted URL leaves orphan rows that
+    // inflate `getIssueCounts()`, re-attach stale audit data on re-crawl, and
+    // resurface the URL as a GSC/GA4 cross-source "orphan". These must run
+    // before the parent `urls` row vanishes (they resolve the URL from it).
     this.runInTransaction(() => {
-      this.db
-        .prepare(
-          'DELETE FROM pagespeed_results WHERE url = (SELECT url FROM urls WHERE id = ?)',
-        )
-        .run(id);
+      for (const table of ProjectDb.URL_KEYED_AUDIT_TABLES) {
+        this.db
+          .prepare(`DELETE FROM ${table} WHERE url = (SELECT url FROM urls WHERE id = ?)`)
+          .run(id);
+      }
       this.db.prepare('DELETE FROM urls_issues WHERE url_id = ?').run(id);
       this.db.prepare('DELETE FROM urls WHERE id = ?').run(id);
     });
@@ -1154,20 +1179,23 @@ export class ProjectDb {
   deleteUrls(ids: number[]): void {
     if (ids.length === 0) return;
     // Chunk to stay under SQLite's bound-parameter limit; wrap in one
-    // transaction so the urls + urls_issues + pagespeed_results deletes
-    // are atomic. `urls_issues` / `pagespeed_results` have no FK to
-    // `urls` (see `deleteUrl`), so they're wiped explicitly.
+    // transaction so the urls + urls_issues + audit-table deletes are atomic.
+    // `urls_issues` and the url-keyed audit tables have no FK to `urls`
+    // (see `deleteUrl`), so they're wiped explicitly — same six tables as
+    // `deleteByDomain`, else deleted URLs leave orphan analytics/AI rows.
     const CHUNK = 500;
     this.runInTransaction(() => {
       for (let i = 0; i < ids.length; i += CHUNK) {
         const slice = ids.slice(i, i + CHUNK);
         const placeholders = slice.map(() => '?').join(',');
-        this.db
-          .prepare(
-            `DELETE FROM pagespeed_results
-              WHERE url IN (SELECT url FROM urls WHERE id IN (${placeholders}))`,
-          )
-          .run(...slice);
+        for (const table of ProjectDb.URL_KEYED_AUDIT_TABLES) {
+          this.db
+            .prepare(
+              `DELETE FROM ${table}
+                WHERE url IN (SELECT url FROM urls WHERE id IN (${placeholders}))`,
+            )
+            .run(...slice);
+        }
         this.db
           .prepare(`DELETE FROM urls_issues WHERE url_id IN (${placeholders})`)
           .run(...slice);

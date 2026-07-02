@@ -18,6 +18,20 @@
  */
 
 const TR_LABELS: Record<string, string> = {
+  // Settings — User-Agent presets
+  'Googlebot — Smartphone': 'Googlebot — Akıllı Telefon',
+  'Googlebot — Desktop': 'Googlebot — Masaüstü',
+  'Chrome — Desktop': 'Chrome — Masaüstü',
+  'Chrome — Mobile (Pixel)': 'Chrome — Mobil (Pixel)',
+  'FreeCrawl SEO (default)': 'FreeCrawl SEO (varsayılan)',
+  // Settings — Integration categories (Performance is defined below with the sub-tab labels)
+  AI: 'Yapay Zeka',
+  'SEO Data': 'SEO Verisi',
+  // Settings — Integration auth types
+  'API Key': 'API Anahtarı',
+  'OAuth (your own client)': 'OAuth (kendi istemciniz)',
+  'Service Account': 'Servis Hesabı',
+  Local: 'Yerel',
   // Top-level groups
   Summary: 'Özet',
   'Crawl Data': 'Crawl Verisi',
@@ -83,9 +97,48 @@ const TR_LABELS: Record<string, string> = {
   // Indexability
   Indexable: 'İndekslenebilir',
   Noindex: 'Noindex',
-  Canonicalised: 'Canonicalised',
+  Canonicalised: 'Canonical edilmiş',
   'Canonicalised (→ other)': 'Canonicalised (→ başka)',
   'Non-Indexable': 'İndekslenemez',
+  // Indexability status (indexabilityStatusLabel values)
+  'Blocked by robots.txt': 'robots.txt tarafından engellendi',
+  Redirected: 'Yönlendirildi',
+  'Client Error': 'İstemci Hatası',
+  'Server Error': 'Sunucu Hatası',
+
+  // Analytics detail panel (AnalyticsRow labels)
+  Clicks: 'Tıklamalar',
+  Impressions: 'Gösterimler',
+  CTR: 'TO',
+  'Avg position': 'Ort. konum',
+  Sessions: 'Oturumlar',
+  Users: 'Kullanıcılar',
+  Pageviews: 'Sayfa görüntülemeleri',
+  'Engagement rate': 'Etkileşim oranı',
+  'Avg session duration': 'Ort. oturum süresi',
+  Verdict: 'Karar',
+  Coverage: 'Kapsam',
+  Indexing: 'İndeksleme',
+  'Last crawl': 'Son tarama',
+  'Google canonical': 'Google canonical',
+  'User canonical': 'Kullanıcı canonical',
+
+  // Settings crawl presets (PRESETS labels + descriptions)
+  Fast: 'Hızlı',
+  Thorough: 'Kapsamlı',
+  'Mobile-only': 'Yalnızca mobil',
+  'Desktop-only': 'Yalnızca masaüstü',
+  Aggressive: 'Agresif',
+  'High concurrency, short timeouts — for a quick first sweep on a healthy site. Skips media + retries.':
+    'Yüksek eşzamanlılık, kısa zaman aşımları — sağlıklı bir sitede hızlı ilk tarama için. Medya + yeniden denemeleri atlar.',
+  'Lower concurrency + extra retries; captures more on flaky origins. The default for large audits.':
+    'Daha düşük eşzamanlılık + ek yeniden denemeler; kararsız kaynaklarda daha fazla yakalar. Büyük denetimler için varsayılan.',
+  'Mimic Googlebot Smartphone — primary signal for mobile-first indexing. Combine with viewport audits.':
+    'Googlebot Smartphone taklidi — mobil öncelikli indeksleme için birincil sinyal. Viewport denetimleriyle birleştirin.',
+  'Mimic legacy Googlebot Desktop. Useful for comparing mobile vs. desktop renders.':
+    'Eski Googlebot Desktop taklidi. Mobil ve masaüstü render karşılaştırması için kullanışlı.',
+  'High parallelism + ignore robots — only for sites you own. Can trip rate-limit / WAF rules; use with caution.':
+    'Yüksek paralellik + robots yok sayılır — yalnızca sahip olduğunuz siteler için. Hız sınırı / WAF kurallarını tetikleyebilir; dikkatli kullanın.',
 
   // Issues parent
   'Page Titles': 'Sayfa Başlıkları',

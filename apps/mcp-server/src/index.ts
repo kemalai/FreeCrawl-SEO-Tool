@@ -26,7 +26,7 @@ import { buildTools, type Tool } from './tools.js';
 import { defaultProjectPath, listProjectFiles } from './project-resolver.js';
 
 const SERVER_NAME = 'freecrawl-seo';
-const SERVER_VERSION = '0.2.7';
+const SERVER_VERSION = '0.8.0';
 const PROTOCOL_VERSION = '2024-11-05';
 
 interface Session {
@@ -58,6 +58,10 @@ function setProject(projectPath: string): Session {
     } catch {
       // best-effort close
     }
+    // Null it first so that if openProject throws (missing / corrupt file)
+    // we don't leave the session pointing at a now-closed DB handle, which
+    // would make every later DB tool fail with "database is not open".
+    session = null;
   }
   session = openProject(projectPath);
   return session;
@@ -70,6 +74,11 @@ const tools: Tool[] = [
     description:
       'List `.seoproject` files in the desktop app\'s default projects folder. Returns absolute paths the user can pass to `set_project`.',
     inputSchema: { type: 'object', properties: {} },
+    // Must NOT force-open the default project — on a fresh install (or when
+    // only non-default projects exist) that file doesn't exist yet, and
+    // requiring it would deadlock: the very tools you'd use to point the
+    // session at a valid file would themselves fail to open the missing one.
+    requiresDb: false,
     handler: () => {
       const files = listProjectFiles();
       return { files, defaultPath: defaultProjectPath() };
@@ -89,6 +98,8 @@ const tools: Tool[] = [
         },
       },
     },
+    // Opens the *target* file itself; must not first open the default.
+    requiresDb: false,
     handler: (args) => {
       const target = args.path;
       if (typeof target !== 'string' || target.trim() === '') {
@@ -103,7 +114,10 @@ const tools: Tool[] = [
     description:
       'Report which `.seoproject` the MCP server is currently reading from.',
     inputSchema: { type: 'object', properties: {} },
-    handler: () => ({ projectPath: getSession().projectPath }),
+    requiresDb: false,
+    // Report the open project without forcing one open — fall back to the
+    // default path (which may not exist yet) purely as a hint.
+    handler: () => ({ projectPath: session ? session.projectPath : defaultProjectPath() }),
   },
 ];
 
@@ -158,20 +172,22 @@ server.on('tools/call', async (raw) => {
   // work on a fresh install where the local `.seoproject` file doesn't
   // exist yet (only the desktop app has it).
   const needsDb = tool.requiresDb !== false;
-  // `db` is unused when `needsDb` is false; we pass the session's DB
-  // when available, else a never-used null cast — type system lets us
-  // do this because the handler ignores `db` for those tools.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let db: any = null;
-  if (needsDb) {
-    db = getSession().db;
-  } else if (session) {
-    // Re-use an already-open session if there is one (saves opening
-    // the DB just to satisfy the param), but don't force-open.
-    db = session.db;
-  }
   let result: unknown;
   try {
+    // `db` is unused when `needsDb` is false; we pass the session's DB
+    // when available, else a never-used null cast — the handler ignores it
+    // for those tools. Resolving the session INSIDE the try means a failed
+    // project open (e.g. a missing/corrupt file) surfaces as a proper tool
+    // error (`isError`) instead of a raw JSON-RPC -32000 protocol error.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let db: any = null;
+    if (needsDb) {
+      db = getSession().db;
+    } else if (session) {
+      // Re-use an already-open session if there is one (saves opening
+      // the DB just to satisfy the param), but don't force-open.
+      db = session.db;
+    }
     result = await tool.handler(args, db);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

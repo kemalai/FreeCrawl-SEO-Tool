@@ -24,7 +24,7 @@ import { AnalyticsTab } from './tabs/AnalyticsTab.js';
 import { AiTab } from './tabs/AiTab.js';
 import { SeoTab } from './tabs/SeoTab.js';
 import { useAppStore } from './store.js';
-import type { MenuEvent } from '@freecrawl/shared-types';
+import type { MenuEvent, CrawlProgress } from '@freecrawl/shared-types';
 import { clearCrawlWithConfirm } from './utils/clearCrawl.js';
 
 export function App() {
@@ -199,7 +199,7 @@ export function App() {
     // frame caps the React work at 60 Hz worst-case (and at 5 Hz in
     // the common case where the crawler's throttle dominates), so a
     // user click never queues behind a stack of pending re-renders.
-    let pendingProgress: import('@freecrawl/shared-types').CrawlProgress | null = null;
+    let pendingProgress: CrawlProgress | null = null;
     let progressRafScheduled = false;
     const off1 = window.freecrawl.onProgress((p) => {
       pendingProgress = p;

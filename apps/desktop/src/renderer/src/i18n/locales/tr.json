@@ -90,7 +90,18 @@
     "running": "Çalışıyor",
     "paused": "Duraklatıldı",
     "idle": "Boşta",
-    "dismiss": "kapat"
+    "dismiss": "kapat",
+    "fpsSmoothTitle": "Arayüz akıcı (≥ 50 fps)",
+    "fpsDegradedTitle": "Arayüz yavaşladı (30–49 fps) — muhtemelen crawl IPC ile yarışıyor",
+    "fpsStalledTitle": "Arayüz takıldı (< 30 fps) — ana iş parçacığı aç kaldı; crawl'ı duraklatın veya Loglar penceresini kapatın",
+    "heapTitle": "Renderer JS belleği (heap). >500 MB = ısınmış, >1 GB = muhtemelen listener / önbellek sızıntısı",
+    "rssTitle": "Ana süreç yerleşik bellek boyutu (Electron + worker'lar). Sistem toplamı: {{total}}.",
+    "sysFreeTitle": "İşletim sisteminin bildirdiği boş bellek. Sistem toplamının < %10'u takas (swap) tetikler; ondan önce crawl'ı duraklatın. Sistem toplamı: {{total}}.",
+    "perUrlTitle": "Taranan URL başına ortalama RSS baytı ({{urls}} URL). Electron ek yükünü içerir; gerçek dünyadaki büyük crawl'larda marjinal maliyet genelde daha düşüktür.",
+    "capacityTitle": "Mevcut URL-başına maliyetle kalan sistem belleğine sığacak tahmini ek URL sayısı. Hesap: boşBellek / urlBaşınaMaliyet. Üst sınır olarak değerlendirin — sürekli verim genelde önce CPU'ya bağlıdır.",
+    "lagResponsiveTitle": "Ana iş parçacığı yanıt veriyor — girdi anında hissediliyor",
+    "lagContendedTitle": "Ana iş parçacığı yoğun — hafif tıklama takılması",
+    "lagBusyTitle": "Ana iş parçacığı meşgul — IPC birikti; büyük olasılıkla kenar çubuğu SQL'i veya tablo parça getirme crawler ile yarışıyor"
   },
   "menu": {
     "file": "Dosya",
@@ -233,7 +244,13 @@
     "aggregatingFirst": "ilk {{n}} toplanıyor",
     "perPagePrefix": "Bu sekme sayfa başınadır — şu URL için veri gösteriliyor:",
     "perPageSuffix": "(seçimin birincil URL'i).",
-    "selectUrl": "Detayları görmek için tablodan bir URL seç."
+    "selectUrl": "Detayları görmek için tablodan bir URL seç.",
+    "httpResponseTab": "Yanıt ({{count}})",
+    "httpRequestTab": "İstek ({{count}})",
+    "headersReconstructedNote": "Aktif tarama yapılandırmasından yeniden oluşturuldu — taramadan sonra yapılandırma değiştiyse gerçek değerler farklı olabilir.",
+    "headersCapturedNote": "Tarama sırasında yakalandı.",
+    "noResponseHeaders": "Bu URL için yanıt başlığı yakalanmadı.",
+    "noRequestHeaders": "İstek başlığı yok — yapılandırma boş olabilir."
   },
   "filter": {
     "title": "Gelişmiş Tablo Arama",
@@ -250,6 +267,7 @@
     "noValue": "(değer gerekmiyor)"
   },
   "reports": {
+    "reportLabel": "Rapor",
     "report": {
       "pagesPerDir": "Dizin Başına Sayfa",
       "statusCodes": "Durum Kodu Histogramı",
@@ -403,7 +421,15 @@
       "crawlDelayMs": "Worker Başına Gecikme (her istekten sonra, ms)",
       "retriesHeading": "Yeniden Denemeler",
       "retryAttempts": "Yeniden Deneme Sayısı (geçici hatada URL başına)",
-      "retryInitialDelayMs": "İlk Yeniden Deneme Gecikmesi (ms — üstel backoff)"
+      "retryInitialDelayMs": "İlk Yeniden Deneme Gecikmesi (ms — üstel backoff)",
+      "tipsHeading": "Verimlilik ipuçları",
+      "ceilingValue": "~{{rps}} URL/sn ({{workers}} paralel worker, ≤ {{cap}} RPS rate-limit{{delaySuffix}})",
+      "ceilingDelaySuffix": ", worker başına istek sonrası +{{delay}} ms gecikme",
+      "ceilingEmpty": "Öngörülen verimi görmek için Maks Paralellik ve Maks RPS değerlerini ayarlayın.",
+      "worstCaseDelay": "Başarısız URL başına en kötü durum gecikmesi ≈ ilkGecikme × (2 ^ deneme − 1) = {{value}}",
+      "tip1": "Sağlıklı bir sitede hızlı bir ilk tarama için <bold>Fast</bold> ön ayarını deneyin (Ayarlar → Ön Ayarlar) — paralellik 40, RPS 40, yeniden deneme yok.",
+      "tip2": "Güvenilmez kaynaklar veya yavaş API'ler için <bold>Thorough</bold> deneyin — paralellik 10, 3 yeniden deneme, 30 sn zaman aşımı.",
+      "tip3": "Paralellik × HTTP keep-alive = kararlı durumdaki bağlantı sayısı. Çoğu sunucu rahatça 20–40 taşır; kurumsal proxy'ler / WAF'lar genelde 8–10'da sınırlar."
     },
     "requests": {
       "intro": "Her istekle gönderilen HTTP başlıkları.",
@@ -465,7 +491,9 @@
       "exportTitle": "Mevcut kural setini JSON dosyasına kaydet. Versiyonlu sarmal, kaynak kontrolüne commit'lenebilir.",
       "exportDisabled": "Dışa aktarmadan önce en az bir kural ekle.",
       "importConfirm": "Mevcut {{existing}} kural, içe aktarılan {{incoming}} kuralla değiştirilsin mi?",
-      "importSkipped": "{{ok}} kural içe aktarıldı. {{skipped}} kayıt atlandı (geçersiz şema veya 10 kuralın üzerinde)."
+      "importSkipped": "{{ok}} kural içe aktarıldı. {{skipped}} kayıt atlandı (geçersiz şema veya 10 kuralın üzerinde).",
+      "importFailedAlert": "İçe aktarma başarısız: {{error}}",
+      "noValidRules": "Dosyada geçerli kural bulunamadı."
     },
     "urlRewriting": {
       "intro": "URL'ler yinelemeden ve kuyruğa alınmadan önce uygulanan normalleştirme.",
@@ -637,7 +665,11 @@
       "advancedAudits": "Gelişmiş Denetimler",
       "mobileUsability": "Mobil Kullanılabilirlik denetimi",
       "lcpCandidate": "LCP aday tespiti",
-      "a11yAudit": "Erişilebilirlik denetimi (kontrast + odak)"
+      "a11yAudit": "Erişilebilirlik denetimi (kontrast + odak)",
+      "screenshotNone": "Yok (varsayılan)",
+      "screenshotFold": "Katlama üstü",
+      "screenshotFull": "Tam sayfa",
+      "screenshotBoth": "Her ikisi (tam sayfa + katlama)"
     },
     "performanceBudget": {
       "intro": "Sayfa başına performans tavanları belirleyin. Her crawl'dan sonra, etkin eşiklerden herhangi birini aşan dahili HTML sayfaları \"Performans Bütçesini Aşan\" issue filtresinde işaretlenir. Yanıt süresi ve sayfa boyutu crawl'dan; LCP ve CLS mevcutsa PageSpeed Insights verisinden gelir. Bir kontrolü devre dışı bırakmak için ilgili alanı 0 yapın.",
@@ -805,7 +837,8 @@
     "external": "harici",
     "largeCount": "{{n}} > 100 KB",
     "multiEmpty": "Seçili {{n}} sayfada <img> etiketi bulunamadı.",
-    "multiSummary": "{{n}} sayfada görseller"
+    "multiSummary": "{{n}} sayfada görseller",
+    "showingFirst": "ilk {{shown}} / {{total}} gösteriliyor"
   },
   "links": {
     "showing": "Gösterilen",
@@ -927,7 +960,9 @@
     "edgeOpacity": "Kenar opaklığı",
     "edgeOpacityHint": "Düşük = yoğun grafiklerde daha az görsel gürültü.",
     "changesNeedRerun": "Bazı değişiklikler layout yeniden çalıştırması gerektirir.",
-    "rerunLayout": "Layout'u yeniden çalıştır"
+    "rerunLayout": "Layout'u yeniden çalıştır",
+    "title": "Görselleştirme",
+    "occurrences": "{{count}} kez geçiyor"
   },
   "imagesTab": {
     "searchPlaceholder": "Görsel URL / alt ara…",
@@ -1160,7 +1195,27 @@
     "treeLoading": "URL ağacı yükleniyor…",
     "treeEmpty": "Gösterilecek URL yok — bir site tara veya filtreyi değiştir.",
     "expandAll": "Tümünü genişlet",
-    "collapseAll": "Tümünü daralt"
+    "collapseAll": "Tümünü daralt",
+    "noUrlsHint": "Bir crawl başlatın veya farklı bir kategori seçin.",
+    "statusUrls": "URL:",
+    "statusLoaded": "{{count}} yüklendi",
+    "statusSelectedRows": "Seçili Satırlar:",
+    "statusSelectedCells": "Seçili Hücreler:",
+    "statusSelectedColumns": "Seçili Sütunlar:",
+    "rowHeader": "Satır",
+    "rowNumberTitle": "Satır numarası",
+    "rowSelectHint": "Satır seçmek için tıkla · birden çok satır için sürükle",
+    "resizeHint": "Yeniden boyutlandırmak için sürükle · sıfırlamak için çift tıkla",
+    "sortByColumn": "Bu sütuna göre sırala",
+    "columnSortedAscHint": "Artan sıralandı — çevirmek için tıkla",
+    "columnSortedDescHint": "Azalan sıralandı — çevirmek için tıkla",
+    "columnSortedHint": "{{dir}} sıralandı — ters çevirmek için tıklayın",
+    "sortAsc": "artan",
+    "sortDesc": "azalan"
+  },
+  "errorBoundary": {
+    "panelBroke": "Bu panelde bir şeyler bozuldu.",
+    "dismiss": "Kapat"
   },
   "settings": {
     "title": "Ayarlar",

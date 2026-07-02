@@ -197,7 +197,7 @@ async function writeXmlFile(
 }
 
 function sanitizeFilename(label: string): string {
-  return label.replace(/[\\/?*\[\]:<>|"]/g, '_').replace(/\s+/g, '-').toLowerCase();
+  return label.replace(/[\\/?*[\]:<>|"]/g, '_').replace(/\s+/g, '-').toLowerCase();
 }
 
 function sanitizeSubdir(subdir: string): string {
@@ -206,7 +206,7 @@ function sanitizeSubdir(subdir: string): string {
   // filename component.
   return subdir
     .split(/[\\/]+/)
-    .map((seg) => seg.replace(/[\\/?*\[\]:<>|"]/g, '_').replace(/\s+/g, '-').toLowerCase())
+    .map((seg) => seg.replace(/[\\/?*[\]:<>|"]/g, '_').replace(/\s+/g, '-').toLowerCase())
     .filter((seg) => seg.length > 0)
     .join(path.sep);
 }
@@ -232,6 +232,7 @@ function xmlEscape(str: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     // strip control chars XML 1.0 forbids
+    // eslint-disable-next-line no-control-regex -- intentionally matching control chars to strip them
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
 }
 
@@ -249,7 +250,7 @@ function colLetter(idx: number): string {
 }
 
 function sanitizeSheetName(label: string, used: Set<string>): string {
-  let base = label.replace(/[\\/?*\[\]:]/g, ' ').trim().slice(0, 31);
+  let base = label.replace(/[\\/?*[\]:]/g, ' ').trim().slice(0, 31);
   if (!base) base = 'Sheet';
   let candidate = base;
   let i = 2;

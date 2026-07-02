@@ -750,7 +750,7 @@ export function VisualizationTab() {
     <div className="flex h-full w-full flex-col bg-surface-950">
       <div className="flex items-center gap-2 border-b border-surface-800 bg-surface-900/40 px-3 py-1.5">
         <div className="text-[12px] font-semibold tracking-wide text-surface-100">
-          Visualization
+          {t('viz.title', { defaultValue: 'Visualization' })}
         </div>
         <div className="ml-2 flex flex-wrap items-center gap-2 text-[11px]">
           <label className="flex items-center gap-1 text-surface-400">
@@ -1047,7 +1047,10 @@ export function VisualizationTab() {
                       key={a.anchor}
                       className="text-surface-200"
                       style={{ fontSize: `${size}px` }}
-                      title={`${a.count.toLocaleString()} occurrences`}
+                      title={t('viz.occurrences', {
+                        defaultValue: '{{count}} occurrences',
+                        count: a.count.toLocaleString(),
+                      })}
                     >
                       {a.anchor}
                     </span>

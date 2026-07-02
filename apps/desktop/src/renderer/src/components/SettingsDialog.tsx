@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
+import { useTranslation, Trans } from 'react-i18next';
 import {
   SUPPORTED_LANGUAGES,
   changeLanguage,
@@ -1109,7 +1109,7 @@ function PresetsPanel({
   exportSettings: () => Promise<void>;
   importSettings: () => Promise<void>;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   return (
@@ -1124,8 +1124,8 @@ function PresetsPanel({
             className="flex items-start gap-3 rounded border border-surface-800 bg-surface-950/40 p-3"
           >
             <div className="flex-1 min-w-0">
-              <div className="text-[12px] font-medium text-surface-100">{p.label}</div>
-              <div className="mt-0.5 text-[11px] text-surface-400">{p.description}</div>
+              <div className="text-[12px] font-medium text-surface-100">{translateLabel(p.label, i18n.language)}</div>
+              <div className="mt-0.5 text-[11px] text-surface-400">{translateLabel(p.description, i18n.language)}</div>
               <div className="mt-1.5 flex flex-wrap gap-1 font-mono text-[10px] text-surface-500">
                 {Object.entries(p.overrides).map(([k, v]) => (
                   <span key={k} className="rounded border border-surface-800 px-1.5 py-0.5">
@@ -1393,18 +1393,24 @@ function SpeedPanel({ form, update }: PanelProps) {
       <div className="mb-4 rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
         <div className="mb-0.5 font-medium">{t('settingsPanels.speed.effectiveCeiling', { defaultValue: 'Effective ceiling' })}</div>
         <div className="text-blue-300/90">
-          {effectiveRps !== null ? (
-            <>
-              ~{effectiveRps.toLocaleString()} URL/s ({Number.isFinite(conc) ? conc : '—'} parallel
-              workers, ≤ {Number.isFinite(rps) ? rps : '—'} RPS rate-limit
-              {Number.isFinite(delay) && delay > 0
-                ? `, +${delay} ms post-request delay per worker`
-                : ''}
-              )
-            </>
-          ) : (
-            'Set Max Concurrency and Max RPS to see the projected throughput.'
-          )}
+          {effectiveRps !== null
+            ? t('settingsPanels.speed.ceilingValue', {
+                defaultValue:
+                  '~{{rps}} URL/s ({{workers}} parallel workers, ≤ {{cap}} RPS rate-limit{{delaySuffix}})',
+                rps: effectiveRps.toLocaleString(),
+                workers: Number.isFinite(conc) ? conc : '—',
+                cap: Number.isFinite(rps) ? rps : '—',
+                delaySuffix:
+                  Number.isFinite(delay) && delay > 0
+                    ? t('settingsPanels.speed.ceilingDelaySuffix', {
+                        defaultValue: ', +{{delay}} ms post-request delay per worker',
+                        delay,
+                      })
+                    : '',
+              })
+            : t('settingsPanels.speed.ceilingEmpty', {
+                defaultValue: 'Set Max Concurrency and Max RPS to see the projected throughput.',
+              })}
         </div>
       </div>
 
@@ -1448,27 +1454,43 @@ function SpeedPanel({ form, update }: PanelProps) {
         example="500 default. Bump to 2000 when retrying against a flaky API."
       />
       <p className="mt-1 text-[10px] text-surface-500">
-        Worst-case delay per failed URL ≈ initialDelay × (2 ^ attempts − 1) ={' '}
-        {Number.isFinite(retries) && Number.isFinite(delay)
-          ? `${(Number.parseInt(form.retryInitialDelayMs, 10) || 500) *
-              (2 ** Math.max(0, retries) - 1)} ms`
-          : '—'}
+        {t('settingsPanels.speed.worstCaseDelay', {
+          defaultValue:
+            'Worst-case delay per failed URL ≈ initialDelay × (2 ^ attempts − 1) = {{value}}',
+          value:
+            Number.isFinite(retries) && Number.isFinite(delay)
+              ? `${
+                  (Number.parseInt(form.retryInitialDelayMs, 10) || 500) *
+                  (2 ** Math.max(0, retries) - 1)
+                } ms`
+              : '—',
+        })}
       </p>
 
       <div className="mt-5 rounded border border-surface-800 bg-surface-950/40 px-3 py-2 text-[10px] text-surface-400">
-        <div className="mb-1 font-medium text-surface-300">Throughput tips</div>
+        <div className="mb-1 font-medium text-surface-300">
+          {t('settingsPanels.speed.tipsHeading', { defaultValue: 'Throughput tips' })}
+        </div>
         <ul className="list-disc space-y-0.5 pl-4">
           <li>
-            For a quick first sweep on a healthy site try the <strong>Fast</strong> preset (Settings
-            → Presets) — concurrency 40, RPS 40, no retries.
+            <Trans
+              i18nKey="settingsPanels.speed.tip1"
+              defaults="For a quick first sweep on a healthy site try the <bold>Fast</bold> preset (Settings → Presets) — concurrency 40, RPS 40, no retries."
+              components={{ bold: <strong /> }}
+            />
           </li>
           <li>
-            For unreliable origins or slow APIs try <strong>Thorough</strong> — concurrency 10, 3
-            retries, 30 s timeout.
+            <Trans
+              i18nKey="settingsPanels.speed.tip2"
+              defaults="For unreliable origins or slow APIs try <bold>Thorough</bold> — concurrency 10, 3 retries, 30 s timeout."
+              components={{ bold: <strong /> }}
+            />
           </li>
           <li>
-            Concurrency × HTTP keep-alive = the steady-state connection count. Most servers comfortably
-            handle 20–40; corporate proxies / WAFs often cap at 8–10.
+            {t('settingsPanels.speed.tip3', {
+              defaultValue:
+                'Concurrency × HTTP keep-alive = the steady-state connection count. Most servers comfortably handle 20–40; corporate proxies / WAFs often cap at 8–10.',
+            })}
           </li>
         </ul>
       </div>
@@ -1477,7 +1499,7 @@ function SpeedPanel({ form, update }: PanelProps) {
 }
 
 function RequestsPanel({ form, update }: PanelProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
@@ -1501,7 +1523,7 @@ function RequestsPanel({ form, update }: PanelProps) {
           </option>
           {UA_PRESETS.map((p) => (
             <option key={p.label} value={p.ua}>
-              {p.label}
+              {translateLabel(p.label, i18n.language)}
             </option>
           ))}
         </select>
@@ -1870,7 +1892,12 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                   // silently dropping — invalid JSON is the most common
                   // import failure mode and the user needs to know.
                   // eslint-disable-next-line no-alert
-                  alert(`Import failed: ${result.error}`);
+                  alert(
+                    t('settingsPanels.customExtraction.importFailedAlert', {
+                      defaultValue: 'Import failed: {{error}}',
+                      error: result.error,
+                    }),
+                  );
                 }
                 return;
               }
@@ -1878,7 +1905,9 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                 // eslint-disable-next-line no-alert
                 alert(
                   result.error ??
-                    'No valid rules found in the file.',
+                    t('settingsPanels.customExtraction.noValidRules', {
+                      defaultValue: 'No valid rules found in the file.',
+                    }),
                 );
                 return;
               }
@@ -3559,10 +3588,10 @@ function RenderingPanel({ form, update }: PanelProps) {
               )
             }
           >
-            <option value="none">None (default)</option>
-            <option value="fold">Above the fold</option>
-            <option value="fullpage">Full page</option>
-            <option value="both">Both (full page + fold)</option>
+            <option value="none">{t('settingsPanels.rendering.screenshotNone', { defaultValue: 'None (default)' })}</option>
+            <option value="fold">{t('settingsPanels.rendering.screenshotFold', { defaultValue: 'Above the fold' })}</option>
+            <option value="fullpage">{t('settingsPanels.rendering.screenshotFull', { defaultValue: 'Full page' })}</option>
+            <option value="both">{t('settingsPanels.rendering.screenshotBoth', { defaultValue: 'Both (full page + fold)' })}</option>
           </select>
         </label>
         <Bool
@@ -3673,7 +3702,7 @@ function PerformanceBudgetPanel({ form, update }: PanelProps) {
 }
 
 function IntegrationsPanel() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [state, setState] = useState<IntegrationsState | null>(null);
   // Per-integration → per-field draft text. Only fields the user has
   // actually typed into are tracked; a save sends just these so an
@@ -3734,7 +3763,7 @@ function IntegrationsPanel() {
         return (
           <div key={cat.key} className="mb-4">
             <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-              {cat.label}
+              {translateLabel(cat.label, i18n.language)}
             </div>
             <div className="space-y-2">
               {items.map((def) => (
@@ -3777,7 +3806,7 @@ function IntegrationCard({
   onSave: () => void;
   onClear: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const configured = state?.configured ?? false;
   const hasDraft = Object.values(draft).some((v) => v.length > 0);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -3787,7 +3816,7 @@ function IntegrationCard({
       <div className="mb-1 flex items-center gap-2">
         <span className="text-[12px] font-medium text-surface-100">{def.name}</span>
         <span className="rounded bg-surface-800 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-surface-400">
-          {AUTH_TYPE_LABEL[def.authType]}
+          {translateLabel(AUTH_TYPE_LABEL[def.authType], i18n.language)}
         </span>
         <span
           className={clsx(
@@ -3956,17 +3985,17 @@ function StoragePanel() {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        {t('settings.storage.intro')}
+        {t('settings.storage.intro', { defaultValue: "Default folder for new .seoproject files. Save As dialogs open here by default; the Open dialog is not constrained." })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          {t('settings.storage.defaultSaveFolder')}
+          {t('settings.storage.defaultSaveFolder', { defaultValue: "Default Save Folder" })}
         </div>
         <div className="flex items-center gap-2">
           <input
             className="flex-1 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
-            placeholder={t('settings.storage.placeholder')}
+            placeholder={t('settings.storage.placeholder', { defaultValue: "(System Documents folder)" })}
             value={override}
             readOnly
             spellCheck={false}
@@ -3981,20 +4010,20 @@ function StoragePanel() {
             <button
               className="rounded border border-surface-700 px-3 py-1 text-[11px] text-surface-400 hover:bg-surface-800 hover:text-surface-100"
               onClick={reset}
-              title={t('settings.storage.resetTitle')}
+              title={t('settings.storage.resetTitle', { defaultValue: "Reset to the OS Documents folder" })}
             >
               {t('common.reset')}
             </button>
           )}
         </div>
         <p className="mt-2 text-[10px] text-surface-500">
-          {t('settings.storage.resolvedPath')}:{' '}
+          {t('settings.storage.resolvedPath', { defaultValue: "Resolved path" })}:{' '}
           <span className="text-surface-300">{resolved || '…'}</span>
         </p>
       </div>
 
       <div className="rounded border border-surface-800 bg-surface-950/40 p-3 text-[11px] text-surface-400">
-        {t('settings.storage.note')}
+        {t('settings.storage.note', { defaultValue: "Active crawl data lives in the app's user-data directory until you Save As — the path above only controls where Save As starts. Changing this won't move any existing project files." })}
       </div>
     </>
   );
@@ -4020,12 +4049,12 @@ function PrivacyPanel() {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        {t('settings.privacy.intro')}
+        {t('settings.privacy.intro', { defaultValue: "FreeCrawl is local-first — crawl results, project files, and URLs you visit never leave your machine." })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          {t('settings.privacy.telemetryHeading')}
+          {t('settings.privacy.telemetryHeading', { defaultValue: "Anonymous Telemetry" })}
         </div>
         <label className="flex items-start gap-2">
           <input
@@ -4036,17 +4065,17 @@ function PrivacyPanel() {
           />
           <div className="flex flex-col gap-0.5">
             <span className="text-[12px] text-surface-100">
-              {t('settings.privacy.telemetryLabel')}
+              {t('settings.privacy.telemetryLabel', { defaultValue: "Send anonymous usage telemetry (opt-in)" })}
             </span>
             <span className="text-[10px] text-surface-500">
-              {t('settings.privacy.telemetryHelp')}
+              {t('settings.privacy.telemetryHelp', { defaultValue: "Off by default. When on, aggregated counts of feature use (e.g. \"export ran\", \"report opened\") may be sent — never URLs, project contents, or crawl results." })}
             </span>
           </div>
         </label>
       </div>
 
       <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
-        {t('settings.privacy.statusNote')}
+        {t('settings.privacy.statusNote', { defaultValue: "No telemetry endpoint is currently wired up. Toggling this preference is recorded but nothing is transmitted in the current build. The toggle is exposed now so consent state persists across upgrades when a future build adds an endpoint." })}
       </div>
     </>
   );
@@ -4069,12 +4098,12 @@ function LanguagePanel() {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        {t('settings.language.intro')}
+        {t('settings.language.intro', { defaultValue: "Select the UI display language. Applied immediately." })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          {t('settings.language.label')}
+          {t('settings.language.label', { defaultValue: "UI language" })}
         </div>
         <div className="flex flex-col gap-2">
           {SUPPORTED_LANGUAGES.map((lng) => (
@@ -4094,7 +4123,7 @@ function LanguagePanel() {
       </div>
 
       <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
-        {t('settings.language.note')}
+        {t('settings.language.note', { defaultValue: "Some deep panels and dialogs may still display English while broader coverage is being added." })}
       </div>
     </>
   );

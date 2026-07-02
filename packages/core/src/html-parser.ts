@@ -800,7 +800,7 @@ export function parseHtml(
       .first()
       .attr('content') ?? ''
   ).trim();
-  let metaRefresh: string | null = metaRefreshRaw || null;
+  const metaRefresh: string | null = metaRefreshRaw || null;
   let metaRefreshUrl: string | null = null;
   if (metaRefresh) {
     // Format is `<seconds>[; url=<URL>]`. Parameters are case-insensitive

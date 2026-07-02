@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from 'react';
+import i18n from '../i18n';
 
 interface Props {
   /** Rendered when the boundary's subtree throws. Defaults to a tiny notice. */
@@ -45,14 +46,16 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.props.fallback !== undefined) return this.props.fallback;
     return (
       <div className="fixed inset-x-0 top-2 z-[60] mx-auto w-fit max-w-[90vw] rounded border border-red-700/60 bg-red-950/90 px-3 py-2 text-[12px] text-red-200 shadow-lg">
-        <div className="font-semibold">Something broke in this panel.</div>
+        <div className="font-semibold">
+          {i18n.t('errorBoundary.panelBroke', { defaultValue: 'Something broke in this panel.' })}
+        </div>
         <div className="mt-0.5 truncate font-mono text-[11px] text-red-300">{err.message}</div>
         <button
           type="button"
           onClick={this.reset}
           className="mt-1 rounded border border-red-700/60 px-2 py-0.5 text-[11px] text-red-200 hover:bg-red-900/50"
         >
-          Dismiss
+          {i18n.t('errorBoundary.dismiss', { defaultValue: 'Dismiss' })}
         </button>
       </div>
     );

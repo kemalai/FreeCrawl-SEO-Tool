@@ -175,6 +175,7 @@ function xmlEscape(raw: string): string {
     .replace(/'/g, '&apos;')
     // XML 1.0 forbids most C0 control characters; strip everything below
     // 0x20 except tab (0x09), LF (0x0A), and CR (0x0D).
+    // eslint-disable-next-line no-control-regex -- intentionally matching control chars to strip them
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
 }
 

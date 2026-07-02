@@ -71,7 +71,16 @@ export function normalizeUrl(
   rewrites: UrlRewriteOptions = {},
 ): string | null {
   try {
-    const u = new URL(raw, base);
+    // HTML/XML attribute values escape `&` as an entity, so an href like
+    // `/p?a=1&amp;b=2` arrives with a literal `amp;`. Decode the ampersand
+    // entity family up-front so the query splits on the real `&` — otherwise
+    // `new URL` keeps `amp;b=2` as a bogus parameter, the crawler fetches the
+    // wrong page (or 404s) and stores a duplicate row for the escaped variant.
+    // Safe for already-decoded callers: a real URL never carries `&amp;` /
+    // `&#38;` / `&#x26;` as literal data, and the trailing `;` requirement
+    // means genuine separators like `?a=1&b=2` are left untouched.
+    const decoded = raw.replace(/&(?:amp|#0*38|#x0*26);/gi, '&');
+    const u = new URL(decoded, base);
     u.hash = '';
 
     const keep = rewrites.keepQueryParams;
@@ -130,6 +139,67 @@ export function normalizeUrl(
   }
 }
 
+/**
+ * Two-label public suffixes where the registrable domain is the last THREE
+ * labels (e.g. `example.co.uk`, `site.com.tr`) rather than the last two.
+ * A curated subset of the Mozilla Public Suffix List covering the common
+ * ccTLD second levels — the full PSL is megabytes and unnecessary for scope
+ * matching. Without this, `foo.com.tr` and `bar.com.tr` collapse to the same
+ * registrable domain (`com.tr`), so `all-subdomains` scope escapes onto every
+ * unrelated site on the ccTLD.
+ */
+const MULTI_LEVEL_SUFFIXES: ReadonlySet<string> = new Set([
+  // United Kingdom
+  'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk', 'net.uk', 'sch.uk', 'ac.uk', 'gov.uk', 'nhs.uk',
+  // Turkey
+  'com.tr', 'net.tr', 'org.tr', 'gov.tr', 'edu.tr', 'k12.tr', 'av.tr', 'bel.tr', 'biz.tr', 'gen.tr',
+  'info.tr', 'name.tr', 'web.tr', 'tv.tr',
+  // Australia / New Zealand
+  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'asn.au', 'id.au',
+  'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz', 'school.nz',
+  // Japan / Korea / China / Hong Kong
+  'co.jp', 'or.jp', 'ne.jp', 'ac.jp', 'go.jp', 'gr.jp',
+  'co.kr', 'or.kr', 'ne.kr', 're.kr', 'go.kr', 'ac.kr',
+  'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
+  'com.hk', 'org.hk', 'net.hk', 'gov.hk', 'edu.hk',
+  // Brazil / Mexico / Argentina / Colombia
+  'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
+  'com.mx', 'net.mx', 'org.mx', 'gob.mx', 'edu.mx',
+  'com.ar', 'net.ar', 'org.ar', 'gob.ar', 'edu.ar',
+  'com.co', 'net.co', 'org.co', 'gov.co', 'edu.co',
+  // India / Singapore / Malaysia / Thailand / Vietnam / Indonesia / Philippines
+  'co.in', 'net.in', 'org.in', 'gen.in', 'firm.in', 'ind.in', 'ac.in', 'edu.in', 'gov.in', 'res.in',
+  'com.sg', 'net.sg', 'org.sg', 'gov.sg', 'edu.sg',
+  'com.my', 'net.my', 'org.my', 'gov.my', 'edu.my',
+  'co.th', 'in.th', 'ac.th', 'go.th', 'or.th',
+  'com.vn', 'net.vn', 'org.vn', 'gov.vn', 'edu.vn',
+  'co.id', 'or.id', 'go.id', 'ac.id', 'web.id',
+  'com.ph', 'net.ph', 'org.ph', 'gov.ph', 'edu.ph',
+  // South Africa / Israel / Russia / Ukraine / Spain / Poland
+  'co.za', 'org.za', 'net.za', 'gov.za', 'ac.za',
+  'co.il', 'org.il', 'net.il', 'gov.il', 'ac.il',
+  'com.ru', 'net.ru', 'org.ru',
+  'com.ua', 'net.ua', 'org.ua',
+  'com.es', 'org.es', 'gob.es', 'edu.es', 'nom.es',
+  'com.pl', 'net.pl', 'org.pl', 'gov.pl', 'edu.pl',
+]);
+
+/**
+ * Registrable ("root") domain of a hostname, honouring the multi-level
+ * public-suffix table above. `www.example.com` → `example.com`;
+ * `shop.example.co.uk` → `example.co.uk`.
+ */
+export function registrableDomain(hostname: string): string {
+  const host = hostname.toLowerCase().replace(/\.$/, '');
+  const labels = host.split('.');
+  if (labels.length <= 2) return host;
+  const lastTwo = labels.slice(-2).join('.');
+  if (MULTI_LEVEL_SUFFIXES.has(lastTwo) && labels.length >= 3) {
+    return labels.slice(-3).join('.');
+  }
+  return lastTwo;
+}
+
 export function isSameHost(
   urlA: string,
   urlB: string,
@@ -139,8 +209,7 @@ export function isSameHost(
     const a = new URL(urlA);
     const b = new URL(urlB);
     if (opts.includeSubdomains) {
-      const root = (h: string) => h.split('.').slice(-2).join('.');
-      return root(a.hostname) === root(b.hostname);
+      return registrableDomain(a.hostname) === registrableDomain(b.hostname);
     }
     if (a.hostname === b.hostname) return true;
     // CDN list — either side matching a configured CDN host counts as
@@ -197,8 +266,7 @@ export function isInScope(
         return c.pathname === start.pathname || c.pathname.startsWith(prefix);
       }
       case 'all-subdomains': {
-        const root = (h: string) => h.split('.').slice(-2).join('.');
-        return root(start.hostname) === root(c.hostname);
+        return registrableDomain(start.hostname) === registrableDomain(c.hostname);
       }
       default:
         return false;
@@ -281,6 +349,7 @@ export async function resolveStartUrl(
   userAgent = 'FreeCrawlSEO/0.1',
   probeTimeoutMs = 3000,
   onAttempt?: (a: ResolveStartUrlAttempt) => void,
+  opts: { proxyOverride?: string; rewrites?: UrlRewriteOptions } = {},
 ): Promise<string | null> {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -304,7 +373,11 @@ export async function resolveStartUrl(
   async function resolveVia(url: string): Promise<string | null> {
     const { fetch: undiciFetch } = await import('undici');
     const { initHttpClient, formatFetchError } = await import('./http-client.js');
-    initHttpClient();
+    // Preserve the crawler's configured proxy. Calling initHttpClient() with
+    // no argument recomputes the effective proxy from env vars only, which
+    // silently rebuilds the global dispatcher as direct and drops a
+    // Settings/profile proxy for the rest of the crawl.
+    initHttpClient({ proxyOverride: opts.proxyOverride });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), probeTimeoutMs);
     try {
@@ -372,23 +445,29 @@ export async function resolveStartUrl(
     }
   }
 
+  // The start URL must be normalized with the SAME rewrite rules the
+  // crawler applies to discovered links; otherwise (e.g. stripWww on a
+  // www. site) the scope anchor and every in-scope link disagree and the
+  // crawl stops after one page.
+  const rewrites = opts.rewrites ?? {};
+
   if (/^https?:\/\//i.test(trimmed)) {
     const resolved = (await resolveVia(trimmed)) ?? trimmed;
-    return normalizeUrl(resolved);
+    return normalizeUrl(resolved, undefined, rewrites);
   }
 
   const bare = trimmed.replace(/^\/\//, '').replace(/^\/+/, '');
   const httpsUrl = `https://${bare}`;
   const viaHttps = await resolveVia(httpsUrl);
-  if (viaHttps) return normalizeUrl(viaHttps);
+  if (viaHttps) return normalizeUrl(viaHttps, undefined, rewrites);
 
   const httpUrl = `http://${bare}`;
   const viaHttp = await resolveVia(httpUrl);
-  if (viaHttp) return normalizeUrl(viaHttp);
+  if (viaHttp) return normalizeUrl(viaHttp, undefined, rewrites);
 
   // Neither protocol responded — return the secure candidate anyway;
   // the crawler will surface a network error with that URL.
-  return normalizeUrl(httpsUrl);
+  return normalizeUrl(httpsUrl, undefined, rewrites);
 }
 
 /**

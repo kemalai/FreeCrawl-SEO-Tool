@@ -383,12 +383,21 @@ function UrlStatsTab({ version, mode }: { version: number; mode: 'all' | 'orphan
   }, [search, filter, bot, sortBy, version]);
 
   useEffect(() => {
+    // Cancellation guard: fast typing / filter changes fire overlapping
+    // queries, and without this the slower (older) response can resolve last
+    // and overwrite the newer result set, showing rows for a filter the user
+    // no longer has selected.
+    let cancelled = false;
     const input: LogUrlStatsInput = { limit: PAGE, offset, search, sortBy, filter, bot: bot || undefined };
     const call = mode === 'orphans' ? window.freecrawl.logOrphans(input) : window.freecrawl.logUrlStats(input);
     void call.then((r) => {
+      if (cancelled) return;
       setRows(r.rows);
       setTotal(r.total);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [offset, search, filter, bot, sortBy, version, mode]);
 
   // The single filter <select> carries either a membership token

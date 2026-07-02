@@ -193,22 +193,37 @@ async function main(): Promise<void> {
     }
   }
 
+  // Per-flag overrides win ONLY when the flag is actually present. Applying
+  // them unconditionally would let a `parseNumeric(undefined, DEFAULT)` /
+  // `?? DEFAULT` fallback silently overwrite a value the user set in the
+  // --config file (the help text promises "the command line still win[s]",
+  // not "defaults clobber the file").
   const config = {
     ...DEFAULT_CRAWL_CONFIG,
     ...fileConfig,
     mode: listFile ? ('list' as const) : ('spider' as const),
     urlList: listUrls,
     startUrl,
-    maxDepth: parseNumeric(values.depth, DEFAULT_CRAWL_CONFIG.maxDepth),
-    maxUrls: parseNumeric(values.max, DEFAULT_CRAWL_CONFIG.maxUrls),
-    maxConcurrency: parseNumeric(values.concurrency, DEFAULT_CRAWL_CONFIG.maxConcurrency),
-    maxRps: parseNumeric(values.rps, DEFAULT_CRAWL_CONFIG.maxRps),
-    userAgent: values['user-agent'] ?? DEFAULT_CRAWL_CONFIG.userAgent,
-    respectRobotsTxt: !values['no-robots'],
-    crawlExternal: Boolean(values.external),
-    customHeaders: parseHeaders(values.header),
-    includePatterns: values.include ?? [],
-    excludePatterns: values.exclude ?? [],
+    ...(values.depth !== undefined
+      ? { maxDepth: parseNumeric(values.depth, DEFAULT_CRAWL_CONFIG.maxDepth) }
+      : {}),
+    ...(values.max !== undefined
+      ? { maxUrls: parseNumeric(values.max, DEFAULT_CRAWL_CONFIG.maxUrls) }
+      : {}),
+    ...(values.concurrency !== undefined
+      ? { maxConcurrency: parseNumeric(values.concurrency, DEFAULT_CRAWL_CONFIG.maxConcurrency) }
+      : {}),
+    ...(values.rps !== undefined
+      ? { maxRps: parseNumeric(values.rps, DEFAULT_CRAWL_CONFIG.maxRps) }
+      : {}),
+    ...(values['user-agent'] !== undefined ? { userAgent: values['user-agent'] } : {}),
+    // `--no-robots` / `--external` only flip the flag ON in their direction;
+    // absent, the file value (or default) stands.
+    ...(values['no-robots'] ? { respectRobotsTxt: false } : {}),
+    ...(values.external ? { crawlExternal: true } : {}),
+    ...(values.header !== undefined ? { customHeaders: parseHeaders(values.header) } : {}),
+    ...(values.include !== undefined ? { includePatterns: values.include } : {}),
+    ...(values.exclude !== undefined ? { excludePatterns: values.exclude } : {}),
   };
 
   const crawler = new Crawler(config, db);
@@ -221,7 +236,13 @@ async function main(): Promise<void> {
       );
     });
   }
+  let crawlError: string | null = null;
   crawler.on('error', (msg) => {
+    // Record the first fatal error (invalid/unreachable start URL, seed
+    // failure, bad pattern) so the exit code and --json `ok` reflect it —
+    // otherwise an unreachable seed produces an empty DB with no 4xx/5xx
+    // rows and the CLI misreports success to a CI pipeline.
+    if (crawlError === null) crawlError = String(msg);
     process.stderr.write(`\n[error] ${msg}\n`);
   });
 
@@ -244,16 +265,22 @@ async function main(): Promise<void> {
   }
 
   const issues = db.getOverviewCounts().issues;
-  const hasErrors = Object.keys(summary.byStatus).some((k) => {
-    const n = Number.parseInt(k, 10);
-    return Number.isFinite(n) && n >= 400;
-  });
+  // A crawl that fetched nothing (unreachable seed, everything filtered) is a
+  // failure for CI purposes — a successful spider always fetches ≥1 page.
+  const hasErrors =
+    crawlError !== null ||
+    summary.total === 0 ||
+    Object.keys(summary.byStatus).some((k) => {
+      const n = Number.parseInt(k, 10);
+      return Number.isFinite(n) && n >= 400;
+    });
 
   if (jsonMode) {
     process.stdout.write(
       JSON.stringify(
         {
           ok: !hasErrors,
+          error: crawlError,
           startUrl,
           dbPath,
           summary,
@@ -469,7 +496,8 @@ function flattenLogResult(filePath: string, result: LogAnalysisResult): LogInges
       lastTs: u.lastTs,
     })),
     daily: Array.from(result.daily.entries()).map(([key, hits]) => {
-      const sp = key.indexOf(' ');
+      // Key is `${day}\t${bucket}` (tab-separated in log-analyzer.ts).
+      const sp = key.indexOf('\t');
       return { day: key.slice(0, sp), bucket: key.slice(sp + 1), hits };
     }),
     status: Array.from(result.status.entries()).map(([status, v]) => ({

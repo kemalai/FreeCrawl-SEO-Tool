@@ -29,6 +29,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import type { GoogleAuthState } from '@freecrawl/shared-types';
+import { apiFetch } from './api-fetch.js';
 import { resolveCredentials } from './credentials.js';
 import * as logger from './logger.js';
 
@@ -286,7 +287,7 @@ export async function startAuth(integrationId: string): Promise<GoogleAuthState>
     });
 
     // ── Exchange the code for tokens ──────────────────────────────────
-    const tokenRes = await fetch(TOKEN_ENDPOINT, {
+    const tokenRes = await apiFetch(TOKEN_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -322,7 +323,7 @@ export async function startAuth(integrationId: string): Promise<GoogleAuthState>
     let email: string | null = null;
     if (typeof accessToken === 'string' && accessToken) {
       try {
-        const uiRes = await fetch(USERINFO_ENDPOINT, {
+        const uiRes = await apiFetch(USERINFO_ENDPOINT, {
           headers: { Authorization: `Bearer ${accessToken}` },
           signal: AbortSignal.timeout(15_000),
         });
@@ -383,7 +384,7 @@ export async function getAccessToken(integrationId: string): Promise<string> {
     throw new Error(`"${integrationId}" is not connected — sign in with Google first.`);
   }
   const { clientId, clientSecret } = resolveClient(integrationId);
-  const res = await fetch(TOKEN_ENDPOINT, {
+  const res = await apiFetch(TOKEN_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -416,7 +417,7 @@ export async function revokeAuth(integrationId: string): Promise<GoogleAuthState
   const record = readRecord(integrationId);
   if (record) {
     try {
-      await fetch(`${REVOKE_ENDPOINT}?token=${encodeURIComponent(record.refreshToken)}`, {
+      await apiFetch(`${REVOKE_ENDPOINT}?token=${encodeURIComponent(record.refreshToken)}`, {
         method: 'POST',
         signal: AbortSignal.timeout(15_000),
       });

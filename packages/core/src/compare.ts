@@ -119,11 +119,16 @@ export function compareCrawls(
 
   const counts: Record<CompareCategory, number> = { ...EMPTY_COUNTS };
   const samples: CompareDiffRow[] = [];
+  // Per-category sample tally so the cap check is O(1). The previous
+  // `samples.filter(...).length` scanned the whole samples array on every
+  // push — O(n²) that hung for minutes comparing two large divergent crawls.
+  const sampleCounts: Record<CompareCategory, number> = { ...EMPTY_COUNTS };
 
   const push = (row: CompareDiffRow): void => {
     counts[row.category]++;
-    if (samples.filter((s) => s.category === row.category).length < limit) {
+    if (sampleCounts[row.category] < limit) {
       samples.push(row);
+      sampleCounts[row.category]++;
     }
   };
 

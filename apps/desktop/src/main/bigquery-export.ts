@@ -20,6 +20,7 @@ import { createSign } from 'node:crypto';
 import type { ProjectDb } from '@freecrawl/db';
 import type { CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
 import { resolveCredentials } from './credentials.js';
+import { apiFetch } from './api-fetch.js';
 import * as logger from './logger.js';
 
 const TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
@@ -117,7 +118,7 @@ async function mintAccessToken(sa: ServiceAccount): Promise<string> {
     .sign(sa.private_key, 'base64url');
   const jwt = `${signingInput}.${signature}`;
 
-  const res = await fetch(TOKEN_ENDPOINT, {
+  const res = await apiFetch(TOKEN_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -168,7 +169,7 @@ async function ensureDataset(
   token: string,
   datasetId: string,
 ): Promise<void> {
-  const res = await fetch(
+  const res = await apiFetch(
     `${BIGQUERY_API}/projects/${encodeURIComponent(projectId)}/datasets`,
     {
       method: 'POST',
@@ -194,7 +195,7 @@ async function createTable(
   datasetId: string,
   tableId: string,
 ): Promise<void> {
-  const res = await fetch(
+  const res = await apiFetch(
     `${BIGQUERY_API}/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(
       datasetId,
     )}/tables`,
@@ -227,7 +228,7 @@ async function insertAllChunk(
   tableId: string,
   rows: { json: Record<string, string | number | null> }[],
 ): Promise<number> {
-  const res = await fetch(
+  const res = await apiFetch(
     `${BIGQUERY_API}/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(
       datasetId,
     )}/tables/${encodeURIComponent(tableId)}/insertAll`,

@@ -25,6 +25,7 @@ import type {
   SeoProvider,
 } from '@freecrawl/shared-types';
 import { resolveCredentials } from './credentials.js';
+import { apiFetch } from './api-fetch.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 
@@ -97,7 +98,7 @@ async function ahrefsFetch(
   });
   let res: Response;
   try {
-    res = await fetch(
+    res = await apiFetch(
       `https://api.ahrefs.com/v3/site-explorer/${call.path}?${params.toString()}`,
       {
         headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
@@ -222,7 +223,7 @@ async function fetchMajestic(url: string): Promise<MajesticMetrics> {
     item0: url,
     app_api_key: apiKey,
   });
-  const res = await fetch(`https://api.majestic.com/api/json?${params.toString()}`, {
+  const res = await apiFetch(`https://api.majestic.com/api/json?${params.toString()}`, {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
@@ -259,7 +260,7 @@ async function fetchMoz(url: string): Promise<MozMetrics> {
     );
   }
   const basic = Buffer.from(`${accessId}:${secretKey}`).toString('base64');
-  const res = await fetch('https://lsapi.seomoz.com/v2/url_metrics', {
+  const res = await apiFetch('https://lsapi.seomoz.com/v2/url_metrics', {
     method: 'POST',
     headers: {
       Authorization: `Basic ${basic}`,
@@ -304,7 +305,7 @@ async function fetchSemrush(url: string): Promise<SemrushMetrics> {
     display_format: 'json',
     export_columns: 'Or,Ot,Oc,Ad',
   });
-  const res = await fetch(`https://api.semrush.com/?${params.toString()}`, {
+  const res = await apiFetch(`https://api.semrush.com/?${params.toString()}`, {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const text = await res.text();

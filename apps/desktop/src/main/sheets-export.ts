@@ -15,6 +15,7 @@
 import type { ProjectDb } from '@freecrawl/db';
 import type { CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
 import { getAccessToken } from './google-oauth.js';
+import { apiFetch } from './api-fetch.js';
 import * as logger from './logger.js';
 
 const MAX_ROWS = 50_000;
@@ -63,7 +64,7 @@ export async function exportCategoryToSheets(
   const token = await getAccessToken('sheets');
 
   // 1. Create the spreadsheet.
-  const createRes = await fetch(
+  const createRes = await apiFetch(
     'https://sheets.googleapis.com/v4/spreadsheets',
     {
       method: 'POST',
@@ -103,7 +104,7 @@ export async function exportCategoryToSheets(
 
   // 3. Write the values.
   if (count > 0) {
-    const writeRes = await fetch(
+    const writeRes = await apiFetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1?valueInputOption=RAW`,
       {
         method: 'PUT',

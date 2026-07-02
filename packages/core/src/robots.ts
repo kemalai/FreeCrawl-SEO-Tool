@@ -258,7 +258,7 @@ export function validateRobotsTxt(text: string): RobotsValidationIssue[] {
     const lineNo = i + 1;
     const raw = lines[i] ?? '';
     // Strip BOM on first line — some Windows editors prepend U+FEFF.
-    const noBom = i === 0 ? raw.replace(/^﻿/, '') : raw;
+    const noBom = i === 0 ? raw.replace(/^\uFEFF/, '') : raw;
     // Strip trailing CR (handled by split, but defensive) + comments.
     // Comments start at `#` and consume the rest of the line (including
     // `#` mid-line); per RFC 9309 §2.2 leading whitespace is allowed.

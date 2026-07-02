@@ -22,6 +22,7 @@ import {
   resolveStartUrl,
   compileUrlRegexRewrites,
   toEscapedFragmentUrl,
+  type UrlRewriteOptions,
 } from './url-utils.js';
 import { parseHtml, estimatePixelWidth, type ParsedPage } from './html-parser.js';
 import { analyseCookies, extractSetCookies } from './cookies.js';
@@ -111,6 +112,10 @@ export class Crawler extends EventEmitter {
    *  sequence, replayed on every request. Null when form login is off. */
   private sessionJar: SessionCookieJar | null = null;
   private robots: RobotsChecker | null = null;
+  /** robots.txt `Crawl-delay` for the start origin, in ms (0 = none). */
+  private robotsCrawlDelayMs = 0;
+  /** Monotonic dispatch clock for the maxRps gate (see acquireRateSlot). */
+  private nextDispatchAt = 0;
   private progressTimer: NodeJS.Timeout | null = null;
   private memoryWatchdogTimer: NodeJS.Timeout | null = null;
   /** Periodic post-crawl-style recompute of expensive issue counters
@@ -205,7 +210,10 @@ export class Crawler extends EventEmitter {
    * nothing per call (no `?:` chains, no per-link `if`s) and so changing
    * config mid-crawl can't desync the seen-set's keying.
    */
-  private readonly urlRewrites: import('./url-utils.js').UrlRewriteOptions;
+  private readonly urlRewrites: UrlRewriteOptions;
+  /** Effective proxy resolved in the constructor, reused by the start-URL
+   *  probe so it doesn't reset the global dispatcher back to direct. */
+  private readonly resolvedProxy: string;
 
   /**
    * Optional freeze-watchdog hook. The desktop main process injects a
@@ -421,6 +429,7 @@ export class Crawler extends EventEmitter {
       }
       return config.proxyUrl ?? '';
     })();
+    this.resolvedProxy = resolvedProxy;
     initHttpClient({ proxyOverride: resolvedProxy });
     this.config = config;
     this.db = db;
@@ -539,14 +548,20 @@ export class Crawler extends EventEmitter {
     }
 
     const startProbeT0 = Date.now();
-    const start = await resolveStartUrl(this.config.startUrl, this.config.userAgent, 5000, (info) => {
-      this.emit(
-        'debug',
-        `resolveStartUrl: ${info.method} ${info.url} -> ${info.outcome}${
-          info.detail ? ` (${info.detail})` : ''
-        }`,
-      );
-    });
+    const start = await resolveStartUrl(
+      this.config.startUrl,
+      this.config.userAgent,
+      5000,
+      (info) => {
+        this.emit(
+          'debug',
+          `resolveStartUrl: ${info.method} ${info.url} -> ${info.outcome}${
+            info.detail ? ` (${info.detail})` : ''
+          }`,
+        );
+      },
+      { proxyOverride: this.resolvedProxy, rewrites: this.urlRewrites },
+    );
     if (!start) {
       this.emit(
         'error',
@@ -598,7 +613,18 @@ export class Crawler extends EventEmitter {
     // recompute and sitemap-derived issue counts use the full data set.
     const robotsPromise = this.config.respectRobotsTxt
       ? loadRobots(origin, this.config.userAgent).then((r) => {
-          if (!this.stopped) this.robots = r;
+          if (!this.stopped) {
+            this.robots = r;
+            // Honour a robots.txt `Crawl-delay` (seconds) by folding it into
+            // the per-worker politeness delay. Cached once — the start
+            // origin's directive applies for the crawl, matching the single
+            // robots checker used for allow/deny.
+            const rd = r.getCrawlDelay();
+            this.robotsCrawlDelayMs =
+              typeof rd === 'number' && Number.isFinite(rd) && rd > 0
+                ? Math.round(rd * 1000)
+                : 0;
+          }
         })
       : Promise.resolve();
     const sitemapPromise = this.config.discoverSitemaps
@@ -722,17 +748,38 @@ export class Crawler extends EventEmitter {
       this.stopQueueCheckpointTimer();
     }
 
-    // Post-crawl heavy lifting. Each step is a synchronous SQL pass
-    // that can take 1–3 s on a 1M-URL crawl; if we run them all in a
-    // tight sequence the main process JS thread stays blocked for the
-    // entire duration, IPC dispatch starves, and any other window
-    // (especially Logs) freezes visibly. Yielding to the event loop
-    // between steps lets queued IPC mesajları (logs:batch, progress,
-    // dataChanged) get serviced.
-    // Wave 6 — Per-pass crawl-analysis toggles. Each pass is gated
-    // by its config flag so users running tight time-budget audits
-    // can skip steps they don't need (e.g. duplicate clustering can
-    // be 5–10 s on a 100k-URL crawl).
+    // Post-crawl heavy lifting — shared with list mode via runPostCrawlPasses.
+    // Each pass is gated by its config flag so users running tight time-budget
+    // audits can skip steps they don't need, and each yields to the event loop
+    // so IPC dispatch (logs:batch, progress, dataChanged) never starves.
+    await this.runPostCrawlPasses();
+    this.running = false;
+    this.stopMemoryMonitor();
+    // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
+    // heap that's no longer needed once the queue is drained.
+    this.seen.clear();
+    this.externalSeen.clear();
+    this.emitProgress();
+    this.setOp('idle');
+    // Suppress 'done' if a stop() ran during teardown — otherwise the
+    // zombie crawler's done-event clobbers the new crawl's UI state.
+    if (!this.stopped) {
+      this.emit('done', this.db.getSummary());
+      this.fireWebhook();
+    }
+  }
+
+  /**
+   * Post-crawl analysis pipeline shared by spider and list mode. Each step is
+   * a synchronous SQL pass that can take 1–3 s on a 1M-URL crawl; routing DB
+   * passes through `runDbPass` / `recomputeIssues` dispatches them to the
+   * writer-worker in the desktop host (CLI / tests fall back to inline), and
+   * `yieldToEventLoop` between steps lets queued IPC (logs, progress,
+   * dataChanged) get serviced so no window freezes. List mode used to run
+   * these inline on the main thread and skipped boilerplate + manifest probes
+   * — see rule 1.7 (root-cause perf, never mask by degrading UX).
+   */
+  private async runPostCrawlPasses(): Promise<void> {
     if (this.config.analyseInlinks) {
       await yieldToEventLoop();
       this.emit('info', 'Recomputing inlinks…');
@@ -762,12 +809,10 @@ export class Crawler extends EventEmitter {
       // the crawler instance, not the DB; can't blindly off-thread it.
       this.runDuplicateClustering();
 
-      // V2 Faz 14 #5 — Template / boilerplate detection. Runs alongside
-      // duplicate clustering because both are content-similarity passes;
-      // this one specifically surfaces the repeated chrome (nav, footer,
-      // sidebar) that bleeds into every page and dilutes thin-content
-      // detection. Memory-bounded (samples ~2K bodies), skipped when
-      // no body snapshots are stored.
+      // Template / boilerplate detection — runs alongside duplicate
+      // clustering because both are content-similarity passes; surfaces the
+      // repeated chrome (nav, footer, sidebar) that dilutes thin-content
+      // detection. Memory-bounded, skipped when no body snapshots are stored.
       await yieldToEventLoop();
       this.emit('info', 'Detecting boilerplate coverage…');
       this.setOp('post-crawl:boilerplate-coverage');
@@ -801,10 +846,7 @@ export class Crawler extends EventEmitter {
       // Route through the injected hook — in the desktop host this
       // dispatches to the writer-worker, keeping the 70+ correlated
       // subqueries off the main thread. CLI / tests fall back to
-      // running inline via `db.recomputeUrlsIssuesYielding`. Without
-      // offloading, a 5K-URL crawl freezes the main process for
-      // ~45 s in post-crawl, tripping Electron's "Not Responding"
-      // dialog.
+      // running inline via `db.recomputeUrlsIssuesYielding`.
       await this.recomputeIssues(EXPENSIVE_ISSUE_DEFINITIONS);
     }
     await yieldToEventLoop();
@@ -825,20 +867,6 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.setOp('post-crawl:performance-budget');
     this.runBudgetPass();
-    this.running = false;
-    this.stopMemoryMonitor();
-    // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
-    // heap that's no longer needed once the queue is drained.
-    this.seen.clear();
-    this.externalSeen.clear();
-    this.emitProgress();
-    this.setOp('idle');
-    // Suppress 'done' if a stop() ran during teardown — otherwise the
-    // zombie crawler's done-event clobbers the new crawl's UI state.
-    if (!this.stopped) {
-      this.emit('done', this.db.getSummary());
-      this.fireWebhook();
-    }
   }
 
   /**
@@ -1447,47 +1475,11 @@ export class Crawler extends EventEmitter {
       this.stopQueueCheckpointTimer();
     }
 
-    // Same yielding strategy as spider mode — see the comment block
-    // above the spider-mode recompute. SQL aggregates blocking the JS
-    // thread starve IPC dispatch and freeze every other window.
-    // Toggles match the spider-mode gates so a single config controls
-    // both modes' post-crawl pipeline.
-    if (this.config.analyseInlinks) {
-      await yieldToEventLoop();
-      this.db.recomputeInlinks();
-    }
-    if (this.config.analyseRedirectChains) {
-      await yieldToEventLoop();
-      this.db.recomputeRedirectChains();
-    }
-    if (this.config.analyseHreflang) {
-      await yieldToEventLoop();
-      this.db.recomputeHreflangAnalysis();
-      await yieldToEventLoop();
-      this.db.recomputeHreflangInconsistent();
-    }
-    if (this.config.analyseDuplicates) {
-      await yieldToEventLoop();
-      this.runDuplicateClustering();
-    }
-    if (this.config.analysePagination) {
-      await yieldToEventLoop();
-      this.db.recomputePaginationSequence();
-    }
-    if (this.config.analyseIssues) {
-      await yieldToEventLoop();
-      this.db.recomputeUrlsIssues(EXPENSIVE_ISSUE_DEFINITIONS);
-    }
-    await yieldToEventLoop();
-    await this.runImageSizeProbes();
-    await yieldToEventLoop();
-    await this.runTlsCertProbes();
-    await yieldToEventLoop();
-    await this.runSocialImageProbes();
-    await yieldToEventLoop();
-    await this.runPdfMetadataProbes();
-    await yieldToEventLoop();
-    this.runBudgetPass();
+    // Identical post-crawl pipeline to spider mode — routed through the
+    // writer-worker hooks (runDbPass / recomputeIssues) instead of blocking
+    // SQL on the main thread, and now includes boilerplate coverage +
+    // manifest probes that list mode previously skipped. See rule 1.7.
+    await this.runPostCrawlPasses();
     this.running = false;
     this.stopMemoryMonitor();
     this.seen.clear();
@@ -2129,6 +2121,23 @@ export class Crawler extends EventEmitter {
     }
   }
 
+  /**
+   * Token gate for the global requests-per-second cap (`config.maxRps`).
+   * Each caller reserves the next dispatch slot on a monotonic clock and
+   * sleeps until it arrives; the read-compute-write of `nextDispatchAt` is
+   * synchronous (no await between), so concurrent workers get distinct,
+   * evenly-spaced slots. `maxRps <= 0` disables the gate (unlimited).
+   */
+  private async acquireRateSlot(): Promise<void> {
+    if (this.config.maxRps <= 0) return;
+    const minInterval = 1000 / this.config.maxRps;
+    const now = Date.now();
+    const scheduled = Math.max(now, this.nextDispatchAt);
+    this.nextDispatchAt = scheduled + minInterval;
+    const waitMs = scheduled - now;
+    if (waitMs > 0 && !this.stopped) await sleep(waitMs);
+  }
+
   private async fetchAndProcess(item: QueueItem): Promise<void> {
     if (this.stopped) return;
     this.setOp(`crawl:fetch:${item.url}`);
@@ -2142,6 +2151,14 @@ export class Crawler extends EventEmitter {
     // healthy system) and lets renderer-side IPC, lag heartbeats,
     // and progress event listeners run between URLs.
     await new Promise<void>((r) => setImmediate(r));
+
+    // Global requests-per-second cap. Gates the DISPATCH time (before the
+    // timeout starts and before responseTime is measured) rather than using
+    // p-queue's intervalCap, which bucket-refills in bursts and can freeze
+    // the queue between windows (see the constructor's queue comment). Waits
+    // are bounded by ~concurrency / maxRps, so Stop stays responsive.
+    await this.acquireRateSlot();
+    if (this.stopped) return;
 
     const t0 = Date.now();
     const controller = new AbortController();
@@ -2525,8 +2542,33 @@ export class Crawler extends EventEmitter {
         return;
       }
 
-      const body = await res.text();
-      const bodyLength = parseIntSafe(contentLengthHeader) ?? Buffer.byteLength(body, 'utf8');
+      const capRead = await readBodyCapped(res, this.config.maxFileSizeBytes);
+      if (capRead.overCap) {
+        // Chunked/streaming HTML with no Content-Length blew past the cap.
+        // Mirror the declared-length skip branch: keep the row (so inlinks
+        // survive) but drop the body and downstream parsing.
+        this.failed++;
+        this.emit(
+          'warn',
+          `Skipped ${item.url}: streamed body exceeded maxFileSizeBytes ${this.config.maxFileSizeBytes}`,
+        );
+        await this.dbCall<number>('upsertUrl', [
+          {
+            url: item.url,
+            urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+            contentKind: 'other',
+            statusCode,
+            statusText: 'size-cap-exceeded',
+            indexability: 'non-indexable:client-error',
+            indexabilityReason: `Body skipped — streamed size exceeds maxFileSizeBytes ${this.config.maxFileSizeBytes}`,
+            responseTimeMs,
+            depth: item.depth,
+          },
+        ]);
+        return;
+      }
+      const body = decodeBody(capRead.bytes, contentType);
+      const bodyLength = parseIntSafe(contentLengthHeader) ?? capRead.bytes.length;
 
       // V2 Faz 1 — JavaScript rendering pass. When `renderingMode === 'js'`
       // and the host injected a Playwright renderer, fetch the post-JS DOM
@@ -2984,9 +3026,14 @@ export class Crawler extends EventEmitter {
       if (respTimeTimer) clearTimeout(respTimeTimer);
       // Politeness delay — applied per worker *after* each request so a
       // higher concurrency still honours a "one request every N ms per slot"
-      // contract on top of the global RPS cap.
-      if (this.config.crawlDelayMs > 0 && !this.stopped) {
-        await sleep(this.config.crawlDelayMs);
+      // contract on top of the global RPS cap. Takes the larger of the
+      // configured delay and any robots.txt Crawl-delay for the origin.
+      const politenessMs = Math.max(
+        this.config.crawlDelayMs,
+        this.config.respectRobotsTxt ? this.robotsCrawlDelayMs : 0,
+      );
+      if (politenessMs > 0 && !this.stopped) {
+        await sleep(politenessMs);
       }
     }
   }
@@ -3557,6 +3604,94 @@ function parseIntSafe(v: string | null | undefined): number | null {
   if (!v) return null;
   const n = Number.parseInt(v, 10);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Read a fetch Response body as raw bytes with a hard byte cap. undici streams
+ * the DECODED body (content-encoding already stripped), so this bounds the
+ * actual memory a single page can consume. Content-Length is only advisory and
+ * is absent on chunked / streaming responses — without this cap the body
+ * buffers unbounded and a mislabeled multi-hundred-MB `text/html` endpoint OOMs
+ * the process. Returns `{ overCap: true }` once the accumulated bytes exceed
+ * `capBytes` (after cancelling the stream); otherwise the raw bytes, which the
+ * caller decodes with the page's actual charset (NOT forced UTF-8).
+ */
+async function readBodyCapped(
+  res: Response,
+  capBytes: number,
+): Promise<{ overCap: false; bytes: Buffer } | { overCap: true; bytes: null }> {
+  if (capBytes <= 0 || !res.body) {
+    return { overCap: false, bytes: Buffer.from(await res.arrayBuffer()) };
+  }
+  const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > capBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
+        }
+        return { overCap: true, bytes: null };
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
+  }
+  return { overCap: false, bytes: Buffer.concat(chunks) };
+}
+
+/**
+ * Detect the character encoding of an HTML/text body. undici (per the fetch
+ * spec) always decodes bodies as UTF-8, which mojibakes legacy pages served as
+ * ISO-8859-9 / windows-1254 (common on older Turkish sites), corrupting
+ * titles, meta, word counts and duplicate fingerprints. Precedence follows the
+ * HTML spec: Content-Type header charset → BOM → `<meta charset>` in the head.
+ * Returns null when no signal is found (caller defaults to UTF-8).
+ */
+function detectCharset(bytes: Buffer, contentType: string | null): string | null {
+  if (contentType) {
+    const m = /charset\s*=\s*["']?\s*([^"';,\s]+)/i.exec(contentType);
+    if (m && m[1]) return m[1].toLowerCase();
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return 'utf-8';
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) return 'utf-16le';
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) return 'utf-16be';
+  // Scan the first 2 KB as latin1 (ASCII-safe) for a <meta charset> declaration.
+  const head = bytes.subarray(0, Math.min(bytes.length, 2048)).toString('latin1');
+  const metaCharset = /<meta[^>]+charset\s*=\s*["']?\s*([a-z0-9_-]+)/i.exec(head);
+  if (metaCharset && metaCharset[1]) return metaCharset[1].toLowerCase();
+  const metaHttp = /<meta[^>]+content\s*=\s*["'][^"']*charset\s*=\s*([a-z0-9_-]+)/i.exec(head);
+  if (metaHttp && metaHttp[1]) return metaHttp[1].toLowerCase();
+  return null;
+}
+
+/**
+ * Decode a body buffer using its detected charset. Falls back to UTF-8 when no
+ * charset is declared or the label is unknown to the platform's TextDecoder
+ * (Electron bundles full ICU, so legacy labels like `windows-1254` resolve).
+ */
+function decodeBody(bytes: Buffer, contentType: string | null): string {
+  const charset = detectCharset(bytes, contentType);
+  if (!charset || charset === 'utf-8' || charset === 'utf8') {
+    return bytes.toString('utf8');
+  }
+  try {
+    return new TextDecoder(charset).decode(bytes);
+  } catch {
+    return bytes.toString('utf8');
+  }
 }
 
 /**

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { translateLabel } from '../i18n/labels.js';
@@ -562,9 +563,10 @@ function AnalyticsCard({
 }
 
 function AnalyticsRow({ label, value }: { label: string; value: string }) {
+  const { i18n } = useTranslation();
   return (
     <div className="flex items-baseline gap-3 text-[11px]">
-      <div className="w-32 shrink-0 text-surface-500">{label}</div>
+      <div className="w-32 shrink-0 text-surface-500">{translateLabel(label, i18n.language)}</div>
       <div className="min-w-0 flex-1 truncate text-surface-100" title={value}>
         {value}
       </div>
@@ -803,10 +805,26 @@ function ViewSourceView({
     setActiveMatch(0);
   }, [search, urlId]);
 
+  const activeBody = kind === 'rendered' ? src?.renderedBody ?? null : src?.body ?? null;
+  // Memoize the full-body scans so they only re-run when the body, query, or
+  // active-match index actually change — NOT on every keystroke or parent
+  // re-render. On a multi-MB snapshot, an unmemoized countMatches +
+  // renderHighlighted per render stalls typing in the search box by 100 ms+.
+  const matches = useMemo(
+    () => (activeBody && search ? countMatches(activeBody, search) : 0),
+    [activeBody, search],
+  );
+  // Clamp active match into the current range so a shrinking match count
+  // (after the user typed an extra character) doesn't point past the end.
+  const safeActive = matches > 0 ? activeMatch % matches : 0;
+  const highlightedBody = useMemo(
+    () => (activeBody && search ? renderHighlighted(activeBody, search, safeActive) : null),
+    [activeBody, search, safeActive],
+  );
+
   if (loading && !src) {
     return <div className="p-4 text-[11px] text-surface-500">{t('viewSource.loadingSource', { defaultValue: 'Loading source…' })}</div>;
   }
-  const activeBody = kind === 'rendered' ? src?.renderedBody ?? null : src?.body ?? null;
   if (!src || activeBody === null) {
     if (kind === 'rendered') {
       return (
@@ -838,11 +856,6 @@ function ViewSourceView({
   const body = activeBody;
   const activeLength =
     kind === 'rendered' ? src.renderedBodyLength ?? body.length : src.bodyLength;
-  const matches = search ? countMatches(body, search) : 0;
-  // Clamp active match into the current range so a shrinking match
-  // count (after the user typed an extra character) doesn't leave us
-  // pointing past the end.
-  const safeActive = matches > 0 ? activeMatch % matches : 0;
 
   function step(delta: number): void {
     if (matches === 0) return;
@@ -970,9 +983,7 @@ function ViewSourceView({
             wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre',
           )}
         >
-          {search
-            ? renderHighlighted(body, search, safeActive)
-            : body}
+          {search ? highlightedBody : body}
         </pre>
       </div>
       <ViewSourceScrollEffect
@@ -1223,7 +1234,10 @@ function HttpHeadersView({
           )}
           onClick={() => setSide('response')}
         >
-          Response ({headers.length})
+          {t('detail.httpResponseTab', {
+            defaultValue: 'Response ({{count}})',
+            count: headers.length,
+          })}
         </button>
         <button
           className={clsx(
@@ -1234,12 +1248,18 @@ function HttpHeadersView({
           )}
           onClick={() => setSide('request')}
         >
-          Request ({requestHeaders.length})
+          {t('detail.httpRequestTab', {
+            defaultValue: 'Request ({{count}})',
+            count: requestHeaders.length,
+          })}
         </button>
         <span className="ml-auto text-surface-500">
           {side === 'request'
-            ? 'Reconstructed from active crawl config — actual values may have differed if config changed since crawl.'
-            : 'Captured at crawl time.'}
+            ? t('detail.headersReconstructedNote', {
+                defaultValue:
+                  'Reconstructed from active crawl config — actual values may have differed if config changed since crawl.',
+              })
+            : t('detail.headersCapturedNote', { defaultValue: 'Captured at crawl time.' })}
         </span>
       </div>
       <div className="flex-1 overflow-auto">
@@ -1247,8 +1267,12 @@ function HttpHeadersView({
         {rows.length === 0 ? (
           <div className="p-4 text-[11px] text-surface-500">
             {side === 'response'
-              ? 'No response headers captured for this URL.'
-              : 'No request headers — config may be empty.'}
+              ? t('detail.noResponseHeaders', {
+                  defaultValue: 'No response headers captured for this URL.',
+                })
+              : t('detail.noRequestHeaders', {
+                  defaultValue: 'No request headers — config may be empty.',
+                })}
           </div>
         ) : (
           <div className="p-3">
@@ -1906,6 +1930,18 @@ function LinksView({
     | null
   >(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // Virtualize the rows — multi-select aggregates up to 50 URLs' links
+  // (MULTI_DETAIL_LIMIT), so this table can hit 25k+ rows and a plain
+  // rows.map would render ~400k DOM nodes and freeze the renderer. Fixed
+  // row height keeps estimateSize exact; overscan masks the sticky-header
+  // offset the same way the main URLs table does (CLAUDE.md 4.5).
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => LINKS_ROW_HEIGHT,
+    overscan: 20,
+  });
   // `selected` and `rows` change every render; keep the latest in refs
   // so the document-level keydown listener can read them without being
   // re-attached on every state change.
@@ -2165,7 +2201,7 @@ function LinksView({
       {rows.length === 0 ? (
         <div className="py-8 text-center text-xs text-surface-500">{t('links.noLinks', { defaultValue: 'No links.' })}</div>
       ) : (
-        <div className="mt-2 flex-1 overflow-auto">
+        <div ref={scrollRef} className="mt-2 flex-1 overflow-auto">
           <div style={{ minWidth: totalWidth, width: '100%' }}>
             <div
               className="sticky top-0 z-10 flex bg-surface-900 text-[11px]"
@@ -2209,11 +2245,24 @@ function LinksView({
               })}
               <div className="flex-1 border-b border-surface-800" />
             </div>
-            {rows.map((r, ri) => (
+            <div
+              className="relative"
+              style={{
+                height: rowVirtualizer.getTotalSize(),
+                minWidth: totalWidth,
+                width: '100%',
+              }}
+            >
+            {rowVirtualizer.getVirtualItems().map((vi) => {
+              const ri = vi.index;
+              const r = rows[ri];
+              if (!r) return null;
+              return (
               <div
                 key={ri}
-                className="flex border-b border-surface-900 text-[11px]"
+                className="absolute left-0 top-0 flex border-b border-surface-900 text-[11px]"
                 style={{
+                  transform: `translateY(${vi.start}px)`,
                   minWidth: totalWidth,
                   width: '100%',
                   height: LINKS_ROW_HEIGHT,
@@ -2262,7 +2311,9 @@ function LinksView({
                 })}
                 <div className="flex-1" />
               </div>
-            ))}
+              );
+            })}
+            </div>
           </div>
         </div>
       )}
@@ -3100,7 +3151,11 @@ function ImagesView({
         )}
         {row.imagesCount > rows.length && (
           <span className="text-surface-500">
-            (showing first {rows.length} of {row.imagesCount})
+            ({t('imagesView.showingFirst', {
+              defaultValue: 'showing first {{shown}} of {{total}}',
+              shown: rows.length,
+              total: row.imagesCount,
+            })})
           </span>
         )}
       </div>

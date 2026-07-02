@@ -148,6 +148,7 @@ import {
   type LogImportSummary,
   type LogExportInput,
   type LogExportResult,
+  type LogEntry,
 } from '@freecrawl/shared-types';
 import {
   BrowserPool,
@@ -180,9 +181,11 @@ import {
   type LogExportTables,
 } from '@freecrawl/core';
 import { fetch as undiciFetch } from 'undici';
+import { apiFetch } from './api-fetch.js';
+import { spawn } from 'node:child_process';
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
-import { isMenuLang, type MenuLang } from './menu-i18n.js';
+import { getMenuLabels, isMenuLang, type MenuLang } from './menu-i18n.js';
 import {
   getState as getIntegrationsState,
   setCredentials as setIntegrationCredentials,
@@ -932,6 +935,12 @@ function getMenuLang(): MenuLang {
   return isMenuLang(raw) ? raw : 'en';
 }
 
+/** Localized menu/dialog labels for the active UI language. Lets native
+ *  dialogs pull `L().dlgX` inline without threading a param through handlers. */
+function L(): ReturnType<typeof getMenuLabels> {
+  return getMenuLabels(getMenuLang());
+}
+
 function rebuildMenu(): void {
   Menu.setApplicationMenu(
     buildAppMenu({
@@ -943,7 +952,7 @@ function rebuildMenu(): void {
           openProjectAtPath(path);
         } catch (err) {
           dialog.showErrorBox(
-            'Open Project Failed',
+            L().dlgOpenProjectFailedTitle,
             `Could not open ${path}.\n\n${(err as Error).message}`,
           );
           // Drop the bad entry so it doesn't keep failing.
@@ -974,9 +983,9 @@ function openLogsFolder(): void {
     if (mainWindow) {
       void dialog.showMessageBox(mainWindow, {
         type: 'warning',
-        title: 'Logs Folder Unavailable',
-        message: 'Disk logging has not been initialised. Logs are kept in memory only for this session.',
-        buttons: ['OK'],
+        title: L().dlgLogsFolderUnavailableTitle,
+        message: L().dlgLogsFolderUnavailableMsg,
+        buttons: [L().btnOk],
         noLink: true,
       });
     }
@@ -1009,12 +1018,12 @@ function resetDiagnosticDialogs(): void {
   if (mainWindow) {
     void dialog.showMessageBox(mainWindow, {
       type: 'info',
-      title: 'Diagnostic Warnings Reset',
+      title: L().dlgDiagResetTitle,
       message:
         removed === 0
           ? 'No suppressed diagnostic warnings to reset.'
           : `Re-enabled ${removed} previously dismissed warning${removed === 1 ? '' : 's'}. They will pop up again the next time the underlying issue occurs.`,
-      buttons: ['OK'],
+      buttons: [L().btnOk],
       noLink: true,
     });
   }
@@ -1223,7 +1232,7 @@ async function downloadAndRevealInstaller(asset: GitHubReleaseAsset): Promise<vo
           }
           void dialog.showMessageBox(win, {
             type: 'info',
-            title: 'Download Complete',
+            title: L().dlgDownloadCompleteTitle,
             message: `${asset.name} downloaded.`,
             detail:
               `Saved to:\n${savePath}\n\n` +
@@ -1233,16 +1242,16 @@ async function downloadAndRevealInstaller(asset: GitHubReleaseAsset): Promise<vo
                 : process.platform === 'darwin'
                   ? 'macOS Gatekeeper may block the app on first open because it is not notarised. Right-click the .dmg → Open to bypass.'
                   : ''),
-            buttons: ['OK'],
+            buttons: [L().btnOk],
             noLink: true,
           });
         } else {
           void dialog.showMessageBox(win, {
             type: 'error',
-            title: 'Download Failed',
+            title: L().dlgDownloadFailedTitle,
             message: `Could not download ${asset.name}`,
             detail: `Download state: ${state}\n\nYou can retry from the GitHub Releases page.`,
-            buttons: ['OK'],
+            buttons: [L().btnOk],
             noLink: true,
           });
         }
@@ -1256,10 +1265,10 @@ async function downloadAndRevealInstaller(asset: GitHubReleaseAsset): Promise<vo
       session.defaultSession.removeListener('will-download', handler);
       void dialog.showMessageBox(win, {
         type: 'error',
-        title: 'Download Failed',
-        message: 'Could not start the download.',
+        title: L().dlgDownloadFailedTitle,
+        message: L().dlgDownloadStartFailedMsg,
         detail: err instanceof Error ? err.message : String(err),
-        buttons: ['OK'],
+        buttons: [L().btnOk],
         noLink: true,
       });
       resolve();
@@ -1326,7 +1335,7 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
     const ac = new AbortController();
     const timeout = setTimeout(() => ac.abort(), 10_000);
     try {
-      const res = await fetch(apiUrl, {
+      const res = await apiFetch(apiUrl, {
         headers: {
           Accept: 'application/vnd.github+json',
           'User-Agent': `FreeCrawl-SEO-Tool/${installed}`,
@@ -1357,12 +1366,12 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
     }
     void dialog.showMessageBox(win, {
       type: 'warning',
-      title: 'Update Check Failed',
+      title: L().dlgUpdateCheckFailedTitle,
       message: "Couldn't reach the GitHub Releases API.",
       detail:
         (fetchError ?? 'No release tag in response.') +
         '\n\nYou can browse releases manually at:\nhttps://github.com/kemalai/FreeCrawl-SEO-Tool/releases',
-      buttons: ['Open Releases Page', 'Close'],
+      buttons: [L().btnOpenReleasesPage, L().btnClose],
       defaultId: 0,
       cancelId: 1,
       noLink: true,
@@ -1382,12 +1391,12 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
     if (silent) return;
     void dialog.showMessageBox(win, {
       type: 'info',
-      title: 'Up to Date',
+      title: L().dlgUpToDateTitle,
       message: `You're on the latest version (v${installed}).`,
       detail: release.published_at
         ? `Latest GitHub release: ${latest}\nPublished: ${new Date(release.published_at).toLocaleString()}`
         : `Latest GitHub release: ${latest}`,
-      buttons: ['OK'],
+      buttons: [L().btnOk],
       noLink: true,
     });
     return;
@@ -1428,7 +1437,7 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
 
   const result = await dialog.showMessageBox(win, {
     type: 'info',
-    title: 'Update Available',
+    title: L().dlgUpdateAvailableTitle,
     message: `${latest} is available.`,
     detail,
     buttons,
@@ -1458,7 +1467,7 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
 async function promptOpenProject(): Promise<void> {
   if (!mainWindow) return;
   const res = await dialog.showOpenDialog(mainWindow, {
-    title: 'Open Project',
+    title: L().dlgOpenProjectTitle,
     properties: ['openFile'],
     filters: [
       { name: 'FreeCrawl Project', extensions: ['seoproject', 'sqlite', 'db'] },
@@ -1470,7 +1479,7 @@ async function promptOpenProject(): Promise<void> {
     openProjectAtPath(res.filePaths[0]!);
   } catch (err) {
     dialog.showErrorBox(
-      'Open Project Failed',
+      L().dlgOpenProjectFailedTitle,
       `Could not open the selected file.\n\n${(err as Error).message}`,
     );
   }
@@ -1558,14 +1567,39 @@ function createWindow(): void {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    // Only hand real web / mail links to the OS. Without a scheme allowlist a
+    // crawl-derived `file://` / `smb://` / custom-protocol URL would be opened
+    // with the user's privileges.
+    if (isSafeExternalUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  // Null the reference when the window closes so the ~15 `mainWindow?.…send()`
+  // sites short-circuit instead of throwing "Object has been destroyed" — a
+  // closed-but-non-null BrowserWindow still throws on `.webContents`. Matches
+  // the Logs / Visualization / Log Analyzer windows, which already do this.
+  mainWindow.on('closed', () => {
+    mainWindow = null;
   });
 
   if (process.env['ELECTRON_RENDERER_URL']) {
     void mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL']);
   } else {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
+  }
+}
+
+/**
+ * Whether a renderer-supplied URL is safe to hand to `shell.openExternal`.
+ * Restricts to the schemes a user actually expects a browser / mail client to
+ * handle, blocking `file:`, `smb:`, and OS custom-protocol handlers.
+ */
+function isSafeExternalUrl(raw: string): boolean {
+  try {
+    const scheme = new URL(raw).protocol.toLowerCase();
+    return scheme === 'http:' || scheme === 'https:' || scheme === 'mailto:';
+  } catch {
+    return false;
   }
 }
 
@@ -1826,7 +1860,8 @@ function ingestLogResult(filePath: string, result: LogAnalysisResult): LogImport
       lastTs: u.lastTs,
     })),
     daily: Array.from(result.daily.entries()).map(([key, hits]) => {
-      const sp = key.indexOf(' ');
+      // Key is `${day}\t${bucket}` (tab-separated in log-analyzer.ts).
+      const sp = key.indexOf('\t');
       return { day: key.slice(0, sp), bucket: key.slice(sp + 1), hits };
     }),
     status: Array.from(result.status.entries()).map(([status, v]) => ({
@@ -1955,7 +1990,7 @@ function registerIpc(): void {
           return { ok: false, error: 'No window available for the file picker.', imported: null, overview: null };
         }
         const res = await dialog.showOpenDialog(parent, {
-          title: 'Open Access Log',
+          title: L().dlgOpenAccessLogTitle,
           properties: ['openFile'],
           filters: [
             { name: 'Log Files', extensions: ['log', 'txt', 'gz', 'out', 'access'] },
@@ -2027,7 +2062,7 @@ function registerIpc(): void {
           BrowserWindow.fromWebContents(e.sender) ?? logAnalyzerWindow ?? mainWindow;
         if (!parent) return { filePath: '', bytesWritten: 0 };
         const res = await dialog.showSaveDialog(parent, {
-          title: 'Export Log Analysis',
+          title: L().dlgExportLogAnalysisTitle,
           defaultPath: `log-analysis.${format}`,
           filters: [
             format === 'csv'
@@ -2236,7 +2271,7 @@ function registerIpc(): void {
     ): Promise<ExtractionRulesExportResult> => {
       if (!mainWindow) return { filePath: '', bytesWritten: 0 };
       const res = await dialog.showSaveDialog(mainWindow, {
-        title: 'Export Extraction Rules',
+        title: L().dlgExportExtractionRulesTitle,
         defaultPath: 'freecrawl-extraction-rules.json',
         filters: [{ name: 'JSON', extensions: ['json'] }],
       });
@@ -2268,7 +2303,7 @@ function registerIpc(): void {
         return { filePath: '', rules: [], skippedCount: 0 };
       }
       const res = await dialog.showOpenDialog(mainWindow, {
-        title: 'Import Extraction Rules',
+        title: L().dlgImportExtractionRulesTitle,
         properties: ['openFile'],
         filters: [{ name: 'JSON', extensions: ['json'] }],
       });
@@ -2575,7 +2610,7 @@ function registerIpc(): void {
       if (!filePath) {
         if (!mainWindow) return { filePath: '', bytesWritten: 0 };
         const res = await dialog.showSaveDialog(mainWindow, {
-          title: 'Export Settings',
+          title: L().dlgExportSettingsTitle,
           defaultPath: 'freecrawl-settings.json',
           filters: [{ name: 'JSON', extensions: ['json'] }],
         });
@@ -2601,7 +2636,7 @@ function registerIpc(): void {
     async (): Promise<SettingsImportResult> => {
       if (!mainWindow) return { filePath: '', config: null, unknownFields: [] };
       const res = await dialog.showOpenDialog(mainWindow, {
-        title: 'Import Settings',
+        title: L().dlgImportSettingsTitle,
         properties: ['openFile'],
         filters: [{ name: 'JSON', extensions: ['json'] }],
       });
@@ -2659,7 +2694,7 @@ function registerIpc(): void {
       const win = mainWindow;
       if (!win) return null;
       const res = await dialog.showOpenDialog(win, {
-        title: input?.title ?? 'Choose Folder',
+        title: input?.title ?? L().dlgChooseFolderTitle,
         defaultPath: input?.defaultPath,
         properties: ['openDirectory', 'createDirectory'],
       });
@@ -3575,7 +3610,7 @@ function registerIpc(): void {
   // costs serialise + V8-deserialise + main-thread work in the
   // renderer process. Batching at 100 ms drops IPC volume by ~10–30×
   // while still feeling "live" in the log panel.
-  let logsBatch: import('@freecrawl/shared-types').LogEntry[] = [];
+  let logsBatch: LogEntry[] = [];
   let logsFlushTimer: NodeJS.Timeout | null = null;
   const flushLogsBatch = (): void => {
     logsFlushTimer = null;
@@ -3989,18 +4024,17 @@ function registerIpc(): void {
     if (!mainWindow) return false;
     const res = await dialog.showMessageBox(mainWindow, {
       type: 'question',
-      title: 'JavaScript Rendering — Browser Missing',
+      title: L().dlgPlaywrightTitle,
       message:
         'Playwright needs to download a Chromium browser before JavaScript rendering can run.',
       detail:
         'This is a one-time ~250 MB download. The browser is stored in your user cache; FreeCrawl never sends any data to Playwright servers — only the binary is downloaded from cdn.playwright.dev.\n\nDownload now?',
-      buttons: ['Download now', 'Skip — disable JS render for this run'],
+      buttons: [L().btnDownloadNow, L().btnSkipJsRender],
       defaultId: 0,
       cancelId: 1,
     });
     if (res.response !== 0) return false;
     playwrightInstallPromise = new Promise<boolean>((resolve) => {
-      const { spawn } = require('node:child_process') as typeof import('node:child_process');
       const proc = spawn(
         'npx',
         ['playwright', 'install', 'chromium', 'chromium-headless-shell'],
@@ -4030,7 +4064,7 @@ function registerIpc(): void {
             `Browser install failed (exit ${code}). stderr: ${stderr.slice(0, 500)}`,
           );
           dialog.showErrorBox(
-            'Browser Install Failed',
+            L().dlgBrowserInstallFailedTitle,
             `Playwright install exited with code ${code}.\n\n` +
               `Try running "npx playwright install chromium chromium-headless-shell" manually from a terminal in the FreeCrawl source folder.\n\n${stderr.slice(0, 400)}`,
           );
@@ -4041,7 +4075,7 @@ function registerIpc(): void {
         playwrightInstallPromise = null;
         logger.log('error', 'playwright-install', `spawn failed: ${err.message}`);
         dialog.showErrorBox(
-          'Browser Install Failed',
+          L().dlgBrowserInstallFailedTitle,
           `Could not run "npx playwright install": ${err.message}\n\nPlease install Playwright browsers manually from a terminal.`,
         );
         resolve(false);
@@ -5025,10 +5059,10 @@ function registerIpc(): void {
       const bytes = statSync(target).size;
       await dialog.showMessageBox(win, {
         type: 'info',
-        title: 'Project Saved',
+        title: L().dlgProjectSavedTitle,
         message: `Snapshot written: ${(bytes / (1024 * 1024)).toFixed(1)} MB.`,
         detail: target,
-        buttons: ['OK'],
+        buttons: [L().btnOk],
         noLink: true,
       });
       // Saved snapshot is a valid project on disk — pin it as the active
@@ -5054,7 +5088,7 @@ function registerIpc(): void {
       if (!target) {
         if (!mainWindow) return null;
         const res = await dialog.showOpenDialog(mainWindow, {
-          title: 'Open Project',
+          title: L().dlgOpenProjectTitle,
           properties: ['openFile'],
           filters: [
             { name: 'FreeCrawl Project', extensions: ['seoproject', 'sqlite', 'db'] },
@@ -5070,7 +5104,7 @@ function registerIpc(): void {
       } catch (err) {
         if (mainWindow) {
           dialog.showErrorBox(
-            'Open Project Failed',
+            L().dlgOpenProjectFailedTitle,
             `Could not open ${target}.\n\n${(err as Error).message}`,
           );
         }
@@ -5135,12 +5169,12 @@ function registerIpc(): void {
 
         await dialog.showMessageBox(win, {
           type: 'info',
-          title: 'Encrypted Snapshot Saved',
+          title: L().dlgEncSnapshotSavedTitle,
           message: `Encrypted snapshot written: ${(result.bytesWritten / (1024 * 1024)).toFixed(1)} MB.`,
           detail:
             `${target}\n\n` +
             'Keep the password safe — it cannot be recovered. Without it, the file is unreadable.',
-          buttons: ['OK'],
+          buttons: [L().btnOk],
           noLink: true,
         });
         return { filePath: target, bytesWritten: result.bytesWritten };
@@ -5188,7 +5222,7 @@ function registerIpc(): void {
         return app.getPath('documents');
       })();
       const save = await dialog.showSaveDialog(win, {
-        title: 'Save Decrypted Project As…',
+        title: L().dlgSaveDecryptedProjectTitle,
         defaultPath: join(baseDir, 'recovered.seoproject'),
         filters: [
           { name: 'FreeCrawl Project', extensions: ['seoproject'] },
@@ -5214,18 +5248,16 @@ function registerIpc(): void {
   ipcMain.handle(IPC.confirmClear, async (): Promise<ConfirmClearResult> => {
     const win = mainWindow;
     if (!win) return { confirmed: false, skipNext: false };
-    const isTr = getMenuLang() === 'tr';
+    const L = getMenuLabels(getMenuLang());
     const res = await dialog.showMessageBox(win, {
       type: 'warning',
-      buttons: isTr ? ['Temizle', 'İptal'] : ['Clear', 'Cancel'],
+      buttons: [L.btnClear, L.btnCancel],
       defaultId: 1,
       cancelId: 1,
-      title: isTr ? 'Crawl Verilerini Temizle' : 'Clear Crawl Data',
-      message: isTr ? 'Tüm crawl verileri temizlensin mi?' : 'Clear all crawl data?',
-      detail: isTr
-        ? 'Bu, bu projedeki tüm keşfedilmiş URL\'leri, linkleri ve crawl meta verilerini siler. Bu işlem geri alınamaz.'
-        : 'This will remove all discovered URLs, links, and crawl metadata for this project. This action cannot be undone.',
-      checkboxLabel: isTr ? 'Bana bir daha sorma' : "Don't ask me again",
+      title: L.clearCrawlData,
+      message: L.dlgConfirmClearMsg,
+      detail: L.dlgConfirmClearDetail,
+      checkboxLabel: L.dlgDontAskAgain,
       checkboxChecked: false,
       noLink: true,
     });
@@ -5320,21 +5352,24 @@ function registerIpc(): void {
   ipcMain.handle(IPC.urlContextMenu, (e, input: UrlContextMenuInput) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     const canRecrawl = activeCrawler !== null && activeCrawler.isRunning;
+    const L = getMenuLabels(getMenuLang());
 
     const template: MenuItemConstructorOptions[] = [
       {
-        label: 'Copy',
+        label: L.ctxCopy,
         click: () => clipboard.writeText(input.url),
       },
       {
-        label: 'Open in Browser',
-        click: () => void shell.openExternal(input.url),
+        label: L.ctxOpenInBrowser,
+        click: () => {
+          if (isSafeExternalUrl(input.url)) void shell.openExternal(input.url);
+        },
       },
       { type: 'separator' },
       {
-        label: 'Re-Spider',
+        label: L.ctxRespider,
         enabled: canRecrawl,
-        toolTip: canRecrawl ? undefined : 'Start a crawl first',
+        toolTip: canRecrawl ? undefined : L.ctxStartCrawlFirst,
         click: () => {
           const db = getDb();
           db.markUrlForRecrawl(input.urlId);
@@ -5345,7 +5380,7 @@ function registerIpc(): void {
         },
       },
       {
-        label: 'Remove',
+        label: L.ctxRemove,
         click: () => {
           getDb().deleteUrl(input.urlId);
           fireDataChanged();
@@ -5353,20 +5388,7 @@ function registerIpc(): void {
       },
       { type: 'separator' },
       {
-        label: 'Export',
-        enabled: false,
-        submenu: [{ label: 'Selected URLs as CSV', enabled: false }],
-      },
-      { label: 'Visualisations', enabled: false },
-      { label: 'Check Index', enabled: false },
-      { label: 'Backlinks', enabled: false },
-      { label: 'Validation', enabled: false },
-      { label: 'History', enabled: false },
-      { label: 'Speed', enabled: false },
-      { type: 'separator' },
-      { label: 'Show Other Domains on IP', enabled: false },
-      {
-        label: 'Open robots.txt',
+        label: L.ctxOpenRobotsTxt,
         click: () => {
           try {
             const origin = new URL(input.url).origin;
@@ -5393,27 +5415,27 @@ function registerIpc(): void {
       const urls = db.getUrlsByIds(ids);
       const canRecrawl = activeCrawler !== null && activeCrawler.isRunning;
       const n = ids.length.toLocaleString();
+      const L = getMenuLabels(getMenuLang());
 
       const template: MenuItemConstructorOptions[] = [
         {
-          label: `Copy ${n} URLs`,
+          label: L.ctxCopyNUrls.replace('{n}', n),
           click: () => clipboard.writeText(urls.join('\n')),
         },
         {
-          label: `Open ${n} URLs in Browser`,
+          label: L.ctxOpenNUrlsInBrowser.replace('{n}', n),
           // Guard: opening hundreds of tabs at once is a bad default.
           enabled: urls.length <= 20,
-          toolTip:
-            urls.length > 20 ? 'Limited to 20 URLs to avoid spawning too many tabs' : undefined,
+          toolTip: urls.length > 20 ? L.ctxOpenLimitTooltip : undefined,
           click: () => {
-            for (const u of urls) void shell.openExternal(u);
+            for (const u of urls) if (isSafeExternalUrl(u)) void shell.openExternal(u);
           },
         },
         { type: 'separator' },
         {
-          label: `Re-Spider ${n} URLs`,
+          label: L.ctxRespiderNUrls.replace('{n}', n),
           enabled: canRecrawl,
-          toolTip: canRecrawl ? undefined : 'Start a crawl first',
+          toolTip: canRecrawl ? undefined : L.ctxStartCrawlFirst,
           click: () => {
             db.markUrlsForRecrawl(ids);
             if (activeCrawler) {
@@ -5423,7 +5445,7 @@ function registerIpc(): void {
           },
         },
         {
-          label: `Remove ${n} URLs`,
+          label: L.ctxRemoveNUrls.replace('{n}', n),
           click: () => {
             db.deleteUrls(ids);
             fireDataChanged();
@@ -5431,7 +5453,7 @@ function registerIpc(): void {
         },
         { type: 'separator' },
         {
-          label: `Export ${n} URLs as CSV…`,
+          label: L.ctxExportNUrlsAsCsv.replace('{n}', n),
           click: async () => {
             const w = win ?? mainWindow;
             if (!w) return;
@@ -5798,7 +5820,7 @@ function registerIpc(): void {
       return { outputDir: '', files: [], errors: [] };
     }
     const dirRes = await dialog.showOpenDialog(mainWindow, {
-      title: 'Bulk Export — choose output folder',
+      title: L().dlgBulkExportFolderTitle,
       properties: ['openDirectory', 'createDirectory'],
     });
     if (dirRes.canceled || dirRes.filePaths.length === 0) {
@@ -5812,14 +5834,14 @@ function registerIpc(): void {
       const totalRows = files.reduce((s, f) => s + f.rowsWritten, 0);
       await dialog.showMessageBox(mainWindow, {
         type: 'info',
-        title: 'Bulk Export Complete',
+        title: L().dlgBulkExportCompleteTitle,
         message: `${files.length} file(s) written, ${totalRows.toLocaleString()} row(s) total.`,
         detail:
           outputDir +
           (errors.length > 0
             ? `\n\nErrors:\n${errors.map((e) => `• ${e.label}: ${e.error}`).join('\n')}`
             : ''),
-        buttons: ['OK', 'Open Folder'],
+        buttons: [L().btnOk, L().btnOpenFolder],
         defaultId: 0,
         noLink: true,
       }).then((res) => {
@@ -5852,10 +5874,10 @@ function registerIpc(): void {
       if (mainWindow) {
         await dialog.showMessageBox(mainWindow, {
           type: 'info',
-          title: 'HTML Report Saved',
+          title: L().dlgHtmlReportSavedTitle,
           message: `Report written: ${(result.bytesWritten / 1024).toFixed(1)} KB.`,
           detail: result.filePath,
-          buttons: ['OK'],
+          buttons: [L().btnOk],
           noLink: true,
         });
       }
@@ -5901,7 +5923,7 @@ function registerIpc(): void {
           : result.files[0] ?? filePath;
         await dialog.showMessageBox(mainWindow, {
           type: result.truncated ? 'warning' : 'info',
-          title: 'Sitemap Generated',
+          title: L().dlgSitemapGeneratedTitle,
           message: result.sharded
             ? `Sharded sitemap written: ${result.urlsWritten.toLocaleString()} URLs across ${
                 result.files.length - 1
@@ -5910,7 +5932,7 @@ function registerIpc(): void {
                 result.truncated ? ' (truncated at the 50,000 limit).' : '.'
               }`,
           detail,
-          buttons: ['OK'],
+          buttons: [L().btnOk],
           noLink: true,
         });
       }

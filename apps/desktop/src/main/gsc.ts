@@ -13,6 +13,7 @@
  */
 import type { GscSite } from '@freecrawl/shared-types';
 import { getAccessToken } from './google-oauth.js';
+import { apiFetch } from './api-fetch.js';
 import * as logger from './logger.js';
 
 const API_BASE = 'https://www.googleapis.com/webmasters/v3';
@@ -37,7 +38,7 @@ function apiError(json: unknown, status: number): string {
 /** List the connected account's Search Console properties. */
 export async function listSites(): Promise<GscSite[]> {
   const token = await getAccessToken('gsc');
-  const res = await fetch(`${API_BASE}/sites`, {
+  const res = await apiFetch(`${API_BASE}/sites`, {
     headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(30_000),
   });
@@ -82,7 +83,7 @@ export async function querySearchAnalytics(
   let startRow = 0;
 
   for (;;) {
-    const res = await fetch(endpoint, {
+    const res = await apiFetch(endpoint, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -151,7 +152,7 @@ export async function inspectUrl(
   url: string,
 ): Promise<GscInspectionRaw> {
   const token = await getAccessToken('gsc');
-  const res = await fetch(
+  const res = await apiFetch(
     'https://searchconsole.googleapis.com/v1/urlInspection/index:inspect',
     {
       method: 'POST',

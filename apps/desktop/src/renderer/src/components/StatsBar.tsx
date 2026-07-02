@@ -138,10 +138,15 @@ export function StatsBar() {
         valueClassName={fpsClass(perf.fps)}
         title={
           perf.fps >= 50
-            ? 'Renderer is smooth (≥ 50 fps)'
+            ? t('stats.fpsSmoothTitle', { defaultValue: 'Renderer is smooth (≥ 50 fps)' })
             : perf.fps >= 30
-              ? 'Renderer is degraded (30–49 fps) — likely competing with crawl IPC'
-              : 'Renderer is stalled (< 30 fps) — main thread starved; pause crawl or close Logs window'
+              ? t('stats.fpsDegradedTitle', {
+                  defaultValue: 'Renderer is degraded (30–49 fps) — likely competing with crawl IPC',
+                })
+              : t('stats.fpsStalledTitle', {
+                  defaultValue:
+                    'Renderer is stalled (< 30 fps) — main thread starved; pause crawl or close Logs window',
+                })
         }
       />
       {perf.heapMb !== null && (
@@ -149,7 +154,9 @@ export function StatsBar() {
           label={t('stats.heap')}
           value={`${perf.heapMb} MB`}
           valueClassName={heapClass(perf.heapMb)}
-          title="Renderer JS heap. >500 MB = warm, >1 GB = likely a listener / cache leak"
+          title={t('stats.heapTitle', {
+            defaultValue: 'Renderer JS heap. >500 MB = warm, >1 GB = likely a listener / cache leak',
+          })}
         />
       )}
       {mem && (
@@ -158,26 +165,41 @@ export function StatsBar() {
             label={t('stats.rss')}
             value={formatBytes(mem.rss)}
             valueClassName={rssClass(mem.rss, mem.systemTotal)}
-            title={`Main-process resident set size (Electron + workers). System total: ${formatBytes(mem.systemTotal)}.`}
+            title={t('stats.rssTitle', {
+              defaultValue:
+                'Main-process resident set size (Electron + workers). System total: {{total}}.',
+              total: formatBytes(mem.systemTotal),
+            })}
           />
           <Stat
             label={t('stats.sysFree')}
             value={formatBytes(mem.systemFree)}
             valueClassName={systemFreeClass(mem.systemFree, mem.systemTotal)}
-            title={`OS-reported free memory. < 10% of system total triggers swap; pause the crawl before that. System total: ${formatBytes(mem.systemTotal)}.`}
+            title={t('stats.sysFreeTitle', {
+              defaultValue:
+                'OS-reported free memory. < 10% of system total triggers swap; pause the crawl before that. System total: {{total}}.',
+              total: formatBytes(mem.systemTotal),
+            })}
           />
           {perUrlCost !== null && (
             <Stat
               label={t('stats.perUrl')}
               value={formatBytes(perUrlCost)}
-              title={`Average bytes of RSS per crawled URL (${mem.urlsCrawled.toLocaleString()} URLs). Includes Electron overhead, so the marginal cost on real-world large crawls is typically lower.`}
+              title={t('stats.perUrlTitle', {
+                defaultValue:
+                  'Average bytes of RSS per crawled URL ({{urls}} URLs). Includes Electron overhead, so the marginal cost on real-world large crawls is typically lower.',
+                urls: mem.urlsCrawled.toLocaleString(),
+              })}
             />
           )}
           {capacity !== null && (
             <Stat
               label={t('stats.capacity')}
               value={formatCount(capacity)}
-              title={`Estimated additional URLs that fit in remaining system memory at the current per-URL cost. Calc: systemFree / perUrlCost. Treat as an upper bound — sustained throughput is usually CPU-bound first.`}
+              title={t('stats.capacityTitle', {
+                defaultValue:
+                  'Estimated additional URLs that fit in remaining system memory at the current per-URL cost. Calc: systemFree / perUrlCost. Treat as an upper bound — sustained throughput is usually CPU-bound first.',
+              })}
             />
           )}
         </>
@@ -188,10 +210,17 @@ export function StatsBar() {
         valueClassName={lagClass(perf.inputLagMs)}
         title={
           perf.inputLagMs < 16
-            ? 'Main thread is responsive — input feels instant'
+            ? t('stats.lagResponsiveTitle', {
+                defaultValue: 'Main thread is responsive — input feels instant',
+              })
             : perf.inputLagMs < 50
-              ? 'Main thread is contended — light click stutter'
-              : 'Main thread is busy — IPC backed up; most likely sidebar SQL or table chunk fetch competing with the crawler'
+              ? t('stats.lagContendedTitle', {
+                  defaultValue: 'Main thread is contended — light click stutter',
+                })
+              : t('stats.lagBusyTitle', {
+                  defaultValue:
+                    'Main thread is busy — IPC backed up; most likely sidebar SQL or table chunk fetch competing with the crawler',
+                })
         }
       />
 
