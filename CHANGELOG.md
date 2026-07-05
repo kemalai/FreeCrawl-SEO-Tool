@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.2] — 2026-07-06
+
+### Added
+- Internal PageRank "Link Score" (0–100) per page — a sortable column, a detail-panel row, and a "By Link Score" graph colour mode showing where internal link equity concentrates.
+- RAM-only storage mode — run a crawl entirely in memory for maximum speed, writing to disk only when you Save As (Settings → Storage).
+
+### Changed
+- Cross-source orphan pages (sitemap + Search Console + Analytics) now rank by traffic and are available as an MCP report tool.
+- Various performance and reliability improvements.
+
 ## [0.8.1] — 2026-07-02
 
 ### Added
