@@ -99,6 +99,7 @@ interface UrlRowDb {
   depth: number;
   inlinks: number;
   outlinks: number;
+  link_score: number | null;
   redirect_target: string | null;
   crawled_at: string;
   is_external: number;
@@ -1263,6 +1264,29 @@ export class ProjectDb {
     // so the `external:html` filter stays empty. COALESCE keeps the prior
     // value when the probe returned no usable Content-Type.
     const contentKind = contentKindFromType(patch.contentType);
+    // Derive indexability from the probed status. External stubs are inserted
+    // with a placeholder 'indexable'; without recomputing here, a link that
+    // 404s, is bot-blocked, or never responded would stay reported as
+    // "indexable" (misleading, and inflates the Indexable count).
+    const status = patch.statusCode;
+    let indexability: string;
+    let indexabilityReason: string | null;
+    if (status === null) {
+      indexability = 'non-indexable:client-error';
+      indexabilityReason = 'No response';
+    } else if (status >= 500) {
+      indexability = 'non-indexable:server-error';
+      indexabilityReason = `HTTP ${status}`;
+    } else if (status >= 400) {
+      indexability = 'non-indexable:client-error';
+      indexabilityReason = `HTTP ${status}`;
+    } else if (status >= 300) {
+      indexability = 'non-indexable:redirect';
+      indexabilityReason = `HTTP ${status}`;
+    } else {
+      indexability = 'indexable';
+      indexabilityReason = null;
+    }
     this.db
       .prepare(
         `UPDATE urls SET
@@ -1271,7 +1295,9 @@ export class ProjectDb {
            content_type = :content_type,
            content_kind = COALESCE(:content_kind, content_kind),
            content_length = :content_length,
-           response_time_ms = :response_time_ms
+           response_time_ms = :response_time_ms,
+           indexability = :indexability,
+           indexability_reason = :indexability_reason
          WHERE url = :url AND is_external = 1`,
       )
       .run({
@@ -1282,6 +1308,8 @@ export class ProjectDb {
         content_kind: contentKind,
         content_length: patch.contentLength ?? null,
         response_time_ms: patch.responseTimeMs ?? null,
+        indexability,
+        indexability_reason: indexabilityReason,
       });
   }
 
@@ -1933,6 +1961,130 @@ export class ProjectDb {
       this.db.exec('ROLLBACK');
       throw err;
     }
+  }
+
+  /**
+   * Internal PageRank / "link score". Runs the classic iterative PageRank
+   * over the internal link graph (`links.is_internal = 1`), then normalises
+   * the stationary distribution so the most-linked page scores 100 and the
+   * rest scale linearly down to 0. Written to `urls.link_score` (INTEGER).
+   *
+   * Model details:
+   *  - Nodes = every internal URL (`is_external = 0`). Edges = unique
+   *    (from → to) internal links; duplicate nav/footer links to the same
+   *    target are collapsed so template chrome doesn't inflate the score.
+   *  - Damping 0.85 (Google's original constant). Dangling nodes (no
+   *    out-links) redistribute their mass uniformly, so equity is conserved.
+   *  - Converges on L1 delta < 1e-6 or `iterations` cap, whichever first.
+   *  - When the crawl has zero internal edges there is no equity to
+   *    distribute, so every page is written 0 (not a misleading uniform 100).
+   */
+  recomputeLinkScore(
+    opts: { damping?: number; iterations?: number } = {},
+  ): { pages: number; iterations: number } {
+    const damping = opts.damping ?? 0.85;
+    const maxIterations = opts.iterations ?? 50;
+
+    const nodeRows = this.db
+      .prepare('SELECT id, url FROM urls WHERE is_external = 0')
+      .all() as { id: number; url: string }[];
+    const n = nodeRows.length;
+    if (n === 0) return { pages: 0, iterations: 0 };
+
+    const indexById = new Map<number, number>();
+    const indexByUrl = new Map<string, number>();
+    const idByIndex = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      const row = nodeRows[i]!;
+      indexById.set(row.id, i);
+      indexByUrl.set(row.url, i);
+      idByIndex[i] = row.id;
+    }
+
+    // Build the unique-edge adjacency list. `SELECT DISTINCT` collapses
+    // duplicate (from → to) links inside SQLite, so a page's repeated
+    // nav/footer chrome links to the same target don't inflate its
+    // out-degree — no per-source Set needed on the JS side. `to_url` is a
+    // string, so map it back to a node index; links to external stubs (not
+    // in `urls`) and self-loops are dropped.
+    const outTargets: number[][] = Array.from({ length: n }, () => []);
+    let edgeCount = 0;
+    const edgeRows = this.db
+      .prepare(
+        'SELECT DISTINCT from_url_id AS source, to_url FROM links WHERE is_internal = 1',
+      )
+      .all() as { source: number; to_url: string }[];
+    for (const e of edgeRows) {
+      const si = indexById.get(e.source);
+      if (si === undefined) continue;
+      const ti = indexByUrl.get(e.to_url);
+      if (ti === undefined || ti === si) continue;
+      outTargets[si]!.push(ti);
+      edgeCount++;
+    }
+
+    const upd = this.db.prepare('UPDATE urls SET link_score = ? WHERE id = ?');
+
+    // No internal link graph → no equity signal. Zero the column so stale
+    // scores from a previous crawl don't linger.
+    if (edgeCount === 0) {
+      this.db.exec('BEGIN');
+      try {
+        for (let i = 0; i < n; i++) upd.run(0, idByIndex[i]!);
+        this.db.exec('COMMIT');
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      }
+      return { pages: n, iterations: 0 };
+    }
+
+    const outDeg = new Int32Array(n);
+    for (let i = 0; i < n; i++) outDeg[i] = outTargets[i]!.length;
+
+    let pr = new Float64Array(n);
+    pr.fill(1 / n);
+    let next = new Float64Array(n);
+    const base = (1 - damping) / n;
+    let iterationsRun = 0;
+    for (let iter = 0; iter < maxIterations; iter++) {
+      iterationsRun++;
+      // Dangling nodes (no out-links) leak PageRank mass; redistribute it
+      // uniformly so the total stays 1.
+      let dangling = 0;
+      for (let i = 0; i < n; i++) if (outDeg[i]! === 0) dangling += pr[i]!;
+      const danglingShare = (damping * dangling) / n;
+      for (let i = 0; i < n; i++) next[i] = base + danglingShare;
+      for (let i = 0; i < n; i++) {
+        const d = outDeg[i]!;
+        if (d === 0) continue;
+        const share = (damping * pr[i]!) / d;
+        const targets = outTargets[i]!;
+        for (let k = 0; k < d; k++) next[targets[k]!]! += share;
+      }
+      let diff = 0;
+      for (let i = 0; i < n; i++) diff += Math.abs(next[i]! - pr[i]!);
+      const tmp = pr;
+      pr = next;
+      next = tmp;
+      if (diff < 1e-6) break;
+    }
+
+    let maxPr = 0;
+    for (let i = 0; i < n; i++) if (pr[i]! > maxPr) maxPr = pr[i]!;
+    const scale = maxPr > 0 ? 100 / maxPr : 0;
+
+    this.db.exec('BEGIN');
+    try {
+      for (let i = 0; i < n; i++) {
+        upd.run(Math.round(pr[i]! * scale), idByIndex[i]!);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return { pages: n, iterations: iterationsRun };
   }
 
   /**
@@ -5483,13 +5635,14 @@ export class ProjectDb {
       lcpTag: string | null;
       lcpResourceUrl: string | null;
       lcpCoverage: number | null;
+      linkScore: number | null;
     }[];
     edges: { source: number; target: number }[];
   } {
     const nodes = this.db
       .prepare(
         `SELECT id, url, status_code, depth, inlinks, indexability,
-                lcp_tag, lcp_resource_url, lcp_coverage
+                lcp_tag, lcp_resource_url, lcp_coverage, link_score
            FROM urls
           WHERE is_external = 0 AND content_kind = 'html'
           ORDER BY inlinks DESC, id ASC
@@ -5505,6 +5658,7 @@ export class ProjectDb {
       lcp_tag: string | null;
       lcp_resource_url: string | null;
       lcp_coverage: number | null;
+      link_score: number | null;
     }[];
 
     if (nodes.length === 0) return { nodes: [], edges: [] };
@@ -5543,6 +5697,7 @@ export class ProjectDb {
         lcpTag: n.lcp_tag,
         lcpResourceUrl: n.lcp_resource_url,
         lcpCoverage: n.lcp_coverage,
+        linkScore: n.link_score,
       })),
       edges,
     };
@@ -6784,10 +6939,20 @@ export class ProjectDb {
    * triage why it was missed (sitemap-only = drop or fix internal
    * linking; GSC + GA4 = real but unreachable from the crawl seed).
    */
-  orphanPagesCrossSource(
-    limit = 1000,
-  ): { url: string; sources: string[] }[] {
+  orphanPagesCrossSource(limit = 1000): {
+    url: string;
+    sources: string[];
+    gscClicks: number | null;
+    gscImpressions: number | null;
+    ga4Sessions: number | null;
+    lastmod: string | null;
+  }[] {
     const cap = Math.max(1, Math.min(10_000, limit));
+    // The GSC / GA4 / sitemap joins are all 1:1 (url is PK / UNIQUE in each
+    // source table), so pulling their metrics alongside the GROUP_CONCAT of
+    // sources introduces no fan-out. Ordered by traffic (GSC clicks + GA4
+    // sessions) descending so the highest-value orphans — real pages users
+    // reach that the crawl can't — float to the top.
     const rows = this.db
       .prepare(
         `WITH src AS (
@@ -6798,18 +6963,36 @@ export class ProjectDb {
            SELECT url, 'ga4' AS source FROM ga4_results
          )
          SELECT s.url AS url,
-                GROUP_CONCAT(DISTINCT s.source) AS sources
+                GROUP_CONCAT(DISTINCT s.source) AS sources,
+                g.clicks AS gscClicks,
+                g.impressions AS gscImpressions,
+                a.sessions AS ga4Sessions,
+                sm.lastmod AS lastmod
            FROM src s
            LEFT JOIN urls u ON u.url = s.url
+           LEFT JOIN gsc_results g ON g.url = s.url
+           LEFT JOIN ga4_results a ON a.url = s.url
+           LEFT JOIN sitemap_urls sm ON sm.url = s.url
           WHERE u.url IS NULL OR u.status_code IS NULL
           GROUP BY s.url
-          ORDER BY s.url
+          ORDER BY (COALESCE(g.clicks, 0) + COALESCE(a.sessions, 0)) DESC, s.url
           LIMIT ?`,
       )
-      .all(cap) as { url: string; sources: string }[];
+      .all(cap) as {
+      url: string;
+      sources: string;
+      gscClicks: number | null;
+      gscImpressions: number | null;
+      ga4Sessions: number | null;
+      lastmod: string | null;
+    }[];
     return rows.map((r) => ({
       url: r.url,
       sources: r.sources ? r.sources.split(',').sort() : [],
+      gscClicks: r.gscClicks ?? null,
+      gscImpressions: r.gscImpressions ?? null,
+      ga4Sessions: r.ga4Sessions ?? null,
+      lastmod: r.lastmod ?? null,
     }));
   }
 
@@ -6999,6 +7182,7 @@ export class ProjectDb {
     depth: r.depth,
     inlinks: r.inlinks,
     outlinks: r.outlinks,
+    linkScore: r.link_score,
     imagesCount: r.images_count,
     imagesMissingAlt: r.images_missing_alt,
     redirectTarget: r.redirect_target,
@@ -7148,6 +7332,7 @@ const VALID_SORT_COLUMNS = new Set([
   'depth',
   'inlinks',
   'outlinks',
+  'link_score',
   'crawled_at',
   'indexability',
   'content_kind',

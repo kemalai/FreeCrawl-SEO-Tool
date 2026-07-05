@@ -277,6 +277,8 @@ export interface CrawlUrlRow {
   depth: number;
   inlinks: number;
   outlinks: number;
+  /** Internal PageRank / link score, 0..100 (100 = most-linked page). Null until the post-crawl pass runs. */
+  linkScore: number | null;
   imagesCount: number;
   imagesMissingAlt: number;
   /** Number of `<img>` tags with `alt=""` (decorative, distinct from missing alt). */
@@ -1011,6 +1013,8 @@ export interface CrawlConfig {
    */
   /** Recompute `inlinks` count per URL after the crawl. */
   analyseInlinks: boolean;
+  /** Compute internal PageRank / link score (0..100) over the link graph. */
+  analyseLinkScore: boolean;
   /** Walk redirect chains, fill `redirect_chain_length` / `redirect_loop`. */
   analyseRedirectChains: boolean;
   /** Hreflang reciprocity + invalid code + target health. */
@@ -1980,6 +1984,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   followNofollow: false,
   followJsRedirects: false,
   analyseInlinks: true,
+  analyseLinkScore: true,
   analyseRedirectChains: true,
   analyseHreflang: true,
   analyseDuplicates: true,

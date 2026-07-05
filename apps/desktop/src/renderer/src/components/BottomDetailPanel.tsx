@@ -1752,6 +1752,7 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
     ['Crawl Depth', row.depth],
     ['Inlinks', row.inlinks],
     ['Outlinks', row.outlinks],
+    ['Link Score', row.linkScore],
     ['Redirect URL', row.redirectTarget],
     ['Last Crawled', row.crawledAt],
   ];

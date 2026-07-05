@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import * as os from 'node:os';
-import { fetch as undiciFetch } from 'undici';
+import { fetch as undiciFetch, type Dispatcher } from 'undici';
 import { load as cheerioLoad } from 'cheerio';
 import PQueue from 'p-queue';
 import type {
@@ -28,7 +28,9 @@ import { parseHtml, estimatePixelWidth, type ParsedPage } from './html-parser.js
 import { analyseCookies, extractSetCookies } from './cookies.js';
 import { loadRobots, type RobotsChecker } from './robots.js';
 import {
+  BROWSER_FALLBACK_UA,
   buildDigestAuthHeader,
+  buildLenientDispatcher,
   collectNetworkDiagnostics,
   defaultRequestHeaders,
   detectHttpProtocol,
@@ -76,6 +78,31 @@ const EXT_TO_KIND: Record<string, ContentKind> = {
   ttf: 'font',
   otf: 'font',
 };
+
+// Statuses a HEAD request often reports that differ from a real GET: many
+// CDNs/WAFs answer a HEAD with 403/405 but a GET with 200 (e.g. Netflix
+// HEAD 403 / GET 200). Retry these — plus any 5xx or transport failure —
+// with GET before recording, so the status matches what a visitor sees.
+// Module-scope so the external-probe hot path doesn't rebuild it per URL.
+const HEAD_UNRELIABLE_STATUSES = new Set([
+  400, 401, 403, 405, 406, 409, 429, 501,
+]);
+
+const CERT_VERIFY_ERROR_RE =
+  /UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|DEPTH_ZERO_SELF_SIGNED_CERT|CERT_UNTRUSTED/;
+function isCertVerifyError(err: unknown): boolean {
+  return CERT_VERIFY_ERROR_RE.test(formatFetchError(err));
+}
+
+// DNS / TCP-connect failures are method- and UA-independent — a browser-UA
+// GET can't recover them, so retrying only doubles the wait on a dead host.
+// (HTTP/2 resets, headers-timeouts and 4xx/5xx statuses CAN differ on GET,
+// so those still get the retry.)
+const HARD_TRANSPORT_ERROR_RE =
+  /ENOTFOUND|EAI_AGAIN|ENODATA|ESERVFAIL|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT/;
+function isHardTransportError(err: unknown): boolean {
+  return HARD_TRANSPORT_ERROR_RE.test(formatFetchError(err));
+}
 
 export class Crawler extends EventEmitter {
   private config: CrawlConfig;
@@ -785,6 +812,12 @@ export class Crawler extends EventEmitter {
       this.emit('info', 'Recomputing inlinks…');
       this.setOp('post-crawl:recompute-inlinks');
       await this.runDbPass('recomputeInlinks');
+    }
+    if (this.config.analyseLinkScore) {
+      await yieldToEventLoop();
+      this.emit('info', 'Computing internal link scores…');
+      this.setOp('post-crawl:link-score');
+      await this.runDbPass('recomputeLinkScore');
     }
     if (this.config.analyseRedirectChains) {
       await yieldToEventLoop();
@@ -1635,37 +1668,81 @@ export class Crawler extends EventEmitter {
   private async probeExternal(url: string): Promise<void> {
     if (this.stopped) return;
     const t0 = Date.now();
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
-    const doFetch = async (method: 'HEAD' | 'GET') =>
-      undiciFetch(url, {
-        method,
-        headers: defaultRequestHeaders(
-          this.resolveUserAgent(url),
-          this.config.acceptLanguage,
-          this.config.customHeaders,
-          this.config.auth,
-        ),
-        redirect: this.config.followRedirects ? 'follow' : 'manual',
-        signal: controller.signal,
-      });
+    const cfgUa = this.resolveUserAgent(url);
 
-    try {
-      let res;
+    // One fetch attempt with its OWN timeout budget. Giving HEAD and the GET
+    // retry independent AbortControllers is what stops a hung HEAD from eating
+    // the GET's time and collapsing a specific error (connect timeout, TLS
+    // reject) into a generic "operation was aborted — raise your Timeout".
+    const attempt = async (
+      method: 'HEAD' | 'GET',
+      ua: string,
+      dispatcher?: Dispatcher,
+    ): Promise<{ res?: Awaited<ReturnType<typeof undiciFetch>>; err?: unknown }> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
       try {
-        res = await doFetch('HEAD');
-      } catch {
-        // Some hosts / WAFs reject HEAD — fall back to GET and discard body.
-        res = await doFetch('GET');
+        const res = await undiciFetch(url, {
+          method,
+          headers: defaultRequestHeaders(
+            ua,
+            this.config.acceptLanguage,
+            this.config.customHeaders,
+            this.config.auth,
+          ),
+          redirect: this.config.followRedirects ? 'follow' : 'manual',
+          signal: controller.signal,
+          ...(dispatcher ? { dispatcher } : {}),
+        });
+        return { res };
+      } catch (err) {
+        return { err };
+      } finally {
+        clearTimeout(timer);
       }
-      // If HEAD returned a suspicious status (405/403) try GET once to confirm
-      if (res.status === 405 || res.status === 501) {
-        try {
-          res = await doFetch('GET');
-        } catch {
-          /* keep HEAD result */
+    };
+
+    // 1) Cheap HEAD with the configured UA.
+    let { res, err } = await attempt('HEAD', cfgUa);
+
+    // 2) Retry with GET (browser UA) when HEAD is unreliable or threw a
+    //    recoverable error. The browser UA slips past UA-based bot walls; the
+    //    GET reveals the status a real visitor would get.
+    const headBlocked =
+      !!res && (res.status >= 500 || HEAD_UNRELIABLE_STATUSES.has(res.status));
+    const headRecoverableThrow = !res && !isHardTransportError(err);
+    if (headBlocked || headRecoverableThrow) {
+      try {
+        await res?.body?.cancel();
+      } catch {
+        /* ignore */
+      }
+      const got = await attempt('GET', BROWSER_FALLBACK_UA);
+      if (got.res) {
+        res = got.res;
+        err = undefined;
+      } else if (!res) {
+        // Prefer the more specific of the two transport errors.
+        err = got.err ?? err;
+      }
+    }
+
+    // 3) Last-resort TLS-relaxed retry for incomplete-chain certificates that
+    //    browsers accept (via AIA) but Node rejects. External link checking
+    //    only needs the status code. Skipped when a proxy is active.
+    if (!res && isCertVerifyError(err)) {
+      const lenient = buildLenientDispatcher();
+      if (lenient) {
+        const got = await attempt('GET', BROWSER_FALLBACK_UA, lenient);
+        if (got.res) {
+          res = got.res;
+          err = undefined;
         }
       }
+    }
+
+    const responseTimeMs = Date.now() - t0;
+    if (res) {
       try {
         await res.body?.cancel();
       } catch {
@@ -1675,22 +1752,21 @@ export class Crawler extends EventEmitter {
         url,
         {
           statusCode: res.status,
+          statusText: res.statusText || null,
           contentType: res.headers.get('content-type'),
           contentLength: parseIntSafe(res.headers.get('content-length')),
-          responseTimeMs: Date.now() - t0,
+          responseTimeMs,
         },
       ]);
-    } catch (err) {
+    } else {
       await this.dbCall<void>('updateExternalProbe', [
         url,
         {
           statusCode: null,
           statusText: formatFetchError(err),
-          responseTimeMs: Date.now() - t0,
+          responseTimeMs,
         },
       ]);
-    } finally {
-      clearTimeout(timeout);
     }
   }
 

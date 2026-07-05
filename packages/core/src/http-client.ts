@@ -9,6 +9,28 @@ let dnsInitialized = false;
  *  only rebuild when it actually changes (a second crawl can switch proxy). */
 let lastProxyKey: string | null = null;
 
+/** Resilient DNS lookup from the last direct-mode init, reused when building
+ *  the lenient (TLS-relaxed) dispatcher below. */
+let sharedResilientLookup: ReturnType<typeof createResilientLookup> | null = null;
+/** True while the global dispatcher is a direct Agent (no proxy). Lenient TLS
+ *  retry is only offered in this mode so we never silently bypass a proxy. */
+let directMode = false;
+/** Lazily-built dispatcher with certificate verification disabled — used ONLY
+ *  as a last-resort retry when an EXTERNAL link fails TLS chain verification
+ *  (incomplete chain that browsers complete via AIA fetching but Node does
+ *  not). Rebuilt whenever the effective proxy changes. */
+let lenientDispatcher: Agent | null = null;
+
+/**
+ * Browser-like User-Agent used as a fallback when an external-link probe with
+ * the configured (often non-browser) UA is blocked. Many WAFs/CDNs actively
+ * reject or reset non-browser UAs — e.g. Microsoft resets the HTTP/2 stream,
+ * Cloudflare Bot-Fight returns 403 — so a link that a real visitor can open is
+ * wrongly recorded as failed. See `Crawler.probeExternal`.
+ */
+export const BROWSER_FALLBACK_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
 /**
  * Configure the global undici dispatcher and Node DNS once per process.
  *
@@ -60,8 +82,19 @@ export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsR
   const key = proxyUrl || '<direct>';
   if (key === lastProxyKey) return;
   lastProxyKey = key;
+  // Effective transport changed — drop the cached lenient dispatcher so it
+  // rebuilds against the new proxy/direct state and DNS lookup. Close the
+  // stale Agent first so its keep-alive socket pool is released now instead
+  // of leaking until GC; fall back to a forceful destroy if graceful close
+  // rejects (e.g. already closing).
+  if (lenientDispatcher) {
+    const stale = lenientDispatcher;
+    void stale.close().catch(() => stale.destroy().catch(() => undefined));
+  }
+  lenientDispatcher = null;
 
   if (proxyUrl) {
+    directMode = false;
     const scheme = proxyUrl.slice(0, Math.max(0, proxyUrl.indexOf(':'))).toLowerCase();
     if (scheme.startsWith('socks')) {
       setGlobalDispatcher(buildSocksDispatcher(proxyUrl));
@@ -72,6 +105,8 @@ export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsR
   }
 
   const lookup = createResilientLookup({ onEvent: opts.onDnsEvent });
+  sharedResilientLookup = lookup;
+  directMode = true;
   const agent = new Agent({
     connections: 128,
     pipelining: 1,
@@ -91,6 +126,38 @@ export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsR
   });
 
   setGlobalDispatcher(agent);
+}
+
+/**
+ * Lazily build (and cache) a dispatcher whose TLS layer does NOT verify the
+ * certificate chain, reusing the resilient DNS lookup. Used as a last-resort
+ * retry for EXTERNAL link probes that fail with an incomplete-chain error
+ * (`UNABLE_TO_VERIFY_LEAF_SIGNATURE`): browsers complete such chains via AIA
+ * fetching, Node does not, so an otherwise-reachable link is wrongly recorded
+ * as dead. External link checking only needs the status code — TLS problems
+ * are surfaced separately by the Security tab / certificate probe.
+ *
+ * Returns `null` when a proxy is active (we must not bypass a corporate proxy
+ * just to relax TLS) or before `initHttpClient` has run in direct mode.
+ */
+export function buildLenientDispatcher(): Agent | null {
+  if (!directMode || !sharedResilientLookup) return null;
+  if (lenientDispatcher) return lenientDispatcher;
+  lenientDispatcher = new Agent({
+    connections: 32,
+    pipelining: 1,
+    keepAliveTimeout: 10_000,
+    keepAliveMaxTimeout: 30_000,
+    headersTimeout: 10_000,
+    bodyTimeout: 30_000,
+    connect: {
+      lookup: sharedResilientLookup as never,
+      rejectUnauthorized: false,
+      autoSelectFamily: true,
+      autoSelectFamilyAttemptTimeout: 250,
+    },
+  });
+  return lenientDispatcher;
 }
 
 /**

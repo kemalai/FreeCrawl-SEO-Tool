@@ -624,6 +624,11 @@ function maybeShowDiagnosticDialog(msg: string): void {
 /** Currently-open project file path (empty when using the default scratch DB). */
 let currentProjectPath = '';
 
+/** Storage mode the active DB connection was opened in. Resolved from the
+ *  `storageMode` pref at first open; `ram` means the project lives in an
+ *  in-memory database and the worker pools are disabled. */
+let storageModeActive: 'disk' | 'ram' = 'disk';
+
 /**
  * Dispatch HTML parsing to the worker pool when ready, otherwise
  * fall back to the inline parser on the main thread. This wrapper is
@@ -775,10 +780,20 @@ async function dbCallViaPool<T>(method: string, args: unknown[]): Promise<T> {
 
 function getDb(): ProjectDb {
   if (!db) {
+    loadPrefs();
+    // Storage mode (Settings → Storage). RAM-only keeps the whole project
+    // in an in-memory SQLite database (`:memory:`) — fastest, nothing
+    // touches disk until Save As serialises it out. A `:memory:` DB is
+    // private to a single connection, so the reader/writer worker pools are
+    // disabled in this mode and every query runs on the main-thread
+    // connection (the pool-call wrappers already fall back to it when the
+    // pools aren't ready). Applies at first open, i.e. on the next launch.
+    const ramMode = prefsCache['storageMode'] === 'ram';
+    storageModeActive = ramMode ? 'ram' : 'disk';
     const dataDir = join(app.getPath('userData'), 'projects');
     mkdirSync(dataDir, { recursive: true });
     const defaultPath = join(dataDir, 'default.seoproject');
-    db = new ProjectDb(defaultPath);
+    db = new ProjectDb(ramMode ? ':memory:' : defaultPath);
     currentProjectPath = '';
     // Wave 6 — Snapshot the previous session's crash-recovery state
     // BEFORE the reset wipes the project tables. We capture the
@@ -835,28 +850,39 @@ function getDb(): ProjectDb {
     // Fresh start on every app launch — clear any data carried over from
     // the previous session. Explicit Save Project will be added later.
     db.reset();
-    // Spawn the read-only worker pointed at the same file. Migrations
-    // already ran above (the writer owns them) so the worker just
-    // attaches to the WAL and starts serving SELECTs concurrently.
-    try {
-      // Pass the freeze-watchdog SAB so the reader worker can publish
-      // its own heartbeat + current op into the same diagnostic file.
-      dbReaderPool.init(defaultPath, freezeWatchdog.sharedBuffer);
-    } catch (err) {
+    if (ramMode) {
+      // In-memory DB can't be shared across worker connections, so keep
+      // everything on the main-thread connection. Save As (`VACUUM INTO`)
+      // serialises it to disk and switches back to a pooled disk project.
       logger.log(
-        'warn',
+        'info',
         'main',
-        `db-reader pool init failed: ${err instanceof Error ? err.message : String(err)} — falling back to main-thread queries.`,
+        'Storage mode: RAM-only — project held in an in-memory database; worker pools disabled. Save As writes it to disk.',
       );
-    }
-    try {
-      dbWriterPool.init(defaultPath, freezeWatchdog.sharedBuffer);
-    } catch (err) {
-      logger.log(
-        'warn',
-        'main',
-        `db-writer pool init failed: ${err instanceof Error ? err.message : String(err)} — writes fall back to main thread.`,
-      );
+    } else {
+      // Spawn the read-only worker pointed at the same file. Migrations
+      // already ran above (the writer owns them) so the worker just
+      // attaches to the WAL and starts serving SELECTs concurrently.
+      try {
+        // Pass the freeze-watchdog SAB so the reader worker can publish
+        // its own heartbeat + current op into the same diagnostic file.
+        dbReaderPool.init(defaultPath, freezeWatchdog.sharedBuffer);
+      } catch (err) {
+        logger.log(
+          'warn',
+          'main',
+          `db-reader pool init failed: ${err instanceof Error ? err.message : String(err)} — falling back to main-thread queries.`,
+        );
+      }
+      try {
+        dbWriterPool.init(defaultPath, freezeWatchdog.sharedBuffer);
+      } catch (err) {
+        logger.log(
+          'warn',
+          'main',
+          `db-writer pool init failed: ${err instanceof Error ? err.message : String(err)} — writes fall back to main thread.`,
+        );
+      }
     }
   }
   return db;
@@ -882,6 +908,10 @@ function openProjectAtPath(filePath: string): void {
   }
   db = new ProjectDb(filePath);
   currentProjectPath = filePath;
+  // Opening a real `.seoproject` file always lands us in disk mode, even
+  // when the previous project was an in-memory (RAM-only) scratch DB — the
+  // pool `swap` below spins the worker pools up against the disk file.
+  storageModeActive = 'disk';
   // Re-point the read-only worker at the new file. `swap` cancels any
   // in-flight requests with `reader-swapped`; the next IPC call will
   // hit the freshly opened worker.
@@ -2712,6 +2742,12 @@ function registerIpc(): void {
     const raw = prefsCache['projectSaveDir'];
     if (typeof raw === 'string' && raw.trim().length > 0) return raw;
     return app.getPath('documents');
+  });
+
+  ipcMain.handle(IPC.storageModeActive, (): 'disk' | 'ram' => {
+    // Ensure the DB has been resolved at least once so the mode is set.
+    getDb();
+    return storageModeActive;
   });
 
   // V1 Faz 7 — integration credential store. Secrets are encrypted at

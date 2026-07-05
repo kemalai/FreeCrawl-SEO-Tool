@@ -405,12 +405,19 @@ export function ReportsDialog({ open, onClose }: Props) {
               r.map((x: OrphanCrossSourceRow) => ({
                 key: x.url,
                 count: 1,
-                // `sources` (sitemap / gsc / ga4) goes in the secondary
-                // value column so the user can triage why each URL was
-                // missed by the crawl — sitemap-only often means a
-                // broken internal-link path; GSC + GA4 means real
-                // user-visited pages no crawl path reaches.
-                valueLabel: x.sources.join(' + '),
+                // `sources` (sitemap / gsc / ga4) plus any traffic go in the
+                // secondary value column so the user can triage why each URL
+                // was missed and how much it matters — sitemap-only with no
+                // traffic is often a dead entry to drop; GSC clicks / GA4
+                // sessions mean real user-visited pages no crawl path reaches.
+                valueLabel: [
+                  x.sources.join(' + '),
+                  x.gscClicks != null ? `${x.gscClicks.toLocaleString()} GSC clicks` : null,
+                  x.gscImpressions != null ? `${x.gscImpressions.toLocaleString()} impr` : null,
+                  x.ga4Sessions != null ? `${x.ga4Sessions.toLocaleString()} GA4 sessions` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · '),
               })),
             );
         } else if (kind === 'server-headers') {

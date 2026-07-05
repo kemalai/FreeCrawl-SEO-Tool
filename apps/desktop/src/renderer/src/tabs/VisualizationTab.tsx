@@ -190,7 +190,7 @@ const LAYOUTS: { key: LayoutKind; label: string; hint: string }[] = [
   { key: 'concentric', label: 'Concentric', hint: 'By inlinks (centre = most-linked)' },
 ];
 
-type ColorMode = 'status' | 'depth' | 'indexability' | 'lcp';
+type ColorMode = 'status' | 'depth' | 'indexability' | 'lcp' | 'linkScore';
 
 /** Colour a node by its Largest-Contentful-Paint candidate: grey when no
  *  render data, amber when the LCP is an image (a prime optimisation
@@ -283,6 +283,22 @@ function depthColor(d: number): string {
     '#60a5fa', '#93c5fd', '#bfdbfe', '#dbeafe', '#eff6ff', '#a3a3a3',
   ];
   return palette[Math.min(d, palette.length - 1)] ?? '#a3a3a3';
+}
+
+/** Colour a node by internal link score (PageRank, 0..100): grey when not
+ *  yet computed, pale green at the bottom of the graph, deep green for the
+ *  pages holding the most internal link equity. */
+function linkScoreColor(score: number | null): string {
+  if (score === null || score === undefined) return '#737373';
+  const palette = [
+    '#f0fdf4', '#dcfce7', '#bbf7d0', '#86efac', '#4ade80',
+    '#22c55e', '#16a34a', '#15803d', '#166534', '#14532d',
+  ];
+  const idx = Math.min(
+    palette.length - 1,
+    Math.max(0, Math.floor((score / 100) * palette.length)),
+  );
+  return palette[idx] ?? '#737373';
 }
 
 function indexColor(i: Indexability): string {
@@ -396,6 +412,7 @@ export function VisualizationTab() {
       if (colorMode === 'depth') return depthColor(n.depth);
       if (colorMode === 'indexability') return indexColor(n.indexability);
       if (colorMode === 'lcp') return lcpColor(n);
+      if (colorMode === 'linkScore') return linkScoreColor(n.linkScore);
       return statusColor(n.statusCode);
     };
 
@@ -778,6 +795,7 @@ export function VisualizationTab() {
               <option value="depth">{t('viz.byDepth', { defaultValue: 'By Depth' })}</option>
               <option value="indexability">{t('viz.byIndexability', { defaultValue: 'By Indexability' })}</option>
               <option value="lcp">{t('viz.byLcp', { defaultValue: 'By LCP (above-fold)' })}</option>
+              <option value="linkScore">{t('viz.byLinkScore', { defaultValue: 'By Link Score' })}</option>
             </select>
           </label>
           <label className="flex items-center gap-1 text-surface-400">

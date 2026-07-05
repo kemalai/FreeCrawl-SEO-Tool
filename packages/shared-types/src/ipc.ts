@@ -225,6 +225,10 @@ export const IPC = {
    *  `projectSaveDir` pref when set, otherwise the OS Documents folder.
    *  Used by Settings → Storage to display the active path. */
   defaultProjectDir: 'app:default-project-dir',
+  /** Storage mode the active DB connection is actually running in
+   *  (`disk` | `ram`). Reflects what was resolved at launch, which may
+   *  differ from the `storageMode` pref until the next restart. */
+  storageModeActive: 'app:storage-mode-active',
   /** Faz 7 — Google PageSpeed Insights integration.
    *  `pagespeedQuery` lists crawled internal HTML pages joined with any
    *  stored audit results; `pagespeedRun` audits a user-selected set of
@@ -651,6 +655,10 @@ export interface GraphNode {
   lcpTag: string | null;
   lcpResourceUrl: string | null;
   lcpCoverage: number | null;
+  /** Internal PageRank / link score, 0..100 (100 = most-linked page).
+   *  Null until the post-crawl link-score pass runs. Powers the
+   *  "By Link Score" visualization colour mode. */
+  linkScore: number | null;
 }
 
 export interface GraphEdge {
@@ -983,6 +991,14 @@ export interface OrphanCrossSourceRow {
   url: string;
   /** Which truth sources mentioned this URL — `sitemap`, `gsc`, `ga4`. */
   sources: string[];
+  /** Search Console clicks for this URL, when it came from GSC. */
+  gscClicks: number | null;
+  /** Search Console impressions for this URL, when it came from GSC. */
+  gscImpressions: number | null;
+  /** Analytics 4 sessions for this URL, when it came from GA4. */
+  ga4Sessions: number | null;
+  /** `<lastmod>` from the sitemap, when it came from the sitemap. */
+  lastmod: string | null;
 }
 
 /** One row in the Server Stack report — `Server` response-header rollup. */
@@ -1513,6 +1529,9 @@ export interface FreeCrawlApi {
   pickDirectory(input?: { title?: string; defaultPath?: string }): Promise<string | null>;
   /** Resolved default save directory for new projects (Documents fallback when unset). */
   defaultProjectDir(): Promise<string>;
+  /** Storage mode the active DB connection is running in (`disk` | `ram`).
+   *  May lag the `storageMode` pref until the next launch. */
+  storageModeActive(): Promise<'disk' | 'ram'>;
   /** Faz 7 — list crawled internal HTML pages joined with their stored
    *  PageSpeed Insights audit results. */
   pagespeedQuery(input: PagespeedQueryInput): Promise<PagespeedQueryResult>;

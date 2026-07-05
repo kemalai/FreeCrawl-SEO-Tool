@@ -350,6 +350,7 @@ const TR_LABELS: Record<string, string> = {
   'Size (Bytes)': 'Boyut (Bayt)',
   Inlinks: 'Gelen Linkler',
   Outlinks: 'Giden Linkler',
+  'Link Score': 'Bağlantı Puanı',
   'Title 1': 'Başlık 1',
   'Title 1 Length': 'Başlık 1 Uzunluğu',
   'Meta Description 1': 'Meta Açıklama 1',

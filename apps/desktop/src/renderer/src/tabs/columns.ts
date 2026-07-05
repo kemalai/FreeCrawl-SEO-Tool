@@ -210,6 +210,14 @@ const COL = {
     info: 'Number of unique <a> links emitted from this page (internal + external).',
     example: '32',
   } as ColumnSpec,
+  linkScore: {
+    key: 'linkScore',
+    header: 'Link Score',
+    size: 92,
+    kind: 'number',
+    info: 'Internal PageRank, 0–100. Computed over the internal link graph (damping 0.85) and normalised so the most-linked page scores 100. Higher = more internal link equity.',
+    example: '73',
+  } as ColumnSpec,
   imagesCount: {
     key: 'imagesCount',
     header: 'Images',
@@ -541,6 +549,7 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
     COL.depth,
     COL.inlinks,
     COL.outlinks,
+    COL.linkScore,
     COL.imagesCount,
     COL.imagesMissingAlt,
   ],

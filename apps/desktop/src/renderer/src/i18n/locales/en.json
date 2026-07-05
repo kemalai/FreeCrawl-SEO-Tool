@@ -602,6 +602,7 @@
     "crawlAnalysis": {
       "intro": "Per-pass post-crawl analysis toggles. Each pass runs after the HTTP fetch phase finishes and feeds different issue filters. Skip passes you don't need to shave wall-clock on large crawls; the related issue counters quietly read as 0 until the pass runs.",
       "recomputeInlinks": "Recompute inlinks",
+      "linkScore": "Compute link score (internal PageRank)",
       "recomputeRedirectChains": "Recompute redirect chains",
       "hreflang": "Hreflang reciprocity + inconsistent lang",
       "nearDuplicate": "Near-duplicate clustering",
@@ -923,6 +924,7 @@
     "byDepth": "By Depth",
     "byIndexability": "By Indexability",
     "byLcp": "By LCP (above-fold)",
+    "byLinkScore": "By Link Score",
     "crawlPath": "Crawl Path",
     "crawlPathTitle": "Crawl Path mode — click a page node to trace its shortest path from the crawl root",
     "crawlPathHint": "Select a page node to trace its shortest path from the crawl root.",
@@ -1238,6 +1240,12 @@
     "storage": {
       "title": "Storage",
       "intro": "Default folder for new .seoproject files. Save As dialogs open here by default; the Open dialog is not constrained.",
+      "modeLabel": "Storage Mode",
+      "modeDisk": "Disk (SQLite file) — persistent, resumable, uses worker pools",
+      "modeRam": "RAM-only (in-memory) — fastest, nothing written to disk until Save As",
+      "modeRestart": "Applies the next time FreeCrawl starts (currently running in {{active}} mode).",
+      "modeActiveNote": "Currently running in {{active}} mode.",
+      "modeRamWarning": "In-memory projects are lost on exit — and when you open or switch to another project — unless you Save As first. Crash recovery is off and very large crawls are bounded by available RAM.",
       "defaultSaveFolder": "Default Save Folder",
       "placeholder": "(System Documents folder)",
       "resolvedPath": "Resolved path",

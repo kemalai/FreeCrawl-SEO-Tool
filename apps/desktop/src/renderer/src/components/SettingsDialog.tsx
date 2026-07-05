@@ -131,6 +131,7 @@ interface FormState {
   // Wave 8 additions
   // crawl analysis (per-pass post-crawl toggles, Wave 6)
   analyseInlinks: boolean;
+  analyseLinkScore: boolean;
   analyseRedirectChains: boolean;
   analyseHreflang: boolean;
   analyseDuplicates: boolean;
@@ -456,6 +457,7 @@ function configToForm(c: CrawlConfig): FormState {
     excludeExtensionsText: (c.excludeExtensions ?? []).join(', '),
     maxRedirects: String(c.maxRedirects ?? 10),
     analyseInlinks: c.analyseInlinks ?? true,
+    analyseLinkScore: c.analyseLinkScore ?? true,
     analyseRedirectChains: c.analyseRedirectChains ?? true,
     analyseHreflang: c.analyseHreflang ?? true,
     analyseDuplicates: c.analyseDuplicates ?? true,
@@ -690,6 +692,7 @@ export function SettingsDialog({ open, onClose }: Props) {
         .filter(Boolean),
       maxRedirects: Math.max(0, num(form.maxRedirects, config.maxRedirects)),
       analyseInlinks: form.analyseInlinks,
+      analyseLinkScore: form.analyseLinkScore,
       analyseRedirectChains: form.analyseRedirectChains,
       analyseHreflang: form.analyseHreflang,
       analyseDuplicates: form.analyseDuplicates,
@@ -2873,6 +2876,12 @@ function CrawlAnalysisPanel({ form, update }: PanelProps) {
           info="Counts how many internal pages link to each URL. Drives the Most-Linked URLs report and the per-row Inlinks column."
         />
         <Bool
+          label={t('settingsPanels.crawlAnalysis.linkScore', { defaultValue: 'Compute link score (internal PageRank)' })}
+          checked={form.analyseLinkScore}
+          onChange={(v) => update('analyseLinkScore', v)}
+          info="Runs iterative PageRank (damping 0.85) over the internal link graph and normalises it to a 0–100 Link Score per page. Drives the Link Score column and the 'By Link Score' visualization colour mode."
+        />
+        <Bool
           label={t('settingsPanels.crawlAnalysis.recomputeRedirectChains', { defaultValue: 'Recompute redirect chains' })}
           checked={form.analyseRedirectChains}
           onChange={(v) => update('analyseRedirectChains', v)}
@@ -3954,6 +3963,10 @@ function StoragePanel() {
     return typeof raw === 'string' ? raw : '';
   });
   const [resolved, setResolved] = useState<string>('');
+  const [mode, setMode] = useState<'disk' | 'ram'>(() =>
+    window.freecrawl.prefsGet('storageMode') === 'ram' ? 'ram' : 'disk',
+  );
+  const [activeMode, setActiveMode] = useState<'disk' | 'ram' | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -3964,6 +3977,24 @@ function StoragePanel() {
       cancelled = true;
     };
   }, [override]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.freecrawl.storageModeActive().then((m) => {
+      if (!cancelled) setActiveMode(m);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function pickMode(m: 'disk' | 'ram') {
+    setMode(m);
+    // Disk is the default, so a `ram` pick persists the pref and a `disk`
+    // pick clears it back to the default rather than storing a redundant key.
+    if (m === 'ram') window.freecrawl.prefsSet('storageMode', 'ram');
+    else window.freecrawl.prefsDelete('storageMode');
+  }
 
   async function browse() {
     const chosen = await window.freecrawl.pickDirectory({
@@ -3987,6 +4018,54 @@ function StoragePanel() {
       <p className="mb-3 text-[11px] text-surface-400">
         {t('settings.storage.intro', { defaultValue: "Default folder for new .seoproject files. Save As dialogs open here by default; the Open dialog is not constrained." })}
       </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.storage.modeLabel', { defaultValue: "Storage Mode" })}
+        </div>
+        <div className="flex flex-col gap-2">
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="radio"
+              name="storage-mode"
+              className="mt-0.5"
+              checked={mode === 'disk'}
+              onChange={() => pickMode('disk')}
+            />
+            <span className="text-[12px] text-surface-100">
+              {t('settings.storage.modeDisk', { defaultValue: "Disk (SQLite file) — persistent, resumable, uses worker pools" })}
+            </span>
+          </label>
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="radio"
+              name="storage-mode"
+              className="mt-0.5"
+              checked={mode === 'ram'}
+              onChange={() => pickMode('ram')}
+            />
+            <span className="text-[12px] text-surface-100">
+              {t('settings.storage.modeRam', { defaultValue: "RAM-only (in-memory) — fastest, nothing written to disk until Save As" })}
+            </span>
+          </label>
+        </div>
+        <p className="mt-2 text-[10px] text-surface-500">
+          {activeMode && activeMode !== mode
+            ? t('settings.storage.modeRestart', {
+                defaultValue: "Applies the next time FreeCrawl starts (currently running in {{active}} mode).",
+                active: activeMode.toUpperCase(),
+              })
+            : t('settings.storage.modeActiveNote', {
+                defaultValue: "Currently running in {{active}} mode.",
+                active: (activeMode ?? mode).toUpperCase(),
+              })}
+        </p>
+        {mode === 'ram' && (
+          <p className="mt-1 text-[10px] text-amber-500/80">
+            {t('settings.storage.modeRamWarning', { defaultValue: "In-memory projects are lost on exit unless you Save As. Crash recovery is off and very large crawls are bounded by available RAM." })}
+          </p>
+        )}
+      </div>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">

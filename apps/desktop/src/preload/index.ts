@@ -343,6 +343,8 @@ const api: FreeCrawlApi = {
   pickDirectory: (input?: { title?: string; defaultPath?: string }): Promise<string | null> =>
     ipcRenderer.invoke(IPC.pickDirectory, input),
   defaultProjectDir: (): Promise<string> => ipcRenderer.invoke(IPC.defaultProjectDir),
+  storageModeActive: (): Promise<'disk' | 'ram'> =>
+    ipcRenderer.invoke(IPC.storageModeActive),
   integrationsGetAll: (): Promise<IntegrationsState> =>
     ipcRenderer.invoke(IPC.integrationsGetAll),
   integrationsSet: (

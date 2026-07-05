@@ -1729,6 +1729,19 @@ function Cell({
 
   if (spec.kind === 'status') {
     const code = row.statusCode;
+    // No HTTP status (DNS/TLS/connect/timeout failure): a bare "—" hides the
+    // reason the crawler already captured. Show a compact token (DNS / TLS /
+    // Timeout / …) with the full error text on hover.
+    if (code === null || code === undefined) {
+      return (
+        <span
+          className="inline-block rounded bg-rose-950/60 px-1.5 font-mono text-[10px] text-rose-300"
+          title={row.statusText ?? undefined}
+        >
+          {shortFailureLabel(row.statusText)}
+        </span>
+      );
+    }
     return (
       <span
         className={clsx(
@@ -1736,7 +1749,7 @@ function Cell({
           statusClasses(code),
         )}
       >
-        {code ?? '—'}
+        {code}
       </span>
     );
   }
@@ -1808,6 +1821,24 @@ function indexabilityStatusLabel(v: CrawlUrlRow['indexability']): string {
     default:
       return v;
   }
+}
+
+/**
+ * Compact token for a no-HTTP-response failure, derived from the crawler's
+ * captured `statusText`. Technical protocol abbreviations (DNS/TLS/H2/…) — not
+ * localized, same convention as the numeric status codes themselves. The full
+ * diagnostic is on hover (title) and in the URL Details → HTTP Headers tab.
+ */
+function shortFailureLabel(statusText: string | null): string {
+  if (!statusText) return '—';
+  if (/ENOTFOUND|EAI_AGAIN|ENODATA|ESERVFAIL|getaddrinfo|DNS/i.test(statusText)) return 'DNS';
+  if (/UNABLE_TO_VERIFY|CERT|SSL|TLSV1|HANDSHAKE|EPROTO/i.test(statusText)) return 'TLS';
+  if (/ECONNREFUSED/i.test(statusText)) return 'Refused';
+  if (/ECONNRESET|SOCKET|EPIPE|reset/i.test(statusText)) return 'Reset';
+  if (/HTTP2|NGHTTP2|GOAWAY|PROTOCOL_ERROR/i.test(statusText)) return 'H2 err';
+  if (/CONNECT_TIMEOUT|ETIMEDOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|aborted|timeout/i.test(statusText))
+    return 'Timeout';
+  return 'Failed';
 }
 
 function statusClasses(code: number | null): string {

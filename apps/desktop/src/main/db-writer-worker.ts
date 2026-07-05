@@ -82,6 +82,7 @@ const ALLOWED_METHODS = new Set<string>([
   'updateExternalProbe',
   'recomputeInlinks',
   'recomputeRedirectChains',
+  'recomputeLinkScore',
   'recomputeHreflangAnalysis',
   'recomputeHreflangInconsistent',
   'recomputeDuplicateClusters',

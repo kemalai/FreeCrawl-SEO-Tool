@@ -942,6 +942,18 @@ export function buildTools(): Tool[] {
       }),
     },
     {
+      name: 'report_orphan_cross_source',
+      description:
+        'Orphan pages across all truth sources: URLs present in the XML sitemap, Google Search Console, or Google Analytics 4 but never reached by the crawl (or crawled only as an unfetched stub). Each row lists which sources mentioned it plus its GSC clicks / impressions and GA4 sessions; sorted by traffic (GSC clicks + GA4 sessions) descending so high-value orphans surface first. Sitemap-only with no traffic is often a dead entry; GSC/GA4 orphans are real pages users reach that no internal link path does.',
+      inputSchema: {
+        type: 'object',
+        properties: { limit: { type: 'integer', minimum: 1, maximum: 10_000 } },
+      },
+      handler: (args, db) => ({
+        rows: db.orphanPagesCrossSource(clamp(args.limit, 1, 10_000, 1000)),
+      }),
+    },
+    {
       name: 'report_analytics_coverage',
       description: 'Which third-party analytics trackers (GA4 / GTM / Hotjar / Clarity / Mixpanel / Plausible / ...) appear on which fraction of indexable pages. Reveals coverage gaps and ID inconsistencies (multiple GA4 properties tagged across the site, etc).',
       inputSchema: { type: 'object', properties: {} },

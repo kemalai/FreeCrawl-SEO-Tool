@@ -602,6 +602,7 @@
     "crawlAnalysis": {
       "intro": "Pas-başına post-crawl analiz toggle'ları. Her pas HTTP fetch fazı bittikten sonra çalışır ve farklı issue filtrelerini besler. İhtiyacın olmayan pasları atla — ilgili issue sayaçları pas çalışana kadar 0 okur.",
       "recomputeInlinks": "Inlink'leri yeniden hesapla",
+      "linkScore": "Bağlantı puanı hesapla (dahili PageRank)",
       "recomputeRedirectChains": "Yönlendirme zincirlerini yeniden hesapla",
       "hreflang": "Hreflang karşılıklılığı + tutarsız lang",
       "nearDuplicate": "Yakın-yinelenen kümeleme",
@@ -923,6 +924,7 @@
     "byDepth": "Derinliğe Göre",
     "byIndexability": "İndekslenebilirliğe Göre",
     "byLcp": "LCP'ye Göre (fold üstü)",
+    "byLinkScore": "Bağlantı Puanına Göre",
     "crawlPath": "Tarama Yolu",
     "crawlPathTitle": "Tarama Yolu modu — bir sayfa düğümüne tıklayarak tarama kökünden en kısa yolu izleyin",
     "crawlPathHint": "Tarama kökünden en kısa yolu izlemek için bir sayfa düğümü seçin.",
@@ -1238,6 +1240,12 @@
     "storage": {
       "title": "Depolama",
       "intro": "Yeni .seoproject dosyaları için varsayılan klasör. Farklı Kaydet diyalogları varsayılan olarak burayı açar; Aç diyaloğu kısıtlı değildir.",
+      "modeLabel": "Depolama Modu",
+      "modeDisk": "Disk (SQLite dosyası) — kalıcı, sürdürülebilir, worker havuzlarını kullanır",
+      "modeRam": "Yalnızca RAM (bellek içi) — en hızlı, Farklı Kaydet'e kadar diske hiçbir şey yazılmaz",
+      "modeRestart": "FreeCrawl'ı bir sonraki açışınızda uygulanır (şu an {{active}} modunda çalışıyor).",
+      "modeActiveNote": "Şu an {{active}} modunda çalışıyor.",
+      "modeRamWarning": "Bellek içi projeler — çıkışta ve başka bir proje açtığınızda/geçtiğinizde — önce Farklı Kaydet yapmazsanız kaybolur. Çökme kurtarma kapalıdır ve çok büyük crawl'lar mevcut RAM ile sınırlıdır.",
       "defaultSaveFolder": "Varsayılan Kayıt Klasörü",
       "placeholder": "(Sistem Belgeler klasörü)",
       "resolvedPath": "Çözümlenen yol",

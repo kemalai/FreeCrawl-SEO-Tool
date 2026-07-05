@@ -1777,6 +1777,23 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_log_url_bot_bot ON log_url_bot(bot);
     `,
   },
+  {
+    version: 74,
+    name: 'add_link_score',
+    // V2 — internal PageRank / link score. A per-URL 0..100 integer
+    // computed post-crawl over the internal link graph (damping 0.85),
+    // normalised so the most-linked page scores 100. NULL until the
+    // post-crawl `recomputeLinkScore` pass runs; 0 when the crawl has no
+    // internal edges to distribute equity through.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'link_score')) {
+        db.exec('ALTER TABLE urls ADD COLUMN link_score INTEGER');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {
