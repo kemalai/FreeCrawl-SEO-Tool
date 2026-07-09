@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.5] — 2026-07-06
+
+### Added
+- Chrome UX Report tab — real-user Core Web Vitals (p75 LCP, INP, CLS, FCP, TTFB) per page for phone and desktop.
+- Spelling and grammar checking via LanguageTool, with a custom dictionary, picky rule level, and in-context highlighting of every finding.
+- A "Spelling/Grammar Issues" sidebar filter that lists pages with at least one finding.
+- Five new MCP tools so agents can run and read CrUX and spelling checks.
+
+### Changed
+- Various improvements and enhancements.
+
 ## [0.8.2] — 2026-07-06
 
 ### Added
