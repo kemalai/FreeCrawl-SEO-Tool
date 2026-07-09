@@ -103,6 +103,17 @@ import {
   type PagespeedRunInput,
   type PagespeedRunResult,
   type PagespeedStrategy,
+  type CruxQueryInput,
+  type CruxQueryResult,
+  type CruxRunInput,
+  type CruxRunResult,
+  type CruxFormFactor,
+  type SpellingQueryInput,
+  type SpellingQueryResult,
+  type SpellingRunInput,
+  type SpellingRunResult,
+  type SpellingMatchesResult,
+  type SpellingLevel,
   type GoogleAuthState,
   type GoogleAuthResult,
   type GscListSitesResult,
@@ -177,6 +188,7 @@ import {
   analyzeLogFile,
   buildLogExportXlsx,
   buildLogExportCsv,
+  extractProseText,
   type LogAnalysisResult,
   type LogExportTables,
 } from '@freecrawl/core';
@@ -193,6 +205,12 @@ import {
   resolveCredentials,
 } from './credentials.js';
 import { runPagespeedBatch, type PagespeedBatchItem } from './pagespeed.js';
+import { runCruxBatch, type CruxBatchItem } from './crux.js';
+import {
+  runSpellingBatch,
+  PUBLIC_LT_ENDPOINT,
+  type SpellingCheckOptions,
+} from './languagetool.js';
 import { startAuth, getAuthState, revokeAuth } from './google-oauth.js';
 import { listSites, querySearchAnalytics, inspectUrl } from './gsc.js';
 import { exportCategoryToSheets } from './sheets-export.js';
@@ -285,6 +303,14 @@ function idleFetchSnapshot(): FetchRunSnapshot {
 let pagespeedRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
 let aiRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
 let seoRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
+/** CrUX run guard + MCP poll snapshot — same shape as the PSI guard. */
+let cruxRunActive = false;
+let cruxCancelRequested = false;
+let cruxRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
+/** LanguageTool (spelling & grammar) run guard + MCP poll snapshot. */
+let spellingRunActive = false;
+let spellingCancelRequested = false;
+let spellingRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
 /** Faz 7 — GSC URL Inspection run guard. */
 let gscInspectRunActive = false;
 let gscInspectCancelRequested = false;
@@ -2921,6 +2947,361 @@ function registerIpc(): void {
     }
   });
 
+  // ---- Chrome UX Report (CrUX) — real-user field metrics ----
+  ipcMain.handle(
+    IPC.cruxQuery,
+    async (_e, input: CruxQueryInput): Promise<CruxQueryResult> => {
+      const params = {
+        limit: input.limit,
+        offset: input.offset,
+        search: input.search,
+        filter: input.filter,
+      };
+      return callReaderOrFallback<CruxQueryResult>(
+        'queryCrux',
+        [params],
+        () => getDb().queryCrux(params),
+      );
+    },
+  );
+
+  // Shared CrUX batch orchestrator — driven by both the renderer's
+  // `cruxRun` IPC and the MCP bridge's `crux-run` action. Mirrors
+  // `runPagespeedJob`; updates `cruxRunSnapshot` throughout.
+  async function runCruxJob(input: CruxRunInput): Promise<CruxRunResult> {
+    if (cruxRunActive) {
+      return { completed: 0, failed: 0, cancelled: true };
+    }
+    const urls = Array.from(
+      new Set(
+        (input.urls ?? []).filter(
+          (u): u is string => typeof u === 'string' && u.length > 0,
+        ),
+      ),
+    );
+    if (urls.length === 0) {
+      cruxRunSnapshot = {
+        ...idleFetchSnapshot(),
+        finishedAt: new Date().toISOString(),
+      };
+      return { completed: 0, failed: 0, cancelled: false };
+    }
+    const formFactors: CruxFormFactor[] =
+      input.formFactor === 'both'
+        ? ['phone', 'desktop']
+        : [input.formFactor];
+    const items: CruxBatchItem[] = [];
+    for (const url of urls) {
+      for (const formFactor of formFactors) items.push({ url, formFactor });
+    }
+    const apiKeyRaw = resolveCredentials('crux')['apiKey'];
+    const apiKey =
+      apiKeyRaw && apiKeyRaw.trim().length > 0 ? apiKeyRaw.trim() : '';
+    if (!apiKey) {
+      // CrUX has no keyless mode — surface a clear failure instead of a
+      // batch of 400s.
+      cruxRunSnapshot = {
+        ...idleFetchSnapshot(),
+        finishedAt: new Date().toISOString(),
+        error: 'No CrUX API key configured (Settings → Integrations → Chrome UX Report).',
+      };
+      logger.log(
+        'warn',
+        'crux',
+        'run aborted — no API key (Settings → Integrations → Chrome UX Report)',
+      );
+      return { completed: 0, failed: items.length, cancelled: false };
+    }
+
+    cruxRunActive = true;
+    cruxCancelRequested = false;
+    cruxRunSnapshot = {
+      ...idleFetchSnapshot(),
+      running: true,
+      total: items.length,
+      startedAt: new Date().toISOString(),
+    };
+    const runDb = getDb();
+    logger.log(
+      'info',
+      'crux',
+      `run started — ${items.length} record(s): ${urls.length} URL(s) × ${formFactors.length} form factor`,
+    );
+    try {
+      const result = await runCruxBatch({
+        items,
+        apiKey,
+        isCancelled: () => cruxCancelRequested,
+        onResult: (url, formFactor, metrics) => {
+          try {
+            runDb.upsertCruxResult(url, formFactor, metrics);
+          } catch (err) {
+            logger.log(
+              'error',
+              'crux',
+              `DB write failed for ${url}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+          if (metrics.status === 'ok') cruxRunSnapshot.completed++;
+          else cruxRunSnapshot.failed++;
+        },
+        onProgress: (done, total, currentUrl) => {
+          cruxRunSnapshot.done = done;
+          cruxRunSnapshot.total = total;
+          cruxRunSnapshot.currentUrl = currentUrl;
+          mainWindow?.webContents.send(IPC.cruxProgress, {
+            done,
+            total,
+            currentUrl,
+            running: true,
+          });
+        },
+      });
+      cruxRunSnapshot = {
+        ...cruxRunSnapshot,
+        running: false,
+        done: result.completed + result.failed,
+        completed: result.completed,
+        failed: result.failed,
+        cancelled: result.cancelled,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+      };
+      mainWindow?.webContents.send(IPC.cruxProgress, {
+        done: result.completed + result.failed,
+        total: items.length,
+        currentUrl: null,
+        running: false,
+      });
+      fireDataChanged();
+      return result;
+    } catch (err) {
+      cruxRunSnapshot = {
+        ...cruxRunSnapshot,
+        running: false,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message : String(err),
+      };
+      throw err;
+    } finally {
+      cruxRunActive = false;
+      cruxCancelRequested = false;
+    }
+  }
+
+  ipcMain.handle(
+    IPC.cruxRun,
+    async (_e, input: CruxRunInput): Promise<CruxRunResult> =>
+      runCruxJob(input),
+  );
+
+  ipcMain.handle(IPC.cruxCancel, () => {
+    if (cruxRunActive) {
+      cruxCancelRequested = true;
+      logger.log('info', 'crux', 'run cancellation requested');
+    }
+  });
+
+  // ---- Spelling & Grammar (LanguageTool) ----
+  ipcMain.handle(
+    IPC.spellingQuery,
+    async (_e, input: SpellingQueryInput): Promise<SpellingQueryResult> => {
+      const params = {
+        limit: input.limit,
+        offset: input.offset,
+        search: input.search,
+        filter: input.filter,
+      };
+      return callReaderOrFallback<SpellingQueryResult>(
+        'querySpelling',
+        [params],
+        () => getDb().querySpelling(params),
+      );
+    },
+  );
+
+  ipcMain.handle(
+    IPC.spellingMatches,
+    async (_e, url: string): Promise<SpellingMatchesResult | null> =>
+      callReaderOrFallback<SpellingMatchesResult | null>(
+        'getSpellingMatches',
+        [url],
+        () => getDb().getSpellingMatches(url),
+      ),
+  );
+
+  /** Resolve the LanguageTool endpoint + credentials + user preferences. */
+  function resolveSpellingOptions(): SpellingCheckOptions {
+    loadPrefs();
+    const creds = resolveCredentials('languagetool');
+    const endpointRaw = (creds['endpoint'] ?? '').trim();
+    const level: SpellingLevel =
+      prefsCache['spellingLevel'] === 'picky' ? 'picky' : 'default';
+    const ignoreRaw = prefsCache['spellingIgnoreWords'];
+    const ignoreWords = new Set<string>(
+      (typeof ignoreRaw === 'string' ? ignoreRaw : '')
+        .split(/[\s,;\n]+/)
+        .map((w) => w.trim().toLowerCase())
+        .filter((w) => w.length > 0),
+    );
+    return {
+      endpoint: endpointRaw.length > 0 ? endpointRaw : PUBLIC_LT_ENDPOINT,
+      username: (creds['username'] ?? '').trim() || undefined,
+      apiKey: (creds['apiKey'] ?? '').trim() || undefined,
+      level,
+      ignoreWords,
+    };
+  }
+
+  /**
+   * Resolve one page's prose for the checker. Prefers the crawl-time raw
+   * HTML snapshot (`url_sources.body`); when body snapshots were disabled
+   * the page is re-fetched once over HTTP. Either way the HTML is reduced
+   * to prose (chrome, script/style and code blocks stripped) before it
+   * leaves the machine.
+   */
+  async function loadSpellingPage(
+    db: ProjectDb,
+    url: string,
+  ): Promise<{ text: string | null; lang: string | null }> {
+    const stored = db.getUrlBodyAndLang(url);
+    const lang = stored?.lang ?? null;
+    if (stored?.body && stored.body.length > 0) {
+      return { text: extractProseText(stored.body), lang };
+    }
+    try {
+      const res = await undiciFetch(url, {
+        signal: AbortSignal.timeout(30_000),
+        headers: { Accept: 'text/html,application/xhtml+xml' },
+      });
+      if (!res.ok) return { text: null, lang };
+      const html = await res.text();
+      return { text: extractProseText(html), lang };
+    } catch {
+      return { text: null, lang };
+    }
+  }
+
+  // Shared LanguageTool batch orchestrator — driven by both the renderer's
+  // `spellingRun` IPC and the MCP bridge's `spelling-run` action.
+  async function runSpellingJob(
+    input: SpellingRunInput,
+  ): Promise<SpellingRunResult> {
+    if (spellingRunActive) {
+      return { completed: 0, failed: 0, cancelled: true };
+    }
+    const urls = Array.from(
+      new Set(
+        (input.urls ?? []).filter(
+          (u): u is string => typeof u === 'string' && u.length > 0,
+        ),
+      ),
+    );
+    if (urls.length === 0) {
+      spellingRunSnapshot = {
+        ...idleFetchSnapshot(),
+        finishedAt: new Date().toISOString(),
+      };
+      return { completed: 0, failed: 0, cancelled: false };
+    }
+
+    const check = resolveSpellingOptions();
+    spellingRunActive = true;
+    spellingCancelRequested = false;
+    spellingRunSnapshot = {
+      ...idleFetchSnapshot(),
+      running: true,
+      total: urls.length,
+      startedAt: new Date().toISOString(),
+    };
+    const runDb = getDb();
+    logger.log(
+      'info',
+      'languagetool',
+      `run started — ${urls.length} page(s) against ${check.endpoint} (level: ${check.level}, ${check.ignoreWords.size} ignored word(s))`,
+    );
+    try {
+      const result = await runSpellingBatch({
+        urls,
+        check,
+        loadPage: (url) => loadSpellingPage(runDb, url),
+        isCancelled: () => spellingCancelRequested,
+        onResult: (url, r) => {
+          try {
+            runDb.upsertSpellingResult(url, r);
+          } catch (err) {
+            logger.log(
+              'error',
+              'languagetool',
+              `DB write failed for ${url}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+          if (r.status === 'ok') spellingRunSnapshot.completed++;
+          else spellingRunSnapshot.failed++;
+        },
+        onProgress: (done, total, currentUrl) => {
+          spellingRunSnapshot.done = done;
+          spellingRunSnapshot.total = total;
+          spellingRunSnapshot.currentUrl = currentUrl;
+          mainWindow?.webContents.send(IPC.spellingProgress, {
+            done,
+            total,
+            currentUrl,
+            running: true,
+          });
+        },
+      });
+      spellingRunSnapshot = {
+        ...spellingRunSnapshot,
+        running: false,
+        done: result.completed + result.failed,
+        completed: result.completed,
+        failed: result.failed,
+        cancelled: result.cancelled,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+      };
+      mainWindow?.webContents.send(IPC.spellingProgress, {
+        done: result.completed + result.failed,
+        total: urls.length,
+        currentUrl: null,
+        running: false,
+      });
+      fireDataChanged();
+      return result;
+    } catch (err) {
+      spellingRunSnapshot = {
+        ...spellingRunSnapshot,
+        running: false,
+        currentUrl: null,
+        finishedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message : String(err),
+      };
+      throw err;
+    } finally {
+      spellingRunActive = false;
+      spellingCancelRequested = false;
+    }
+  }
+
+  ipcMain.handle(
+    IPC.spellingRun,
+    async (_e, input: SpellingRunInput): Promise<SpellingRunResult> =>
+      runSpellingJob(input),
+  );
+
+  ipcMain.handle(IPC.spellingCancel, () => {
+    if (spellingRunActive) {
+      spellingCancelRequested = true;
+      logger.log('info', 'languagetool', 'run cancellation requested');
+    }
+  });
+
   // V1 Faz 7 — Google OAuth keystone. The interactive consent flow runs
   // entirely in the main process (loopback HTTP server + system
   // browser); the renderer only ever sees the redacted GoogleAuthState.
@@ -4751,6 +5132,91 @@ function registerIpc(): void {
       };
     },
 
+    'crux-run': async (input) => {
+      const i = (input ?? {}) as {
+        urls?: unknown;
+        category?: unknown;
+        search?: unknown;
+        limit?: unknown;
+        formFactor?: unknown;
+      };
+      if (cruxRunActive) {
+        return {
+          started: false,
+          reason:
+            'A CrUX run is already in progress — poll get_fetch_progress or cancel_fetch first.',
+          state: cruxRunSnapshot,
+        };
+      }
+      const { urls, truncated } = resolveActionUrls(i);
+      if (urls.length === 0) {
+        return {
+          started: false,
+          reason:
+            'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
+          state: cruxRunSnapshot,
+        };
+      }
+      const formFactor =
+        i.formFactor === 'desktop'
+          ? ('desktop' as const)
+          : i.formFactor === 'both'
+            ? ('both' as const)
+            : ('phone' as const);
+      void runCruxJob({ urls, formFactor }).catch((err) => {
+        logger.log(
+          'error',
+          'crux',
+          `MCP-triggered run failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      return {
+        started: cruxRunActive,
+        total: cruxRunSnapshot.total,
+        truncated,
+        state: cruxRunSnapshot,
+      };
+    },
+
+    'spelling-run': async (input) => {
+      const i = (input ?? {}) as {
+        urls?: unknown;
+        category?: unknown;
+        search?: unknown;
+        limit?: unknown;
+      };
+      if (spellingRunActive) {
+        return {
+          started: false,
+          reason:
+            'A spelling run is already in progress — poll get_fetch_progress or cancel_fetch first.',
+          state: spellingRunSnapshot,
+        };
+      }
+      const { urls, truncated } = resolveActionUrls(i);
+      if (urls.length === 0) {
+        return {
+          started: false,
+          reason:
+            'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
+          state: spellingRunSnapshot,
+        };
+      }
+      void runSpellingJob({ urls }).catch((err) => {
+        logger.log(
+          'error',
+          'languagetool',
+          `MCP-triggered run failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      return {
+        started: spellingRunActive,
+        total: spellingRunSnapshot.total,
+        truncated,
+        state: spellingRunSnapshot,
+      };
+    },
+
     'ai-run': async (input) => {
       const i = (input ?? {}) as {
         provider?: unknown;
@@ -4875,10 +5341,18 @@ function registerIpc(): void {
       const kind = (input as { kind?: unknown } | null)?.kind;
       const all = {
         pagespeed: pagespeedRunSnapshot,
+        crux: cruxRunSnapshot,
+        spelling: spellingRunSnapshot,
         ai: aiRunSnapshot,
         seo: seoRunSnapshot,
       };
-      if (kind === 'pagespeed' || kind === 'ai' || kind === 'seo') {
+      if (
+        kind === 'pagespeed' ||
+        kind === 'crux' ||
+        kind === 'spelling' ||
+        kind === 'ai' ||
+        kind === 'seo'
+      ) {
         return { [kind]: all[kind] };
       }
       return all;
@@ -4902,11 +5376,25 @@ function registerIpc(): void {
         if (was) seoCancelRequested = true;
         cancelled.seo = { wasRunning: was };
       };
+      const cancelCrux = (): void => {
+        const was = cruxRunActive;
+        if (was) cruxCancelRequested = true;
+        cancelled.crux = { wasRunning: was };
+      };
+      const cancelSpelling = (): void => {
+        const was = spellingRunActive;
+        if (was) spellingCancelRequested = true;
+        cancelled.spelling = { wasRunning: was };
+      };
       if (kind === 'pagespeed') cancelPagespeed();
+      else if (kind === 'crux') cancelCrux();
+      else if (kind === 'spelling') cancelSpelling();
       else if (kind === 'ai') cancelAi();
       else if (kind === 'seo') cancelSeo();
       else {
         cancelPagespeed();
+        cancelCrux();
+        cancelSpelling();
         cancelAi();
         cancelSeo();
       }

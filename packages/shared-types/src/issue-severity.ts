@@ -65,6 +65,7 @@ const WARNING: UrlCategory[] = [
   'issues:canonical-missing',
   'issues:canonical-to-redirect',
   'issues:content-thin',
+  'issues:spelling-grammar',
   'issues:response-slow',
   'issues:page-large',
   'issues:viewport-missing',

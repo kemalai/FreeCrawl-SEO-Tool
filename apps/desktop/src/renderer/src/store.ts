@@ -35,6 +35,8 @@ export type TabKey =
   | 'broken-links'
   | 'serp'
   | 'pagespeed'
+  | 'crux'
+  | 'spelling'
   | 'search-console'
   | 'analytics'
   | 'ai'
@@ -67,6 +69,8 @@ export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'broken-links', label: 'Broken Links' },
   { key: 'serp', label: 'SERP' },
   { key: 'pagespeed', label: 'PageSpeed' },
+  { key: 'crux', label: 'CrUX' },
+  { key: 'spelling', label: 'Spelling' },
   { key: 'search-console', label: 'Search Console' },
   { key: 'analytics', label: 'GA4' },
   { key: 'ai', label: 'AI' },
@@ -218,6 +222,7 @@ export const TAB_QUICK_FILTERS: Partial<Record<TabKey, TabQuickFilter[]>> = {
   content: [
     { label: 'All', category: 'internal:html' },
     { label: 'Thin Content (<300 words)', category: 'issues:content-thin' },
+    { label: 'Spelling/Grammar Issues', category: 'issues:spelling-grammar' },
     { label: 'Empty Page (<30 words)', category: 'issues:page-empty' },
     { label: 'Hard to Read (Flesch <30)', category: 'issues:flesch-very-difficult' },
     { label: 'Gunning Fog >17', category: 'issues:gunning-fog-very-high' },
@@ -522,6 +527,7 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
   if (cat === 'issues:multiple-canonicals') return 'canonicals';
   if (
     cat === 'issues:content-thin' ||
+    cat === 'issues:spelling-grammar' ||
     cat === 'issues:page-empty' ||
     cat === 'issues:high-boilerplate' ||
     cat === 'issues:flesch-very-difficult' ||

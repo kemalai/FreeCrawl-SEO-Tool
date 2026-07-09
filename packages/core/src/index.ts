@@ -35,6 +35,7 @@ export type {
 export {
   parseHtml,
   estimatePixelWidth,
+  extractProseText,
   type AnalyticsTracker,
   type HreflangEntry,
 } from './html-parser.js';

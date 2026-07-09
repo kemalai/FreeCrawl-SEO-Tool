@@ -630,6 +630,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               category: 'issues:content-thin',
             },
             {
+              key: 'issues-spelling-grammar',
+              label: 'Spelling/Grammar Issues',
+              count: o.issues.spellingGrammar,
+              category: 'issues:spelling-grammar',
+            },
+            {
               key: 'issues-page-empty',
               label: 'Empty Page (<30 words)',
               count: o.issues.pageEmpty,

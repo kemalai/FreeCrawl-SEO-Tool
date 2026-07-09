@@ -615,6 +615,8 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
   'broken-links': [],
   serp: [],
   pagespeed: [],
+  crux: [],
+  spelling: [],
   'search-console': [],
   analytics: [],
   ai: [],

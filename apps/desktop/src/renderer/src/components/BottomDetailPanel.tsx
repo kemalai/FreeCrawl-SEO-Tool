@@ -16,6 +16,7 @@ import type {
   UrlPageImageRow,
   UrlSourceResult,
   UrlAnalyticsDetail,
+  SpellingMatchesResult,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { diagnoseStatus, type StatusDiagnosis } from '../utils/statusDiagnosis.js';
@@ -36,7 +37,8 @@ type SubTab =
   | 'view-rendered'
   | 'screenshot'
   | 'duplicates'
-  | 'analytics';
+  | 'analytics'
+  | 'spelling';
 
 const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'url-details', label: 'URL Details' },
@@ -55,6 +57,7 @@ const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'screenshot', label: 'Screenshot' },
   { key: 'duplicates', label: 'Duplicates' },
   { key: 'analytics', label: 'Analytics' },
+  { key: 'spelling', label: 'Spelling & Grammar' },
 ];
 
 // Maximum number of URLs we aggregate over in one go. Anything larger is
@@ -78,6 +81,7 @@ const SINGLE_URL_ONLY_TABS: ReadonlySet<SubTab> = new Set([
   'screenshot',
   'duplicates',
   'analytics',
+  'spelling',
 ]);
 
 export function BottomDetailPanel() {
@@ -424,7 +428,155 @@ export function BottomDetailPanel() {
         {detail && subTab === 'analytics' && (
           <AnalyticsView pageUrl={detail.row.url} />
         )}
+        {detail && subTab === 'spelling' && (
+          <SpellingView pageUrl={detail.row.url} />
+        )}
       </div>
+    </div>
+  );
+}
+
+/** Colour an issue type chip: misspellings are errors, style is advisory. */
+function issueTypeClass(issueType: string): string {
+  if (issueType === 'misspelling' || issueType === 'typographical') {
+    return 'bg-red-900/40 text-red-300 border-red-800';
+  }
+  if (issueType === 'grammar') {
+    return 'bg-amber-900/40 text-amber-300 border-amber-800';
+  }
+  return 'bg-surface-800 text-surface-300 border-surface-700';
+}
+
+/**
+ * Spelling & Grammar sub-tab — the stored LanguageTool match list for the
+ * selected page. The offending span is highlighted inside its surrounding
+ * context so the user can see the error in situ, with suggested
+ * replacements listed beside it.
+ */
+function SpellingView({ pageUrl }: { pageUrl: string }) {
+  const { t } = useTranslation();
+  const [data, setData] = useState<SpellingMatchesResult | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const dataVersion = useAppStore((s) => s.dataVersion);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoaded(false);
+    void window.freecrawl.spellingMatches(pageUrl).then((res) => {
+      if (cancelled) return;
+      setData(res);
+      setLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pageUrl, dataVersion]);
+
+  if (!loaded) {
+    return (
+      <div className="p-3 text-[11px] text-surface-500">
+        {t('spelling.loading', { defaultValue: 'Loading…' })}
+      </div>
+    );
+  }
+  if (!data || data.status === null) {
+    return (
+      <div className="p-3 text-[11px] text-surface-500">
+        {t('spelling.notChecked', {
+          defaultValue:
+            'This page has not been checked yet. Select it in the Spelling tab and run a check.',
+        })}
+      </div>
+    );
+  }
+  if (data.status === 'error') {
+    return (
+      <div className="p-3 text-[11px] text-red-400">
+        {t('spelling.checkFailed', { defaultValue: 'Check failed' })}: {data.error}
+      </div>
+    );
+  }
+  if (data.status === 'skipped') {
+    return (
+      <div className="p-3 text-[11px] text-surface-500">
+        {t('spelling.skipped', {
+          defaultValue: 'Skipped — the page has too little prose to check.',
+        })}
+      </div>
+    );
+  }
+  if (data.matches.length === 0) {
+    return (
+      <div className="p-3 text-[11px] text-emerald-400">
+        {t('spelling.clean', {
+          defaultValue: 'No spelling or grammar issues found.',
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-3 border-b border-surface-800 px-3 py-1.5 text-[10px] text-surface-400">
+        <span>
+          {t('spelling.summary', {
+            defaultValue: '{{n}} finding(s)',
+            n: data.matches.length,
+          })}
+        </span>
+        {data.language && (
+          <span>
+            {t('spelling.language', { defaultValue: 'Language' })}:{' '}
+            <span className="text-surface-200">{data.language}</span>
+          </span>
+        )}
+      </div>
+      <ol className="flex-1 overflow-y-auto text-[11px]">
+        {data.matches.map((m, i) => {
+          const before = m.context.slice(0, m.contextOffset);
+          const after = m.context.slice(m.contextOffset + m.text.length);
+          return (
+            <li
+              key={`${m.ruleId}-${m.offset}-${i}`}
+              className="border-b border-surface-800/60 px-3 py-2 odd:bg-surface-900/20"
+            >
+              <div className="mb-1 flex items-center gap-2">
+                <span
+                  className={`rounded border px-1.5 py-px text-[9px] uppercase tracking-wide ${issueTypeClass(m.issueType)}`}
+                >
+                  {m.issueType}
+                </span>
+                {m.category && (
+                  <span className="text-[10px] text-surface-500">{m.category}</span>
+                )}
+              </div>
+              <div className="mb-1 text-surface-200">
+                {m.shortMessage || m.message}
+              </div>
+              <div className="mb-1 font-mono text-[10px] text-surface-400">
+                …{before}
+                <mark className="rounded bg-red-900/60 px-0.5 text-red-200">
+                  {m.text}
+                </mark>
+                {after}…
+              </div>
+              {m.replacements.length > 0 && (
+                <div className="text-[10px] text-surface-500">
+                  {t('spelling.suggestions', { defaultValue: 'Suggestions' })}:{' '}
+                  {m.replacements.map((r, ri) => (
+                    <span
+                      key={ri}
+                      className="mr-1 rounded bg-surface-800 px-1 py-px font-mono text-emerald-300"
+                    >
+                      {r}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }

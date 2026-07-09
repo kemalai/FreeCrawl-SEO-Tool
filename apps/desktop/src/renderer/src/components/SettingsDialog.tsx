@@ -32,6 +32,7 @@ import {
   AlertTriangle,
   Wrench,
   FolderOpen,
+  SpellCheck,
   Lock,
   Languages,
   Plug,
@@ -212,6 +213,7 @@ type SectionKey =
   | 'rendering'
   | 'performance-budget'
   | 'storage'
+  | 'spelling'
   | 'privacy'
   | 'language';
 
@@ -376,6 +378,12 @@ const SECTIONS: SectionDef[] = [
     label: 'Storage',
     icon: FolderOpen,
     keywords: 'storage save folder directory project location path documents disk',
+  },
+  {
+    key: 'spelling',
+    label: 'Spelling',
+    icon: SpellCheck,
+    keywords: 'spelling grammar languagetool dictionary ignore words picky rule level yazım dilbilgisi sözlük',
   },
   {
     key: 'privacy',
@@ -945,6 +953,7 @@ export function SettingsDialog({ open, onClose }: Props) {
                 <PerformanceBudgetPanel form={form} update={update} />
               )}
               {active === 'storage' && <StoragePanel />}
+              {active === 'spelling' && <SpellingPanel />}
               {active === 'privacy' && <PrivacyPanel />}
               {active === 'language' && <LanguagePanel />}
             </div>
@@ -3956,6 +3965,106 @@ function IntegrationCard({
  * shows the resolved path so the user always sees where new projects
  * will land, regardless of whether they've customised it.
  */
+/**
+ * Spelling & Grammar panel — rule strictness + the custom dictionary.
+ * Both are app preferences read by the main process when a LanguageTool
+ * run starts; the endpoint and any Premium credentials live under
+ * Settings → Integrations → LanguageTool.
+ */
+function SpellingPanel() {
+  const { t } = useTranslation();
+  const [level, setLevel] = useState<'default' | 'picky'>(() =>
+    window.freecrawl.prefsGet('spellingLevel') === 'picky' ? 'picky' : 'default',
+  );
+  const [ignoreWords, setIgnoreWords] = useState<string>(() => {
+    const raw = window.freecrawl.prefsGet('spellingIgnoreWords');
+    return typeof raw === 'string' ? raw : '';
+  });
+
+  function pickLevel(l: 'default' | 'picky') {
+    setLevel(l);
+    // `default` is the default — clear the pref rather than storing it.
+    if (l === 'picky') window.freecrawl.prefsSet('spellingLevel', 'picky');
+    else window.freecrawl.prefsDelete('spellingLevel');
+  }
+
+  function saveIgnoreWords(value: string) {
+    setIgnoreWords(value);
+    if (value.trim().length > 0) {
+      window.freecrawl.prefsSet('spellingIgnoreWords', value);
+    } else {
+      window.freecrawl.prefsDelete('spellingIgnoreWords');
+    }
+  }
+
+  const wordCount = ignoreWords
+    .split(/[\s,;\n]+/)
+    .map((w) => w.trim())
+    .filter(Boolean).length;
+
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settings.spelling.intro', { defaultValue: "Spelling, grammar and style checks run through LanguageTool against pages you select in the Spelling tab. The page's own html[lang] picks the language; pages that don't declare one are auto-detected. Configure the endpoint (public API or self-hosted) under Integrations → LanguageTool." })}
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.spelling.levelLabel', { defaultValue: "Rule Level" })}
+        </div>
+        <div className="flex flex-col gap-2">
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="radio"
+              name="spelling-level"
+              className="mt-0.5"
+              checked={level === 'default'}
+              onChange={() => pickLevel('default')}
+            />
+            <span className="text-[12px] text-surface-100">
+              {t('settings.spelling.levelDefault', { defaultValue: "Default — spelling and grammar errors only" })}
+            </span>
+          </label>
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="radio"
+              name="spelling-level"
+              className="mt-0.5"
+              checked={level === 'picky'}
+              onChange={() => pickLevel('picky')}
+            />
+            <span className="text-[12px] text-surface-100">
+              {t('settings.spelling.levelPicky', { defaultValue: "Picky — also flags style, typography and wordiness" })}
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div className="rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.spelling.dictionaryLabel', { defaultValue: "Custom Dictionary" })}
+        </div>
+        <p className="mb-2 text-[11px] text-surface-400">
+          {t('settings.spelling.dictionaryHint', { defaultValue: "Words to never flag — brand names, product names, industry jargon. One per line, or separated by commas. Case-insensitive." })}
+        </p>
+        <textarea
+          className="h-32 w-full resize-y rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+          placeholder={"FreeCrawl\nhreflang\ncanonicalisation"}
+          value={ignoreWords}
+          onChange={(e) => saveIgnoreWords(e.target.value)}
+          spellCheck={false}
+        />
+        <p className="mt-1 text-[10px] text-surface-500">
+          {t('settings.spelling.dictionaryCount', {
+            defaultValue: "{{n}} word(s) ignored",
+            n: wordCount,
+          })}
+        </p>
+      </div>
+    </>
+  );
+}
+
 function StoragePanel() {
   const { t } = useTranslation();
   const [override, setOverride] = useState<string>(() => {

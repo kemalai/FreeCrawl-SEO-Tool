@@ -19,6 +19,12 @@ import type {
   PagespeedMetrics,
   PagespeedRow,
   PagespeedStrategy,
+  CruxMetrics,
+  CruxRow,
+  CruxFormFactor,
+  SpellingResult,
+  SpellingRow,
+  SpellingMatch,
   GscRow,
   Ga4Row,
   AiProvider,
@@ -785,6 +791,8 @@ export class ProjectDb {
          DELETE FROM crawl_queue;
          DELETE FROM host_certs;
          DELETE FROM pagespeed_results;
+         DELETE FROM crux_results;
+         DELETE FROM spelling_results;
          DELETE FROM gsc_results;
          DELETE FROM ga4_results;
          DELETE FROM ai_results;
@@ -910,10 +918,12 @@ export class ProjectDb {
           WHERE id NOT IN (SELECT DISTINCT image_id FROM image_usages)`,
       );
 
-      // PageSpeed + Search Console rows are keyed by URL string (no FK
-      // to `urls`), so wipe them by the same host match — otherwise a
-      // GDPR delete leaves stale data that would re-attach if the URL
-      // is re-crawled later.
+      // The url-keyed audit tables (PageSpeed, CrUX, Search Console,
+      // Analytics, AI, SEO) have no FK to `urls`, so wipe them by the same
+      // host match — otherwise a GDPR delete leaves stale data that would
+      // re-attach if the URL is re-crawled later. Driven off
+      // `URL_KEYED_AUDIT_TABLES` so a newly-added audit table can never be
+      // silently missed here.
       const hostMatchSql = (table: string): string =>
         `DELETE FROM ${table}
           WHERE LOWER(
@@ -927,12 +937,9 @@ export class ProjectDb {
               END
             )
           ) = ?`;
-      this.db.prepare(hostMatchSql('pagespeed_results')).run(target);
-      this.db.prepare(hostMatchSql('gsc_results')).run(target);
-      this.db.prepare(hostMatchSql('ga4_results')).run(target);
-      this.db.prepare(hostMatchSql('ai_results')).run(target);
-      this.db.prepare(hostMatchSql('seo_results')).run(target);
-      this.db.prepare(hostMatchSql('gsc_inspection_results')).run(target);
+      for (const table of ProjectDb.URL_KEYED_AUDIT_TABLES) {
+        this.db.prepare(hostMatchSql(table)).run(target);
+      }
 
       return { urlsDeleted, linksDeleted };
     });
@@ -1114,9 +1121,11 @@ export class ProjectDb {
    */
   /** url-keyed audit tables with no FK to `urls` — must be wiped explicitly
    *  on delete (ON DELETE CASCADE doesn't reach them). Kept in sync with
-   *  `deleteByDomain`, which clears the same six. */
+   *  `deleteByDomain`, which clears the same set. */
   private static readonly URL_KEYED_AUDIT_TABLES = [
     'pagespeed_results',
+    'crux_results',
+    'spelling_results',
     'gsc_results',
     'ga4_results',
     'ai_results',
@@ -3452,6 +3461,307 @@ export class ProjectDb {
   }
 
   /**
+   * Store one CrUX field-data record, keyed by (url, form_factor);
+   * re-fetching overwrites the previous row.
+   */
+  upsertCruxResult(
+    url: string,
+    formFactor: CruxFormFactor,
+    m: CruxMetrics,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO crux_results
+           (url, form_factor, lcp, cls, inp, fcp, ttfb,
+            status, error, collection_period, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(url, form_factor) DO UPDATE SET
+           lcp = excluded.lcp,
+           cls = excluded.cls,
+           inp = excluded.inp,
+           fcp = excluded.fcp,
+           ttfb = excluded.ttfb,
+           status = excluded.status,
+           error = excluded.error,
+           collection_period = excluded.collection_period,
+           fetched_at = excluded.fetched_at`,
+      )
+      .run(
+        url,
+        formFactor,
+        m.lcp,
+        m.cls,
+        m.inp,
+        m.fcp,
+        m.ttfb,
+        m.status,
+        m.error,
+        m.collectionPeriod,
+        m.fetchedAt,
+      );
+  }
+
+  /**
+   * Candidate query for the CrUX tab. Returns crawled internal HTML 2xx
+   * pages left-joined with any stored phone + desktop field records.
+   */
+  queryCrux(params: {
+    limit: number;
+    offset: number;
+    search?: string;
+    filter?: 'all' | 'tested' | 'untested';
+  }): { rows: CruxRow[]; total: number } {
+    const where: string[] = [
+      "u.is_external = 0 AND u.content_kind = 'html'",
+      'u.status_code >= 200 AND u.status_code < 300',
+    ];
+    const args: (string | number)[] = [];
+    if (params.search) {
+      where.push('u.url LIKE ?');
+      args.push(`%${params.search}%`);
+    }
+    const filter = params.filter ?? 'all';
+    if (filter === 'tested') {
+      where.push('(cp.url IS NOT NULL OR cd.url IS NOT NULL)');
+    } else if (filter === 'untested') {
+      where.push('cp.url IS NULL AND cd.url IS NULL');
+    }
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const joinSql = `
+      FROM urls u
+      LEFT JOIN crux_results cp ON cp.url = u.url AND cp.form_factor = 'phone'
+      LEFT JOIN crux_results cd ON cd.url = u.url AND cd.form_factor = 'desktop'`;
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
+      .get(...args) as { c: number };
+
+    const rowsDb = this.db
+      .prepare(
+        `SELECT u.url AS url, u.status_code AS status_code,
+                cp.lcp AS p_lcp, cp.cls AS p_cls, cp.inp AS p_inp,
+                cp.fcp AS p_fcp, cp.ttfb AS p_ttfb, cp.status AS p_status,
+                cp.error AS p_error, cp.collection_period AS p_period, cp.fetched_at AS p_fetched,
+                cd.lcp AS d_lcp, cd.cls AS d_cls, cd.inp AS d_inp,
+                cd.fcp AS d_fcp, cd.ttfb AS d_ttfb, cd.status AS d_status,
+                cd.error AS d_error, cd.collection_period AS d_period, cd.fetched_at AS d_fetched
+         ${joinSql}
+         ${whereSql}
+         ORDER BY u.inlinks DESC, u.url ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...args, params.limit, params.offset) as unknown as Record<
+      string,
+      unknown
+    >[];
+
+    const metrics = (
+      r: Record<string, unknown>,
+      p: string,
+    ): CruxMetrics | null => {
+      const status = r[`${p}_status`];
+      if (typeof status !== 'string') return null;
+      return {
+        lcp: (r[`${p}_lcp`] as number | null) ?? null,
+        cls: (r[`${p}_cls`] as number | null) ?? null,
+        inp: (r[`${p}_inp`] as number | null) ?? null,
+        fcp: (r[`${p}_fcp`] as number | null) ?? null,
+        ttfb: (r[`${p}_ttfb`] as number | null) ?? null,
+        status:
+          status === 'ok' ? 'ok' : status === 'nodata' ? 'nodata' : 'error',
+        error: (r[`${p}_error`] as string | null) ?? null,
+        collectionPeriod: (r[`${p}_period`] as string | null) ?? null,
+        fetchedAt: (r[`${p}_fetched`] as string | null) ?? '',
+      };
+    };
+
+    return {
+      total: totalRow.c,
+      rows: rowsDb.map((r) => ({
+        url: r['url'] as string,
+        statusCode: (r['status_code'] as number | null) ?? null,
+        phone: metrics(r, 'p'),
+        desktop: metrics(r, 'd'),
+      })),
+    };
+  }
+
+  /**
+   * Raw stored HTML body + declared `html[lang]` for one URL. Feeds the
+   * spelling check, which prefers the crawl-time snapshot over re-fetching
+   * the page. `body` is null when body snapshots were disabled for the
+   * crawl, in which case the caller re-fetches.
+   */
+  getUrlBodyAndLang(
+    url: string,
+  ): { body: string | null; lang: string | null } | null {
+    const row = this.db
+      .prepare(
+        `SELECT u.lang AS lang, s.body AS body
+           FROM urls u
+           LEFT JOIN url_sources s ON s.url_id = u.id
+          WHERE u.url = ?`,
+      )
+      .get(url) as { lang: string | null; body: string | null } | undefined;
+    if (!row) return null;
+    return { body: row.body ?? null, lang: row.lang ?? null };
+  }
+
+  /**
+   * Store one LanguageTool check result, keyed by url; re-checking a page
+   * overwrites the previous row. `matches` is persisted as a JSON array.
+   */
+  upsertSpellingResult(url: string, r: SpellingResult): void {
+    this.db
+      .prepare(
+        `INSERT INTO spelling_results
+           (url, language, match_count, matches, status, error, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(url) DO UPDATE SET
+           language = excluded.language,
+           match_count = excluded.match_count,
+           matches = excluded.matches,
+           status = excluded.status,
+           error = excluded.error,
+           fetched_at = excluded.fetched_at`,
+      )
+      .run(
+        url,
+        r.language,
+        r.matchCount,
+        r.matches.length > 0 ? JSON.stringify(r.matches) : null,
+        r.status,
+        r.error,
+        r.fetchedAt,
+      );
+  }
+
+  /**
+   * Candidate query for the Spelling tab. Returns crawled internal HTML
+   * 2xx pages left-joined with any stored check summary. The full match
+   * list is deliberately NOT selected here — it can be thousands of
+   * entries per page; the Detail panel loads it per-URL on demand.
+   */
+  querySpelling(params: {
+    limit: number;
+    offset: number;
+    search?: string;
+    filter?: 'all' | 'checked' | 'unchecked' | 'errors';
+  }): { rows: SpellingRow[]; total: number } {
+    const where: string[] = [
+      "u.is_external = 0 AND u.content_kind = 'html'",
+      'u.status_code >= 200 AND u.status_code < 300',
+    ];
+    const args: (string | number)[] = [];
+    if (params.search) {
+      where.push('u.url LIKE ?');
+      args.push(`%${params.search}%`);
+    }
+    const filter = params.filter ?? 'all';
+    if (filter === 'checked') where.push('s.url IS NOT NULL');
+    else if (filter === 'unchecked') where.push('s.url IS NULL');
+    else if (filter === 'errors') where.push('s.match_count > 0');
+
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const joinSql = `
+      FROM urls u
+      LEFT JOIN spelling_results s ON s.url = u.url`;
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
+      .get(...args) as { c: number };
+
+    const rowsDb = this.db
+      .prepare(
+        `SELECT u.url AS url, u.lang AS lang, u.word_count AS word_count,
+                s.language AS language, s.match_count AS match_count,
+                s.status AS status, s.error AS error, s.fetched_at AS fetched_at
+         ${joinSql}
+         ${whereSql}
+         ORDER BY s.match_count DESC, u.inlinks DESC, u.url ASC
+         LIMIT ? OFFSET ?`,
+      )
+      .all(...args, params.limit, params.offset) as unknown as Record<
+      string,
+      unknown
+    >[];
+
+    return {
+      total: totalRow.c,
+      rows: rowsDb.map((r) => {
+        const status = r['status'];
+        return {
+          url: r['url'] as string,
+          lang: (r['lang'] as string | null) ?? null,
+          wordCount: (r['word_count'] as number | null) ?? null,
+          language: (r['language'] as string | null) ?? null,
+          matchCount: (r['match_count'] as number | null) ?? null,
+          status:
+            status === 'ok' || status === 'skipped' || status === 'error'
+              ? status
+              : null,
+          error: (r['error'] as string | null) ?? null,
+          fetchedAt: (r['fetched_at'] as string | null) ?? null,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Full stored match list for one URL — drives the Detail panel's
+   * Spelling & Grammar sub-tab. Returns null when the page was never
+   * checked. A corrupt `matches` blob degrades to an empty list rather
+   * than throwing.
+   */
+  getSpellingMatches(url: string): {
+    url: string;
+    language: string | null;
+    status: 'ok' | 'skipped' | 'error' | null;
+    error: string | null;
+    fetchedAt: string | null;
+    matches: SpellingMatch[];
+  } | null {
+    const row = this.db
+      .prepare(
+        `SELECT url, language, matches, status, error, fetched_at
+           FROM spelling_results WHERE url = ?`,
+      )
+      .get(url) as
+      | {
+          url: string;
+          language: string | null;
+          matches: string | null;
+          status: string;
+          error: string | null;
+          fetched_at: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+
+    let matches: SpellingMatch[] = [];
+    if (row.matches) {
+      try {
+        const parsed = JSON.parse(row.matches) as unknown;
+        if (Array.isArray(parsed)) matches = parsed as SpellingMatch[];
+      } catch {
+        // Corrupt blob — surface the summary without the list.
+      }
+    }
+    const status = row.status;
+    return {
+      url: row.url,
+      language: row.language,
+      status:
+        status === 'ok' || status === 'skipped' || status === 'error'
+          ? status
+          : null,
+      error: row.error,
+      fetchedAt: row.fetched_at,
+      matches,
+    };
+  }
+
+  /**
    * Faz 7 — wholesale-replace the stored Google Search Console data.
    * Each GSC pull is a fresh snapshot for a date range, so the old rows
    * are dropped and the new set inserted in one transaction.
@@ -4384,6 +4694,12 @@ export class ProjectDb {
          )`,
       ),
       contentThin: countWhere(`${html} AND word_count IS NOT NULL AND word_count < 300`),
+      spellingGrammar: countWhere(
+        `${html} AND EXISTS (
+           SELECT 1 FROM spelling_results s
+            WHERE s.url = urls.url AND s.match_count > 0
+         )`,
+      ),
       responseSlow: countWhere(`${html} AND response_time_ms > 1000`),
       responseVerySlow: countWhere(`${html} AND response_time_ms > 3000`),
       pageLarge: countWhere(`${html} AND content_length > 1048576`),
@@ -7836,6 +8152,11 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               )`;
     case 'issues:content-thin':
       return "is_external = 0 AND content_kind = 'html' AND word_count IS NOT NULL AND word_count < 300";
+    case 'issues:spelling-grammar':
+      return `is_external = 0 AND content_kind = 'html' AND EXISTS (
+                SELECT 1 FROM spelling_results s
+                 WHERE s.url = urls.url AND s.match_count > 0
+              )`;
     case 'issues:response-slow':
       return "is_external = 0 AND content_kind = 'html' AND response_time_ms > 1000";
     case 'issues:response-very-slow':

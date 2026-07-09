@@ -1794,6 +1794,73 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 75,
+    name: 'add_crux_results_table',
+    // V2 — Chrome UX Report (CrUX) integration. Real-user field Core Web
+    // Vitals live in their own table, mirroring `pagespeed_results`: CrUX
+    // is fetched on-demand against a user-selected subset, each URL can
+    // have up to two rows (phone + desktop), and it keeps the very-wide
+    // `urls` table from growing further.
+    //
+    //   url          — the page URL (joins back to `urls.url`).
+    //   form_factor  — 'phone' | 'desktop'.
+    //   lcp/inp/fcp/ttfb — p75 timing metrics in milliseconds.
+    //   cls          — p75 Cumulative Layout Shift (unitless).
+    //   status       — 'ok' | 'nodata' (too little traffic) | 'error'.
+    //   error        — failure reason when status='error'.
+    //   collection_period — CrUX window end date (YYYY-MM-DD) when known.
+    //   fetched_at   — ISO timestamp of the fetch.
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS crux_results (
+          url               TEXT NOT NULL,
+          form_factor       TEXT NOT NULL,
+          lcp               REAL,
+          cls               REAL,
+          inp               REAL,
+          fcp               REAL,
+          ttfb              REAL,
+          status            TEXT NOT NULL,
+          error             TEXT,
+          collection_period TEXT,
+          fetched_at        TEXT NOT NULL,
+          PRIMARY KEY (url, form_factor)
+        );
+      `);
+    },
+  },
+  {
+    version: 76,
+    name: 'add_spelling_results_table',
+    // V2 — Spelling & Grammar (LanguageTool). Like the other on-demand
+    // audit integrations this lives in its own url-keyed table rather than
+    // widening `urls`: checks run against a user-selected subset, and the
+    // per-page match list is a variable-length JSON blob.
+    //
+    //   url         — the checked page URL (joins back to `urls.url`).
+    //   language    — language code LanguageTool used (may be auto-detected).
+    //   match_count — findings after the ignore-dictionary filter.
+    //   matches     — JSON array of SpellingMatch objects.
+    //   status      — 'ok' | 'skipped' (too little prose) | 'error'.
+    //   error       — failure reason when status='error'.
+    //   fetched_at  — ISO timestamp of the check.
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS spelling_results (
+          url         TEXT PRIMARY KEY,
+          language    TEXT,
+          match_count INTEGER NOT NULL DEFAULT 0,
+          matches     TEXT,
+          status      TEXT NOT NULL,
+          error       TEXT,
+          fetched_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_spelling_match_count
+          ON spelling_results(match_count);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

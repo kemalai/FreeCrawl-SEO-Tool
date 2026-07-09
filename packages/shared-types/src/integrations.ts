@@ -161,6 +161,52 @@ export const INTEGRATIONS: IntegrationDef[] = [
     setupHint:
       "A free API key is required — Google's keyless shared quota is now 0/day, so anonymous audits no longer work. Create a key in Google Cloud Console (no billing required), enable the PageSpeed Insights API, then paste the key here. Free tier: 25 000 queries/day, 240/min.",
   },
+  {
+    id: 'crux',
+    name: 'Chrome UX Report (CrUX)',
+    category: 'performance',
+    authType: 'api-key',
+    description: 'Real-user field Core Web Vitals per URL (p75 LCP / INP / CLS / FCP / TTFB).',
+    fields: [KEY_FIELD],
+    helpUrl: 'https://developer.chrome.com/docs/crux/api',
+    setupHint:
+      'An API key is required (no keyless mode). Create a key in Google Cloud Console (no billing required), enable the "Chrome UX Report API", then paste the key here. A single Google API key can serve both this and PageSpeed Insights once both APIs are enabled. Pages with too little real-user traffic simply return no data.',
+  },
+
+  // ---- Content quality ----
+  {
+    id: 'languagetool',
+    name: 'LanguageTool',
+    category: 'seo',
+    authType: 'local',
+    description: 'Spelling, grammar and style checking per page.',
+    fields: [
+      {
+        key: 'endpoint',
+        label: 'API endpoint',
+        secret: false,
+        placeholder: 'https://api.languagetool.org',
+        optional: true,
+      },
+      {
+        key: 'username',
+        label: 'Premium username',
+        secret: false,
+        optional: true,
+        placeholder: 'Account email (Premium only)',
+      },
+      {
+        key: 'apiKey',
+        label: 'Premium API Key',
+        secret: true,
+        optional: true,
+        placeholder: 'Premium API key (optional)',
+      },
+    ],
+    helpUrl: 'https://languagetool.org/http-api/',
+    setupHint:
+      'Leave everything blank to use the free public API (rate-limited to ~20 requests/min). For unlimited checks, self-host LanguageTool and point the endpoint at it (e.g. http://localhost:8081), or paste a Premium username + API key.',
+  },
 
   // ---- SEO data ----
   {

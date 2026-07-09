@@ -345,6 +345,28 @@ export interface ParsedPage {
  * fingerprint uses this; `wordCount` / readability stay on the full
  * body so existing thin-content thresholds don't shift.
  */
+/**
+ * Extract human-readable prose from a raw HTML document, for grammar /
+ * spell checking. Unlike `extractMainContentText` (which feeds the
+ * duplicate fingerprint and keeps whatever `<body>` yields), this strips
+ * everything that would produce false positives in a language checker:
+ * script / style / noscript payloads, `<template>` and `<svg>` innards,
+ * and `<code>` / `<pre>` / `<kbd>` / `<samp>` blocks (identifiers are not
+ * prose). Page chrome (nav / header / footer / aside) is dropped via the
+ * same main-content heuristic so a shared menu isn't re-flagged on every
+ * page. Returns whitespace-collapsed, trimmed text — empty when the
+ * document carries no prose.
+ */
+export function extractProseText(
+  html: string,
+  contentAreaSelector?: string,
+): string {
+  if (!html || html.trim().length === 0) return '';
+  const $ = cheerio.load(html);
+  $('script, style, noscript, template, svg, code, pre, kbd, samp').remove();
+  return extractMainContentText($, contentAreaSelector);
+}
+
 function extractMainContentText(
   $: cheerio.CheerioAPI,
   userSelector?: string,

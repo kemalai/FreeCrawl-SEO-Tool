@@ -19,6 +19,8 @@ import { ImagesTab } from './tabs/ImagesTab.js';
 import { BrokenLinksTab } from './tabs/BrokenLinksTab.js';
 import { SerpTab } from './tabs/SerpTab.js';
 import { PageSpeedTab } from './tabs/PageSpeedTab.js';
+import { CruxTab } from './tabs/CruxTab.js';
+import { SpellingTab } from './tabs/SpellingTab.js';
 import { SearchConsoleTab } from './tabs/SearchConsoleTab.js';
 import { AnalyticsTab } from './tabs/AnalyticsTab.js';
 import { AiTab } from './tabs/AiTab.js';
@@ -435,6 +437,10 @@ export function App() {
                   <SerpTab />
                 ) : activeTab === 'pagespeed' ? (
                   <PageSpeedTab />
+                ) : activeTab === 'crux' ? (
+                  <CruxTab />
+                ) : activeTab === 'spelling' ? (
+                  <SpellingTab />
                 ) : activeTab === 'search-console' ? (
                   <SearchConsoleTab />
                 ) : activeTab === 'analytics' ? (

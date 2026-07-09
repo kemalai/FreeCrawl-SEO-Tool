@@ -100,6 +100,17 @@ import {
   type PagespeedRunInput,
   type PagespeedRunResult,
   type PagespeedProgress,
+  type CruxQueryInput,
+  type CruxQueryResult,
+  type CruxRunInput,
+  type CruxRunResult,
+  type CruxProgress,
+  type SpellingQueryInput,
+  type SpellingQueryResult,
+  type SpellingRunInput,
+  type SpellingRunResult,
+  type SpellingProgress,
+  type SpellingMatchesResult,
   type GoogleAuthState,
   type GoogleAuthResult,
   type GscListSitesResult,
@@ -360,6 +371,21 @@ const api: FreeCrawlApi = {
   pagespeedCancel: (): Promise<void> => ipcRenderer.invoke(IPC.pagespeedCancel),
   onPagespeedProgress: (cb) =>
     subscribe<PagespeedProgress>(IPC.pagespeedProgress, cb),
+  cruxQuery: (input: CruxQueryInput): Promise<CruxQueryResult> =>
+    ipcRenderer.invoke(IPC.cruxQuery, input),
+  cruxRun: (input: CruxRunInput): Promise<CruxRunResult> =>
+    ipcRenderer.invoke(IPC.cruxRun, input),
+  cruxCancel: (): Promise<void> => ipcRenderer.invoke(IPC.cruxCancel),
+  onCruxProgress: (cb) => subscribe<CruxProgress>(IPC.cruxProgress, cb),
+  spellingQuery: (input: SpellingQueryInput): Promise<SpellingQueryResult> =>
+    ipcRenderer.invoke(IPC.spellingQuery, input),
+  spellingRun: (input: SpellingRunInput): Promise<SpellingRunResult> =>
+    ipcRenderer.invoke(IPC.spellingRun, input),
+  spellingCancel: (): Promise<void> => ipcRenderer.invoke(IPC.spellingCancel),
+  onSpellingProgress: (cb) =>
+    subscribe<SpellingProgress>(IPC.spellingProgress, cb),
+  spellingMatches: (url: string): Promise<SpellingMatchesResult | null> =>
+    ipcRenderer.invoke(IPC.spellingMatches, url),
   googleAuthStart: (id: string): Promise<GoogleAuthResult> =>
     ipcRenderer.invoke(IPC.googleAuthStart, id),
   googleAuthStatus: (id: string): Promise<GoogleAuthState> =>

@@ -639,6 +639,71 @@ export function buildTools(): Tool[] {
           filter: args.filter as 'all' | 'tested' | 'untested' | undefined,
         }),
     },
+    {
+      name: 'query_crux',
+      description:
+        'Chrome UX Report rows: real-user (field) 75th-percentile Core Web Vitals per URL (LCP/INP/CLS/FCP/TTFB) for phone + desktop. Populate via Settings → Integrations → Chrome UX Report, then run a batch from the desktop CrUX tab (or crux_run).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          search: { type: 'string' },
+          filter: { type: 'string', enum: ['all', 'tested', 'untested'] },
+          limit: { type: 'integer', minimum: 1, maximum: 1000 },
+          offset: { type: 'integer', minimum: 0 },
+        },
+      },
+      handler: (args, db) =>
+        db.queryCrux({
+          limit: clamp(args.limit, 1, 1000, 50),
+          offset: clamp(args.offset, 0, 10_000_000, 0),
+          search: typeof args.search === 'string' ? args.search : undefined,
+          filter: args.filter as 'all' | 'tested' | 'untested' | undefined,
+        }),
+    },
+    {
+      name: 'query_spelling',
+      description:
+        'Spelling & grammar check summary per crawled page (LanguageTool): match count, language used, status. Use filter "errors" for pages with ≥1 finding. Populate via Settings → Integrations → LanguageTool, then run a batch from the desktop Spelling tab (or spelling_run). Call get_url_spelling for a page\'s full match list.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          search: { type: 'string' },
+          filter: {
+            type: 'string',
+            enum: ['all', 'checked', 'unchecked', 'errors'],
+          },
+          limit: { type: 'integer', minimum: 1, maximum: 1000 },
+          offset: { type: 'integer', minimum: 0 },
+        },
+      },
+      handler: (args, db) =>
+        db.querySpelling({
+          limit: clamp(args.limit, 1, 1000, 50),
+          offset: clamp(args.offset, 0, 10_000_000, 0),
+          search: typeof args.search === 'string' ? args.search : undefined,
+          filter: args.filter as
+            | 'all'
+            | 'checked'
+            | 'unchecked'
+            | 'errors'
+            | undefined,
+        }),
+    },
+    {
+      name: 'get_url_spelling',
+      description:
+        'Full LanguageTool match list for one URL: message, offending text, surrounding context, suggested replacements, rule id and issue type per finding.',
+      inputSchema: {
+        type: 'object',
+        properties: { url: { type: 'string' } },
+        required: ['url'],
+      },
+      handler: (args, db) => {
+        const url = typeof args.url === 'string' ? args.url : '';
+        if (!url) throw new Error('url is required');
+        return db.getSpellingMatches(url) ?? { url, matches: [], status: null };
+      },
+    },
 
     {
       name: 'query_ai',
@@ -1697,6 +1762,77 @@ export function buildTools(): Tool[] {
 
     {
       requiresDb: false,
+      name: 'crux_run',
+      description:
+        'Kick off a Chrome UX Report (real-user field data) batch fetch in the desktop app and return immediately — it does NOT block. Poll `get_fetch_progress` (kind "crux") to watch it and `cancel_fetch` to stop. Pick targets with an explicit `urls` array OR a `category` resolved server-side. Requires a Google API key with the Chrome UX Report API enabled (Settings → Integrations → Chrome UX Report). Pages with too little real-user traffic simply return no data. Results land where `query_crux` reads. Returns `{started, total, truncated, state}`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          urls: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Explicit URLs to fetch. Wins over `category`.',
+          },
+          category: {
+            type: 'string',
+            description: 'Resolve target URLs from the active project by category when `urls` is omitted.',
+          },
+          search: {
+            type: 'string',
+            description: 'Optional substring filter applied when resolving via `category`.',
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 5000,
+            description: 'Max URLs to pull when resolving via `category`. Default 100.',
+          },
+          formFactor: {
+            type: 'string',
+            enum: ['phone', 'desktop', 'both'],
+            description: 'Device class. `both` doubles the API calls. Default "phone".',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/crux-run', args),
+    },
+
+    {
+      requiresDb: false,
+      name: 'spelling_run',
+      description:
+        'Kick off a LanguageTool spelling/grammar check over crawled pages in the desktop app and return immediately — it does NOT block. Poll `get_fetch_progress` (kind "spelling") to watch it and `cancel_fetch` to stop. Pick targets with an explicit `urls` array OR a `category` resolved server-side. Uses the free public LanguageTool API by default (rate-limited to ~20 req/min, so runs are serial); configure a self-hosted endpoint or Premium credentials under Settings → Integrations → LanguageTool for throughput. Results land where `query_spelling` / `get_url_spelling` read.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          urls: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Explicit URLs to check. Wins over `category`.',
+          },
+          category: {
+            type: 'string',
+            description: 'Resolve target URLs from the active project by category when `urls` is omitted.',
+          },
+          search: {
+            type: 'string',
+            description: 'Optional substring filter applied when resolving via `category`.',
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 5000,
+            description: 'Max URLs to pull when resolving via `category`. Default 100.',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/spelling-run', args),
+    },
+
+    {
+      requiresDb: false,
       name: 'ai_run',
       description:
         'Kick off an AI batch over the matched URLs and return immediately (non-blocking). Each page\'s fields can be interpolated into `prompt` via {url}/{title}/{description}/{h1}/{body}. Poll `get_fetch_progress` (kind "ai") and `cancel_fetch` to stop. COSTS REAL MONEY for hosted providers (openai/anthropic) — one API call per matched URL — so scope tightly with `category` + `limit` first. The provider must be configured in Settings → AI. URLs not crawled in this project are skipped (no page context). Results land where `query_ai` reads. Returns `{started, total, truncated, state}`.',
@@ -1781,7 +1917,10 @@ export function buildTools(): Tool[] {
       inputSchema: {
         type: 'object',
         properties: {
-          kind: { type: 'string', enum: ['pagespeed', 'ai', 'seo'] },
+          kind: {
+            type: 'string',
+            enum: ['pagespeed', 'crux', 'spelling', 'ai', 'seo'],
+          },
         },
       },
       handler: async (args) =>
@@ -1796,7 +1935,10 @@ export function buildTools(): Tool[] {
       inputSchema: {
         type: 'object',
         properties: {
-          kind: { type: 'string', enum: ['pagespeed', 'ai', 'seo'] },
+          kind: {
+            type: 'string',
+            enum: ['pagespeed', 'crux', 'spelling', 'ai', 'seo'],
+          },
         },
       },
       handler: async (args) =>

@@ -23,6 +23,8 @@ import type {
   PagespeedRow,
   PagespeedRunStrategy,
 } from './pagespeed.js';
+import type { CruxRow, CruxRunFormFactor } from './crux.js';
+import type { SpellingMatch, SpellingRow } from './spelling.js';
 import type {
   GoogleAuthState,
   GoogleAuthResult,
@@ -239,6 +241,26 @@ export const IPC = {
   pagespeedCancel: 'pagespeed:cancel',
   /** main → renderer: live progress of an in-flight PageSpeed run. */
   pagespeedProgress: 'pagespeed:progress',
+  /** Chrome UX Report (CrUX) integration — real-user field metrics.
+   *  `cruxQuery` lists crawled internal HTML pages joined with any stored
+   *  field data; `cruxRun` fetches a user-selected set of URLs (emits
+   *  `cruxProgress`); `cruxCancel` stops an in-flight run early. */
+  cruxQuery: 'crux:query',
+  cruxRun: 'crux:run',
+  cruxCancel: 'crux:cancel',
+  /** main → renderer: live progress of an in-flight CrUX run. */
+  cruxProgress: 'crux:progress',
+  /** Spelling & Grammar (LanguageTool) integration.
+   *  `spellingQuery` lists crawled internal HTML pages joined with any
+   *  stored check summary; `spellingRun` checks a user-selected set of
+   *  URLs (emits `spellingProgress`); `spellingCancel` stops a run early;
+   *  `spellingMatches` loads the full match list for one URL. */
+  spellingQuery: 'spelling:query',
+  spellingRun: 'spelling:run',
+  spellingCancel: 'spelling:cancel',
+  spellingMatches: 'spelling:matches',
+  /** main → renderer: live progress of an in-flight spelling run. */
+  spellingProgress: 'spelling:progress',
   /** Faz 7 — Google OAuth keystone (shared by Search Console, GA4,
    *  Sheets). `googleAuthStart` opens the consent screen in the browser
    *  and catches the loopback redirect; `googleAuthStatus` reports the
@@ -1198,6 +1220,96 @@ export interface PagespeedProgress {
   running: boolean;
 }
 
+/**
+ * Inputs for the CrUX tab's candidate query — crawled internal HTML pages
+ * left-joined with any stored field data.
+ */
+export interface CruxQueryInput {
+  limit: number;
+  offset: number;
+  /** Substring match against the URL. */
+  search?: string;
+  /** `all` (default), `tested` (has ≥1 stored result), `untested`. */
+  filter?: 'all' | 'tested' | 'untested';
+}
+
+export interface CruxQueryResult {
+  rows: CruxRow[];
+  /** Total candidate rows matching the filter (before pagination). */
+  total: number;
+}
+
+export interface CruxRunInput {
+  /** URLs to fetch — taken from the candidate rows in the tab. */
+  urls: string[];
+  /** Which form factor(s) to fetch. `both` doubles the API calls. */
+  formFactor: CruxRunFormFactor;
+}
+
+export interface CruxRunResult {
+  /** Number of (url × form-factor) records fetched with data. */
+  completed: number;
+  /** Number that returned an error or no data. */
+  failed: number;
+  /** True when the user cancelled the run before it finished. */
+  cancelled: boolean;
+}
+
+/** main → renderer live progress while a CrUX run is in flight. */
+export interface CruxProgress {
+  done: number;
+  total: number;
+  currentUrl: string | null;
+  running: boolean;
+}
+
+/** Inputs for the Spelling tab's candidate query. */
+export interface SpellingQueryInput {
+  limit: number;
+  offset: number;
+  /** Substring match against the URL. */
+  search?: string;
+  /** `all` (default), `checked`, `unchecked`, `errors` (matchCount > 0). */
+  filter?: 'all' | 'checked' | 'unchecked' | 'errors';
+}
+
+export interface SpellingQueryResult {
+  rows: SpellingRow[];
+  /** Total candidate rows matching the filter (before pagination). */
+  total: number;
+}
+
+export interface SpellingRunInput {
+  /** URLs to check — taken from the candidate rows in the tab. */
+  urls: string[];
+}
+
+export interface SpellingRunResult {
+  /** Pages checked successfully (including clean pages). */
+  completed: number;
+  /** Pages that errored or were skipped for having no prose. */
+  failed: number;
+  cancelled: boolean;
+}
+
+/** main → renderer live progress while a spelling run is in flight. */
+export interface SpellingProgress {
+  done: number;
+  total: number;
+  currentUrl: string | null;
+  running: boolean;
+}
+
+/** Full stored match list for one URL (Detail panel sub-tab). */
+export interface SpellingMatchesResult {
+  url: string;
+  language: string | null;
+  status: 'ok' | 'skipped' | 'error' | null;
+  error: string | null;
+  fetchedAt: string | null;
+  matches: SpellingMatch[];
+}
+
 /** Result of `gscListSites` — the connected account's GSC properties. */
 export interface GscListSitesResult {
   ok: boolean;
@@ -1543,6 +1655,28 @@ export interface FreeCrawlApi {
   pagespeedCancel(): Promise<void>;
   /** Live progress of an in-flight PageSpeed run. */
   onPagespeedProgress(cb: (p: PagespeedProgress) => void): () => void;
+  /** List crawled internal HTML pages joined with their stored CrUX
+   *  real-user field metrics. */
+  cruxQuery(input: CruxQueryInput): Promise<CruxQueryResult>;
+  /** Fetch CrUX field data for the given URLs. Resolves when the run
+   *  finishes; subscribe to `onCruxProgress` for live progress. */
+  cruxRun(input: CruxRunInput): Promise<CruxRunResult>;
+  /** Request cancellation of an in-flight CrUX run. */
+  cruxCancel(): Promise<void>;
+  /** Live progress of an in-flight CrUX run. */
+  onCruxProgress(cb: (p: CruxProgress) => void): () => void;
+  /** List crawled internal HTML pages joined with their stored
+   *  spelling / grammar check summary. */
+  spellingQuery(input: SpellingQueryInput): Promise<SpellingQueryResult>;
+  /** Run a LanguageTool check over the given URLs. Resolves when the run
+   *  finishes; subscribe to `onSpellingProgress` for live progress. */
+  spellingRun(input: SpellingRunInput): Promise<SpellingRunResult>;
+  /** Request cancellation of an in-flight spelling run. */
+  spellingCancel(): Promise<void>;
+  /** Live progress of an in-flight spelling run. */
+  onSpellingProgress(cb: (p: SpellingProgress) => void): () => void;
+  /** Full stored match list for one URL. */
+  spellingMatches(url: string): Promise<SpellingMatchesResult | null>;
   /** Faz 7 — start the interactive Google OAuth consent flow for one
    *  integration. Resolves once the user finishes (or cancels) in the
    *  browser. */

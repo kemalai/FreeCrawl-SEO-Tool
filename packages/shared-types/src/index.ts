@@ -4,6 +4,8 @@ export * from './ipc.js';
 export * from './project.js';
 export * from './integrations.js';
 export * from './pagespeed.js';
+export * from './crux.js';
+export * from './spelling.js';
 export * from './google.js';
 export * from './ai.js';
 export * from './seo.js';

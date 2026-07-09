@@ -68,6 +68,7 @@ export type UrlCategory =
   | 'issues:canonical-to-redirect'
   | 'issues:canonical-to-noindex'
   | 'issues:content-thin'
+  | 'issues:spelling-grammar'
   | 'issues:response-slow'
   | 'issues:response-very-slow'
   | 'issues:page-large'
@@ -1392,6 +1393,8 @@ export interface OverviewCounts {
     canonicalToRedirect: number;
     canonicalToNoindex: number;
     contentThin: number;
+    /** Pages whose LanguageTool check returned ≥1 spelling/grammar match. */
+    spellingGrammar: number;
     responseSlow: number;
     responseVerySlow: number;
     pageLarge: number;
