@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.7] — 2026-07-14
+
+### Added
+- Multi-window support — open several projects at once, each in its own window with an independent crawl, logs, settings, and enrichment runs.
+- Projects manager dialog to browse, search, tag, and archive recent projects, and start new ones from a template.
+- Project templates (E-commerce, Blog, News, Corporate, SaaS) that pre-fill sensible exclude rules and crawl budgets.
+- Each project file now remembers its own crawl configuration.
+
+### Changed
+- Various improvements and enhancements.
+
 ## [0.8.5] — 2026-07-06
 
 ### Added
