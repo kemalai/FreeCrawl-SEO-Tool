@@ -3,6 +3,7 @@ import {
   IPC,
   type ConfirmClearResult,
   type CrawlConfig,
+  type RecentProject,
   type CrawlProgress,
   type CrawlSummary,
   type ExportCsvInput,
@@ -184,6 +185,20 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.projectOpen, filePath),
   projectCurrentPath: (): Promise<string | null> =>
     ipcRenderer.invoke(IPC.projectCurrentPath),
+  projectConfigGet: (): Promise<CrawlConfig | null> =>
+    ipcRenderer.invoke(IPC.projectConfigGet),
+  projectConfigSet: (config: CrawlConfig): Promise<void> =>
+    ipcRenderer.invoke(IPC.projectConfigSet, config),
+  onProjectConfigChanged: (cb: (config: CrawlConfig | null) => void) =>
+    subscribe<CrawlConfig | null>(IPC.projectConfigChanged, cb),
+  recentProjectsList: (): Promise<RecentProject[]> =>
+    ipcRenderer.invoke(IPC.recentProjectsList),
+  recentProjectSetArchived: (path: string, archived: boolean): Promise<void> =>
+    ipcRenderer.invoke(IPC.recentProjectSetArchived, path, archived),
+  recentProjectSetTags: (path: string, tags: string[]): Promise<void> =>
+    ipcRenderer.invoke(IPC.recentProjectSetTags, path, tags),
+  recentProjectRemove: (path: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.recentProjectRemove, path),
   projectSaveEncrypted: (
     password: string,
   ): Promise<{ filePath: string; bytesWritten: number } | { error: string } | null> =>
@@ -262,7 +277,8 @@ const api: FreeCrawlApi = {
     void ipcRenderer.invoke(IPC.prefsDelete, key);
   },
   confirmClear: (): Promise<ConfirmClearResult> => ipcRenderer.invoke(IPC.confirmClear),
-  logsGetAll: (): Promise<LogEntry[]> => ipcRenderer.invoke(IPC.logsGetAll),
+  logsGetAll: (ownerId?: number): Promise<LogEntry[]> =>
+    ipcRenderer.invoke(IPC.logsGetAll, ownerId),
   logsClear: (): Promise<void> => ipcRenderer.invoke(IPC.logsClear),
   logsOpenWindow: (): Promise<void> => ipcRenderer.invoke(IPC.logsOpenWindow),
   openVisualizationWindow: (): Promise<void> =>

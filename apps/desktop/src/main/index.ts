@@ -10,10 +10,13 @@ import {
   shell,
   type DownloadItem,
   type MenuItemConstructorOptions,
+  type IpcMainInvokeEvent,
+  type WebContents,
 } from 'electron';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, resolve as resolvePath, sep as pathSep } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { totalmem, freemem } from 'node:os';
 import {
@@ -114,6 +117,7 @@ import {
   type SpellingRunResult,
   type SpellingMatchesResult,
   type SpellingLevel,
+  type RecentProject,
   type GoogleAuthState,
   type GoogleAuthResult,
   type GscListSitesResult,
@@ -220,8 +224,17 @@ import { runAiBatch, type AiBatchItem } from './ai-batch.js';
 import { resolveModel, defaultConcurrency } from './ai-providers.js';
 import { runSeoBatch } from './seo-batch.js';
 import * as logger from './logger.js';
-import { dbReaderPool, callReaderOrFallback } from './db-reader-pool.js';
-import { dbWriterPool } from './db-writer-pool.js';
+import {
+  dbReaderPool,
+  callReaderOrFallback,
+  setReaderPoolResolver,
+  DbReaderPool,
+} from './db-reader-pool.js';
+import {
+  dbWriterPool,
+  DbWriterPool,
+  setWriterPoolResolver,
+} from './db-writer-pool.js';
 import { freezeWatchdog } from './freeze-watchdog.js';
 import { parserPool } from './parser-pool.js';
 import { parseHtml as inlineParseHtml } from '@freecrawl/core';
@@ -242,33 +255,28 @@ import type { ProjectDb as ProjectDbType } from '@freecrawl/db';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
-let logsWindow: BrowserWindow | null = null;
+/** Per-project-window Logs popups, keyed by the OWNING project window's
+ *  `webContents.id`. Each shows only its owner's crawler activity (plus
+ *  app-global infra logs) so two windows' crawls never mix in one view. */
+const logsWindows = new Map<number, BrowserWindow>();
 /** Standalone Visualization popup — single-instance, native window. */
 let visualizationWindow: BrowserWindow | null = null;
 /** V2 Faz 2 — standalone Log File Analyzer popup, single-instance. */
 let logAnalyzerWindow: BrowserWindow | null = null;
-let db: ProjectDb | null = null;
-let activeCrawler: Crawler | null = null;
-/** V2 Faz 1 — Playwright browser pool, lazily started when a JS-mode
- *  crawl launches. Disposed on crawl stop/clear/app quit. */
-let activeBrowserPool: BrowserPool | null = null;
-/** Faz 7 — PageSpeed run guard. Only one PSI batch may run at a time;
- *  `pagespeedCancelRequested` is the cooperative cancel flag. */
-let pagespeedRunActive = false;
-let pagespeedCancelRequested = false;
-/** Faz 7 — AI run guard. Same shape as the PSI guard. */
-let aiRunActive = false;
-let aiCancelRequested = false;
-/** Faz 7 — SEO provider run guard. */
-let seoRunActive = false;
-let seoCancelRequested = false;
+// Multi-window Stage 1: per-project state (db, crawler, browser pool,
+// project path, storage mode, last config, latest progress, recovery
+// checkpoint) now lives on `ProjectSession` below. Code reaches it via
+// `currentSession().X`. Stage 1 keeps a single `defaultSession` so
+// behaviour is identical to before; Stage 2 will key sessions by window
+// (via AsyncLocalStorage) so each window drives its own project + crawl.
+
 /**
  * V2 Faz 0.5 Increment 5 — live snapshot of each slow batch-fetch run
- * (PageSpeed / AI / SEO), polled by the MCP `get_fetch_progress` tool.
- * The shared run-job helpers below update these whether the run was
- * triggered from the renderer or the MCP bridge, so an agent can watch a
- * user-started run too. The renderer keeps consuming its own `*Progress`
- * IPC events — this snapshot is purely the MCP poll surface.
+ * (PageSpeed / CrUX / Spelling / AI / SEO), polled by the MCP
+ * `get_fetch_progress` tool. The shared run-job helpers update these whether
+ * the run was triggered from the renderer or the MCP bridge, so an agent can
+ * watch a user-started run too. The renderer keeps consuming its own
+ * `*Progress` IPC events — this snapshot is purely the MCP poll surface.
  */
 interface FetchRunSnapshot {
   running: boolean;
@@ -300,30 +308,306 @@ function idleFetchSnapshot(): FetchRunSnapshot {
     error: null,
   };
 }
-let pagespeedRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
-let aiRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
-let seoRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
-/** CrUX run guard + MCP poll snapshot — same shape as the PSI guard. */
-let cruxRunActive = false;
-let cruxCancelRequested = false;
-let cruxRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
-/** LanguageTool (spelling & grammar) run guard + MCP poll snapshot. */
-let spellingRunActive = false;
-let spellingCancelRequested = false;
-let spellingRunSnapshot: FetchRunSnapshot = idleFetchSnapshot();
-/** Faz 7 — GSC URL Inspection run guard. */
-let gscInspectRunActive = false;
-let gscInspectCancelRequested = false;
-/** Most-recent CrawlConfig — needed by the crash-recovery resume
- * flow so we can re-create the Crawler with the same knobs the user
- * had set, without re-prompting. Hydrated lazily from `project_meta`
- * on first DB open. */
-let lastCrawlConfig: CrawlConfig | null = null;
-/** Latest `CrawlProgress` event captured from the active Crawler.
- * Exposed to the MCP bridge so external agents (Claude Code, etc.)
- * can poll live crawl state without a renderer subscription. Null
- * when no crawl has run since app launch. */
-let latestProgress: CrawlProgress | null = null;
+
+/** One enrichment op's per-window run state: whether a batch is in flight,
+ *  the cooperative cancel flag, and the MCP poll snapshot. Formerly six sets
+ *  of process-global module vars — which let one window's run block or cancel
+ *  another window's. Now a field on ProjectSession so each window runs and
+ *  cancels its enrichment jobs independently; the MCP surface reads the
+ *  primary session's slots (it is primary-bound via `runInPrimarySession`). */
+interface FetchRunSlot {
+  active: boolean;
+  cancelRequested: boolean;
+  snapshot: FetchRunSnapshot;
+}
+function newFetchRunSlot(): FetchRunSlot {
+  return {
+    active: false,
+    cancelRequested: false,
+    snapshot: idleFetchSnapshot(),
+  };
+}
+
+class ProjectSession {
+  /** Owning renderer window (null for the default/headless session). */
+  window: BrowserWindow | null = null;
+  db: ProjectDb | null = null;
+  activeCrawler: Crawler | null = null;
+  activeBrowserPool: BrowserPool | null = null;
+  /** Open `.seoproject` file path; '' means the default scratch DB. */
+  currentProjectPath = '';
+  storageModeActive: 'disk' | 'ram' = 'disk';
+  lastCrawlConfig: CrawlConfig | null = null;
+  latestProgress: CrawlProgress | null = null;
+  pendingRecoveryCheckpoint: { url: string; depth: number; seedUrl: string }[] =
+    [];
+  /** True from the moment the scheduler launches this session's crawl until
+   *  its done/error event, so the handlers can record the schedule outcome.
+   *  Per-session so concurrent scheduled crawls in different windows don't
+   *  clobber each other's flag. */
+  crawlerStartedByScheduler = false;
+  readonly readerPool: DbReaderPool;
+  readonly writerPool: DbWriterPool;
+  /** On-disk scratch DB this session opens by default; resolved lazily.
+   *  Repointed to a real `.seoproject` once the user opens/saves one. */
+  scratchPath: string | null;
+  /** The throwaway per-window scratch file created for a secondary window
+   *  (`window-N.seoproject`). Recorded separately from `scratchPath` (which
+   *  gets repointed on Open/Save As) so teardown can delete the throwaway
+   *  even after the user opened a real project. Null for the default session,
+   *  whose `default.seoproject` is intentionally persistent (crash recovery). */
+  readonly ownedScratchPath: string | null;
+
+  /** Per-window run state for the slow batch-fetch enrichment ops. Formerly
+   *  process-global (`pagespeedRunActive`, `…RunSnapshot`, …), which let one
+   *  window's PageSpeed/CrUX/Spelling/AI/SEO/GSC-inspect run block, cancel, or
+   *  overwrite another window's. Scoped here so every window drives its own.
+   *  GSC URL Inspection has no MCP poll snapshot (renderer-push only). */
+  readonly fetchRuns = {
+    pagespeed: newFetchRunSlot(),
+    crux: newFetchRunSlot(),
+    spelling: newFetchRunSlot(),
+    ai: newFetchRunSlot(),
+    seo: newFetchRunSlot(),
+    gscInspect: { active: false, cancelRequested: false },
+  };
+
+  constructor(opts: {
+    readerPool: DbReaderPool;
+    writerPool: DbWriterPool;
+    scratchPath?: string;
+  }) {
+    this.readerPool = opts.readerPool;
+    this.writerPool = opts.writerPool;
+    this.scratchPath = opts.scratchPath ?? null;
+    this.ownedScratchPath = opts.scratchPath ?? null;
+  }
+
+  /** Lazily open (and reset) this session's DB + worker pools. */
+  getDb(): ProjectDb {
+    if (this.db) return this.db;
+    loadPrefs();
+    // RAM-only mode keeps the project in an in-memory DB (`:memory:`) with
+    // the worker pools disabled — every query runs on the main-thread
+    // connection (the pool-call wrappers fall back when pools aren't ready).
+    const ramMode = prefsCache['storageMode'] === 'ram';
+    this.storageModeActive = ramMode ? 'ram' : 'disk';
+    const path =
+      this.scratchPath ??
+      join(app.getPath('userData'), 'projects', 'default.seoproject');
+    this.scratchPath = path;
+    mkdirSync(dirname(path), { recursive: true });
+    const database = new ProjectDb(ramMode ? ':memory:' : path);
+    this.db = database;
+    this.currentProjectPath = '';
+    // Snapshot the previous session's crash-recovery state BEFORE reset()
+    // wipes the tables, so the user can be offered a resume on app start.
+    try {
+      const raw = database.getMeta('lastCrawlConfig');
+      if (raw) {
+        this.lastCrawlConfig = mergeCrawlConfig(
+          JSON.parse(raw) as Partial<CrawlConfig>,
+        );
+      }
+    } catch {
+      /* malformed JSON or missing key — recovery just won't fire */
+    }
+    try {
+      this.pendingRecoveryCheckpoint = database.loadQueueCheckpoint();
+    } catch {
+      this.pendingRecoveryCheckpoint = [];
+    }
+    database.reset();
+    if (ramMode) {
+      logger.log(
+        'info',
+        'main',
+        'Storage mode: RAM-only — project held in an in-memory database; worker pools disabled. Save As writes it to disk.',
+      );
+    } else {
+      try {
+        this.readerPool.init(path, freezeWatchdog.sharedBuffer);
+      } catch (err) {
+        logger.log(
+          'warn',
+          'main',
+          `db-reader pool init failed: ${err instanceof Error ? err.message : String(err)} — falling back to main-thread queries.`,
+        );
+      }
+      try {
+        this.writerPool.init(path, freezeWatchdog.sharedBuffer);
+      } catch (err) {
+        logger.log(
+          'warn',
+          'main',
+          `db-writer pool init failed: ${err instanceof Error ? err.message : String(err)} — writes fall back to main thread.`,
+        );
+      }
+    }
+    return database;
+  }
+
+  /** Send an IPC message to this session's window (no-op if none/destroyed). */
+  send(channel: string, ...args: unknown[]): void {
+    const w = this.window;
+    if (w && !w.isDestroyed()) w.webContents.send(channel, ...args);
+  }
+
+  /** Stable per-window tag for log entries — the owning window's
+   *  `webContents.id`. Lets each project window's Logs view show only its
+   *  own crawl activity. Undefined for a session with no window. */
+  get logTag(): number | undefined {
+    return this.window?.webContents.id;
+  }
+
+  /** Tear down a secondary window's session: stop its crawl, dispose its
+   *  browser + worker pools, and close its DB. NOT for the default session
+   *  (its singleton pools are torn down at app quit instead). */
+  async teardown(): Promise<void> {
+    try {
+      this.activeCrawler?.stop();
+    } catch {
+      /* best-effort */
+    }
+    this.activeCrawler = null;
+    const pool = this.activeBrowserPool;
+    this.activeBrowserPool = null;
+    if (pool) {
+      try {
+        await pool.close();
+      } catch {
+        /* best-effort */
+      }
+    }
+    try {
+      await this.readerPool.terminate();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      await this.writerPool.terminate();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      this.db?.close();
+    } catch {
+      /* best-effort */
+    }
+    this.db = null;
+    // Remove this window's throwaway scratch DB (+ WAL/SHM siblings) so
+    // repeated New Project Window / close cycles don't leak files under
+    // userData/projects. Only the per-window scratch is deleted — never a
+    // real project the user opened (that lives at a different path) nor the
+    // default session's persistent scratch (ownedScratchPath is null there).
+    if (this.ownedScratchPath) {
+      for (const suffix of ['', '-wal', '-shm']) {
+        try {
+          rmSync(this.ownedScratchPath + suffix, { force: true });
+        } catch {
+          /* best-effort — file may never have been created (RAM mode) */
+        }
+      }
+    }
+  }
+}
+
+/** The primary window's session, backed by the process-wide pool
+ *  singletons. Additional windows get their own `ProjectSession` with
+ *  their own pool instances (see `createProjectWindow`). */
+const defaultSession = new ProjectSession({
+  readerPool: dbReaderPool,
+  writerPool: dbWriterPool,
+});
+
+/** All live sessions keyed by their window's `webContents.id`. The
+ *  default session is also registered here once its window is created. */
+const sessionsByWc = new Map<number, ProjectSession>();
+
+/** Propagates the calling window's session through an IPC handler's async
+ *  chain so `currentSession()` resolves correctly across `await`s without
+ *  threading the session through every function signature. */
+const sessionStore = new AsyncLocalStorage<ProjectSession>();
+
+/** Session that owns a given renderer, or the default session. */
+function sessionFor(wc: WebContents): ProjectSession {
+  return sessionsByWc.get(wc.id) ?? defaultSession;
+}
+
+/** Resolve the session for the currently-running code path: the calling
+ *  window's session when inside an IPC handler (via AsyncLocalStorage),
+ *  else the default session. Crawler callbacks — which run outside any
+ *  handler — capture their session explicitly instead of relying on this. */
+function currentSession(): ProjectSession {
+  return sessionStore.getStore() ?? defaultSession;
+}
+
+/** Window that should parent a native dialog for the current IPC call.
+ *  Inside a handler this is the calling window (via ALS); from a menu/timer
+ *  with no session context it falls back to the primary window. Keeps modal
+ *  dialogs (Save As, Clear, Delete-domain…) attached to the window that
+ *  invoked them instead of always blocking the primary window. */
+function dialogParent(): BrowserWindow | null {
+  return currentSession().window ?? mainWindow;
+}
+
+/** Run `fn` inside the session that owns the currently-focused window.
+ *  Native menu clicks fire outside any IPC AsyncLocalStorage context, so a
+ *  menu-driven action (File → Open Project / Open Recent) would otherwise
+ *  resolve `currentSession()` to the primary window and open into the wrong
+ *  window. Falls back to the default session when nothing is focused. */
+function runInFocusedSession<T>(fn: () => T): T {
+  const wc = BrowserWindow.getFocusedWindow()?.webContents;
+  const sess = wc ? sessionFor(wc) : defaultSession;
+  return sessionStore.run(sess, fn);
+}
+
+/** webContents.id of the project window that should own a Logs popup opened
+ *  from the native menu. Resolves the focused window when it's a project
+ *  window (primary or secondary); a focused popup (logs/viz) or no focus
+ *  falls back to the primary window. */
+function focusedOwnerWcId(): number {
+  const focused = BrowserWindow.getFocusedWindow();
+  const id = focused?.webContents.id;
+  if (
+    id !== undefined &&
+    (id === mainWindow?.webContents.id || sessionsByWc.has(id))
+  ) {
+    return id;
+  }
+  return mainWindow?.webContents.id ?? id ?? 0;
+}
+
+/** Run `fn` bound to the primary window's session. The MCP bridge and the
+ *  crawl scheduler are single, window-less entry points, so they always
+ *  drive the primary project. Binding the session explicitly (instead of
+ *  leaning on `currentSession()`'s out-of-ALS fallback) makes that intent
+ *  robust and lets the pinned code use `currentSession()`/`getDb()` normally. */
+function runInPrimarySession<T>(fn: () => T): T {
+  return sessionStore.run(defaultSession, fn);
+}
+
+// Route every pooled read (callReaderOrFallback) to the calling window's
+// reader pool. Read IPC handlers run inside the session's ALS context, so
+// `currentSession()` here resolves the right window.
+setReaderPoolResolver(() => currentSession().readerPool);
+// Same for the writer helper — keeps `callWriterOrFallback` window-scoped so
+// it can never silently write to the primary window's DB from a secondary.
+setWriterPoolResolver(() => currentSession().writerPool);
+
+/** Register an IPC handler that runs inside the calling window's session
+ *  context. Every `ipcMain.handle` in this file goes through here so
+ *  `getDb()` / `currentSession()` resolve per-window. */
+function registerHandle(
+  channel: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  listener: (event: IpcMainInvokeEvent, ...args: any[]) => any,
+): void {
+  ipcMain.handle(channel, (event, ...args) =>
+    sessionStore.run(sessionFor(event.sender), () => listener(event, ...args)),
+  );
+}
+
 /** Handle to the in-process crawl control primitives. Populated by
  * `registerIpc()` so the MCP bridge can drive Start/Stop/Pause/Resume
  * through the same code path as the renderer's IPC handlers — without
@@ -346,10 +630,6 @@ let crawlController: {
    *  action names matching the MCP tool's `bridgeRequest` path. */
   actions: Record<string, (input: unknown) => Promise<unknown>>;
 } | null = null;
-/** In-memory snapshot of the previous session's checkpoint, captured
- * before `db.reset()` wipes it. Cleared once the user accepts or
- * discards the recovery prompt. */
-let pendingRecoveryCheckpoint: { url: string; depth: number; seedUrl: string }[] = [];
 
 // UI preferences (column widths, panel sizes, etc.) live in a JSON file
 // under userData — separate from the crawl DB so "Clear" wipes crawl data
@@ -409,8 +689,11 @@ function flushPrefs(): void {
   }
 }
 
-function fireDataChanged(): void {
-  mainWindow?.webContents.send(IPC.dataChanged);
+function fireDataChanged(sess: ProjectSession = currentSession()): void {
+  // Refresh the owning window (multi-window: each session's data change
+  // repaints its own renderer). Callers inside an IPC handler get the
+  // right session for free; crawler callbacks pass their captured session.
+  sess.send(IPC.dataChanged);
   // Mirror the event to the standalone Visualization window so its
   // Cytoscape graph repaints when a crawl finishes or rows change.
   if (visualizationWindow && !visualizationWindow.isDestroyed()) {
@@ -445,50 +728,54 @@ const schedulerStore: SchedulerStore = {
 };
 
 let schedulerTickTimer: NodeJS.Timeout | null = null;
-/** Set to true at the moment the scheduler tick calls `launchCrawl`,
- *  cleared on the next crawl-done / crawl-error event. Lets the
- *  done/error handlers update the schedule's `lastStatus` without
- *  duplicating the launch path for user-initiated crawls. */
-let crawlerStartedByScheduler = false;
 
 /**
- * Scheduler tick — invoked every 60 s while the app is open. Checks
- * whether the currently-loaded project has a due schedule and, if so,
- * launches the crawl using the last-used CrawlConfig.
- *
- * No-ops when:
+ * Scheduler tick — invoked every 60 s while the app is open. Evaluates
+ * EVERY live window's project (the primary session plus any secondary
+ * project windows) so a schedule fires in whichever window owns that
+ * project. Each project is checked inside its own session context.
+ */
+function schedulerTick(): void {
+  for (const s of [defaultSession, ...sessionsByWc.values()]) {
+    sessionStore.run(s, () => schedulerTickForSession(s));
+  }
+}
+
+/**
+ * Evaluate one session's schedule. No-ops when:
  *   - No project is loaded
  *   - A crawl is already running (we don't preempt a manual crawl)
  *   - The schedule isn't due yet
  *   - No CrawlConfig has ever been saved (we'd have nothing to fire)
  */
-function schedulerTick(): void {
-  if (!currentProjectPath) return;
-  if (activeCrawler) return;
-  const entry = claimIfDue(schedulerStore, currentProjectPath);
+function schedulerTickForSession(s: ProjectSession): void {
+  if (!s.currentProjectPath) return;
+  if (s.activeCrawler) return;
+  const entry = claimIfDue(schedulerStore, s.currentProjectPath);
   if (!entry) return;
-  if (!lastCrawlConfig) {
+  const cfg = s.lastCrawlConfig;
+  if (!cfg) {
     // No saved config — record a failure so the dialog surfaces the
     // condition rather than silently retrying on the next tick.
-    recordFireResult(schedulerStore, currentProjectPath, 'failure');
+    recordFireResult(schedulerStore, s.currentProjectPath, 'failure');
     logger.log(
       'warn',
       'scheduler',
-      `Schedule due for ${currentProjectPath} but no CrawlConfig saved yet — run a crawl manually once first.`,
+      `Schedule due for ${s.currentProjectPath} but no CrawlConfig saved yet — run a crawl manually once first.`,
     );
     return;
   }
   if (!crawlController) {
-    recordFireResult(schedulerStore, currentProjectPath, 'failure');
+    recordFireResult(schedulerStore, s.currentProjectPath, 'failure');
     return;
   }
   logger.log(
     'info',
     'scheduler',
-    `Scheduled crawl firing: ${lastCrawlConfig.startUrl} (cadence=${entry.spec.cadence})`,
+    `Scheduled crawl firing: ${cfg.startUrl} (cadence=${entry.spec.cadence})`,
   );
-  crawlerStartedByScheduler = true;
-  void crawlController.launchCrawl(lastCrawlConfig);
+  s.crawlerStartedByScheduler = true;
+  void crawlController.launchCrawl(cfg);
 }
 
 function startScheduler(): void {
@@ -612,8 +899,10 @@ function isDontShowAgain(key: string): boolean {
  * again" checkbox that persists to user prefs (per-diagnostic-key, so
  * dismissing the DNS dialog doesn't suppress TLS warnings).
  */
-function showDiagnosticDialog(diag: DiagnosticDialog): void {
-  const win = mainWindow;
+function showDiagnosticDialog(diag: DiagnosticDialog, ownerWcId?: number): void {
+  const win =
+    (ownerWcId !== undefined ? sessionsByWc.get(ownerWcId)?.window : null) ??
+    mainWindow;
   if (!win) return;
   void dialog
     .showMessageBox(win, {
@@ -634,26 +923,18 @@ function showDiagnosticDialog(diag: DiagnosticDialog): void {
         prefsCache[diagnosticDialogPrefKey(diag.key)] = true;
         schedulePrefsWrite();
       }
-      if (res.response === 0) openLogsWindow();
+      if (res.response === 0) openLogsWindow(ownerWcId ?? focusedOwnerWcId());
     });
 }
 
-function maybeShowDiagnosticDialog(msg: string): void {
+function maybeShowDiagnosticDialog(msg: string, ownerWcId?: number): void {
   const diag = categorizeDiagnostic(msg);
   if (!diag) return;
   if (shownDiagnosticDialogs.has(diag.key)) return;
   if (isDontShowAgain(diag.key)) return;
   shownDiagnosticDialogs.add(diag.key);
-  showDiagnosticDialog(diag);
+  showDiagnosticDialog(diag, ownerWcId);
 }
-
-/** Currently-open project file path (empty when using the default scratch DB). */
-let currentProjectPath = '';
-
-/** Storage mode the active DB connection was opened in. Resolved from the
- *  `storageMode` pref at first open; `ram` means the project lives in an
- *  in-memory database and the worker pools are disabled. */
-let storageModeActive: 'disk' | 'ram' = 'disk';
 
 /**
  * Dispatch HTML parsing to the worker pool when ready, otherwise
@@ -691,13 +972,14 @@ async function parseHtmlViaPool(
  * never silently drops data.
  */
 async function writeFetchedUrlViaPool(
+  session: ProjectSession,
   payload: Parameters<ProjectDbType['writeFetchedUrl']>[0],
 ): Promise<{ urlId: number }> {
-  if (!dbWriterPool.isReady()) {
-    return getDb().writeFetchedUrl(payload);
+  if (!session.writerPool.isReady()) {
+    return session.getDb().writeFetchedUrl(payload);
   }
   try {
-    return await dbWriterPool.call<{ urlId: number }>('writeFetchedUrl', [payload]);
+    return await session.writerPool.call<{ urlId: number }>('writeFetchedUrl', [payload]);
   } catch (err) {
     logger.log(
       'warn',
@@ -706,7 +988,7 @@ async function writeFetchedUrlViaPool(
         err instanceof Error ? err.message : String(err)
       }) — falling back to main-thread writeFetchedUrl.`,
     );
-    return getDb().writeFetchedUrl(payload);
+    return session.getDb().writeFetchedUrl(payload);
   }
 }
 
@@ -718,13 +1000,14 @@ async function writeFetchedUrlViaPool(
  * dialog). Routing through the writer worker keeps main free.
  */
 async function recomputeIssuesViaPool(
+  session: ProjectSession,
   definitions: ReadonlyArray<readonly [string, string]>,
 ): Promise<void> {
-  if (!dbWriterPool.isReady()) {
-    return getDb().recomputeUrlsIssuesYielding(definitions);
+  if (!session.writerPool.isReady()) {
+    return session.getDb().recomputeUrlsIssuesYielding(definitions);
   }
   try {
-    await dbWriterPool.call<void>('recomputeUrlsIssuesYielding', [definitions]);
+    await session.writerPool.call<void>('recomputeUrlsIssuesYielding', [definitions]);
   } catch (err) {
     logger.log(
       'warn',
@@ -733,7 +1016,7 @@ async function recomputeIssuesViaPool(
         err instanceof Error ? err.message : String(err)
       }) — falling back to main-thread recompute.`,
     );
-    await getDb().recomputeUrlsIssuesYielding(definitions);
+    await session.getDb().recomputeUrlsIssuesYielding(definitions);
   }
 }
 
@@ -747,14 +1030,18 @@ async function recomputeIssuesViaPool(
  * 5–15 s on a 5K-URL crawl — exactly the window where users hit
  * Stop/Pause and "nothing happens".
  */
-async function runDbPassViaPool(method: string): Promise<void> {
-  if (!dbWriterPool.isReady()) {
-    const fn = (getDb() as unknown as Record<string, unknown>)[method];
-    if (typeof fn === 'function') (fn as () => void).call(getDb());
+async function runDbPassViaPool(
+  session: ProjectSession,
+  method: string,
+): Promise<void> {
+  if (!session.writerPool.isReady()) {
+    const db = session.getDb();
+    const fn = (db as unknown as Record<string, unknown>)[method];
+    if (typeof fn === 'function') (fn as () => void).call(db);
     return;
   }
   try {
-    await dbWriterPool.call<void>(method, []);
+    await session.writerPool.call<void>(method, []);
   } catch (err) {
     logger.log(
       'warn',
@@ -763,8 +1050,9 @@ async function runDbPassViaPool(method: string): Promise<void> {
         err instanceof Error ? err.message : String(err)
       }) — falling back to main-thread.`,
     );
-    const fn = (getDb() as unknown as Record<string, unknown>)[method];
-    if (typeof fn === 'function') (fn as () => void).call(getDb());
+    const db = session.getDb();
+    const fn = (db as unknown as Record<string, unknown>)[method];
+    if (typeof fn === 'function') (fn as () => void).call(db);
   }
 }
 
@@ -778,16 +1066,21 @@ async function runDbPassViaPool(method: string): Promise<void> {
  * Falls back to running on the main-thread `ProjectDb` when the worker
  * is crashed/restarting so writes still happen.
  */
-async function dbCallViaPool<T>(method: string, args: unknown[]): Promise<T> {
-  if (!dbWriterPool.isReady()) {
-    const fn = (getDb() as unknown as Record<string, unknown>)[method];
+async function dbCallViaPool<T>(
+  session: ProjectSession,
+  method: string,
+  args: unknown[],
+): Promise<T> {
+  if (!session.writerPool.isReady()) {
+    const db = session.getDb();
+    const fn = (db as unknown as Record<string, unknown>)[method];
     if (typeof fn !== 'function') {
       throw new Error(`dbCallViaPool: unknown method ${method}`);
     }
-    return (fn as (...a: unknown[]) => T).apply(getDb(), args);
+    return (fn as (...a: unknown[]) => T).apply(db, args);
   }
   try {
-    return await dbWriterPool.call<T>(method, args);
+    return await session.writerPool.call<T>(method, args);
   } catch (err) {
     logger.log(
       'warn',
@@ -796,122 +1089,59 @@ async function dbCallViaPool<T>(method: string, args: unknown[]): Promise<T> {
         err instanceof Error ? err.message : String(err)
       }`,
     );
-    const fn = (getDb() as unknown as Record<string, unknown>)[method];
+    const db = session.getDb();
+    const fn = (db as unknown as Record<string, unknown>)[method];
     if (typeof fn !== 'function') {
       throw new Error(`dbCallViaPool fallback: unknown method ${method}`);
     }
-    return (fn as (...a: unknown[]) => T).apply(getDb(), args);
+    return (fn as (...a: unknown[]) => T).apply(db, args);
   }
 }
 
+/**
+ * Deep-merge a stored (possibly-partial) crawl config over the defaults,
+ * filling the nested bags (`jsRender`, `performanceBudget`) that a plain
+ * spread would clobber. Shared by the crash-recovery hydration and the
+ * per-project config get/open paths so every read produces a complete,
+ * well-formed `CrawlConfig`.
+ */
+function mergeCrawlConfig(parsed: Partial<CrawlConfig>): CrawlConfig {
+  return {
+    ...DEFAULT_CRAWL_CONFIG,
+    ...parsed,
+    jsRender: {
+      ...DEFAULT_CRAWL_CONFIG.jsRender,
+      ...(parsed.jsRender ?? {}),
+      blockResources: {
+        ...DEFAULT_CRAWL_CONFIG.jsRender.blockResources,
+        ...(parsed.jsRender?.blockResources ?? {}),
+      },
+      screenshotMode:
+        parsed.jsRender?.screenshotMode ??
+        DEFAULT_CRAWL_CONFIG.jsRender.screenshotMode,
+      mobileScreenshot:
+        parsed.jsRender?.mobileScreenshot ??
+        DEFAULT_CRAWL_CONFIG.jsRender.mobileScreenshot,
+      mobileUsability:
+        parsed.jsRender?.mobileUsability ??
+        DEFAULT_CRAWL_CONFIG.jsRender.mobileUsability,
+      lcpCandidate:
+        parsed.jsRender?.lcpCandidate ??
+        DEFAULT_CRAWL_CONFIG.jsRender.lcpCandidate,
+      a11yAudit:
+        parsed.jsRender?.a11yAudit ?? DEFAULT_CRAWL_CONFIG.jsRender.a11yAudit,
+    },
+    performanceBudget: {
+      ...DEFAULT_CRAWL_CONFIG.performanceBudget,
+      ...(parsed.performanceBudget ?? {}),
+    },
+  };
+}
+
+/** Resolve the active project's DB — the calling window's session when an
+ *  IPC handler is running (via AsyncLocalStorage), else the default one. */
 function getDb(): ProjectDb {
-  if (!db) {
-    loadPrefs();
-    // Storage mode (Settings → Storage). RAM-only keeps the whole project
-    // in an in-memory SQLite database (`:memory:`) — fastest, nothing
-    // touches disk until Save As serialises it out. A `:memory:` DB is
-    // private to a single connection, so the reader/writer worker pools are
-    // disabled in this mode and every query runs on the main-thread
-    // connection (the pool-call wrappers already fall back to it when the
-    // pools aren't ready). Applies at first open, i.e. on the next launch.
-    const ramMode = prefsCache['storageMode'] === 'ram';
-    storageModeActive = ramMode ? 'ram' : 'disk';
-    const dataDir = join(app.getPath('userData'), 'projects');
-    mkdirSync(dataDir, { recursive: true });
-    const defaultPath = join(dataDir, 'default.seoproject');
-    db = new ProjectDb(ramMode ? ':memory:' : defaultPath);
-    currentProjectPath = '';
-    // Wave 6 — Snapshot the previous session's crash-recovery state
-    // BEFORE the reset wipes the project tables. We capture the
-    // checkpointed pending queue + the cached crawl config so the
-    // user can be offered a resume on app start. The DB tables go
-    // back to empty after `reset()`; the in-memory snapshot stays
-    // until the user accepts/discards the recovery prompt.
-    try {
-      const raw = db.getMeta('lastCrawlConfig');
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<CrawlConfig>;
-        lastCrawlConfig = {
-          ...DEFAULT_CRAWL_CONFIG,
-          ...parsed,
-          jsRender: {
-            ...DEFAULT_CRAWL_CONFIG.jsRender,
-            ...(parsed.jsRender ?? {}),
-            blockResources: {
-              ...DEFAULT_CRAWL_CONFIG.jsRender.blockResources,
-              ...(parsed.jsRender?.blockResources ?? {}),
-            },
-            screenshotMode:
-              parsed.jsRender?.screenshotMode ??
-              DEFAULT_CRAWL_CONFIG.jsRender.screenshotMode,
-            mobileScreenshot:
-              parsed.jsRender?.mobileScreenshot ??
-              DEFAULT_CRAWL_CONFIG.jsRender.mobileScreenshot,
-            mobileUsability:
-              parsed.jsRender?.mobileUsability ??
-              DEFAULT_CRAWL_CONFIG.jsRender.mobileUsability,
-            lcpCandidate:
-              parsed.jsRender?.lcpCandidate ??
-              DEFAULT_CRAWL_CONFIG.jsRender.lcpCandidate,
-            a11yAudit:
-              parsed.jsRender?.a11yAudit ??
-              DEFAULT_CRAWL_CONFIG.jsRender.a11yAudit,
-          },
-          performanceBudget: {
-            ...DEFAULT_CRAWL_CONFIG.performanceBudget,
-            ...(parsed.performanceBudget ?? {}),
-          },
-        };
-      }
-    } catch {
-      /* malformed JSON or missing key — recovery just won't fire */
-    }
-    pendingRecoveryCheckpoint = (() => {
-      try {
-        return db.loadQueueCheckpoint();
-      } catch {
-        return [];
-      }
-    })();
-    // Fresh start on every app launch — clear any data carried over from
-    // the previous session. Explicit Save Project will be added later.
-    db.reset();
-    if (ramMode) {
-      // In-memory DB can't be shared across worker connections, so keep
-      // everything on the main-thread connection. Save As (`VACUUM INTO`)
-      // serialises it to disk and switches back to a pooled disk project.
-      logger.log(
-        'info',
-        'main',
-        'Storage mode: RAM-only — project held in an in-memory database; worker pools disabled. Save As writes it to disk.',
-      );
-    } else {
-      // Spawn the read-only worker pointed at the same file. Migrations
-      // already ran above (the writer owns them) so the worker just
-      // attaches to the WAL and starts serving SELECTs concurrently.
-      try {
-        // Pass the freeze-watchdog SAB so the reader worker can publish
-        // its own heartbeat + current op into the same diagnostic file.
-        dbReaderPool.init(defaultPath, freezeWatchdog.sharedBuffer);
-      } catch (err) {
-        logger.log(
-          'warn',
-          'main',
-          `db-reader pool init failed: ${err instanceof Error ? err.message : String(err)} — falling back to main-thread queries.`,
-        );
-      }
-      try {
-        dbWriterPool.init(defaultPath, freezeWatchdog.sharedBuffer);
-      } catch (err) {
-        logger.log(
-          'warn',
-          'main',
-          `db-writer pool init failed: ${err instanceof Error ? err.message : String(err)} — writes fall back to main thread.`,
-        );
-      }
-    }
-  }
-  return db;
+  return currentSession().getDb();
 }
 
 /**
@@ -920,29 +1150,32 @@ function getDb(): ProjectDb {
  * renderer reloads its views. Used by File → Open Recent and Open Project.
  */
 function openProjectAtPath(filePath: string): void {
-  if (activeCrawler) {
-    activeCrawler.stop();
-    activeCrawler = null;
+  const s = currentSession();
+  const running = s.activeCrawler;
+  if (running) {
+    running.stop();
+    s.activeCrawler = null;
   }
-  if (db) {
+  if (s.db) {
     try {
-      db.close();
+      s.db.close();
     } catch {
       // best-effort; new DB will replace it regardless
     }
-    db = null;
+    s.db = null;
   }
-  db = new ProjectDb(filePath);
-  currentProjectPath = filePath;
+  s.db = new ProjectDb(filePath);
+  s.scratchPath = filePath;
+  s.currentProjectPath = filePath;
   // Opening a real `.seoproject` file always lands us in disk mode, even
   // when the previous project was an in-memory (RAM-only) scratch DB — the
   // pool `swap` below spins the worker pools up against the disk file.
-  storageModeActive = 'disk';
-  // Re-point the read-only worker at the new file. `swap` cancels any
-  // in-flight requests with `reader-swapped`; the next IPC call will
-  // hit the freshly opened worker.
+  s.storageModeActive = 'disk';
+  // Re-point this session's read-only worker at the new file. `swap`
+  // cancels any in-flight requests with `reader-swapped`; the next IPC
+  // call hits the freshly opened worker.
   try {
-    dbReaderPool.swap(filePath, freezeWatchdog.sharedBuffer);
+    s.readerPool.swap(filePath, freezeWatchdog.sharedBuffer);
   } catch (err) {
     logger.log(
       'warn',
@@ -951,7 +1184,7 @@ function openProjectAtPath(filePath: string): void {
     );
   }
   try {
-    dbWriterPool.swap(filePath, freezeWatchdog.sharedBuffer);
+    s.writerPool.swap(filePath, freezeWatchdog.sharedBuffer);
   } catch (err) {
     logger.log(
       'warn',
@@ -959,25 +1192,115 @@ function openProjectAtPath(filePath: string): void {
       `db-writer pool swap failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  pushRecentProject(filePath);
+  pushRecentProject(filePath, new Date().toISOString());
   rebuildMenu();
-  if (mainWindow) {
-    mainWindow.setTitle(`FreeCrawl SEO Tool v${app.getVersion()} — ${filePath}`);
+  const win = s.window ?? mainWindow;
+  if (win) {
+    win.setTitle(`FreeCrawl SEO Tool v${app.getVersion()} — ${filePath}`);
   }
-  fireDataChanged();
+  // Rehydrate the crawl config from the project we just opened and push it
+  // to the renderer so the UI reflects THIS project's saved settings
+  // (per-project settings). Null when the project has none saved yet — the
+  // renderer then keeps its current config.
+  let projectConfig: CrawlConfig | null = null;
+  try {
+    const raw = s.db.getMeta('lastCrawlConfig');
+    if (raw) {
+      projectConfig = mergeCrawlConfig(JSON.parse(raw) as Partial<CrawlConfig>);
+      s.lastCrawlConfig = projectConfig;
+    }
+  } catch {
+    /* malformed — leave config as-is */
+  }
+  s.send(IPC.projectConfigChanged, projectConfig);
+  fireDataChanged(s);
 }
 
-function getRecentProjects(): string[] {
+/** Max recent entries retained (archived ones included). */
+const RECENT_PROJECTS_CAP = 50;
+
+/**
+ * Full recent-projects list as objects. Legacy entries were bare path
+ * strings — coerce them to `{ path }` on read so old preferences keep
+ * working after the archived/tags upgrade.
+ */
+function getRecentProjectEntries(): RecentProject[] {
   const raw = prefsCache['recentProjects'];
   if (!Array.isArray(raw)) return [];
-  return raw.filter((p): p is string => typeof p === 'string' && p.length > 0).slice(0, 10);
+  const out: RecentProject[] = [];
+  for (const item of raw) {
+    if (typeof item === 'string' && item.length > 0) {
+      out.push({ path: item });
+    } else if (
+      item &&
+      typeof item === 'object' &&
+      typeof (item as RecentProject).path === 'string' &&
+      (item as RecentProject).path.length > 0
+    ) {
+      const e = item as RecentProject;
+      out.push({
+        path: e.path,
+        archived: e.archived === true,
+        tags: Array.isArray(e.tags)
+          ? e.tags.filter((t): t is string => typeof t === 'string')
+          : [],
+        lastOpened: typeof e.lastOpened === 'string' ? e.lastOpened : undefined,
+      });
+    }
+  }
+  return out.slice(0, RECENT_PROJECTS_CAP);
 }
 
-function pushRecentProject(filePath: string): void {
-  const list = getRecentProjects().filter((p) => p !== filePath);
-  list.unshift(filePath);
-  prefsCache['recentProjects'] = list.slice(0, 10);
+function saveRecentProjectEntries(entries: RecentProject[]): void {
+  prefsCache['recentProjects'] = entries.slice(0, RECENT_PROJECTS_CAP);
   schedulePrefsWrite();
+}
+
+/** Non-archived project paths for the File → Open Recent native menu. */
+function getRecentProjects(): string[] {
+  return getRecentProjectEntries()
+    .filter((e) => !e.archived)
+    .map((e) => e.path)
+    .slice(0, 10);
+}
+
+function pushRecentProject(filePath: string, isoNow?: string): void {
+  const entries = getRecentProjectEntries();
+  const existing = entries.find((e) => e.path === filePath);
+  const rest = entries.filter((e) => e.path !== filePath);
+  const merged: RecentProject = {
+    path: filePath,
+    archived: existing?.archived ?? false,
+    tags: existing?.tags ?? [],
+    lastOpened: isoNow ?? existing?.lastOpened,
+  };
+  saveRecentProjectEntries([merged, ...rest]);
+}
+
+function setRecentArchived(filePath: string, archived: boolean): void {
+  const entries = getRecentProjectEntries();
+  const e = entries.find((x) => x.path === filePath);
+  if (!e) return;
+  e.archived = archived;
+  saveRecentProjectEntries(entries);
+  rebuildMenu();
+}
+
+function setRecentTags(filePath: string, tags: string[]): void {
+  const entries = getRecentProjectEntries();
+  const e = entries.find((x) => x.path === filePath);
+  if (!e) return;
+  e.tags = Array.from(
+    new Set(tags.map((t) => t.trim()).filter((t) => t.length > 0)),
+  );
+  saveRecentProjectEntries(entries);
+}
+
+function removeRecentProject(filePath: string): void {
+  saveRecentProjectEntries(
+    getRecentProjectEntries().filter((e) => e.path !== filePath),
+  );
+  rebuildMenu();
 }
 
 function clearRecentProjects(): void {
@@ -1001,21 +1324,21 @@ function rebuildMenu(): void {
   Menu.setApplicationMenu(
     buildAppMenu({
       lang: getMenuLang(),
-      onOpenLogs: openLogsWindow,
-      onOpenProject: () => void promptOpenProject(),
+      onOpenLogs: () => openLogsWindow(focusedOwnerWcId()),
+      onNewProjectWindow: () => createProjectWindow(),
+      onOpenProject: () => runInFocusedSession(() => void promptOpenProject()),
       onOpenRecent: (path) => {
         try {
-          openProjectAtPath(path);
+          runInFocusedSession(() => openProjectAtPath(path));
         } catch (err) {
           dialog.showErrorBox(
             L().dlgOpenProjectFailedTitle,
             `Could not open ${path}.\n\n${(err as Error).message}`,
           );
-          // Drop the bad entry so it doesn't keep failing.
-          const list = getRecentProjects().filter((p) => p !== path);
-          prefsCache['recentProjects'] = list;
-          schedulePrefsWrite();
-          rebuildMenu();
+          // Drop the bad entry so it doesn't keep failing. Use the
+          // object-model remover so archived/tags/lastOpened on the
+          // OTHER recents are preserved (rebuilds the menu itself).
+          removeRecentProject(path);
         }
       },
       onClearRecent: () => clearRecentProjects(),
@@ -1521,8 +1844,9 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
 }
 
 async function promptOpenProject(): Promise<void> {
-  if (!mainWindow) return;
-  const res = await dialog.showOpenDialog(mainWindow, {
+  const parent = dialogParent();
+  if (!parent) return;
+  const res = await dialog.showOpenDialog(parent, {
     title: L().dlgOpenProjectTitle,
     properties: ['openFile'],
     filters: [
@@ -1565,6 +1889,10 @@ function createWindow(): void {
       backgroundThrottling: false,
     },
   });
+  // Multi-window Stage 1: bind the single default session to the primary
+  // window so `session.send(...)` reaches this renderer. Stage 2 will
+  // create a session per window here instead.
+  defaultSession.window = mainWindow;
 
   mainWindow.on('ready-to-show', () => mainWindow?.show());
 
@@ -1643,6 +1971,66 @@ function createWindow(): void {
   } else {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
   }
+  // The primary window resolves to `defaultSession` via `sessionFor`'s
+  // fallback, so it needs no registry entry (avoids a stale entry if the
+  // window is recreated on macOS activate).
+}
+
+/** Monotonic id for new project windows' scratch DB filenames. */
+let projectWindowSeq = 0;
+
+/**
+ * Multi-window: open an additional top-level window that drives its OWN
+ * project — its own in-memory/scratch DB, worker pools and crawler, fully
+ * independent of the primary window. The renderer bundle is identical; the
+ * session is resolved per-window via `sessionFor(webContents)`.
+ */
+function createProjectWindow(): void {
+  const scratchPath = join(
+    app.getPath('userData'),
+    'projects',
+    `window-${++projectWindowSeq}.seoproject`,
+  );
+  const sess = new ProjectSession({
+    readerPool: new DbReaderPool(),
+    writerPool: new DbWriterPool(),
+    scratchPath,
+  });
+  const win = new BrowserWindow({
+    width: 1360,
+    height: 860,
+    minWidth: 1024,
+    minHeight: 640,
+    show: false,
+    backgroundColor: '#0a0a0a',
+    title: `FreeCrawl SEO Tool v${app.getVersion()}`,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+  sess.window = win;
+  // Capture the webContents id now. By the time 'closed' fires the native
+  // window is already destroyed, so reading `win.webContents` inside that
+  // handler throws "Object has been destroyed" — which, as an uncaught
+  // exception, aborted both the map cleanup and teardown, leaking the
+  // secondary session's pools, DB and throwaway scratch file.
+  const wcId = win.webContents.id;
+  sessionsByWc.set(wcId, sess);
+  win.on('ready-to-show', () => win.show());
+  win.on('page-title-updated', (e) => e.preventDefault());
+  win.on('closed', () => {
+    sessionsByWc.delete(wcId);
+    void sess.teardown();
+  });
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    void win.loadURL(process.env['ELECTRON_RENDERER_URL']);
+  } else {
+    void win.loadFile(join(__dirname, '../renderer/index.html'));
+  }
 }
 
 /**
@@ -1660,16 +2048,26 @@ function isSafeExternalUrl(raw: string): boolean {
 }
 
 /**
- * Open (or focus) the Logs popup window. Loads the same renderer bundle
- * with `?logs=1` so the renderer entry branches to the LogsView component.
- * Single-instance — re-invocations focus the existing window.
+ * Open (or focus) the Logs popup for a specific project window. Loads the
+ * same renderer bundle with `?logs=1&owner=<id>` so the LogsView filters to
+ * that window's crawler entries (plus app-global infra logs). One Logs popup
+ * per owner — re-invocations focus the existing one.
  */
-function openLogsWindow(): void {
-  if (logsWindow && !logsWindow.isDestroyed()) {
-    logsWindow.show();
-    logsWindow.focus();
+function openLogsWindow(ownerWcId: number): void {
+  const existing = logsWindows.get(ownerWcId);
+  if (existing && !existing.isDestroyed()) {
+    existing.show();
+    existing.focus();
     return;
   }
+  // Title hint so the user can tell two Logs windows apart: the owner's
+  // open project name, else Primary / New Project.
+  const ownerSession = sessionsByWc.get(ownerWcId) ?? defaultSession;
+  const ownerLabel = ownerSession.currentProjectPath
+    ? basename(ownerSession.currentProjectPath)
+    : ownerSession === defaultSession
+      ? 'Primary'
+      : 'New Project';
   const win = new BrowserWindow({
     width: 1000,
     height: 640,
@@ -1677,7 +2075,7 @@ function openLogsWindow(): void {
     minHeight: 320,
     show: false,
     backgroundColor: '#0a0a0a',
-    title: 'FreeCrawl — Logs',
+    title: `FreeCrawl — Logs (${ownerLabel})`,
     // Intentionally NOT a child of mainWindow — `parent: mainWindow`
     // links the two windows in the OS compositor (DWM on Windows) so
     // that when the main process is busy doing post-crawl recompute /
@@ -1699,7 +2097,7 @@ function openLogsWindow(): void {
   win.on('ready-to-show', () => win.show());
   win.on('page-title-updated', (e) => e.preventDefault());
   win.on('closed', () => {
-    if (logsWindow === win) logsWindow = null;
+    if (logsWindows.get(ownerWcId) === win) logsWindows.delete(ownerWcId);
   });
 
   // Same dev-tools lockdown as the main window.
@@ -1721,11 +2119,13 @@ function openLogsWindow(): void {
   });
 
   if (process.env['ELECTRON_RENDERER_URL']) {
-    void win.loadURL(process.env['ELECTRON_RENDERER_URL'] + '?logs=1');
+    void win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}?logs=1&owner=${ownerWcId}`);
   } else {
-    void win.loadFile(join(__dirname, '../renderer/index.html'), { search: 'logs=1' });
+    void win.loadFile(join(__dirname, '../renderer/index.html'), {
+      search: `logs=1&owner=${ownerWcId}`,
+    });
   }
-  logsWindow = win;
+  logsWindows.set(ownerWcId, win);
   logger.log('info', 'main', 'Logs window opened');
 
   // Drag/resize busy signal — pause the renderer's live setState pump
@@ -1967,22 +2367,23 @@ function seedDiscoveryUrls(limit: number): LogSeedDiscoveryResult {
     }
   }
   if (!origin) {
-    return { enqueued: 0, hasActiveCrawl: activeCrawler?.isRunning === true, reason: 'no-base-origin' };
+    return { enqueued: 0, hasActiveCrawl: currentSession().activeCrawler?.isRunning === true, reason: 'no-base-origin' };
   }
-  if (!activeCrawler || !activeCrawler.isRunning) {
+  const discoveryCrawler = currentSession().activeCrawler;
+  if (!discoveryCrawler || !discoveryCrawler.isRunning) {
     return { enqueued: 0, hasActiveCrawl: false, reason: 'no-active-crawl' };
   }
-  const rows = db.getLogDiscovery(limit);
+  const rows = getDb().getLogDiscovery(limit);
   let enqueued = 0;
   for (const r of rows) {
-    if (activeCrawler.enqueueManual(origin + r.path)) enqueued++;
+    if (discoveryCrawler.enqueueManual(origin + r.path)) enqueued++;
   }
   if (enqueued > 0) fireDataChanged();
   return { enqueued, hasActiveCrawl: true };
 }
 
 function registerIpc(): void {
-  ipcMain.handle(IPC.appVersion, () => app.getVersion());
+  registerHandle(IPC.appVersion, () => app.getVersion());
 
   // Live memory snapshot for the in-app monitor (status bar). Returns
   // process RSS / heap + system total/free + the active project's URL
@@ -1990,7 +2391,7 @@ function registerIpc(): void {
   // (1M / 5M / 10M projection) without separate round-trips.
   // `urlsCrawled = 0` when no project is open — the renderer suppresses
   // the per-URL cost UI in that case.
-  ipcMain.handle(IPC.memoryStats, () => {
+  registerHandle(IPC.memoryStats, () => {
     const mu = process.memoryUsage();
     let urlsCrawled = 0;
     try {
@@ -2017,25 +2418,34 @@ function registerIpc(): void {
   // off the synchronous IPC reply path entirely.
   ipcMain.on(IPC.rendererLagReport, (_e, lagMs: number) => {
     if (typeof lagMs === 'number' && Number.isFinite(lagMs)) {
-      activeCrawler?.reportRendererLag(lagMs);
+      currentSession().activeCrawler?.reportRendererLag(lagMs);
       // Forward the same sample to the freeze-watchdog so a frozen
       // renderer surfaces in `debug.txt` even when no crawl is active.
       freezeWatchdog.reportRendererLag(lagMs);
     }
   });
 
-  ipcMain.handle(IPC.logsGetAll, () => logger.getAll());
-  ipcMain.handle(IPC.logsClear, () => {
+  registerHandle(IPC.logsGetAll, (_e, ownerId?: number) => {
+    const all = logger.getAll();
+    // Scope to the requesting Logs window's owner (its own crawler entries +
+    // app-global infra). No owner → full buffer (legacy / primary).
+    if (typeof ownerId !== 'number') return all;
+    return all.filter((e) => e.windowId === undefined || e.windowId === ownerId);
+  });
+  registerHandle(IPC.logsClear, () => {
     logger.clearAll();
     logger.log('info', 'main', 'Log buffer cleared');
   });
-  ipcMain.handle(IPC.logsOpenWindow, () => openLogsWindow());
-  ipcMain.handle(IPC.visualizationOpenWindow, () => openVisualizationWindow());
+  registerHandle(IPC.logsOpenWindow, () =>
+    // Renderer button in a project window — own the Logs popup by that window.
+    openLogsWindow(currentSession().logTag ?? mainWindow?.webContents.id ?? 0),
+  );
+  registerHandle(IPC.visualizationOpenWindow, () => openVisualizationWindow());
 
   // ── V2 Faz 2 — Log File Analyzer IPC surface ───────────────────────
-  ipcMain.handle(IPC.logAnalyzerOpenWindow, () => openLogAnalyzerWindow());
+  registerHandle(IPC.logAnalyzerOpenWindow, () => openLogAnalyzerWindow());
 
-  ipcMain.handle(
+  registerHandle(
     IPC.logAnalyze,
     async (e, input: LogAnalyzeInput): Promise<LogAnalyzeResult> => {
       let filePath = input?.filePath;
@@ -2083,32 +2493,32 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.logOverview, (): LogOverview => getDb().getLogOverview());
-  ipcMain.handle(
+  registerHandle(IPC.logOverview, (): LogOverview => getDb().getLogOverview());
+  registerHandle(
     IPC.logUrlStats,
     (_e, input: LogUrlStatsInput): LogUrlStatsResult => getDb().queryLogUrlStats(input),
   );
-  ipcMain.handle(IPC.logBots, (): LogBotRow[] => getDb().getLogBots());
-  ipcMain.handle(IPC.logStatus, (): LogStatusRow[] => getDb().getLogStatusDistribution());
-  ipcMain.handle(IPC.logTrend, (): LogTrendRow[] => getDb().getLogTrend());
-  ipcMain.handle(
+  registerHandle(IPC.logBots, (): LogBotRow[] => getDb().getLogBots());
+  registerHandle(IPC.logStatus, (): LogStatusRow[] => getDb().getLogStatusDistribution());
+  registerHandle(IPC.logTrend, (): LogTrendRow[] => getDb().getLogTrend());
+  registerHandle(
     IPC.logCrawlBudget,
     (_e, limit?: number): LogCrawlBudgetRow[] => getDb().getLogCrawlBudget(limit ?? 200),
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.logOrphans,
     (_e, input: LogUrlStatsInput): LogUrlStatsResult =>
       getDb().queryLogUrlStats({ ...input, filter: 'orphans' }),
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.logDiscovery,
     (_e, limit?: number): LogDiscoveryRow[] => getDb().getLogDiscovery(limit ?? 500),
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.logSeedDiscovery,
     (_e, limit?: number): LogSeedDiscoveryResult => seedDiscoveryUrls(limit ?? 500),
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.logExport,
     async (e, input: LogExportInput): Promise<LogExportResult> => {
       const format = input?.format === 'csv' ? 'csv' : 'xlsx';
@@ -2151,13 +2561,13 @@ function registerIpc(): void {
       return { filePath, bytesWritten: buf.length };
     },
   );
-  ipcMain.handle(IPC.logClear, (): void => {
+  registerHandle(IPC.logClear, (): void => {
     getDb().clearLogData();
     fireDataChanged();
     logger.log('info', 'main', 'Log Analyzer data cleared');
   });
 
-  ipcMain.handle(
+  registerHandle(
     IPC.screenshotRead,
     async (_e, absolutePath: string): Promise<string | null> => {
       if (typeof absolutePath !== 'string' || absolutePath.length === 0) return null;
@@ -2166,8 +2576,8 @@ function registerIpc(): void {
       // naive startsWith() lets `<root>/../../../etc/passwd` pass.
       const resolved = resolvePath(absolutePath);
       const allowedRoots: string[] = [];
-      if (currentProjectPath) {
-        const dir = resolveScreenshotDir(currentProjectPath);
+      if (currentSession().currentProjectPath) {
+        const dir = resolveScreenshotDir(currentSession().currentProjectPath);
         if (dir) allowedRoots.push(resolvePath(dir));
       }
       // Append the separator so that `<root>` doesn't match `<root>2`.
@@ -2187,15 +2597,15 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.robotsValidate, (_e, text: string) =>
+  registerHandle(IPC.robotsValidate, (_e, text: string) =>
     validateRobotsTxt(typeof text === 'string' ? text : ''),
   );
 
-  ipcMain.handle(IPC.robotsTest, (_e, input: RobotsTestInput) =>
+  registerHandle(IPC.robotsTest, (_e, input: RobotsTestInput) =>
     testUrlAgainstRobots(input.url, input.userAgent, input.customRobots),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.urlRewritePreview,
     (_e, input: UrlRewritePreviewInput): UrlRewritePreviewResult => {
       const errors: Array<{ pattern: string; error: string }> = [];
@@ -2221,7 +2631,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.extractionPreview,
     async (_e, input: ExtractionPreviewInput): Promise<ExtractionPreviewResult> => {
       // Live preview of Custom Extraction rules against a single URL.
@@ -2319,7 +2729,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.extractionRulesExport,
     async (
       _e,
@@ -2352,7 +2762,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.extractionRulesImport,
     async (): Promise<ExtractionRulesImportResult> => {
       if (!mainWindow) {
@@ -2450,7 +2860,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.sitemapValidate,
     async (_e, input: SitemapValidateInput): Promise<SitemapValidateResult> => {
       const ac = new AbortController();
@@ -2494,7 +2904,7 @@ function registerIpc(): void {
   // from running off the main thread. Each handler routes through the
   // reader pool with a main-thread fallback so a worker crash doesn't
   // brick the Reports dialog.
-  ipcMain.handle(
+  registerHandle(
     IPC.reportsPagesPerDirectory,
     (_e, input: PagesPerDirectoryInput) =>
       callReaderOrFallback(
@@ -2504,35 +2914,35 @@ function registerIpc(): void {
       ),
   );
 
-  ipcMain.handle(IPC.reportsStatusCodeHistogram, () =>
+  registerHandle(IPC.reportsStatusCodeHistogram, () =>
     callReaderOrFallback('getStatusCodeHistogram', [], () =>
       getDb().getStatusCodeHistogram(),
     ),
   );
 
-  ipcMain.handle(IPC.reportsIndexabilityDistribution, () =>
+  registerHandle(IPC.reportsIndexabilityDistribution, () =>
     callReaderOrFallback('getIndexabilityDistribution', [], () =>
       getDb().getIndexabilityDistribution(),
     ),
   );
 
-  ipcMain.handle(IPC.reportsContentKindDistribution, () =>
+  registerHandle(IPC.reportsContentKindDistribution, () =>
     callReaderOrFallback('getContentKindDistribution', [], () =>
       getDb().getContentKindDistribution(),
     ),
   );
 
-  ipcMain.handle(IPC.reportsDepthHistogram, () =>
+  registerHandle(IPC.reportsDepthHistogram, () =>
     callReaderOrFallback('getDepthHistogram', [], () => getDb().getDepthHistogram()),
   );
 
-  ipcMain.handle(IPC.reportsResponseTimeHistogram, () =>
+  registerHandle(IPC.reportsResponseTimeHistogram, () =>
     callReaderOrFallback('getResponseTimeHistogram', [], () =>
       getDb().getResponseTimeHistogram(),
     ),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.reportsTopUrls,
     (_e, input: TopUrlsInput): Promise<TopUrlsRow[]> => {
       const limit = Math.min(500, Math.max(1, input.limit ?? 25));
@@ -2555,7 +2965,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.reportsExternalDomainHealth,
     (_e, limit: number | undefined): Promise<ExternalDomainHealthRow[]> =>
       callReaderOrFallback<ExternalDomainHealthRow[]>(
@@ -2565,19 +2975,19 @@ function registerIpc(): void {
       ),
   );
 
-  ipcMain.handle(IPC.reportsAnalyticsCoverage, () =>
+  registerHandle(IPC.reportsAnalyticsCoverage, () =>
     callReaderOrFallback<AnalyticsCoverageRow[]>('analyticsCoverage', [], () =>
       getDb().analyticsCoverage(),
     ),
   );
 
-  ipcMain.handle(IPC.reportsLinkPositions, () =>
+  registerHandle(IPC.reportsLinkPositions, () =>
     callReaderOrFallback<LinkPositionRow[]>('linkPositionBreakdown', [], () =>
       getDb().linkPositionBreakdown(),
     ),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.reportsImageWeightPerPage,
     (_e, limit: number | undefined): Promise<ImageWeightRow[]> =>
       callReaderOrFallback<ImageWeightRow[]>(
@@ -2587,25 +2997,25 @@ function registerIpc(): void {
       ),
   );
 
-  ipcMain.handle(IPC.reportsInlinksHistogram, () =>
+  registerHandle(IPC.reportsInlinksHistogram, () =>
     callReaderOrFallback<BucketHistogramRow[]>('inlinksHistogram', [], () =>
       getDb().inlinksHistogram(),
     ),
   );
 
-  ipcMain.handle(IPC.reportsWordCountHistogram, () =>
+  registerHandle(IPC.reportsWordCountHistogram, () =>
     callReaderOrFallback<BucketHistogramRow[]>('wordCountHistogram', [], () =>
       getDb().wordCountHistogram(),
     ),
   );
 
-  ipcMain.handle(IPC.reportsUrlLengthHistogram, () =>
+  registerHandle(IPC.reportsUrlLengthHistogram, () =>
     callReaderOrFallback<BucketHistogramRow[]>('urlLengthHistogram', [], () =>
       getDb().urlLengthHistogram(),
     ),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.reportsWordCountPerDirectory,
     (_e, input: WordCountPerDirectoryInput): Promise<WordCountPerDirectoryRow[]> =>
       callReaderOrFallback<WordCountPerDirectoryRow[]>(
@@ -2616,7 +3026,7 @@ function registerIpc(): void {
       ),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.reportsSitemapOrphans,
     (_e, limit?: number): Promise<SitemapOrphanRow[]> =>
       callReaderOrFallback<SitemapOrphanRow[]>(
@@ -2626,7 +3036,7 @@ function registerIpc(): void {
       ),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.reportsOrphanCrossSource,
     (_e, limit?: number): Promise<OrphanCrossSourceRow[]> =>
       callReaderOrFallback<OrphanCrossSourceRow[]>(
@@ -2636,7 +3046,7 @@ function registerIpc(): void {
       ),
   );
 
-  ipcMain.handle(IPC.reportsServerHeaders, () =>
+  registerHandle(IPC.reportsServerHeaders, () =>
     callReaderOrFallback<ServerHeaderRow[]>('serverHeaderBreakdown', [], () =>
       getDb().serverHeaderBreakdown(),
     ),
@@ -2647,7 +3057,7 @@ function registerIpc(): void {
   // db package isn't allowed to depend on core per the monorepo
   // dependency graph). Aggregation is sync + cheap so we don't need
   // the reader pool's worker offload here.
-  ipcMain.handle(
+  registerHandle(
     IPC.reportsTopWords,
     (_e, input: TopWordsInput): TopWordsRow[] => {
       const corpus = getDb().seoTextCorpus();
@@ -2659,7 +3069,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.prefsExportSettings,
     async (_e, input: SettingsExportInput): Promise<SettingsExportResult> => {
       let filePath = input.filePath ?? '';
@@ -2687,7 +3097,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.prefsImportSettings,
     async (): Promise<SettingsImportResult> => {
       if (!mainWindow) return { filePath: '', config: null, unknownFields: [] };
@@ -2732,22 +3142,22 @@ function registerIpc(): void {
 
   // V1 Faz 6 — Scheduled crawl IPC. One schedule per project, stored
   // app-level under the `schedules` prefs key keyed by project path.
-  ipcMain.handle(IPC.scheduleGet, () => {
-    return getSchedule(schedulerStore, currentProjectPath);
+  registerHandle(IPC.scheduleGet, () => {
+    return getSchedule(schedulerStore, currentSession().currentProjectPath);
   });
-  ipcMain.handle(IPC.scheduleSet, (_e, spec: ScheduleSpec | null) => {
-    return setSchedule(schedulerStore, currentProjectPath, spec);
+  registerHandle(IPC.scheduleSet, (_e, spec: ScheduleSpec | null) => {
+    return setSchedule(schedulerStore, currentSession().currentProjectPath, spec);
   });
 
   // V1 Faz 9 — directory picker for Settings → Storage. Returns the chosen
   // absolute path, or null if the user cancelled.
-  ipcMain.handle(
+  registerHandle(
     IPC.pickDirectory,
     async (
       _e,
       input?: { title?: string; defaultPath?: string },
     ): Promise<string | null> => {
-      const win = mainWindow;
+      const win = dialogParent();
       if (!win) return null;
       const res = await dialog.showOpenDialog(win, {
         title: input?.title ?? L().dlgChooseFolderTitle,
@@ -2763,30 +3173,30 @@ function registerIpc(): void {
   // configured `projectSaveDir` pref when set & non-empty, otherwise the
   // OS Documents folder. Used by Settings → Storage to display the active
   // value, and by `projectSaveAs` as the dialog's starting directory.
-  ipcMain.handle(IPC.defaultProjectDir, (): string => {
+  registerHandle(IPC.defaultProjectDir, (): string => {
     loadPrefs();
     const raw = prefsCache['projectSaveDir'];
     if (typeof raw === 'string' && raw.trim().length > 0) return raw;
     return app.getPath('documents');
   });
 
-  ipcMain.handle(IPC.storageModeActive, (): 'disk' | 'ram' => {
+  registerHandle(IPC.storageModeActive, (): 'disk' | 'ram' => {
     // Ensure the DB has been resolved at least once so the mode is set.
     getDb();
-    return storageModeActive;
+    return currentSession().storageModeActive;
   });
 
   // V1 Faz 7 — integration credential store. Secrets are encrypted at
   // rest with safeStorage; the renderer only ever sees the redacted
   // state map (secret values blanked, non-secret values round-tripped).
-  ipcMain.handle(IPC.integrationsGetAll, () => getIntegrationsState());
-  ipcMain.handle(
+  registerHandle(IPC.integrationsGetAll, () => getIntegrationsState());
+  registerHandle(
     IPC.integrationsSet,
     (_e, id: string, fields: Record<string, string>) => {
       return setIntegrationCredentials(id, fields);
     },
   );
-  ipcMain.handle(IPC.integrationsClear, (_e, id: string) => {
+  registerHandle(IPC.integrationsClear, (_e, id: string) => {
     return clearIntegrationCredentials(id);
   });
 
@@ -2795,7 +3205,7 @@ function registerIpc(): void {
   // `pagespeedRun` audits a user-selected subset (the slow part — PSI
   // takes ~10–30 s per URL — so it streams `pagespeedProgress` events
   // and can be cancelled mid-run).
-  ipcMain.handle(
+  registerHandle(
     IPC.pagespeedQuery,
     async (_e, input: PagespeedQueryInput): Promise<PagespeedQueryResult> => {
       const params = {
@@ -2815,12 +3225,16 @@ function registerIpc(): void {
   // Shared PSI batch orchestrator — driven by both the renderer's
   // `pagespeedRun` IPC (which awaits the result) and the MCP bridge's
   // non-blocking `pagespeed-run` action (which fires-and-forgets and
-  // lets the agent poll `fetch-progress`). Updates `pagespeedRunSnapshot`
-  // throughout so the MCP poll surface reflects either trigger path.
+  // lets the agent poll `fetch-progress`). Updates the session's pagespeed
+  // run snapshot throughout so the MCP poll surface reflects either path.
   async function runPagespeedJob(
     input: PagespeedRunInput,
   ): Promise<PagespeedRunResult> {
-    if (pagespeedRunActive) {
+    // Bind the run to the calling window's session up front so the guard,
+    // cancel flag and MCP snapshot are all this window's — not a global.
+    const runSession = currentSession();
+    const run = runSession.fetchRuns.pagespeed;
+    if (run.active) {
       return { completed: 0, failed: 0, cancelled: true };
     }
     const urls = Array.from(
@@ -2831,7 +3245,7 @@ function registerIpc(): void {
       ),
     );
     if (urls.length === 0) {
-      pagespeedRunSnapshot = {
+      run.snapshot = {
         ...idleFetchSnapshot(),
         finishedAt: new Date().toISOString(),
       };
@@ -2847,21 +3261,21 @@ function registerIpc(): void {
     const apiKey =
       apiKeyRaw && apiKeyRaw.trim().length > 0 ? apiKeyRaw.trim() : undefined;
 
-    pagespeedRunActive = true;
-    pagespeedCancelRequested = false;
+    run.active = true;
+    run.cancelRequested = false;
     // Set synchronously (before the first await) so the MCP `pagespeed-run`
     // action can read an accurate snapshot right after kicking us off.
-    pagespeedRunSnapshot = {
+    run.snapshot = {
       ...idleFetchSnapshot(),
       running: true,
       total: items.length,
       startedAt: new Date().toISOString(),
     };
-    // Pin writes to the project that was active when the run started —
-    // a PSI run can last minutes, and resolving `getDb()` per result
-    // would leak audits into a different project if the user opens
-    // one mid-run.
-    const runDb = getDb();
+    // Pin writes to the window that started the run — a PSI run can last
+    // minutes, and resolving `getDb()` per result would leak audits into a
+    // different project if the user opens one mid-run. (`runSession` was
+    // captured at the top for the same reason.)
+    const runDb = runSession.getDb();
     logger.log(
       'info',
       'pagespeed',
@@ -2873,7 +3287,7 @@ function registerIpc(): void {
       const result = await runPagespeedBatch({
         items,
         apiKey,
-        isCancelled: () => pagespeedCancelRequested,
+        isCancelled: () => run.cancelRequested,
         onResult: (url, strategy, metrics) => {
           try {
             runDb.upsertPagespeedResult(url, strategy, metrics);
@@ -2886,14 +3300,14 @@ function registerIpc(): void {
               }`,
             );
           }
-          if (metrics.status === 'ok') pagespeedRunSnapshot.completed++;
-          else pagespeedRunSnapshot.failed++;
+          if (metrics.status === 'ok') run.snapshot.completed++;
+          else run.snapshot.failed++;
         },
         onProgress: (done, total, currentUrl) => {
-          pagespeedRunSnapshot.done = done;
-          pagespeedRunSnapshot.total = total;
-          pagespeedRunSnapshot.currentUrl = currentUrl;
-          mainWindow?.webContents.send(IPC.pagespeedProgress, {
+          run.snapshot.done = done;
+          run.snapshot.total = total;
+          run.snapshot.currentUrl = currentUrl;
+          runSession.send(IPC.pagespeedProgress, {
             done,
             total,
             currentUrl,
@@ -2901,8 +3315,8 @@ function registerIpc(): void {
           });
         },
       });
-      pagespeedRunSnapshot = {
-        ...pagespeedRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         done: result.completed + result.failed,
         completed: result.completed,
@@ -2911,17 +3325,17 @@ function registerIpc(): void {
         currentUrl: null,
         finishedAt: new Date().toISOString(),
       };
-      mainWindow?.webContents.send(IPC.pagespeedProgress, {
+      runSession.send(IPC.pagespeedProgress, {
         done: result.completed + result.failed,
         total: items.length,
         currentUrl: null,
         running: false,
       });
-      fireDataChanged();
+      fireDataChanged(runSession);
       return result;
     } catch (err) {
-      pagespeedRunSnapshot = {
-        ...pagespeedRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         currentUrl: null,
         finishedAt: new Date().toISOString(),
@@ -2929,26 +3343,27 @@ function registerIpc(): void {
       };
       throw err;
     } finally {
-      pagespeedRunActive = false;
-      pagespeedCancelRequested = false;
+      run.active = false;
+      run.cancelRequested = false;
     }
   }
 
-  ipcMain.handle(
+  registerHandle(
     IPC.pagespeedRun,
     async (_e, input: PagespeedRunInput): Promise<PagespeedRunResult> =>
       runPagespeedJob(input),
   );
 
-  ipcMain.handle(IPC.pagespeedCancel, () => {
-    if (pagespeedRunActive) {
-      pagespeedCancelRequested = true;
+  registerHandle(IPC.pagespeedCancel, () => {
+    const run = currentSession().fetchRuns.pagespeed;
+    if (run.active) {
+      run.cancelRequested = true;
       logger.log('info', 'pagespeed', 'run cancellation requested');
     }
   });
 
   // ---- Chrome UX Report (CrUX) — real-user field metrics ----
-  ipcMain.handle(
+  registerHandle(
     IPC.cruxQuery,
     async (_e, input: CruxQueryInput): Promise<CruxQueryResult> => {
       const params = {
@@ -2967,9 +3382,11 @@ function registerIpc(): void {
 
   // Shared CrUX batch orchestrator — driven by both the renderer's
   // `cruxRun` IPC and the MCP bridge's `crux-run` action. Mirrors
-  // `runPagespeedJob`; updates `cruxRunSnapshot` throughout.
+  // `runPagespeedJob`; updates the session's crux run snapshot throughout.
   async function runCruxJob(input: CruxRunInput): Promise<CruxRunResult> {
-    if (cruxRunActive) {
+    const runSession = currentSession();
+    const run = runSession.fetchRuns.crux;
+    if (run.active) {
       return { completed: 0, failed: 0, cancelled: true };
     }
     const urls = Array.from(
@@ -2980,7 +3397,7 @@ function registerIpc(): void {
       ),
     );
     if (urls.length === 0) {
-      cruxRunSnapshot = {
+      run.snapshot = {
         ...idleFetchSnapshot(),
         finishedAt: new Date().toISOString(),
       };
@@ -3000,7 +3417,7 @@ function registerIpc(): void {
     if (!apiKey) {
       // CrUX has no keyless mode — surface a clear failure instead of a
       // batch of 400s.
-      cruxRunSnapshot = {
+      run.snapshot = {
         ...idleFetchSnapshot(),
         finishedAt: new Date().toISOString(),
         error: 'No CrUX API key configured (Settings → Integrations → Chrome UX Report).',
@@ -3013,15 +3430,15 @@ function registerIpc(): void {
       return { completed: 0, failed: items.length, cancelled: false };
     }
 
-    cruxRunActive = true;
-    cruxCancelRequested = false;
-    cruxRunSnapshot = {
+    run.active = true;
+    run.cancelRequested = false;
+    run.snapshot = {
       ...idleFetchSnapshot(),
       running: true,
       total: items.length,
       startedAt: new Date().toISOString(),
     };
-    const runDb = getDb();
+    const runDb = runSession.getDb();
     logger.log(
       'info',
       'crux',
@@ -3031,7 +3448,7 @@ function registerIpc(): void {
       const result = await runCruxBatch({
         items,
         apiKey,
-        isCancelled: () => cruxCancelRequested,
+        isCancelled: () => run.cancelRequested,
         onResult: (url, formFactor, metrics) => {
           try {
             runDb.upsertCruxResult(url, formFactor, metrics);
@@ -3044,14 +3461,14 @@ function registerIpc(): void {
               }`,
             );
           }
-          if (metrics.status === 'ok') cruxRunSnapshot.completed++;
-          else cruxRunSnapshot.failed++;
+          if (metrics.status === 'ok') run.snapshot.completed++;
+          else run.snapshot.failed++;
         },
         onProgress: (done, total, currentUrl) => {
-          cruxRunSnapshot.done = done;
-          cruxRunSnapshot.total = total;
-          cruxRunSnapshot.currentUrl = currentUrl;
-          mainWindow?.webContents.send(IPC.cruxProgress, {
+          run.snapshot.done = done;
+          run.snapshot.total = total;
+          run.snapshot.currentUrl = currentUrl;
+          runSession.send(IPC.cruxProgress, {
             done,
             total,
             currentUrl,
@@ -3059,8 +3476,8 @@ function registerIpc(): void {
           });
         },
       });
-      cruxRunSnapshot = {
-        ...cruxRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         done: result.completed + result.failed,
         completed: result.completed,
@@ -3069,17 +3486,17 @@ function registerIpc(): void {
         currentUrl: null,
         finishedAt: new Date().toISOString(),
       };
-      mainWindow?.webContents.send(IPC.cruxProgress, {
+      runSession.send(IPC.cruxProgress, {
         done: result.completed + result.failed,
         total: items.length,
         currentUrl: null,
         running: false,
       });
-      fireDataChanged();
+      fireDataChanged(runSession);
       return result;
     } catch (err) {
-      cruxRunSnapshot = {
-        ...cruxRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         currentUrl: null,
         finishedAt: new Date().toISOString(),
@@ -3087,26 +3504,27 @@ function registerIpc(): void {
       };
       throw err;
     } finally {
-      cruxRunActive = false;
-      cruxCancelRequested = false;
+      run.active = false;
+      run.cancelRequested = false;
     }
   }
 
-  ipcMain.handle(
+  registerHandle(
     IPC.cruxRun,
     async (_e, input: CruxRunInput): Promise<CruxRunResult> =>
       runCruxJob(input),
   );
 
-  ipcMain.handle(IPC.cruxCancel, () => {
-    if (cruxRunActive) {
-      cruxCancelRequested = true;
+  registerHandle(IPC.cruxCancel, () => {
+    const run = currentSession().fetchRuns.crux;
+    if (run.active) {
+      run.cancelRequested = true;
       logger.log('info', 'crux', 'run cancellation requested');
     }
   });
 
   // ---- Spelling & Grammar (LanguageTool) ----
-  ipcMain.handle(
+  registerHandle(
     IPC.spellingQuery,
     async (_e, input: SpellingQueryInput): Promise<SpellingQueryResult> => {
       const params = {
@@ -3123,7 +3541,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.spellingMatches,
     async (_e, url: string): Promise<SpellingMatchesResult | null> =>
       callReaderOrFallback<SpellingMatchesResult | null>(
@@ -3190,7 +3608,9 @@ function registerIpc(): void {
   async function runSpellingJob(
     input: SpellingRunInput,
   ): Promise<SpellingRunResult> {
-    if (spellingRunActive) {
+    const runSession = currentSession();
+    const run = runSession.fetchRuns.spelling;
+    if (run.active) {
       return { completed: 0, failed: 0, cancelled: true };
     }
     const urls = Array.from(
@@ -3201,7 +3621,7 @@ function registerIpc(): void {
       ),
     );
     if (urls.length === 0) {
-      spellingRunSnapshot = {
+      run.snapshot = {
         ...idleFetchSnapshot(),
         finishedAt: new Date().toISOString(),
       };
@@ -3209,15 +3629,15 @@ function registerIpc(): void {
     }
 
     const check = resolveSpellingOptions();
-    spellingRunActive = true;
-    spellingCancelRequested = false;
-    spellingRunSnapshot = {
+    run.active = true;
+    run.cancelRequested = false;
+    run.snapshot = {
       ...idleFetchSnapshot(),
       running: true,
       total: urls.length,
       startedAt: new Date().toISOString(),
     };
-    const runDb = getDb();
+    const runDb = runSession.getDb();
     logger.log(
       'info',
       'languagetool',
@@ -3228,7 +3648,7 @@ function registerIpc(): void {
         urls,
         check,
         loadPage: (url) => loadSpellingPage(runDb, url),
-        isCancelled: () => spellingCancelRequested,
+        isCancelled: () => run.cancelRequested,
         onResult: (url, r) => {
           try {
             runDb.upsertSpellingResult(url, r);
@@ -3241,14 +3661,14 @@ function registerIpc(): void {
               }`,
             );
           }
-          if (r.status === 'ok') spellingRunSnapshot.completed++;
-          else spellingRunSnapshot.failed++;
+          if (r.status === 'ok') run.snapshot.completed++;
+          else run.snapshot.failed++;
         },
         onProgress: (done, total, currentUrl) => {
-          spellingRunSnapshot.done = done;
-          spellingRunSnapshot.total = total;
-          spellingRunSnapshot.currentUrl = currentUrl;
-          mainWindow?.webContents.send(IPC.spellingProgress, {
+          run.snapshot.done = done;
+          run.snapshot.total = total;
+          run.snapshot.currentUrl = currentUrl;
+          runSession.send(IPC.spellingProgress, {
             done,
             total,
             currentUrl,
@@ -3256,8 +3676,8 @@ function registerIpc(): void {
           });
         },
       });
-      spellingRunSnapshot = {
-        ...spellingRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         done: result.completed + result.failed,
         completed: result.completed,
@@ -3266,17 +3686,17 @@ function registerIpc(): void {
         currentUrl: null,
         finishedAt: new Date().toISOString(),
       };
-      mainWindow?.webContents.send(IPC.spellingProgress, {
+      runSession.send(IPC.spellingProgress, {
         done: result.completed + result.failed,
         total: urls.length,
         currentUrl: null,
         running: false,
       });
-      fireDataChanged();
+      fireDataChanged(runSession);
       return result;
     } catch (err) {
-      spellingRunSnapshot = {
-        ...spellingRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         currentUrl: null,
         finishedAt: new Date().toISOString(),
@@ -3284,20 +3704,21 @@ function registerIpc(): void {
       };
       throw err;
     } finally {
-      spellingRunActive = false;
-      spellingCancelRequested = false;
+      run.active = false;
+      run.cancelRequested = false;
     }
   }
 
-  ipcMain.handle(
+  registerHandle(
     IPC.spellingRun,
     async (_e, input: SpellingRunInput): Promise<SpellingRunResult> =>
       runSpellingJob(input),
   );
 
-  ipcMain.handle(IPC.spellingCancel, () => {
-    if (spellingRunActive) {
-      spellingCancelRequested = true;
+  registerHandle(IPC.spellingCancel, () => {
+    const run = currentSession().fetchRuns.spelling;
+    if (run.active) {
+      run.cancelRequested = true;
       logger.log('info', 'languagetool', 'run cancellation requested');
     }
   });
@@ -3305,11 +3726,11 @@ function registerIpc(): void {
   // V1 Faz 7 — Google OAuth keystone. The interactive consent flow runs
   // entirely in the main process (loopback HTTP server + system
   // browser); the renderer only ever sees the redacted GoogleAuthState.
-  ipcMain.handle(
+  registerHandle(
     IPC.googleAuthStatus,
     (_e, id: string): GoogleAuthState => getAuthState(id),
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.googleAuthStart,
     async (_e, id: string): Promise<GoogleAuthResult> => {
       try {
@@ -3324,7 +3745,7 @@ function registerIpc(): void {
       }
     },
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.googleAuthRevoke,
     (_e, id: string): Promise<GoogleAuthState> => revokeAuth(id),
   );
@@ -3332,7 +3753,7 @@ function registerIpc(): void {
   // V1 Faz 7 — Google Search Console. `gscFetch` pulls per-page metrics
   // for a date range and wholesale-replaces the stored snapshot;
   // `gscQuery` lists crawled pages joined with that data.
-  ipcMain.handle(
+  registerHandle(
     IPC.gscListSites,
     async (): Promise<GscListSitesResult> => {
       try {
@@ -3346,7 +3767,7 @@ function registerIpc(): void {
       }
     },
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.gscFetch,
     async (_e, input: GscFetchInput): Promise<GscFetchResult> => {
       if (!input.property) {
@@ -3399,7 +3820,7 @@ function registerIpc(): void {
       }
     },
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.gscQuery,
     async (_e, input: GscQueryInput): Promise<GscQueryResult> => {
       const params = {
@@ -3426,7 +3847,7 @@ function registerIpc(): void {
   // V1 Faz 7 — Google Analytics 4. Same shape as GSC: list properties,
   // fetch a date-range snapshot, query crawled pages joined with the
   // stored data. Auth runs through the shared OAuth keystone.
-  ipcMain.handle(
+  registerHandle(
     IPC.ga4ListProperties,
     async (): Promise<Ga4ListPropertiesResult> => {
       try {
@@ -3440,7 +3861,7 @@ function registerIpc(): void {
       }
     },
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.ga4Fetch,
     async (_e, input: Ga4FetchInput): Promise<Ga4FetchResult> => {
       if (!input.property) {
@@ -3488,7 +3909,7 @@ function registerIpc(): void {
       }
     },
   );
-  ipcMain.handle(
+  registerHandle(
     IPC.ga4Query,
     async (_e, input: Ga4QueryInput): Promise<Ga4QueryResult> => {
       const params = {
@@ -3539,9 +3960,11 @@ function registerIpc(): void {
 
   // Shared AI batch orchestrator — driven by the renderer's `aiRun` IPC
   // (awaits) and the MCP bridge's non-blocking `ai-run` action (polls
-  // `fetch-progress`). Updates `aiRunSnapshot` throughout.
+  // `fetch-progress`). Updates the session's ai run snapshot throughout.
   async function runAiJob(input: AiRunInput): Promise<AiRunResult> {
-    if (aiRunActive) {
+    const runSession = currentSession();
+    const run = runSession.fetchRuns.ai;
+    if (run.active) {
       return { completed: 0, failed: 0, cancelled: true };
     }
     const urls = Array.from(
@@ -3552,14 +3975,14 @@ function registerIpc(): void {
       ),
     );
     if (urls.length === 0 || !input.prompt?.trim()) {
-      aiRunSnapshot = {
+      run.snapshot = {
         ...idleFetchSnapshot(),
         provider: input.provider,
         finishedAt: new Date().toISOString(),
       };
       return { completed: 0, failed: 0, cancelled: false };
     }
-    const runDb = getDb();
+    const runDb = runSession.getDb();
     const model = resolveModel(input.provider, input.model);
     const concurrency = defaultConcurrency(input.provider);
 
@@ -3575,7 +3998,7 @@ function registerIpc(): void {
       });
     }
     if (items.length === 0) {
-      aiRunSnapshot = {
+      run.snapshot = {
         ...idleFetchSnapshot(),
         provider: input.provider,
         finishedAt: new Date().toISOString(),
@@ -3583,9 +4006,9 @@ function registerIpc(): void {
       return { completed: 0, failed: 0, cancelled: false };
     }
 
-    aiRunActive = true;
-    aiCancelRequested = false;
-    aiRunSnapshot = {
+    run.active = true;
+    run.cancelRequested = false;
+    run.snapshot = {
       ...idleFetchSnapshot(),
       running: true,
       total: items.length,
@@ -3603,7 +4026,7 @@ function registerIpc(): void {
         model,
         concurrency,
         items,
-        isCancelled: () => aiCancelRequested,
+        isCancelled: () => run.cancelRequested,
         onResult: (outcome) => {
           try {
             const fetchedAt = new Date().toISOString();
@@ -3641,14 +4064,14 @@ function registerIpc(): void {
               }`,
             );
           }
-          if (outcome.ok) aiRunSnapshot.completed++;
-          else aiRunSnapshot.failed++;
+          if (outcome.ok) run.snapshot.completed++;
+          else run.snapshot.failed++;
         },
         onProgress: (done, total, currentUrl) => {
-          aiRunSnapshot.done = done;
-          aiRunSnapshot.total = total;
-          aiRunSnapshot.currentUrl = currentUrl;
-          mainWindow?.webContents.send(IPC.aiProgress, {
+          run.snapshot.done = done;
+          run.snapshot.total = total;
+          run.snapshot.currentUrl = currentUrl;
+          runSession.send(IPC.aiProgress, {
             done,
             total,
             currentUrl,
@@ -3656,8 +4079,8 @@ function registerIpc(): void {
           });
         },
       });
-      aiRunSnapshot = {
-        ...aiRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         done: result.completed + result.failed,
         completed: result.completed,
@@ -3666,17 +4089,17 @@ function registerIpc(): void {
         currentUrl: null,
         finishedAt: new Date().toISOString(),
       };
-      mainWindow?.webContents.send(IPC.aiProgress, {
+      runSession.send(IPC.aiProgress, {
         done: result.completed + result.failed,
         total: items.length,
         currentUrl: null,
         running: false,
       });
-      fireDataChanged();
+      fireDataChanged(runSession);
       return result;
     } catch (err) {
-      aiRunSnapshot = {
-        ...aiRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         currentUrl: null,
         finishedAt: new Date().toISOString(),
@@ -3684,24 +4107,25 @@ function registerIpc(): void {
       };
       throw err;
     } finally {
-      aiRunActive = false;
-      aiCancelRequested = false;
+      run.active = false;
+      run.cancelRequested = false;
     }
   }
 
-  ipcMain.handle(
+  registerHandle(
     IPC.aiRun,
     async (_e, input: AiRunInput): Promise<AiRunResult> => runAiJob(input),
   );
 
-  ipcMain.handle(IPC.aiCancel, () => {
-    if (aiRunActive) {
-      aiCancelRequested = true;
+  registerHandle(IPC.aiCancel, () => {
+    const run = currentSession().fetchRuns.ai;
+    if (run.active) {
+      run.cancelRequested = true;
       logger.log('info', 'ai', 'run cancellation requested');
     }
   });
 
-  ipcMain.handle(
+  registerHandle(
     IPC.aiQuery,
     async (_e, input: AiQueryInput): Promise<AiQueryResult> => {
       const params = {
@@ -3725,9 +4149,11 @@ function registerIpc(): void {
   // ok/error rows so partial outages are visible in the UI.
   // Shared SEO-authority batch orchestrator — driven by the renderer's
   // `seoRun` IPC (awaits) and the MCP bridge's non-blocking `seo-run`
-  // action (polls `fetch-progress`). Updates `seoRunSnapshot` throughout.
+  // action (polls `fetch-progress`). Updates the session's seo run snapshot.
   async function runSeoJob(input: SeoRunInput): Promise<SeoRunResult> {
-    if (seoRunActive) return { completed: 0, failed: 0, cancelled: true };
+    const runSession = currentSession();
+    const run = runSession.fetchRuns.seo;
+    if (run.active) return { completed: 0, failed: 0, cancelled: true };
     const urls = Array.from(
       new Set(
         (input.urls ?? []).filter(
@@ -3736,17 +4162,17 @@ function registerIpc(): void {
       ),
     );
     if (urls.length === 0) {
-      seoRunSnapshot = {
+      run.snapshot = {
         ...idleFetchSnapshot(),
         provider: input.provider,
         finishedAt: new Date().toISOString(),
       };
       return { completed: 0, failed: 0, cancelled: false };
     }
-    const runDb = getDb();
-    seoRunActive = true;
-    seoCancelRequested = false;
-    seoRunSnapshot = {
+    const runDb = runSession.getDb();
+    run.active = true;
+    run.cancelRequested = false;
+    run.snapshot = {
       ...idleFetchSnapshot(),
       running: true,
       total: urls.length,
@@ -3758,7 +4184,7 @@ function registerIpc(): void {
       const result = await runSeoBatch({
         provider: input.provider,
         urls,
-        isCancelled: () => seoCancelRequested,
+        isCancelled: () => run.cancelRequested,
         onResult: (outcome) => {
           try {
             runDb.upsertSeoResult(
@@ -3778,14 +4204,14 @@ function registerIpc(): void {
               }`,
             );
           }
-          if (outcome.ok) seoRunSnapshot.completed++;
-          else seoRunSnapshot.failed++;
+          if (outcome.ok) run.snapshot.completed++;
+          else run.snapshot.failed++;
         },
         onProgress: (done, total, currentUrl) => {
-          seoRunSnapshot.done = done;
-          seoRunSnapshot.total = total;
-          seoRunSnapshot.currentUrl = currentUrl;
-          mainWindow?.webContents.send(IPC.seoProgress, {
+          run.snapshot.done = done;
+          run.snapshot.total = total;
+          run.snapshot.currentUrl = currentUrl;
+          runSession.send(IPC.seoProgress, {
             done,
             total,
             currentUrl,
@@ -3793,8 +4219,8 @@ function registerIpc(): void {
           });
         },
       });
-      seoRunSnapshot = {
-        ...seoRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         done: result.completed + result.failed,
         completed: result.completed,
@@ -3803,17 +4229,17 @@ function registerIpc(): void {
         currentUrl: null,
         finishedAt: new Date().toISOString(),
       };
-      mainWindow?.webContents.send(IPC.seoProgress, {
+      runSession.send(IPC.seoProgress, {
         done: result.completed + result.failed,
         total: urls.length,
         currentUrl: null,
         running: false,
       });
-      fireDataChanged();
+      fireDataChanged(runSession);
       return result;
     } catch (err) {
-      seoRunSnapshot = {
-        ...seoRunSnapshot,
+      run.snapshot = {
+        ...run.snapshot,
         running: false,
         currentUrl: null,
         finishedAt: new Date().toISOString(),
@@ -3821,22 +4247,23 @@ function registerIpc(): void {
       };
       throw err;
     } finally {
-      seoRunActive = false;
-      seoCancelRequested = false;
+      run.active = false;
+      run.cancelRequested = false;
     }
   }
 
-  ipcMain.handle(
+  registerHandle(
     IPC.seoRun,
     async (_e, input: SeoRunInput): Promise<SeoRunResult> => runSeoJob(input),
   );
-  ipcMain.handle(IPC.seoCancel, () => {
-    if (seoRunActive) {
-      seoCancelRequested = true;
+  registerHandle(IPC.seoCancel, () => {
+    const run = currentSession().fetchRuns.seo;
+    if (run.active) {
+      run.cancelRequested = true;
       logger.log('info', 'seo', 'run cancellation requested');
     }
   });
-  ipcMain.handle(
+  registerHandle(
     IPC.seoQuery,
     async (_e, input: SeoQueryInput): Promise<SeoQueryResult> => {
       const params = {
@@ -3857,10 +4284,12 @@ function registerIpc(): void {
   // V1 Faz 7 — Google Search Console URL Inspection. Sequential — the
   // API caps at 2 000 calls / day per property; running in parallel
   // doesn't speed it up materially and risks burning quota on errors.
-  ipcMain.handle(
+  registerHandle(
     IPC.gscInspectRun,
     async (_e, input: GscInspectRunInput): Promise<GscInspectRunResult> => {
-      if (gscInspectRunActive) {
+      const runSession = currentSession();
+      const run = runSession.fetchRuns.gscInspect;
+      if (run.active) {
         return { completed: 0, failed: 0, cancelled: true };
       }
       const urls = Array.from(
@@ -3873,9 +4302,9 @@ function registerIpc(): void {
       if (!input.property || urls.length === 0) {
         return { completed: 0, failed: 0, cancelled: false };
       }
-      const runDb = getDb();
-      gscInspectRunActive = true;
-      gscInspectCancelRequested = false;
+      const runDb = runSession.getDb();
+      run.active = true;
+      run.cancelRequested = false;
       let completed = 0;
       let failed = 0;
       let done = 0;
@@ -3884,7 +4313,7 @@ function registerIpc(): void {
         'gsc',
         `URL Inspection run started — ${urls.length} URL(s) for ${input.property}`,
       );
-      mainWindow?.webContents.send(IPC.gscInspectProgress, {
+      runSession.send(IPC.gscInspectProgress, {
         done: 0,
         total: urls.length,
         currentUrl: null,
@@ -3892,8 +4321,8 @@ function registerIpc(): void {
       });
       try {
         for (const url of urls) {
-          if (gscInspectCancelRequested) break;
-          mainWindow?.webContents.send(IPC.gscInspectProgress, {
+          if (run.cancelRequested) break;
+          runSession.send(IPC.gscInspectProgress, {
             done,
             total: urls.length,
             currentUrl: url,
@@ -3927,27 +4356,28 @@ function registerIpc(): void {
           }
           done++;
         }
-        mainWindow?.webContents.send(IPC.gscInspectProgress, {
+        runSession.send(IPC.gscInspectProgress, {
           done,
           total: urls.length,
           currentUrl: null,
           running: false,
         });
-        fireDataChanged();
+        fireDataChanged(runSession);
         return {
           completed,
           failed,
-          cancelled: gscInspectCancelRequested && done < urls.length,
+          cancelled: run.cancelRequested && done < urls.length,
         };
       } finally {
-        gscInspectRunActive = false;
-        gscInspectCancelRequested = false;
+        run.active = false;
+        run.cancelRequested = false;
       }
     },
   );
-  ipcMain.handle(IPC.gscInspectCancel, () => {
-    if (gscInspectRunActive) {
-      gscInspectCancelRequested = true;
+  registerHandle(IPC.gscInspectCancel, () => {
+    const run = currentSession().fetchRuns.gscInspect;
+    if (run.active) {
+      run.cancelRequested = true;
       logger.log('info', 'gsc', 'URL Inspection cancellation requested');
     }
   });
@@ -3955,7 +4385,7 @@ function registerIpc(): void {
   // V1 Faz 7 — Google Sheets export. Uses the shared OAuth keystone
   // (the user connects once on the GSC/GA4 flows or via the Sheets
   // integration card). Creates a fresh spreadsheet per export.
-  ipcMain.handle(
+  registerHandle(
     IPC.exportSheets,
     async (_e, input: ExportSheetsInput): Promise<ExportSheetsResult> => {
       try {
@@ -3984,7 +4414,7 @@ function registerIpc(): void {
   // grant); paste the JSON key + project ID in Settings → Integrations.
   // V1 closeout — Detail Panel Analytics sub-tab. One read query
   // merges GSC + GA4 + URL Inspection for the selected URL.
-  ipcMain.handle(
+  registerHandle(
     IPC.urlAnalyticsGet,
     async (_e, url: string): Promise<UrlAnalyticsDetail | null> => {
       if (!url) return null;
@@ -3996,7 +4426,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.exportBigquery,
     async (_e, input: ExportBigqueryInput): Promise<ExportBigqueryResult> => {
       try {
@@ -4034,12 +4464,19 @@ function registerIpc(): void {
     if (logsBatch.length === 0) return;
     const payload = logsBatch;
     logsBatch = [];
-    if (logsWindow && !logsWindow.isDestroyed()) {
-      logsWindow.webContents.send(IPC.logsBatch, payload);
+    // Fan out to each open Logs popup, but scope every window to its OWN
+    // crawler entries (entry.windowId === owner) plus app-global infra logs
+    // (windowId undefined). Two windows' crawls therefore never mix.
+    for (const [ownerWcId, win] of logsWindows) {
+      if (win.isDestroyed()) continue;
+      const subset = payload.filter(
+        (e) => e.windowId === undefined || e.windowId === ownerWcId,
+      );
+      if (subset.length > 0) win.webContents.send(IPC.logsBatch, subset);
     }
   };
   logger.subscribe((entry) => {
-    if (!logsWindow || logsWindow.isDestroyed()) return;
+    if (logsWindows.size === 0) return;
     logsBatch.push(entry);
     if (logsFlushTimer === null) {
       logsFlushTimer = setTimeout(flushLogsBatch, 100);
@@ -4052,7 +4489,7 @@ function registerIpc(): void {
     loadPrefs();
     e.returnValue = prefsCache;
   });
-  ipcMain.handle(IPC.prefsSet, (_e, key: string, value: unknown) => {
+  registerHandle(IPC.prefsSet, (_e, key: string, value: unknown) => {
     loadPrefs();
     prefsCache[key] = value;
     schedulePrefsWrite();
@@ -4063,7 +4500,7 @@ function registerIpc(): void {
       rebuildMenu();
     }
   });
-  ipcMain.handle(IPC.prefsDelete, (_e, key: string) => {
+  registerHandle(IPC.prefsDelete, (_e, key: string) => {
     loadPrefs();
     delete prefsCache[key];
     schedulePrefsWrite();
@@ -4073,11 +4510,14 @@ function registerIpc(): void {
    * resume can re-create a Crawler without forcing the user to fill
    * in the Start dialog again. Persisted across restarts via DB
    * project_meta so it survives the very crash we're recovering from. */
-  function attachCrawlerListeners(crawler: Crawler): void {
+  function attachCrawlerListeners(crawler: Crawler, sess: ProjectSession): void {
+    // Bound to the launching session so progress/done/error reach THAT
+    // window (multi-window) — these callbacks run outside any IPC handler's
+    // AsyncLocalStorage context, so they can't use `currentSession()`.
     crawler.on('progress', (p: CrawlProgress) => {
-      if (activeCrawler !== crawler) return;
-      latestProgress = p;
-      mainWindow?.webContents.send(IPC.crawlProgress, p);
+      if (sess.activeCrawler !== crawler) return;
+      sess.latestProgress = p;
+      sess.send(IPC.crawlProgress, p);
       freezeWatchdog.updateCounters({
         crawled: p.crawled,
         discovered: p.discovered,
@@ -4086,25 +4526,22 @@ function registerIpc(): void {
       });
     });
     crawler.on('done', (summary: CrawlSummary) => {
-      if (activeCrawler !== crawler) return;
+      if (sess.activeCrawler !== crawler) return;
       logger.log(
         'info',
         'crawler',
         `Crawl done: total=${summary.total} avgResp=${summary.avgResponseTimeMs}ms totalBytes=${summary.totalBytes}`,
       );
-      mainWindow?.webContents.send(IPC.crawlDone, summary);
-      activeCrawler = null;
+      sess.send(IPC.crawlDone, summary);
+      sess.activeCrawler = null;
       freezeWatchdog.setMainOp('idle');
       // V1 Faz 6 — if this run was kicked off by the scheduler, record
-      // the result so the dialog's "Last status" row reflects the
-      // outcome. The schedule has already been re-armed (nextFiresAt
-      // advanced) at claim time; we only need to flip the status from
-      // `running` to a terminal value.
-      if (crawlerStartedByScheduler) {
-        crawlerStartedByScheduler = false;
-        recordFireResult(schedulerStore, currentProjectPath, 'success');
+      // the result so the dialog's "Last status" row reflects the outcome.
+      if (sess.crawlerStartedByScheduler) {
+        sess.crawlerStartedByScheduler = false;
+        recordFireResult(schedulerStore, sess.currentProjectPath, 'success');
       }
-      if (Notification.isSupported() && !mainWindow?.isFocused()) {
+      if (Notification.isSupported() && !sess.window?.isFocused()) {
         try {
           new Notification({
             title: 'FreeCrawl SEO Tool',
@@ -4117,33 +4554,38 @@ function registerIpc(): void {
       }
     });
     crawler.on('error', (msg: string) => {
-      if (activeCrawler !== crawler) return;
-      logger.log('error', 'crawler', msg);
-      mainWindow?.webContents.send(IPC.crawlError, msg);
-      maybeShowDiagnosticDialog(msg);
-      if (crawlerStartedByScheduler) {
-        crawlerStartedByScheduler = false;
-        recordFireResult(schedulerStore, currentProjectPath, 'failure');
+      if (sess.activeCrawler !== crawler) return;
+      logger.log('error', 'crawler', msg, undefined, sess.logTag);
+      sess.send(IPC.crawlError, msg);
+      maybeShowDiagnosticDialog(msg, sess.logTag);
+      if (sess.crawlerStartedByScheduler) {
+        sess.crawlerStartedByScheduler = false;
+        recordFireResult(schedulerStore, sess.currentProjectPath, 'failure');
       }
     });
     crawler.on('warn', (msg: string) => {
-      if (activeCrawler !== crawler) return;
-      logger.log('warn', 'crawler', msg);
+      if (sess.activeCrawler !== crawler) return;
+      logger.log('warn', 'crawler', msg, undefined, sess.logTag);
     });
     crawler.on('info', (msg: string) => {
-      if (activeCrawler !== crawler) return;
-      logger.log('info', 'crawler', msg);
+      if (sess.activeCrawler !== crawler) return;
+      logger.log('info', 'crawler', msg, undefined, sess.logTag);
     });
     crawler.on('debug', (msg: string) => {
-      if (activeCrawler !== crawler) return;
-      logger.log('debug', 'crawler', msg);
+      if (sess.activeCrawler !== crawler) return;
+      logger.log('debug', 'crawler', msg, undefined, sess.logTag);
     });
   }
 
   async function launchCrawl(config: CrawlConfig): Promise<void> {
-    if (activeCrawler) {
-      activeCrawler.stop();
-      logger.log('info', 'crawler', 'Stopped previous crawl before starting a new one');
+    // Capture the launching window's session ONCE. The crawler outlives
+    // this handler's AsyncLocalStorage context, so its hooks + listeners
+    // are bound to `sess` rather than resolved via `currentSession()`.
+    const sess = currentSession();
+    const previousCrawler = sess.activeCrawler;
+    if (previousCrawler) {
+      previousCrawler.stop();
+      logger.log('info', 'crawler', 'Stopped previous crawl before starting a new one', undefined, sess.logTag);
     }
     // Reset per-session diagnostic dedup so a re-run after fixing the
     // environment can pop the dialog again if the same issue recurs.
@@ -4152,8 +4594,10 @@ function registerIpc(): void {
       'info',
       'crawler',
       `Crawl starting: ${config.startUrl} (scope=${config.scope}, maxDepth=${config.maxDepth}, maxUrls=${config.maxUrls}, concurrency=${config.maxConcurrency}, rps=${config.maxRps})`,
+      undefined,
+      sess.logTag,
     );
-    const database = getDb();
+    const database = sess.getDb();
     database.setMeta('lastStartUrl', config.startUrl);
     // Persist the config so a crash-then-resume can rehydrate it
     // without the user re-entering anything. Stored as JSON in
@@ -4163,14 +4607,14 @@ function registerIpc(): void {
     } catch {
       /* never fatal */
     }
-    lastCrawlConfig = config;
+    sess.lastCrawlConfig = config;
 
     // V2 Faz 1 — Spin up the Playwright browser pool when JS rendering
     // is enabled. Pool start is lazy (Chromium launches on first
     // acquire) so HTTP-only crawls pay nothing. Dispose any previous
     // pool first; pool reuse across runs would carry over routes /
     // viewport from a config that may have changed.
-    void disposeBrowserPool();
+    void disposeBrowserPool(sess);
     let renderHook:
       | ((
           url: string,
@@ -4209,7 +4653,7 @@ function registerIpc(): void {
       if (config.jsRender.blockResources.media) blocked.add('media');
       if (config.jsRender.blockResources.stylesheet) blocked.add('stylesheet');
       if (config.jsRender.blockResources.script) blocked.add('script');
-      activeBrowserPool = new BrowserPool({
+      const pool = new BrowserPool({
         maxPages:
           config.jsRender.maxPages > 0
             ? config.jsRender.maxPages
@@ -4228,7 +4672,7 @@ function registerIpc(): void {
         // ran the snippet N times per navigation.
         prerenderJs: config.jsRender.prerenderJs || undefined,
       });
-      const pool = activeBrowserPool;
+      sess.activeBrowserPool = pool;
 
       // V2 Faz 1 — Eagerly start the pool so we can detect a missing
       // Playwright browser BEFORE any URL hits the render hook.
@@ -4257,7 +4701,7 @@ function registerIpc(): void {
                 'crawler',
                 `JS render pool still failed after install: ${retryErr instanceof Error ? retryErr.message : String(retryErr)} — falling back to text mode for this crawl.`,
               );
-              await disposeBrowserPool();
+              await disposeBrowserPool(sess);
               config = { ...config, renderingMode: 'text' };
               renderHook = undefined;
             }
@@ -4267,7 +4711,7 @@ function registerIpc(): void {
               'crawler',
               'User declined Playwright install — falling back to text mode for this crawl.',
             );
-            await disposeBrowserPool();
+            await disposeBrowserPool(sess);
             config = { ...config, renderingMode: 'text' };
             renderHook = undefined;
           }
@@ -4277,12 +4721,12 @@ function registerIpc(): void {
             'crawler',
             `Browser pool start failed: ${err instanceof Error ? err.message : String(err)} — falling back to text mode.`,
           );
-          await disposeBrowserPool();
+          await disposeBrowserPool(sess);
           config = { ...config, renderingMode: 'text' };
           renderHook = undefined;
         }
       }
-      const screenshotDir = resolveScreenshotDir(currentProjectPath);
+      const screenshotDir = resolveScreenshotDir(currentSession().currentProjectPath);
       const wantsScreenshot = config.jsRender.screenshotMode !== 'none';
       const wantsMobile =
         config.jsRender.mobileScreenshot || config.jsRender.mobileUsability;
@@ -4403,21 +4847,21 @@ function registerIpc(): void {
     const crawler = new Crawler(config, database, {
       setOp: (op: string) => freezeWatchdog.setMainOp(op),
       parseHtml: parseHtmlViaPool,
-      writeFetchedUrl: writeFetchedUrlViaPool,
-      recomputeIssues: recomputeIssuesViaPool,
-      runDbPass: runDbPassViaPool,
-      dbCall: dbCallViaPool,
+      writeFetchedUrl: (payload) => writeFetchedUrlViaPool(sess, payload),
+      recomputeIssues: (defs) => recomputeIssuesViaPool(sess, defs),
+      runDbPass: (method) => runDbPassViaPool(sess, method),
+      dbCall: (method, args) => dbCallViaPool(sess, method, args),
       renderUrl: renderHook,
     });
-    activeCrawler = crawler;
-    attachCrawlerListeners(crawler);
+    sess.activeCrawler = crawler;
+    attachCrawlerListeners(crawler, sess);
     crawler.on('done', () => {
       // Best-effort dispose — keeps Chromium from lingering after a
       // crawl ends. Pool is recreated on next JS-mode launch.
-      void disposeBrowserPool();
+      void disposeBrowserPool(sess);
     });
     crawler.on('error', () => {
-      void disposeBrowserPool();
+      void disposeBrowserPool(sess);
     });
     void crawler.start();
   }
@@ -4517,10 +4961,10 @@ function registerIpc(): void {
     return createHash('sha1').update(url).digest('hex').slice(0, 16);
   }
 
-  async function disposeBrowserPool(): Promise<void> {
-    if (!activeBrowserPool) return;
-    const p = activeBrowserPool;
-    activeBrowserPool = null;
+  async function disposeBrowserPool(sess: ProjectSession): Promise<void> {
+    const p = sess.activeBrowserPool;
+    if (!p) return;
+    sess.activeBrowserPool = null;
     try {
       await p.close();
     } catch (err) {
@@ -4532,21 +4976,21 @@ function registerIpc(): void {
     }
   }
 
-  ipcMain.handle(IPC.crawlStart, async (_e, config: CrawlConfig) => {
+  registerHandle(IPC.crawlStart, async (_e, config: CrawlConfig) => {
     await launchCrawl(config);
   });
 
-  ipcMain.handle(IPC.crawlStop, () => {
-    activeCrawler?.stop();
-    void disposeBrowserPool();
+  registerHandle(IPC.crawlStop, () => {
+    currentSession().activeCrawler?.stop();
+    void disposeBrowserPool(currentSession());
   });
 
-  ipcMain.handle(IPC.crawlPause, () => {
-    activeCrawler?.pause();
+  registerHandle(IPC.crawlPause, () => {
+    currentSession().activeCrawler?.pause();
   });
 
-  ipcMain.handle(IPC.crawlResume, () => {
-    activeCrawler?.resume();
+  registerHandle(IPC.crawlResume, () => {
+    currentSession().activeCrawler?.resume();
   });
 
   // Expose the same primitives to the MCP bridge so external agents
@@ -4608,8 +5052,9 @@ function registerIpc(): void {
   const mcpActions: Record<string, (input: unknown) => Promise<unknown>> = {
     'crawl-add-url': async (input) => {
       const url = (input as { url?: string }).url ?? '';
-      if (!activeCrawler) return { accepted: false, reason: 'no-active-crawl' };
-      const accepted = activeCrawler.enqueueManual(url);
+      const addCrawler = currentSession().activeCrawler;
+      if (!addCrawler) return { accepted: false, reason: 'no-active-crawl' };
+      const accepted = addCrawler.enqueueManual(url);
       return { accepted };
     },
 
@@ -4734,12 +5179,12 @@ function registerIpc(): void {
     },
 
     'schedule-get': async () => {
-      return getSchedule(schedulerStore, currentProjectPath);
+      return getSchedule(schedulerStore, currentSession().currentProjectPath);
     },
 
     'schedule-set': async (input) => {
       const spec = (input as { spec?: ScheduleSpec | null }).spec ?? null;
-      return setSchedule(schedulerStore, currentProjectPath, spec);
+      return setSchedule(schedulerStore, currentSession().currentProjectPath, spec);
     },
 
     'report-top-words': async (input) => {
@@ -4766,15 +5211,16 @@ function registerIpc(): void {
       const db = getDb();
       db.markUrlsForRecrawl(ids);
       let requeued = 0;
-      if (activeCrawler && activeCrawler.isRunning) {
+      const requeueCrawler = currentSession().activeCrawler;
+      if (requeueCrawler && requeueCrawler.isRunning) {
         const urls = db.getUrlsByIds(ids);
         for (const u of urls) {
-          activeCrawler.requeueUrl(u);
+          requeueCrawler.requeueUrl(u);
           requeued++;
         }
       }
       fireDataChanged();
-      return { marked: ids.length, requeued, hasActiveCrawl: activeCrawler?.isRunning === true };
+      return { marked: ids.length, requeued, hasActiveCrawl: currentSession().activeCrawler?.isRunning === true };
     },
 
     'remove-urls': async (input) => {
@@ -4827,10 +5273,10 @@ function registerIpc(): void {
 
     'get-crawl-config': async () => {
       // Mirrors what the renderer hydrates from prefs at boot — the
-      // current saved `lastCrawlConfig` if present, else the factory
+      // current saved `currentSession().lastCrawlConfig` if present, else the factory
       // default. Lets an agent see what's saved before calling
       // `start_crawl` without overrides.
-      return lastCrawlConfig ?? { ...DEFAULT_CRAWL_CONFIG };
+      return currentSession().lastCrawlConfig ?? { ...DEFAULT_CRAWL_CONFIG };
     },
 
     'set-crawl-config': async (input) => {
@@ -4844,13 +5290,13 @@ function registerIpc(): void {
       if (!cfg || typeof cfg !== 'object') {
         throw new Error('CrawlConfig object required.');
       }
-      lastCrawlConfig = { ...DEFAULT_CRAWL_CONFIG, ...cfg };
+      currentSession().lastCrawlConfig = { ...DEFAULT_CRAWL_CONFIG, ...cfg };
       try {
-        getDb().setMeta('lastCrawlConfig', JSON.stringify(lastCrawlConfig));
+        getDb().setMeta('lastCrawlConfig', JSON.stringify(currentSession().lastCrawlConfig));
       } catch {
         /* non-fatal — config still set in memory */
       }
-      return { ok: true, config: lastCrawlConfig };
+      return { ok: true, config: currentSession().lastCrawlConfig };
     },
 
     'url-rewrite-preview': async (input) => {
@@ -5094,12 +5540,15 @@ function registerIpc(): void {
         limit?: unknown;
         strategy?: unknown;
       };
-      if (pagespeedRunActive) {
+      // MCP is primary-bound (runInPrimarySession), so this reads the primary
+      // window's slot — the same one `runPagespeedJob` writes below.
+      const run = currentSession().fetchRuns.pagespeed;
+      if (run.active) {
         return {
           started: false,
           reason:
             'A PageSpeed run is already in progress — poll get_fetch_progress or cancel_fetch first.',
-          state: pagespeedRunSnapshot,
+          state: run.snapshot,
         };
       }
       const { urls, truncated } = resolveActionUrls(i);
@@ -5108,7 +5557,7 @@ function registerIpc(): void {
           started: false,
           reason:
             'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
-          state: pagespeedRunSnapshot,
+          state: run.snapshot,
         };
       }
       const strategy =
@@ -5125,10 +5574,10 @@ function registerIpc(): void {
         );
       });
       return {
-        started: pagespeedRunActive,
-        total: pagespeedRunSnapshot.total,
+        started: run.active,
+        total: run.snapshot.total,
         truncated,
-        state: pagespeedRunSnapshot,
+        state: run.snapshot,
       };
     },
 
@@ -5140,12 +5589,13 @@ function registerIpc(): void {
         limit?: unknown;
         formFactor?: unknown;
       };
-      if (cruxRunActive) {
+      const run = currentSession().fetchRuns.crux;
+      if (run.active) {
         return {
           started: false,
           reason:
             'A CrUX run is already in progress — poll get_fetch_progress or cancel_fetch first.',
-          state: cruxRunSnapshot,
+          state: run.snapshot,
         };
       }
       const { urls, truncated } = resolveActionUrls(i);
@@ -5154,7 +5604,7 @@ function registerIpc(): void {
           started: false,
           reason:
             'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
-          state: cruxRunSnapshot,
+          state: run.snapshot,
         };
       }
       const formFactor =
@@ -5171,10 +5621,10 @@ function registerIpc(): void {
         );
       });
       return {
-        started: cruxRunActive,
-        total: cruxRunSnapshot.total,
+        started: run.active,
+        total: run.snapshot.total,
         truncated,
-        state: cruxRunSnapshot,
+        state: run.snapshot,
       };
     },
 
@@ -5185,12 +5635,13 @@ function registerIpc(): void {
         search?: unknown;
         limit?: unknown;
       };
-      if (spellingRunActive) {
+      const run = currentSession().fetchRuns.spelling;
+      if (run.active) {
         return {
           started: false,
           reason:
             'A spelling run is already in progress — poll get_fetch_progress or cancel_fetch first.',
-          state: spellingRunSnapshot,
+          state: run.snapshot,
         };
       }
       const { urls, truncated } = resolveActionUrls(i);
@@ -5199,7 +5650,7 @@ function registerIpc(): void {
           started: false,
           reason:
             'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
-          state: spellingRunSnapshot,
+          state: run.snapshot,
         };
       }
       void runSpellingJob({ urls }).catch((err) => {
@@ -5210,10 +5661,10 @@ function registerIpc(): void {
         );
       });
       return {
-        started: spellingRunActive,
-        total: spellingRunSnapshot.total,
+        started: run.active,
+        total: run.snapshot.total,
         truncated,
-        state: spellingRunSnapshot,
+        state: run.snapshot,
       };
     },
 
@@ -5243,12 +5694,13 @@ function registerIpc(): void {
           'ai_run requires a non-empty `prompt` (supports {url}/{title}/{description}/{h1}/{body} placeholders).',
         );
       }
-      if (aiRunActive) {
+      const run = currentSession().fetchRuns.ai;
+      if (run.active) {
         return {
           started: false,
           reason:
             'An AI run is already in progress — poll get_fetch_progress or cancel_fetch first.',
-          state: aiRunSnapshot,
+          state: run.snapshot,
         };
       }
       const { urls, truncated } = resolveActionUrls(i);
@@ -5257,7 +5709,7 @@ function registerIpc(): void {
           started: false,
           reason:
             'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
-          state: aiRunSnapshot,
+          state: run.snapshot,
         };
       }
       const model = typeof i.model === 'string' ? i.model : undefined;
@@ -5270,19 +5722,19 @@ function registerIpc(): void {
       });
       // runAiJob skips URLs with no crawled page context; if that leaves
       // nothing it returns synchronously without flipping the active flag.
-      if (!aiRunActive) {
+      if (!run.active) {
         return {
           started: false,
           reason:
             'None of the matched URLs are crawled in this project, so there is no page context to build prompts from.',
-          state: aiRunSnapshot,
+          state: run.snapshot,
         };
       }
       return {
         started: true,
-        total: aiRunSnapshot.total,
+        total: run.snapshot.total,
         truncated,
-        state: aiRunSnapshot,
+        state: run.snapshot,
       };
     },
 
@@ -5305,12 +5757,13 @@ function registerIpc(): void {
           'seo_run requires `provider` to be one of: ahrefs, majestic, moz, semrush.',
         );
       }
-      if (seoRunActive) {
+      const run = currentSession().fetchRuns.seo;
+      if (run.active) {
         return {
           started: false,
           reason:
             'An SEO run is already in progress — poll get_fetch_progress or cancel_fetch first.',
-          state: seoRunSnapshot,
+          state: run.snapshot,
         };
       }
       const { urls, truncated } = resolveActionUrls(i);
@@ -5319,7 +5772,7 @@ function registerIpc(): void {
           started: false,
           reason:
             'No URLs matched — pass an explicit `urls` array or a `category` that has rows in this project.',
-          state: seoRunSnapshot,
+          state: run.snapshot,
         };
       }
       void runSeoJob({ provider, urls }).catch((err) => {
@@ -5330,21 +5783,22 @@ function registerIpc(): void {
         );
       });
       return {
-        started: seoRunActive,
-        total: seoRunSnapshot.total,
+        started: run.active,
+        total: run.snapshot.total,
         truncated,
-        state: seoRunSnapshot,
+        state: run.snapshot,
       };
     },
 
     'fetch-progress': async (input) => {
       const kind = (input as { kind?: unknown } | null)?.kind;
+      const fr = currentSession().fetchRuns;
       const all = {
-        pagespeed: pagespeedRunSnapshot,
-        crux: cruxRunSnapshot,
-        spelling: spellingRunSnapshot,
-        ai: aiRunSnapshot,
-        seo: seoRunSnapshot,
+        pagespeed: fr.pagespeed.snapshot,
+        crux: fr.crux.snapshot,
+        spelling: fr.spelling.snapshot,
+        ai: fr.ai.snapshot,
+        seo: fr.seo.snapshot,
       };
       if (
         kind === 'pagespeed' ||
@@ -5360,30 +5814,31 @@ function registerIpc(): void {
 
     'fetch-cancel': async (input) => {
       const kind = (input as { kind?: unknown } | null)?.kind;
+      const fr = currentSession().fetchRuns;
       const cancelled: Record<string, { wasRunning: boolean }> = {};
       const cancelPagespeed = (): void => {
-        const was = pagespeedRunActive;
-        if (was) pagespeedCancelRequested = true;
+        const was = fr.pagespeed.active;
+        if (was) fr.pagespeed.cancelRequested = true;
         cancelled.pagespeed = { wasRunning: was };
       };
       const cancelAi = (): void => {
-        const was = aiRunActive;
-        if (was) aiCancelRequested = true;
+        const was = fr.ai.active;
+        if (was) fr.ai.cancelRequested = true;
         cancelled.ai = { wasRunning: was };
       };
       const cancelSeo = (): void => {
-        const was = seoRunActive;
-        if (was) seoCancelRequested = true;
+        const was = fr.seo.active;
+        if (was) fr.seo.cancelRequested = true;
         cancelled.seo = { wasRunning: was };
       };
       const cancelCrux = (): void => {
-        const was = cruxRunActive;
-        if (was) cruxCancelRequested = true;
+        const was = fr.crux.active;
+        if (was) fr.crux.cancelRequested = true;
         cancelled.crux = { wasRunning: was };
       };
       const cancelSpelling = (): void => {
-        const was = spellingRunActive;
-        if (was) spellingCancelRequested = true;
+        const was = fr.spelling.active;
+        if (was) fr.spelling.cancelRequested = true;
         cancelled.spelling = { wasRunning: was };
       };
       if (kind === 'pagespeed') cancelPagespeed();
@@ -5474,27 +5929,35 @@ function registerIpc(): void {
 
   crawlController = {
     launchCrawl,
-    stopCrawl: () => activeCrawler?.stop(),
-    pauseCrawl: () => activeCrawler?.pause(),
-    resumeCrawl: () => activeCrawler?.resume(),
+    stopCrawl: () => currentSession().activeCrawler?.stop(),
+    pauseCrawl: () => currentSession().activeCrawler?.pause(),
+    resumeCrawl: () => currentSession().activeCrawler?.resume(),
     clearCrawl: () => clearCrawlDb(),
     actions: mcpActions,
   };
 
   // Shared between the renderer's IPC `crawl:clear` and the MCP bridge's
   // `POST /v1/crawl/clear` — keeps the two surfaces from drifting (e.g.
-  // remembering to drop `pendingRecoveryCheckpoint` and fire
+  // remembering to drop `currentSession().pendingRecoveryCheckpoint` and fire
   // `dataChanged` in both places). Without this helper an MCP-driven
   // re-start after a completed crawl is a no-op because the crawler's
   // resume-vs-fresh decision keeps existing rows when the start URL
   // matches the previous one.
   async function clearCrawlDb(): Promise<void> {
     const t0 = Date.now();
-    activeCrawler?.stop();
-    activeCrawler = null;
-    await disposeBrowserPool();
-    const database = getDb();
-    // Route reset() through the writer pool so it sits behind any
+    // Capture the calling window's session once and drive the whole clear
+    // through it. Every per-window resource — crawler, DB, writer pool — must
+    // be THIS session's, not the process-wide default. Resolving each piece
+    // via the module singletons (as an earlier version did for the writer
+    // pool) reset the primary window's DB from a secondary window, so the
+    // secondary window's rows survived and its Clear looked like a bare
+    // refresh. See ProjectSession / sessionFor for the per-window model.
+    const session = currentSession();
+    session.activeCrawler?.stop();
+    session.activeCrawler = null;
+    await disposeBrowserPool(session);
+    const database = session.getDb();
+    // Route reset() through THIS session's writer pool so it sits behind any
     // in-flight writeFetchedUrl RPCs in the worker's FIFO. Without
     // this, the main process truncates the urls table while the
     // writer worker is still draining the last batch of per-URL
@@ -5502,9 +5965,9 @@ function registerIpc(): void {
     // ~19 rows in the table after Clear. Going through the pool
     // serialises naturally: every queued write completes, then reset
     // runs against an already-stopped crawler.
-    if (dbWriterPool.isReady()) {
+    if (session.writerPool.isReady()) {
       try {
-        await dbWriterPool.call('reset', []);
+        await session.writerPool.call('reset', []);
       } catch {
         // Worker terminated or RPC timed out — fall back to direct
         // reset rather than leaving the table half-cleared.
@@ -5529,29 +5992,37 @@ function registerIpc(): void {
     // mirror still holds the pre-reset entries. Drop it so a stale
     // dialog can't fire after Clear if the user cancelled the boot
     // prompt earlier.
-    pendingRecoveryCheckpoint = [];
-    // Broadcast `dataChanged` so any open table / overview / detail
-    // panel re-queries against the now-empty DB instead of showing
-    // stale rows until the next refresh tick.
-    fireDataChanged();
-    logger.log('info', 'main', `Clear completed in ${Date.now() - t0} ms`);
+    session.pendingRecoveryCheckpoint = [];
+    // Broadcast `dataChanged` to THIS session's window so its table /
+    // overview / detail panels re-query against the now-empty DB instead of
+    // showing stale rows until the next refresh tick.
+    fireDataChanged(session);
+    logger.log(
+      'info',
+      'main',
+      `Clear completed in ${Date.now() - t0} ms`,
+      undefined,
+      session.logTag,
+    );
   }
 
-  ipcMain.handle(IPC.crawlClear, () => clearCrawlDb());
+  registerHandle(IPC.crawlClear, () => clearCrawlDb());
 
-  ipcMain.handle(IPC.crawlAddUrl, (_e, url: string): { accepted: boolean } => {
-    if (!activeCrawler) return { accepted: false };
-    const accepted = activeCrawler.enqueueManual(url);
+  registerHandle(IPC.crawlAddUrl, (_e, url: string): { accepted: boolean } => {
+    const addUrlSession = currentSession();
+    const addUrlCrawler = addUrlSession.activeCrawler;
+    if (!addUrlCrawler) return { accepted: false };
+    const accepted = addUrlCrawler.enqueueManual(url);
     if (accepted) {
-      logger.log('info', 'crawler', `Manual URL added: ${url}`);
+      logger.log('info', 'crawler', `Manual URL added: ${url}`, undefined, addUrlSession.logTag);
     }
     return { accepted };
   });
 
-  ipcMain.handle(
+  registerHandle(
     IPC.projectSaveAs,
     async (): Promise<{ filePath: string; bytesWritten: number } | null> => {
-      const win = mainWindow;
+      const win = dialogParent();
       if (!win) return null;
       // Honour the user-configured default save directory (Settings →
       // Storage). Falls back to the OS Documents folder when unset.
@@ -5602,7 +6073,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.projectOpen,
     async (
       _e,
@@ -5610,8 +6081,9 @@ function registerIpc(): void {
     ): Promise<{ filePath: string } | null> => {
       let target = filePath;
       if (!target) {
-        if (!mainWindow) return null;
-        const res = await dialog.showOpenDialog(mainWindow, {
+        const parent = dialogParent();
+        if (!parent) return null;
+        const res = await dialog.showOpenDialog(parent, {
           title: L().dlgOpenProjectTitle,
           properties: ['openFile'],
           filters: [
@@ -5637,9 +6109,57 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.projectCurrentPath, (): string | null => {
-    return currentProjectPath || null;
+  registerHandle(IPC.projectCurrentPath, (): string | null => {
+    return currentSession().currentProjectPath || null;
   });
+
+  // Per-project settings — read/write the active project's saved crawl
+  // config. On the default scratch DB (no `currentSession().currentProjectPath`) these are
+  // no-ops and the renderer keeps using its global-prefs config.
+  registerHandle(IPC.projectConfigGet, (): CrawlConfig | null => {
+    if (!currentSession().currentProjectPath) return null;
+    try {
+      const raw = getDb().getMeta('lastCrawlConfig');
+      return raw
+        ? mergeCrawlConfig(JSON.parse(raw) as Partial<CrawlConfig>)
+        : null;
+    } catch {
+      return null;
+    }
+  });
+
+  registerHandle(IPC.projectConfigSet, (_e, config: CrawlConfig): void => {
+    if (!currentSession().currentProjectPath) return;
+    try {
+      getDb().setMeta('lastCrawlConfig', JSON.stringify(config));
+      currentSession().lastCrawlConfig = config;
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `projectConfigSet failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  });
+
+  // Recent-projects management (archiving / tagging).
+  registerHandle(
+    IPC.recentProjectsList,
+    (): RecentProject[] => getRecentProjectEntries(),
+  );
+  registerHandle(
+    IPC.recentProjectSetArchived,
+    (_e, path: string, archived: boolean): void =>
+      setRecentArchived(path, archived === true),
+  );
+  registerHandle(
+    IPC.recentProjectSetTags,
+    (_e, path: string, tags: string[]): void =>
+      setRecentTags(path, Array.isArray(tags) ? tags : []),
+  );
+  registerHandle(IPC.recentProjectRemove, (_e, path: string): void =>
+    removeRecentProject(path),
+  );
 
   // V1 #4 — Encrypted snapshot export. Flow:
   //   1. WAL checkpoint so the .seoproject file on disk is consistent.
@@ -5647,13 +6167,13 @@ function registerIpc(): void {
   //      the live DB without racing the writer worker.
   //   3. Ask the user for a destination .seoproject.enc path.
   //   4. AES-256-GCM encrypt the snapshot, write to dst, delete the tmp.
-  ipcMain.handle(
+  registerHandle(
     IPC.projectSaveEncrypted,
     async (
       _e,
       password: string,
     ): Promise<{ filePath: string; bytesWritten: number } | { error: string } | null> => {
-      const win = mainWindow;
+      const win = dialogParent();
       if (!win) return null;
       if (typeof password !== 'string' || password.length === 0) {
         return { error: 'Password is required.' };
@@ -5717,13 +6237,13 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.projectOpenEncrypted,
     async (
       _e,
       password: string,
     ): Promise<{ filePath: string } | { error: string } | null> => {
-      const win = mainWindow;
+      const win = dialogParent();
       if (!win) return null;
       if (typeof password !== 'string' || password.length === 0) {
         return { error: 'Password is required.' };
@@ -5769,8 +6289,8 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.confirmClear, async (): Promise<ConfirmClearResult> => {
-    const win = mainWindow;
+  registerHandle(IPC.confirmClear, async (): Promise<ConfirmClearResult> => {
+    const win = dialogParent();
     if (!win) return { confirmed: false, skipNext: false };
     const L = getMenuLabels(getMenuLang());
     const res = await dialog.showMessageBox(win, {
@@ -5810,7 +6330,7 @@ function registerIpc(): void {
       });
     });
 
-  ipcMain.handle(IPC.urlsQuery, async (_e, input: UrlsQueryInput): Promise<UrlsQueryResult> => {
+  registerHandle(IPC.urlsQuery, async (_e, input: UrlsQueryInput): Promise<UrlsQueryResult> => {
     const args: Parameters<typeof ProjectDb.prototype.queryUrls> = [
       {
         limit: input.limit,
@@ -5830,13 +6350,13 @@ function registerIpc(): void {
     );
   });
 
-  ipcMain.handle(IPC.overviewGet, async (): Promise<OverviewCounts> =>
+  registerHandle(IPC.overviewGet, async (): Promise<OverviewCounts> =>
     callReaderOrFallback<OverviewCounts>('getOverviewCounts', [], () =>
       getDb().getOverviewCountsAsync(),
     ),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.imagesQuery,
     async (_e, input: ImagesQueryInput): Promise<ImagesQueryResult> => {
       const args: Parameters<typeof ProjectDb.prototype.queryImages> = [
@@ -5854,7 +6374,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.brokenLinksQuery,
     async (_e, input: BrokenLinksQueryInput): Promise<BrokenLinksQueryResult> => {
       const args: Parameters<typeof ProjectDb.prototype.queryBrokenLinks> = [
@@ -5873,9 +6393,16 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.urlContextMenu, (e, input: UrlContextMenuInput) => {
+  registerHandle(IPC.urlContextMenu, (e, input: UrlContextMenuInput) => {
     const win = BrowserWindow.fromWebContents(e.sender);
-    const canRecrawl = activeCrawler !== null && activeCrawler.isRunning;
+    // Capture the calling session NOW (ALS is live here). menu.popup() is
+    // non-blocking, so the click callbacks below run after this handler has
+    // unwound and AsyncLocalStorage is gone — resolving currentSession()/
+    // getDb() there would silently hit defaultSession (the primary window)
+    // and mutate the WRONG project's DB. Bind everything to `sess`.
+    const sess = currentSession();
+    const ctxCrawler = sess.activeCrawler;
+    const canRecrawl = ctxCrawler !== null && ctxCrawler.isRunning;
     const L = getMenuLabels(getMenuLang());
 
     const template: MenuItemConstructorOptions[] = [
@@ -5895,19 +6422,20 @@ function registerIpc(): void {
         enabled: canRecrawl,
         toolTip: canRecrawl ? undefined : L.ctxStartCrawlFirst,
         click: () => {
-          const db = getDb();
+          const db = sess.getDb();
           db.markUrlForRecrawl(input.urlId);
-          if (activeCrawler) {
-            activeCrawler.requeueUrl(input.url);
+          const ctxRequeueCrawler = sess.activeCrawler;
+          if (ctxRequeueCrawler) {
+            ctxRequeueCrawler.requeueUrl(input.url);
           }
-          fireDataChanged();
+          fireDataChanged(sess);
         },
       },
       {
         label: L.ctxRemove,
         click: () => {
-          getDb().deleteUrl(input.urlId);
-          fireDataChanged();
+          sess.getDb().deleteUrl(input.urlId);
+          fireDataChanged(sess);
         },
       },
       { type: 'separator' },
@@ -5929,15 +6457,21 @@ function registerIpc(): void {
     else menu.popup();
   });
 
-  ipcMain.handle(
+  registerHandle(
     IPC.urlBulkContextMenu,
     async (e, input: UrlBulkContextMenuInput) => {
       const win = BrowserWindow.fromWebContents(e.sender);
-      const db = getDb();
+      // Bind to the calling session (ALS is live here). The click callbacks
+      // fire after menu.popup() returns and the handler unwinds, so
+      // currentSession()/fireDataChanged() would otherwise hit the primary
+      // window's session — see the single-URL menu above.
+      const sess = currentSession();
+      const db = sess.getDb();
       const ids = input.urlIds;
       if (ids.length === 0) return;
       const urls = db.getUrlsByIds(ids);
-      const canRecrawl = activeCrawler !== null && activeCrawler.isRunning;
+      const bulkCtxCrawler = sess.activeCrawler;
+      const canRecrawl = bulkCtxCrawler !== null && bulkCtxCrawler.isRunning;
       const n = ids.length.toLocaleString();
       const L = getMenuLabels(getMenuLang());
 
@@ -5962,17 +6496,18 @@ function registerIpc(): void {
           toolTip: canRecrawl ? undefined : L.ctxStartCrawlFirst,
           click: () => {
             db.markUrlsForRecrawl(ids);
-            if (activeCrawler) {
-              for (const u of urls) activeCrawler.requeueUrl(u);
+            const bulkRequeueCrawler = sess.activeCrawler;
+            if (bulkRequeueCrawler) {
+              for (const u of urls) bulkRequeueCrawler.requeueUrl(u);
             }
-            fireDataChanged();
+            fireDataChanged(sess);
           },
         },
         {
           label: L.ctxRemoveNUrls.replace('{n}', n),
           click: () => {
             db.deleteUrls(ids);
-            fireDataChanged();
+            fireDataChanged(sess);
           },
         },
         { type: 'separator' },
@@ -5997,7 +6532,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.urlDetailGet, async (_e, input: UrlDetailInput): Promise<UrlDetail | null> =>
+  registerHandle(IPC.urlDetailGet, async (_e, input: UrlDetailInput): Promise<UrlDetail | null> =>
     callReaderOrFallback<UrlDetail | null>(
       'getUrlDetail',
       [input.id, input.linkLimit ?? 500],
@@ -6005,7 +6540,7 @@ function registerIpc(): void {
     ),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.urlSourceGet,
     (_e, input: UrlSourceInput): UrlSourceResult => {
       const r = getDb().getUrlSource(input.id);
@@ -6038,7 +6573,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.urlPageImages,
     (_e, input: UrlPageImagesInput): UrlPageImagesResult => {
       const rows = getDb().pageImagesDetailed(input.id, input.limit ?? 5000);
@@ -6046,21 +6581,21 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.urlClusterMembers, (_e, urlId: number) =>
+  registerHandle(IPC.urlClusterMembers, (_e, urlId: number) =>
     getDb().urlClusterMembers(urlId),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.duplicateClustersList,
     (_e, input: { offset: number; limit: number }) =>
       getDb().listDuplicateClusters(input.offset, input.limit),
   );
 
-  ipcMain.handle(IPC.duplicateClustersCount, () =>
+  registerHandle(IPC.duplicateClustersCount, () =>
     getDb().countDuplicateClusterMembers(),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.urlCertInfo,
     (_e, input: UrlCertInfoInput): UrlCertInfoResult => {
       const r = getDb().getHostCertForUrl(input.id);
@@ -6085,11 +6620,11 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.summaryGet, (): Promise<CrawlSummary> =>
+  registerHandle(IPC.summaryGet, (): Promise<CrawlSummary> =>
     callReaderOrFallback<CrawlSummary>('getSummary', [], () => getDb().getSummary()),
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.exportCsv,
     async (_e, input: ExportCsvInput): Promise<ExportCsvResult> => {
       let filePath = input.filePath;
@@ -6111,7 +6646,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.exportJson,
     async (_e, input: ExportJsonInput): Promise<ExportJsonResult> => {
       let filePath = input.filePath;
@@ -6134,7 +6669,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.exportXml,
     async (_e, input: ExportXmlInput): Promise<ExportXmlResult> => {
       let filePath = input.filePath;
@@ -6157,7 +6692,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.exportBrokenLinks,
     async (
       _e,
@@ -6181,7 +6716,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.exportImages,
     async (
       _e,
@@ -6206,7 +6741,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.exportTabular,
     async (_e, input: ExportTabularInput): Promise<ExportTabularResult> => {
       const { format, sections, columns, selectedIds, csvBom } = input;
@@ -6259,7 +6794,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.dataDeleteByDomain,
     async (
       _e,
@@ -6275,56 +6810,56 @@ function registerIpc(): void {
   // Wave 6 — Crash recovery handlers. The renderer asks `…Status` on
   // mount; if `pendingCount > 0` it shows a confirmation dialog and
   // routes the user's choice to `…Resume` or `…Discard`.
-  ipcMain.handle(
+  registerHandle(
     IPC.crashRecoveryStatus,
     async (): Promise<CrashRecoveryStatus> => {
       // Read from the in-memory snapshot we captured before
       // `db.reset()` wiped the previous session's data.
-      if (pendingRecoveryCheckpoint.length === 0) {
+      if (currentSession().pendingRecoveryCheckpoint.length === 0) {
         return { pendingCount: 0, seedUrl: '' };
       }
       return {
-        pendingCount: pendingRecoveryCheckpoint.length,
-        seedUrl: pendingRecoveryCheckpoint[0]?.seedUrl ?? '',
+        pendingCount: currentSession().pendingRecoveryCheckpoint.length,
+        seedUrl: currentSession().pendingRecoveryCheckpoint[0]?.seedUrl ?? '',
       };
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.crashRecoveryResume,
     async (): Promise<{ accepted: boolean }> => {
-      if (activeCrawler) return { accepted: false };
-      if (pendingRecoveryCheckpoint.length === 0) return { accepted: false };
-      const seedUrl = pendingRecoveryCheckpoint[0]?.seedUrl ?? '';
+      const sess = currentSession();
+      if (sess.activeCrawler) return { accepted: false };
+      if (sess.pendingRecoveryCheckpoint.length === 0) return { accepted: false };
+      const seedUrl = sess.pendingRecoveryCheckpoint[0]?.seedUrl ?? '';
       if (!seedUrl) return { accepted: false };
-      const cfg = lastCrawlConfig
-        ? { ...lastCrawlConfig, startUrl: seedUrl }
-        : null;
+      const savedCfg = sess.lastCrawlConfig;
+      const cfg = savedCfg ? { ...savedCfg, startUrl: seedUrl } : null;
       if (!cfg) return { accepted: false };
-      const crawler = new Crawler(cfg, getDb(), {
+      const crawler = new Crawler(cfg, sess.getDb(), {
         setOp: (op: string) => freezeWatchdog.setMainOp(op),
         parseHtml: parseHtmlViaPool,
-        writeFetchedUrl: writeFetchedUrlViaPool,
-        recomputeIssues: recomputeIssuesViaPool,
-        runDbPass: runDbPassViaPool,
-        dbCall: dbCallViaPool,
+        writeFetchedUrl: (payload) => writeFetchedUrlViaPool(sess, payload),
+        recomputeIssues: (defs) => recomputeIssuesViaPool(sess, defs),
+        runDbPass: (method) => runDbPassViaPool(sess, method),
+        dbCall: (method, args) => dbCallViaPool(sess, method, args),
       });
-      activeCrawler = crawler;
-      attachCrawlerListeners(crawler);
-      const items = pendingRecoveryCheckpoint.map((c) => ({
+      sess.activeCrawler = crawler;
+      attachCrawlerListeners(crawler, sess);
+      const items = sess.pendingRecoveryCheckpoint.map((c) => ({
         url: c.url,
         depth: c.depth,
       }));
       // Snapshot consumed — clear so a second click can't double-fire.
-      pendingRecoveryCheckpoint = [];
+      sess.pendingRecoveryCheckpoint = [];
       crawler.enqueueCheckpointed(items);
       void crawler.start();
       return { accepted: true };
     },
   );
 
-  ipcMain.handle(IPC.crashRecoveryDiscard, async (): Promise<void> => {
-    pendingRecoveryCheckpoint = [];
+  registerHandle(IPC.crashRecoveryDiscard, async (): Promise<void> => {
+    currentSession().pendingRecoveryCheckpoint = [];
     // Wipe the on-disk crawl_queue too — without this, anything that
     // re-populates the queue between now and the next app launch would
     // resurrect the recovery prompt the user just dismissed.
@@ -6339,7 +6874,7 @@ function registerIpc(): void {
     }
   });
 
-  ipcMain.handle(IPC.exportBulk, async (): Promise<BulkExportResult> => {
+  registerHandle(IPC.exportBulk, async (): Promise<BulkExportResult> => {
     if (!mainWindow) {
       return { outputDir: '', files: [], errors: [] };
     }
@@ -6375,7 +6910,7 @@ function registerIpc(): void {
     return { outputDir, files, errors };
   });
 
-  ipcMain.handle(
+  registerHandle(
     IPC.exportHtmlReport,
     async (
       _e,
@@ -6409,7 +6944,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.sitemapGenerate,
     async (_e, input: SitemapGenerateInput): Promise<SitemapGenerateResult> => {
       let filePath = input.filePath;
@@ -6470,7 +7005,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.compareLoad,
     async (_e, input: CompareLoadInput): Promise<CompareLoadResult> => {
       let filePath = input.filePath;
@@ -6523,21 +7058,21 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.crawlPath,
     (_e, input: CrawlPathInput): CrawlPathResult => {
       return getDb().crawlPath(input.urlId);
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.graphSnapshot,
     (_e, input: GraphSnapshotInput): GraphSnapshotResult => {
       return getDb().graphSnapshot(input.nodeLimit ?? 1000);
     },
   );
 
-  ipcMain.handle(
+  registerHandle(
     IPC.topAnchorTexts,
     (_e, limit: number | undefined): AnchorTextRow[] => {
       return getDb().topAnchorTexts(limit ?? 200);
@@ -6562,17 +7097,17 @@ if (!gotSingleInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', (_e, argv) => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
     // V1 Faz 8 — File association on Windows/Linux. A double-click on
     // a `.seoproject` while the app is already running spawns a second
     // process whose `argv` carries the path; this handler opens it in
     // the existing window.
     const path = pickProjectPathFromArgv(argv);
     if (path) {
+      if (mainWindow) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      }
       try {
         openProjectAtPath(path);
       } catch (err) {
@@ -6582,7 +7117,15 @@ if (!gotSingleInstanceLock) {
           `Open project from second-instance argv failed: ${(err as Error).message}`,
         );
       }
+      return;
     }
+    // Faz B — plain re-launch (the user clicked the shortcut / ran the exe
+    // again with no file argument). Rather than silently focusing the
+    // primary window and letting the doomed second process die on cache
+    // errors, honour the obvious intent: open a fresh, independent project
+    // window in THIS running instance. Same result as File → New Project
+    // Window (Ctrl/Cmd+Shift+N).
+    createProjectWindow();
   });
 }
 
@@ -6702,37 +7245,42 @@ void app.whenReady().then(async () => {
   try {
     const bridge = await startMcpBridge({
       userDataDir: app.getPath('userData'),
-      startCrawl: async (input: McpStartCrawlInput) => {
-        if (!crawlController) {
-          return { ok: false as const, error: 'IPC handlers not registered yet — try again in a moment.' };
-        }
-        // Layer the supplied overrides on top of the last-used config
-        // (so a `start_crawl` with just a `startUrl` keeps the user's
-        // saved scope/threads/RPS). Fall back to factory defaults when
-        // there is no saved config.
-        const base: CrawlConfig =
-          lastCrawlConfig !== null ? lastCrawlConfig : { ...DEFAULT_CRAWL_CONFIG };
-        const overrides = input.configOverrides ?? {};
-        const resolved: CrawlConfig = {
-          ...base,
-          ...overrides,
-          startUrl: (input.startUrl ?? base.startUrl ?? '').trim(),
-        };
-        if (!resolved.startUrl) {
-          return {
-            ok: false as const,
-            error: 'startUrl is empty — pass it in the request or run a crawl from the desktop UI at least once so the bridge has a saved default.',
+      startCrawl: (input: McpStartCrawlInput) =>
+        // MCP always drives the PRIMARY window's project — pin the session so
+        // launchCrawl's internal currentSession()/getDb() resolve to it.
+        runInPrimarySession(async () => {
+          if (!crawlController) {
+            return { ok: false as const, error: 'IPC handlers not registered yet — try again in a moment.' };
+          }
+          // Layer the supplied overrides on top of the last-used config
+          // (so a `start_crawl` with just a `startUrl` keeps the user's
+          // saved scope/threads/RPS). Fall back to factory defaults when
+          // there is no saved config.
+          const savedBase = currentSession().lastCrawlConfig;
+          const base: CrawlConfig =
+            savedBase !== null ? savedBase : { ...DEFAULT_CRAWL_CONFIG };
+          const overrides = input.configOverrides ?? {};
+          const resolved: CrawlConfig = {
+            ...base,
+            ...overrides,
+            startUrl: (input.startUrl ?? base.startUrl ?? '').trim(),
           };
-        }
-        await crawlController.launchCrawl(resolved);
-        return { ok: true as const, config: resolved };
-      },
-      stopCrawl: () => crawlController?.stopCrawl(),
-      pauseCrawl: () => crawlController?.pauseCrawl(),
-      resumeCrawl: () => crawlController?.resumeCrawl(),
-      clearCrawl: async () => {
-        if (crawlController) await crawlController.clearCrawl();
-      },
+          if (!resolved.startUrl) {
+            return {
+              ok: false as const,
+              error: 'startUrl is empty — pass it in the request or run a crawl from the desktop UI at least once so the bridge has a saved default.',
+            };
+          }
+          await crawlController.launchCrawl(resolved);
+          return { ok: true as const, config: resolved };
+        }),
+      stopCrawl: () => runInPrimarySession(() => crawlController?.stopCrawl()),
+      pauseCrawl: () => runInPrimarySession(() => crawlController?.pauseCrawl()),
+      resumeCrawl: () => runInPrimarySession(() => crawlController?.resumeCrawl()),
+      clearCrawl: () =>
+        runInPrimarySession(async () => {
+          if (crawlController) await crawlController.clearCrawl();
+        }),
       // Lazy lookup — crawlController is set inside the IPC registration
       // scope (which runs before the bridge starts), but using a getter
       // here keeps the wire-up symmetric with the other deps and avoids
@@ -6740,16 +7288,20 @@ void app.whenReady().then(async () => {
       actions: new Proxy({}, {
         get: (_t, name) => {
           if (typeof name !== 'string') return undefined;
-          return crawlController?.actions[name];
+          const action = crawlController?.actions[name];
+          if (!action) return undefined;
+          // Pin every MCP action to the primary session so its DB reads/writes
+          // and currentSession() land on the primary project's window.
+          return (input: unknown) => runInPrimarySession(() => action(input));
         },
         has: (_t, name) =>
           typeof name === 'string' && crawlController?.actions[name] !== undefined,
       }) as Record<string, (input: unknown) => Promise<unknown>>,
-      getProgress: () => latestProgress,
-      getProjectPath: () => currentProjectPath || null,
+      getProgress: () => defaultSession.latestProgress,
+      getProjectPath: () => defaultSession.currentProjectPath || null,
       getUrlCount: () => {
         try {
-          return getDb().countUrls();
+          return defaultSession.getDb().countUrls();
         } catch {
           return 0;
         }
@@ -6837,14 +7389,15 @@ function performShutdown(): void {
     }
     logAnalyzerWindow = null;
   }
-  activeCrawler?.stop();
+  const shutdownSession = currentSession();
+  shutdownSession.activeCrawler?.stop();
   // V2 Faz 1 — Tear down Playwright before worker pools so a hung
   // Chromium process can't keep the app alive after the renderer
   // window closes.
-  if (activeBrowserPool) {
-    const pool = activeBrowserPool;
-    activeBrowserPool = null;
-    void pool.close().catch(() => {});
+  const shutdownPool = shutdownSession.activeBrowserPool;
+  if (shutdownPool) {
+    shutdownSession.activeBrowserPool = null;
+    void shutdownPool.close().catch(() => {});
   }
   stopScheduler();
   // Tear down the MCP bridge first so any in-flight HTTP calls fail
@@ -6863,8 +7416,8 @@ function performShutdown(): void {
   // reader is still mid-query.
   void dbReaderPool.terminate();
   void dbWriterPool.terminate();
-  db?.close();
-  db = null;
+  shutdownSession.db?.close();
+  shutdownSession.db = null;
   flushPrefs();
   // Flush the disk log stream before exit so the last lines aren't lost
   // if the OS kills the process during a Quit-All cycle.
@@ -6879,6 +7432,6 @@ app.on('window-all-closed', () => {
   // Stop any active crawl when the UI goes away, but keep the DB and
   // worker pools alive so macOS reopen-from-dock works. The full
   // teardown happens in `before-quit`.
-  activeCrawler?.stop();
+  currentSession().activeCrawler?.stop();
   if (process.platform !== 'darwin') app.quit();
 });

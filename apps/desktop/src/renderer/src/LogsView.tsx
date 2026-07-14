@@ -106,11 +106,19 @@ export function LogsView() {
 
   useEffect(() => {
     let cancelled = false;
-    void window.freecrawl.logsGetAll().then((rows) => {
-      if (!cancelled) {
-        setEntries(rows.length > MAX_ENTRIES ? rows.slice(rows.length - MAX_ENTRIES) : rows);
-      }
-    });
+    // This Logs popup is scoped to the project window that opened it
+    // (?owner=<webContents.id>). The main process filters both the initial
+    // snapshot and the live batches to that window's crawler entries plus
+    // app-global infra logs, so two windows' crawls never mix.
+    const ownerParam = new URLSearchParams(window.location.search).get('owner');
+    const ownerId = ownerParam !== null ? Number(ownerParam) : undefined;
+    void window.freecrawl
+      .logsGetAll(Number.isFinite(ownerId) ? ownerId : undefined)
+      .then((rows) => {
+        if (!cancelled) {
+          setEntries(rows.length > MAX_ENTRIES ? rows.slice(rows.length - MAX_ENTRIES) : rows);
+        }
+      });
 
     const flush = (): void => {
       if (isBusyRef.current) return; // window is being dragged/resized — defer

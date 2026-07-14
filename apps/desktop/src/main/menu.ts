@@ -10,6 +10,8 @@ function send(event: MenuEvent): void {
 
 export interface AppMenuHandlers {
   onOpenLogs: () => void;
+  /** Open a second top-level window driving its own independent project. */
+  onNewProjectWindow: () => void;
   /** Open an existing `.seoproject` file via dialog. */
   onOpenProject: () => void;
   /** Open a recent project by its absolute path. */
@@ -73,11 +75,17 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
       submenu: [
         { label: L.newProject, accelerator: 'CmdOrCtrl+N', click: () => send('new-project') },
         {
+          label: L.newProjectWindow,
+          accelerator: 'CmdOrCtrl+Shift+N',
+          click: () => handlers.onNewProjectWindow(),
+        },
+        {
           label: L.openProject,
           accelerator: 'CmdOrCtrl+O',
           click: () => handlers.onOpenProject(),
         },
         { label: L.openRecent, submenu: recentSubmenu },
+        { label: L.manageProjects, click: () => send('manage-projects') },
         { label: L.clearCrawlData, click: () => send('clear-crawl') },
         { type: 'separator' },
         {

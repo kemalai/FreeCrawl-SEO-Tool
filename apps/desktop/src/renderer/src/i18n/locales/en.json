@@ -1086,6 +1086,38 @@
     "emptyNoData": "No internal HTML pages crawled yet — run a crawl, then select pages to check.",
     "emptyNoMatch": "No pages match the current filter."
   },
+  "projects": {
+    "title": "Projects",
+    "newFromTemplate": "Start a New Project",
+    "recent": "Recent Projects",
+    "showArchived": "Show archived",
+    "filterPlaceholder": "Filter by path…",
+    "emptyNone": "No recent projects yet — Save As creates one.",
+    "emptyFilter": "No projects match the current filter.",
+    "open": "Open",
+    "archive": "Archive",
+    "unarchive": "Unarchive",
+    "remove": "Remove from list",
+    "archivedTag": "archived",
+    "editTags": "+ tags",
+    "tagsPlaceholder": "tag1, tag2",
+    "template": {
+      "blank": "Blank",
+      "ecommerce": "E-commerce",
+      "blog": "Blog / Content",
+      "corporate": "Corporate site",
+      "news": "News / Publisher",
+      "saas": "SaaS / Web app"
+    },
+    "templateDesc": {
+      "blank": "Your current default settings — a clean crawl with nothing pre-filled.",
+      "ecommerce": "Skips cart, checkout, account and faceted-filter URLs; larger URL budget for big catalogs.",
+      "blog": "Skips author, tag and date-archive noise so the crawl focuses on articles.",
+      "corporate": "Balanced defaults for a marketing / brochure site.",
+      "news": "Large URL budget; skips print variants and comment-page pagination.",
+      "saas": "Skips authenticated app areas (login, signup, dashboard, settings)."
+    }
+  },
   "spelling": {
     "loading": "Loading…",
     "notChecked": "This page has not been checked yet. Select it in the Spelling tab and run a check.",

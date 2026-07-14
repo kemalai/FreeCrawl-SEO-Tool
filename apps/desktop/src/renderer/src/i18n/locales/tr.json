@@ -1086,6 +1086,38 @@
     "emptyNoData": "Henüz taranmış iç HTML sayfası yok — önce bir crawl çalıştır, sonra denetlenecek sayfaları seç.",
     "emptyNoMatch": "Mevcut filtreyle eşleşen sayfa yok."
   },
+  "projects": {
+    "title": "Projeler",
+    "newFromTemplate": "Yeni Proje Başlat",
+    "recent": "Son Projeler",
+    "showArchived": "Arşivlenenleri göster",
+    "filterPlaceholder": "Yola göre filtrele…",
+    "emptyNone": "Henüz son proje yok — Farklı Kaydet bir tane oluşturur.",
+    "emptyFilter": "Mevcut filtreyle eşleşen proje yok.",
+    "open": "Aç",
+    "archive": "Arşivle",
+    "unarchive": "Arşivden çıkar",
+    "remove": "Listeden kaldır",
+    "archivedTag": "arşivli",
+    "editTags": "+ etiket",
+    "tagsPlaceholder": "etiket1, etiket2",
+    "template": {
+      "blank": "Boş",
+      "ecommerce": "E-ticaret",
+      "blog": "Blog / İçerik",
+      "corporate": "Kurumsal site",
+      "news": "Haber / Yayıncı",
+      "saas": "SaaS / Web uygulaması"
+    },
+    "templateDesc": {
+      "blank": "Mevcut varsayılan ayarların — hiçbir şey doldurulmamış temiz bir crawl.",
+      "ecommerce": "Sepet, ödeme, hesap ve filtre URL'lerini atlar; büyük kataloglar için daha yüksek URL bütçesi.",
+      "blog": "Yazar, etiket ve tarih-arşiv gürültüsünü atlar; crawl makalelere odaklanır.",
+      "corporate": "Pazarlama / tanıtım sitesi için dengeli varsayılanlar.",
+      "news": "Büyük URL bütçesi; yazdırma varyantlarını ve yorum-sayfası sayfalamasını atlar.",
+      "saas": "Kimlik doğrulamalı uygulama alanlarını atlar (giriş, kayıt, panel, ayarlar)."
+    }
+  },
   "spelling": {
     "loading": "Yükleniyor…",
     "notChecked": "Bu sayfa henüz denetlenmedi. Yazım sekmesinden seçip denetim çalıştırın.",

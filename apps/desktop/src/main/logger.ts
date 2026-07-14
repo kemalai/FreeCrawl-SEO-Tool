@@ -132,7 +132,13 @@ function writeToDisk(entry: LogEntry): void {
   }
 }
 
-export function log(level: LogLevel, source: string, message: string, extra?: unknown): LogEntry {
+export function log(
+  level: LogLevel,
+  source: string,
+  message: string,
+  extra?: unknown,
+  windowId?: number,
+): LogEntry {
   const msg =
     extra !== undefined ? `${message} ${safeStringify(extra)}` : message;
   const entry: LogEntry = {
@@ -141,6 +147,7 @@ export function log(level: LogLevel, source: string, message: string, extra?: un
     level,
     source,
     message: msg,
+    ...(windowId !== undefined ? { windowId } : {}),
   };
   buffer.push(entry);
   if (buffer.length > MAX_BUFFER_ENTRIES) buffer.shift();

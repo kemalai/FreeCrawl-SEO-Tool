@@ -344,6 +344,9 @@ interface AppState {
   recentUrls: string[];
   dataVersion: number;
   setConfig: (patch: Partial<CrawlConfig>) => void;
+  /** Replace the whole config from a project's saved settings WITHOUT
+   *  writing it back to the global default prefs (per-project settings). */
+  applyProjectConfig: (config: CrawlConfig) => void;
   setProgress: (p: CrawlProgress) => void;
   setSummary: (s: CrawlSummary) => void;
   setOverview: (o: OverviewCounts) => void;
@@ -388,6 +391,47 @@ function loadInitialConfig(): CrawlConfig {
   return { ...DEFAULT_CRAWL_CONFIG, ...(saved as Partial<CrawlConfig>), startUrl: '' };
 }
 
+/**
+ * Debounced persistence for config edits. `setConfig` updates the in-memory
+ * Zustand state synchronously so the UI stays instant, but the two persistence
+ * sinks — the global prefs JSON and the per-project SQLite `setMeta` write —
+ * are coalesced here. Without this, typing in the URL/scope fields (TopBar
+ * fires `setConfig` per keystroke) triggered one IPC round-trip + one
+ * synchronous main-thread SQLite write per character. A `beforeunload` flush
+ * guarantees the final value is persisted even if the app closes mid-debounce.
+ */
+const CONFIG_PERSIST_DEBOUNCE_MS = 350;
+let configPersistTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingConfig: CrawlConfig | null = null;
+
+function flushConfigPersist(): void {
+  if (configPersistTimer !== null) {
+    clearTimeout(configPersistTimer);
+    configPersistTimer = null;
+  }
+  const cfg = pendingConfig;
+  pendingConfig = null;
+  if (!cfg) return;
+  try {
+    window.freecrawl?.prefsSet('crawl-config', cfg);
+    // No-ops in main when on the default scratch DB, so global prefs stay
+    // the source of truth there.
+    void window.freecrawl?.projectConfigSet(cfg);
+  } catch {
+    // best-effort persistence
+  }
+}
+
+function persistConfigDebounced(config: CrawlConfig): void {
+  pendingConfig = config;
+  if (configPersistTimer !== null) clearTimeout(configPersistTimer);
+  configPersistTimer = setTimeout(flushConfigPersist, CONFIG_PERSIST_DEBOUNCE_MS);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', flushConfigPersist);
+}
+
 export const useAppStore = create<AppState>((set) => ({
   config: loadInitialConfig(),
   progress: null,
@@ -406,16 +450,18 @@ export const useAppStore = create<AppState>((set) => ({
   setConfig: (patch) =>
     set((state) => {
       const next = { ...state.config, ...patch };
-      // Persist every config edit so the next launch starts from the
-      // user's last settings — even fields the Settings dialog doesn't
-      // expose (e.g. live URL / scope edits in the top bar).
-      try {
-        window.freecrawl?.prefsSet('crawl-config', next);
-      } catch {
-        // best-effort persistence
-      }
+      // Persist every config edit so the next launch starts from the user's
+      // last settings — even fields the Settings dialog doesn't expose (e.g.
+      // live URL / scope edits in the top bar). Debounced so per-keystroke
+      // edits don't each fire an IPC round-trip + synchronous SQLite write.
+      persistConfigDebounced(next);
       return { config: next };
     }),
+  applyProjectConfig: (config) =>
+    // Swap the UI to a project's saved config on open. Deliberately does
+    // NOT touch global prefs — opening a project must not overwrite the
+    // user's default settings.
+    set({ config: { ...config, startUrl: '' } }),
   setProgress: (p) => set({ progress: p }),
   setSummary: (s) => set({ summary: s }),
   setOverview: (o) => set({ overview: o }),

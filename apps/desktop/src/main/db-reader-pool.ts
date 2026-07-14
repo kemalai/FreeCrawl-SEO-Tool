@@ -88,7 +88,7 @@ interface WorkerSlot {
   restartTimes: number[];
 }
 
-class DbReaderPool {
+export class DbReaderPool {
   private slots: WorkerSlot[] = [];
   private dbPath: string | null = null;
   private freezeWatchdogSab: SharedArrayBuffer | null = null;
@@ -304,8 +304,19 @@ class DbReaderPool {
   }
 }
 
-// Process-wide singleton — only one worker pool ever exists.
+// Process-wide singleton — the primary window's reader pool. Multi-window
+// gives additional windows their own `DbReaderPool` instances.
 export const dbReaderPool = new DbReaderPool();
+
+/** Resolves which reader pool `callReaderOrFallback` should use. Defaults
+ *  to the singleton; the desktop host injects a per-window resolver so a
+ *  read IPC call hits the calling window's pool. */
+let resolveReaderPool: () => DbReaderPool = () => dbReaderPool;
+
+/** Inject a per-call reader-pool resolver (multi-window). */
+export function setReaderPoolResolver(fn: () => DbReaderPool): void {
+  resolveReaderPool = fn;
+}
 
 /**
  * Thin helper for IPC handlers: try the worker pool first, fall back
@@ -318,11 +329,12 @@ export async function callReaderOrFallback<T>(
   args: unknown[],
   fallback: () => T | Promise<T>,
 ): Promise<T> {
-  if (!dbReaderPool.isReady()) {
+  const pool = resolveReaderPool();
+  if (!pool.isReady()) {
     return fallback();
   }
   try {
-    return await dbReaderPool.call<T>(method, args);
+    return await pool.call<T>(method, args);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.log(

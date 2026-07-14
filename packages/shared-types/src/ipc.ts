@@ -25,6 +25,7 @@ import type {
 } from './pagespeed.js';
 import type { CruxRow, CruxRunFormFactor } from './crux.js';
 import type { SpellingMatch, SpellingRow } from './spelling.js';
+import type { RecentProject } from './project.js';
 import type {
   GoogleAuthState,
   GoogleAuthResult,
@@ -65,6 +66,21 @@ export const IPC = {
   projectSaveAs: 'project:save-as',
   projectOpen: 'project:open',
   projectCurrentPath: 'project:current-path',
+  /** Per-project crawl config. `projectConfigGet` reads the active
+   *  project's saved `CrawlConfig` (null on the default scratch DB, where
+   *  global prefs apply); `projectConfigSet` persists edits to the active
+   *  project's `project_meta.lastCrawlConfig`; `projectConfigChanged` is
+   *  pushed main→renderer when a project opens so the UI rehydrates. */
+  projectConfigGet: 'project:config-get',
+  projectConfigSet: 'project:config-set',
+  projectConfigChanged: 'project:config-changed',
+  /** Recent-projects management (archiving / tagging). `recentProjectsList`
+   *  returns the full list incl. archived; the mutators toggle the archived
+   *  flag, replace tags, or drop an entry. */
+  recentProjectsList: 'project:recent-list',
+  recentProjectSetArchived: 'project:recent-set-archived',
+  recentProjectSetTags: 'project:recent-set-tags',
+  recentProjectRemove: 'project:recent-remove',
   /** V1 #4 — Save an AES-256-GCM-encrypted snapshot of the active
    *  `.seoproject` file. Renderer provides the password; main shows a
    *  save dialog for the destination `.seoproject.enc` path. */
@@ -429,6 +445,7 @@ export interface ExportCsvInput {
 
 export type MenuEvent =
   | 'new-project'
+  | 'manage-projects'
   | 'clear-crawl'
   | 'toggle-sidebar'
   | 'toggle-detail-panel'
@@ -1513,6 +1530,11 @@ export interface LogEntry {
   /** Originating subsystem: 'main', 'crawler', 'ipc', 'console', 'uncaught', 'renderer', 'fetch'. */
   source: string;
   message: string;
+  /** Multi-window: `webContents.id` of the project window this entry belongs
+   *  to (crawler activity is tagged per-window). Undefined for app-global
+   *  infrastructure logs (main / mcp-bridge / console) that are relevant to
+   *  every window's Logs view. */
+  windowId?: number;
 }
 
 export interface FreeCrawlApi {
@@ -1525,6 +1547,22 @@ export interface FreeCrawlApi {
   projectSaveAs(): Promise<{ filePath: string; bytesWritten: number } | null>;
   projectOpen(filePath?: string): Promise<{ filePath: string } | null>;
   projectCurrentPath(): Promise<string | null>;
+  /** Active project's saved crawl config, or null on the default scratch
+   *  DB (renderer keeps its global-prefs config in that case). */
+  projectConfigGet(): Promise<CrawlConfig | null>;
+  /** Persist a crawl config to the active project (no-op on scratch DB). */
+  projectConfigSet(config: CrawlConfig): Promise<void>;
+  /** Fires when the active project changes; payload is the project's saved
+   *  config, or null when it has none yet / is the scratch DB. */
+  onProjectConfigChanged(cb: (config: CrawlConfig | null) => void): () => void;
+  /** Full recent-projects list including archived entries. */
+  recentProjectsList(): Promise<RecentProject[]>;
+  /** Archive / unarchive a recent project (hides it from Open Recent). */
+  recentProjectSetArchived(path: string, archived: boolean): Promise<void>;
+  /** Replace the tag set on a recent project. */
+  recentProjectSetTags(path: string, tags: string[]): Promise<void>;
+  /** Drop a project from the recent list. */
+  recentProjectRemove(path: string): Promise<void>;
   projectSaveEncrypted(
     password: string,
   ): Promise<{ filePath: string; bytesWritten: number } | { error: string } | null>;
@@ -1568,7 +1606,10 @@ export interface FreeCrawlApi {
   prefsSet(key: string, value: unknown): void;
   prefsDelete(key: string): void;
   confirmClear(): Promise<ConfirmClearResult>;
-  logsGetAll(): Promise<LogEntry[]>;
+  /** Snapshot of the live log ring. `ownerId` (a project window's
+   *  webContents.id) scopes the result to that window's crawler entries plus
+   *  app-global entries; omitted returns everything (primary/legacy view). */
+  logsGetAll(ownerId?: number): Promise<LogEntry[]>;
   logsClear(): Promise<void>;
   logsOpenWindow(): Promise<void>;
   openVisualizationWindow(): Promise<void>;

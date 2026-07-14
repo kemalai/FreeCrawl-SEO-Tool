@@ -18,10 +18,12 @@ export type MenuLang = 'en' | 'tr';
 export interface MenuLabels {
   file: string;
   newProject: string;
+  newProjectWindow: string;
   openProject: string;
   openRecent: string;
   clearRecent: string;
   emptyRecent: string;
+  manageProjects: string;
   clearCrawlData: string;
   exportAs: string;
   generateSitemap: string;
@@ -138,7 +140,9 @@ const MENU_EN: MenuLabels = {
   file: 'File',
   newProject: 'New Project',
   openProject: 'Open Project…',
+  newProjectWindow: 'New Project Window',
   openRecent: 'Open Recent',
+  manageProjects: 'Manage Projects…',
   clearRecent: 'Clear Recent',
   emptyRecent: '(empty)',
   clearCrawlData: 'Clear Crawl Data',
@@ -264,7 +268,9 @@ const MENU_TR: MenuLabels = {
   file: 'Dosya',
   newProject: 'Yeni Proje',
   openProject: 'Proje Aç…',
+  newProjectWindow: 'Yeni Proje Penceresi',
   openRecent: 'Son Açılanlar',
+  manageProjects: 'Projeleri Yönet…',
   clearRecent: 'Son Açılanları Temizle',
   emptyRecent: '(boş)',
   clearCrawlData: 'Crawl Verilerini Temizle',

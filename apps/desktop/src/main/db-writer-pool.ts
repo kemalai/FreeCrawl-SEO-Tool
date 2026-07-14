@@ -38,7 +38,7 @@ interface ResponseMessage {
   error?: string;
 }
 
-class DbWriterPool {
+export class DbWriterPool {
   private worker: Worker | null = null;
   private dbPath: string | null = null;
   private freezeWatchdogSab: SharedArrayBuffer | null = null;
@@ -177,7 +177,21 @@ class DbWriterPool {
   }
 }
 
+// Process-wide singleton — the primary window's writer pool. Multi-window
+// gives additional windows their own `DbWriterPool` instances.
 export const dbWriterPool = new DbWriterPool();
+
+/** Resolves which writer pool `callWriterOrFallback` should use. Defaults to
+ *  the singleton; the desktop host injects a per-window resolver so a write
+ *  hits the calling window's pool — mirrors `setReaderPoolResolver`. Without
+ *  this, a per-window write helper would silently target the primary window's
+ *  DB, the same multi-window footgun the clear/reset path once had. */
+let resolveWriterPool: () => DbWriterPool = () => dbWriterPool;
+
+/** Inject a per-call writer-pool resolver (multi-window). */
+export function setWriterPoolResolver(fn: () => DbWriterPool): void {
+  resolveWriterPool = fn;
+}
 
 /**
  * Helper: try the worker first, fall back to a synchronous main-thread
@@ -190,11 +204,12 @@ export async function callWriterOrFallback<T>(
   args: unknown[],
   fallback: () => T | Promise<T>,
 ): Promise<T> {
-  if (!dbWriterPool.isReady()) {
+  const pool = resolveWriterPool();
+  if (!pool.isReady()) {
     return fallback();
   }
   try {
-    return await dbWriterPool.call<T>(method, args);
+    return await pool.call<T>(method, args);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.log(

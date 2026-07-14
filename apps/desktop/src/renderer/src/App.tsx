@@ -12,6 +12,7 @@ import { ReportsDialog } from './components/ReportsDialog.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { CompareDialog } from './components/CompareDialog.js';
 import { ScheduledCrawlDialog } from './components/ScheduledCrawlDialog.js';
+import { ProjectsDialog } from './components/ProjectsDialog.js';
 import { PasswordPromptDialog } from './components/PasswordPromptDialog.js';
 import { ExportDialog } from './components/ExportDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
@@ -44,6 +45,7 @@ export function App() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
   const setConfig = useAppStore((s) => s.setConfig);
+  const applyProjectConfig = useAppStore((s) => s.applyProjectConfig);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
   const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
   const [sitemapValidatorOpen, setSitemapValidatorOpen] = useState(false);
@@ -51,6 +53,7 @@ export function App() {
   const [reportsOpen, setReportsOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useState(false);
   const [dropFlash, setDropFlash] = useState<string | null>(null);
   const [passwordPrompt, setPasswordPrompt] = useState<
     | {
@@ -218,6 +221,11 @@ export function App() {
     const off2 = window.freecrawl.onDone((s) => setSummary(s));
     const off3 = window.freecrawl.onError(setError);
     const offData = window.freecrawl.onDataChanged(() => bumpDataVersion());
+    // Per-project settings — when a project opens, swap the UI to its saved
+    // crawl config (null = project has none yet, keep current config).
+    const offConfig = window.freecrawl.onProjectConfigChanged((cfg) => {
+      if (cfg) applyProjectConfig(cfg);
+    });
     const off4 = window.freecrawl.onMenuEvent((event: MenuEvent) => {
       switch (event) {
         case 'toggle-sidebar':
@@ -364,6 +372,9 @@ export function App() {
         case 'compare-with-project':
           setCompareOpen(true);
           break;
+        case 'manage-projects':
+          setProjectsOpen(true);
+          break;
         case 'save-project-as':
           void window.freecrawl.projectSaveAs();
           break;
@@ -391,6 +402,7 @@ export function App() {
       off3();
       off4();
       offData();
+      offConfig();
     };
   }, [
     t,
@@ -403,6 +415,7 @@ export function App() {
     bumpDataVersion,
     setSettingsOpen,
     setActiveTab,
+    applyProjectConfig,
   ]);
 
   return (
@@ -490,6 +503,19 @@ export function App() {
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <CompareDialog open={compareOpen} onClose={() => setCompareOpen(false)} />
       <ScheduledCrawlDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)} />
+      <ProjectsDialog
+        open={projectsOpen}
+        onClose={() => setProjectsOpen(false)}
+        onNewFromTemplate={(overrides) => {
+          setProjectsOpen(false);
+          void clearCrawlWithConfirm().then((didClear) => {
+            if (didClear) {
+              reset();
+              setConfig(overrides);
+            }
+          });
+        }}
+      />
       <ExportDialog
         open={exportAsOpen}
         onClose={() => setExportAsOpen(false)}
