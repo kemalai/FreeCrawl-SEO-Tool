@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.8] — 2026-07-18
+
+### Added
+- New Video and News XML sitemap variants — build a Google News sitemap or a video sitemap for the crawled site.
+- The Generate Sitemap menu is now a submenu exposing every variant (Standard, Images, Hreflang, News, Video).
+- New mobile-usability checks that flag pages with text or tap targets too small to use comfortably on phones (JavaScript rendering only).
+- A system tray icon with quick show/hide, stop-crawl, and quit actions.
+
 ## [0.8.7] — 2026-07-14
 
 ### Added
