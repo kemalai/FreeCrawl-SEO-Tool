@@ -8,6 +8,8 @@ import {
   Notification,
   session,
   shell,
+  Tray,
+  nativeImage,
   type DownloadItem,
   type MenuItemConstructorOptions,
   type IpcMainInvokeEvent,
@@ -1865,6 +1867,82 @@ async function promptOpenProject(): Promise<void> {
   }
 }
 
+/** Placeholder tray icon — a 32×32 white magnifying glass on a transparent
+ *  background, generated as a PNG (no branded icon asset exists yet; swap
+ *  this base64 for the real icon when one lands). */
+const TRAY_ICON_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAWUlEQVR4nO3OQQoAIAgF0e5/6dqHpZYaxMxavq81IqWu9PR5KsL6PAVhHU9BeEfDESdjAAD8C7AMeu9DEfNdGGA1bg1EOOIGCQIECBA7RBlghSgFSIhygNQAumhY0n/Yk+0AAAAASUVORK5CYII=';
+let tray: Tray | null = null;
+
+/** Show the main window if it's hidden/minimized, else hide it to the tray.
+ *  Non-destructive: closing the window still quits (unchanged behaviour) —
+ *  the tray only toggles visibility while the app is running. */
+function toggleMainWindow(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  if (win.isVisible() && !win.isMinimized()) {
+    win.hide();
+  } else {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  }
+}
+
+/** Create the system tray once. Left-click toggles the window; the context
+ *  menu offers show/hide, stop the primary crawl, and quit. Failure is
+ *  non-fatal — the app runs fine without a tray. */
+function createTray(): void {
+  if (tray) return;
+  try {
+    const img = nativeImage.createFromBuffer(
+      Buffer.from(TRAY_ICON_PNG_BASE64, 'base64'),
+    );
+    // macOS menu-bar icons are template images so they invert with the theme.
+    if (process.platform === 'darwin') img.setTemplateImage(true);
+    const t = new Tray(img);
+    t.setToolTip('FreeCrawl SEO Tool');
+    const rebuild = (): void => {
+      const labels = L();
+      const win = mainWindow;
+      const visible =
+        !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized();
+      t.setContextMenu(
+        Menu.buildFromTemplate([
+          {
+            label: visible ? labels.trayHide : labels.trayShow,
+            click: () => toggleMainWindow(),
+          },
+          { type: 'separator' },
+          {
+            label: labels.trayStopCrawl,
+            click: () => runInPrimarySession(() => crawlController?.stopCrawl()),
+          },
+          { type: 'separator' },
+          { label: labels.trayQuit, click: () => app.quit() },
+        ]),
+      );
+    };
+    rebuild();
+    t.on('click', () => toggleMainWindow());
+    tray = t;
+    // Keep the show/hide label in sync with the primary window's state.
+    const win = mainWindow;
+    if (win) {
+      win.on('show', rebuild);
+      win.on('hide', rebuild);
+      win.on('minimize', rebuild);
+      win.on('restore', rebuild);
+    }
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `system tray init failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -1971,6 +2049,7 @@ function createWindow(): void {
   } else {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
   }
+  createTray();
   // The primary window resolves to `defaultSession` via `sessionFor`'s
   // fallback, so it needs no registry entry (avoids a stale entry if the
   // window is recreated on macOS activate).
@@ -4643,6 +4722,9 @@ function registerIpc(): void {
             lowContrast: number;
             sampled: number;
             focusSuppressed: boolean;
+            smallFont: number;
+            tapTargetsSmall: number;
+            tapTargetsSampled: number;
           } | null;
         }>)
       | undefined;
@@ -6956,7 +7038,11 @@ function registerIpc(): void {
             ? 'sitemap-images.xml'
             : variant === 'hreflang'
               ? 'sitemap-hreflang.xml'
-              : 'sitemap.xml';
+              : variant === 'news'
+                ? 'sitemap-news.xml'
+                : variant === 'video'
+                  ? 'sitemap-video.xml'
+                  : 'sitemap.xml';
         const defaultPath = gzip ? `${baseName}.gz` : baseName;
         const res = await dialog.showSaveDialog(mainWindow!, {
           defaultPath,
@@ -7371,6 +7457,15 @@ let shutdownComplete = false;
 function performShutdown(): void {
   if (shutdownComplete) return;
   shutdownComplete = true;
+  // Drop the tray so its icon doesn't linger after quit.
+  if (tray) {
+    try {
+      tray.destroy();
+    } catch {
+      /* already gone */
+    }
+    tray = null;
+  }
   // Close ancillary popup windows first so their renderers can flush
   // any in-flight IPC before the worker pools shut down.
   if (visualizationWindow && !visualizationWindow.isDestroyed()) {

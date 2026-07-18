@@ -95,7 +95,13 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         },
         {
           label: L.generateSitemap,
-          click: () => send('generate-sitemap'),
+          submenu: [
+            { label: L.sitemapStandard, click: () => send('generate-sitemap') },
+            { label: L.sitemapImages, click: () => send('generate-sitemap-images') },
+            { label: L.sitemapHreflang, click: () => send('generate-sitemap-hreflang') },
+            { label: L.sitemapNews, click: () => send('generate-sitemap-news') },
+            { label: L.sitemapVideo, click: () => send('generate-sitemap-video') },
+          ],
         },
         {
           label: L.exportHtmlReport,

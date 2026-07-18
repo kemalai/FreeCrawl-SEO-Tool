@@ -899,6 +899,18 @@ function buildTree(o: OverviewCounts | null): Node[] {
               count: o.issues.focusOutlineSuppressed,
               category: 'issues:focus-outline-suppressed',
             },
+            {
+              key: 'issues-font-too-small',
+              label: 'Font Size Too Small',
+              count: o.issues.fontTooSmall,
+              category: 'issues:font-too-small',
+            },
+            {
+              key: 'issues-tap-targets-too-small',
+              label: 'Tap Target Too Small',
+              count: o.issues.tapTargetsTooSmall,
+              category: 'issues:tap-targets-too-small',
+            },
           ],
         },
         {

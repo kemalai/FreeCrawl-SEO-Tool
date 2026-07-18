@@ -1861,6 +1861,37 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 77,
+    name: 'add_urls_videos',
+    // Video sitemap variant — per-page videos discovered by the parser
+    // (`<video>` media + recognised YouTube/Vimeo embeds). Stored as a JSON
+    // array of `{ contentLoc, playerLoc, thumbnail }` on `urls`, mirroring
+    // the `hreflangs` column; null when the page has no detectable video.
+    up: (db) => {
+      db.exec('ALTER TABLE urls ADD COLUMN videos TEXT');
+    },
+  },
+  {
+    version: 78,
+    name: 'add_a11y_mobile_columns',
+    // Mobile-usability checks from the JS-render in-page a11y pass.
+    //   a11y_small_font        — count of sampled text elements rendered
+    //                            below ~12px (too small on mobile).
+    //   a11y_tap_targets_small — count of interactive elements rendered
+    //                            below the WCAG 2.5.8 24x24px minimum.
+    // Both NULL until the page is rendered with the a11y audit on.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      for (const col of ['a11y_small_font', 'a11y_tap_targets_small']) {
+        if (!cols.some((c) => c.name === col)) {
+          db.exec(`ALTER TABLE urls ADD COLUMN ${col} INTEGER`);
+        }
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

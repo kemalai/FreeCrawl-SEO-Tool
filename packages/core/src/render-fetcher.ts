@@ -69,6 +69,12 @@ export interface A11yAudit {
   sampled: number;
   /** A stylesheet rule suppresses the focus outline without a fallback. */
   focusSuppressed: boolean;
+  /** Sampled text elements rendered below ~12px (too small on mobile). */
+  smallFont: number;
+  /** Interactive elements rendered below the WCAG 2.5.8 24×24px minimum. */
+  tapTargetsSmall: number;
+  /** How many interactive elements were sampled (context for the above). */
+  tapTargetsSampled: number;
 }
 
 /**
@@ -192,7 +198,7 @@ const A11Y_AUDIT_FN = `(() => {
     }
     return { r: 255, g: 255, b: 255, a: 1 };
   };
-  let sampled = 0, low = 0;
+  let sampled = 0, low = 0, small = 0;
   const all = document.body ? document.body.querySelectorAll('*') : [];
   for (const el of all) {
     if (sampled >= 500) break;
@@ -212,6 +218,8 @@ const A11Y_AUDIT_FN = `(() => {
     const fgc = fg.a < 1 ? over(fg, bg) : fg;
     sampled++;
     const fontSize = parseFloat(cs.fontSize || '16');
+    // Body copy under ~12px is hard to read on mobile without zooming.
+    if (fontSize > 0 && fontSize < 12) small++;
     let weight = parseInt(cs.fontWeight, 10);
     if (!isFinite(weight)) weight = cs.fontWeight === 'bold' ? 700 : 400;
     const large = fontSize >= 24 || (fontSize >= 18.66 && weight >= 700);
@@ -244,7 +252,30 @@ const A11Y_AUDIT_FN = `(() => {
     }
   } catch (e) { /* ignore */ }
   if (focusVisibleRestores) focusSuppressed = false;
-  return { lowContrast: low, sampled: sampled, focusSuppressed: focusSuppressed };
+  // Tap-target sizing — WCAG 2.5.8 (AA) wants interactive controls to be at
+  // least 24x24 CSS px. Sample visible interactive elements and count those
+  // rendered smaller in either dimension. Measured at the render viewport.
+  let tapSmall = 0, tapSampled = 0;
+  const interactive = document.querySelectorAll(
+    'a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [onclick]',
+  );
+  for (const el of interactive) {
+    if (tapSampled >= 500) break;
+    const cs2 = getComputedStyle(el);
+    if (cs2.visibility === 'hidden' || cs2.display === 'none' || parseFloat(cs2.opacity || '1') === 0) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    tapSampled++;
+    if (r.width < 24 || r.height < 24) tapSmall++;
+  }
+  return {
+    lowContrast: low,
+    sampled: sampled,
+    focusSuppressed: focusSuppressed,
+    smallFont: small,
+    tapTargetsSmall: tapSmall,
+    tapTargetsSampled: tapSampled,
+  };
 })()`;
 
 /**

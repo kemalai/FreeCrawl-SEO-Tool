@@ -1201,14 +1201,14 @@ export function buildTools(): Tool[] {
       requiresDb: false,
       name: 'sitemap_generate',
       description:
-        'Generate a sitemap.xml from the indexable URLs in the active project. Variant defaults to `standard`; pass `image` for Google Images extension or `hreflang` for international targeting. Gzip and per-file URL caps supported (sharding kicks in over 50,000).',
+        'Generate a sitemap.xml from the indexable URLs in the active project. Variant defaults to `standard`; pass `image` for Google Images, `hreflang` for international targeting, `news` for a Google News sitemap (publication name/language/date + title per page), or `video` for a Google Video sitemap (only pages with a `<video>` or recognised YouTube/Vimeo embed). Gzip and per-file URL caps supported (sharding kicks in over 50,000).',
       inputSchema: {
         type: 'object',
         properties: {
           filePath: { type: 'string', description: 'Absolute output path.' },
           variant: {
             type: 'string',
-            enum: ['standard', 'image', 'hreflang'],
+            enum: ['standard', 'image', 'hreflang', 'news', 'video'],
           },
           gzip: { type: 'boolean' },
           splitAtUrlCount: { type: 'integer', minimum: 1, maximum: 50_000 },

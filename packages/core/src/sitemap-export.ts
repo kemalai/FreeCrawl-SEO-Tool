@@ -5,7 +5,12 @@ import { createGzip } from 'node:zlib';
 import path from 'node:path';
 import type { ProjectDb } from '@freecrawl/db';
 
-export type SitemapVariant = 'standard' | 'image' | 'hreflang';
+export type SitemapVariant =
+  | 'standard'
+  | 'image'
+  | 'hreflang'
+  | 'news'
+  | 'video';
 
 export interface SitemapOptions {
   /** Default `'weekly'`. Sitemaps.org change-frequency hint. */
@@ -27,6 +32,11 @@ export interface SitemapOptions {
    *  - `standard`  — plain `<url><loc>...</loc></url>` (sitemaps.org core).
    *  - `image`     — adds `<image:image><image:loc>...</image:loc></image:image>` per page (Google Images).
    *  - `hreflang`  — adds `<xhtml:link rel="alternate" hreflang="..." href="..." />` siblings (Google international).
+   *  - `news`      — adds a `<news:news>` block (publication name/language, publication
+   *                  date, title) per page (Google News). Publication name comes from
+   *                  `og:site_name` (host fallback), language from the page `lang`
+   *                  attribute, and the date from the crawl time — Google News also
+   *                  expects only recent articles, so treat the output as a template.
    */
   variant?: SitemapVariant;
   /** Gzip the output (`.xml.gz`). When true the file path is auto-suffixed. */
@@ -72,6 +82,31 @@ function priorityForDepth(depth: number, depthBased: boolean): string {
   return p.toFixed(1);
 }
 
+/** Best-effort publication name for the news variant when `og:site_name`
+ *  is absent — fall back to the URL's hostname (e.g. `www.example.com`). */
+function hostnameOf(rawUrl: string): string {
+  try {
+    return new URL(rawUrl).hostname || rawUrl;
+  } catch {
+    return rawUrl;
+  }
+}
+
+/** ISO 639-1 language code for `<news:language>`: take the primary subtag
+ *  of the page `lang` (e.g. `en-US` → `en`), lowercased; default `en`. */
+function newsLanguage(lang: string | null): string {
+  const primary = (lang ?? '').trim().split(/[-_]/)[0]?.toLowerCase();
+  return primary && /^[a-z]{2,3}$/.test(primary) ? primary : 'en';
+}
+
+/** Full W3C datetime for `<news:publication_date>` — the crawl timestamp is
+ *  the only per-URL date we have; Google accepts complete ISO 8601. */
+function newsPublicationDate(crawledAt: string): string {
+  return crawledAt && crawledAt.length >= 10
+    ? crawledAt
+    : new Date().toISOString();
+}
+
 /**
  * Produce the right `<urlset>` opening tag for the chosen variant.
  * The XML namespace declarations are extension-aware so consumers
@@ -81,7 +116,15 @@ function urlsetOpen(variant: SitemapVariant): string {
   const ns = ['xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'];
   if (variant === 'image') ns.push('xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"');
   if (variant === 'hreflang') ns.push('xmlns:xhtml="http://www.w3.org/1999/xhtml"');
+  if (variant === 'news') ns.push('xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"');
+  if (variant === 'video') ns.push('xmlns:video="http://www.google.com/schemas/sitemap-video/1.1"');
   return `<urlset ${ns.join(' ')}>\n`;
+}
+
+interface VideoRow {
+  contentLoc: string | null;
+  playerLoc: string | null;
+  thumbnail: string | null;
 }
 
 interface UrlEntry {
@@ -90,6 +133,18 @@ interface UrlEntry {
   depth: number;
   crawledAt: string;
   hreflangs: string | null;
+  title: string | null;
+  lang: string | null;
+  ogSiteName: string | null;
+  videos: string | null;
+  metaDescription: string | null;
+  ogImage: string | null;
+}
+
+/** Google caps `<video:title>` at 100 chars and `<video:description>` at
+ *  2048 — clamp so the sitemap validates. */
+function clamp(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) : s;
 }
 
 async function writePart(
@@ -107,9 +162,59 @@ async function writePart(
     for (const e of entries) {
       yield '  <url>\n';
       yield `    <loc>${escapeXml(e.url)}</loc>\n`;
-      if (e.crawledAt) yield `    <lastmod>${formatLastmod(e.crawledAt)}</lastmod>\n`;
-      yield `    <changefreq>${changefreq}</changefreq>\n`;
-      yield `    <priority>${priorityForDepth(e.depth, depthBased)}</priority>\n`;
+      // News entries carry their own <news:publication_date>; the core
+      // <lastmod>/<changefreq>/<priority> hints aren't part of the news
+      // schema, so we omit them for a clean, valid news sitemap.
+      if (variant !== 'news') {
+        if (e.crawledAt) yield `    <lastmod>${formatLastmod(e.crawledAt)}</lastmod>\n`;
+        yield `    <changefreq>${changefreq}</changefreq>\n`;
+        yield `    <priority>${priorityForDepth(e.depth, depthBased)}</priority>\n`;
+      }
+
+      if (variant === 'news') {
+        const pubName = e.ogSiteName?.trim() || hostnameOf(e.url);
+        yield '    <news:news>\n';
+        yield '      <news:publication>\n';
+        yield `        <news:name>${escapeXml(pubName)}</news:name>\n`;
+        yield `        <news:language>${escapeXml(newsLanguage(e.lang))}</news:language>\n`;
+        yield '      </news:publication>\n';
+        yield `      <news:publication_date>${escapeXml(newsPublicationDate(e.crawledAt))}</news:publication_date>\n`;
+        yield `      <news:title>${escapeXml(e.title?.trim() || e.url)}</news:title>\n`;
+        yield '    </news:news>\n';
+      }
+
+      if (variant === 'video' && e.videos) {
+        let vids: VideoRow[] = [];
+        try {
+          const parsed = JSON.parse(e.videos) as unknown;
+          if (Array.isArray(parsed)) vids = parsed as VideoRow[];
+        } catch {
+          // Malformed JSON — skip this page's videos.
+        }
+        const title = clamp((e.title?.trim() || e.url), 100);
+        const description = clamp(
+          (e.metaDescription?.trim() || e.title?.trim() || e.url),
+          2048,
+        );
+        for (const v of vids) {
+          // Google requires a thumbnail; fall back to the page's og:image
+          // when the video itself doesn't declare one, and skip the entry
+          // if neither is available (an entry without one is invalid).
+          const thumb = v.thumbnail?.trim() || e.ogImage?.trim() || '';
+          const media = v.contentLoc?.trim() || v.playerLoc?.trim() || '';
+          if (!thumb || !media) continue;
+          yield '    <video:video>\n';
+          yield `      <video:thumbnail_loc>${escapeXml(thumb)}</video:thumbnail_loc>\n`;
+          yield `      <video:title>${escapeXml(title)}</video:title>\n`;
+          yield `      <video:description>${escapeXml(description)}</video:description>\n`;
+          if (v.contentLoc?.trim()) {
+            yield `      <video:content_loc>${escapeXml(v.contentLoc.trim())}</video:content_loc>\n`;
+          } else if (v.playerLoc?.trim()) {
+            yield `      <video:player_loc>${escapeXml(v.playerLoc.trim())}</video:player_loc>\n`;
+          }
+          yield '    </video:video>\n';
+        }
+      }
 
       if (variant === 'image') {
         const imgs = imagesFor(e.id);
@@ -224,12 +329,20 @@ export async function exportSitemap(
   // outputs we still need the full set up front to compute part counts.
   const entries: UrlEntry[] = [];
   for (const row of db.iterateIndexableUrls()) {
+    // A video sitemap only lists pages that actually have a video.
+    if (variant === 'video' && (!row.videos || row.videos === '[]')) continue;
     entries.push({
       id: row.id,
       url: row.url,
       depth: row.depth,
       crawledAt: row.crawledAt,
       hreflangs: row.hreflangs,
+      title: row.title,
+      lang: row.lang,
+      ogSiteName: row.ogSiteName,
+      videos: row.videos,
+      metaDescription: row.metaDescription,
+      ogImage: row.ogImage,
     });
   }
 

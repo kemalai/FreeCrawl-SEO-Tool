@@ -27,6 +27,11 @@ export interface MenuLabels {
   clearCrawlData: string;
   exportAs: string;
   generateSitemap: string;
+  sitemapStandard: string;
+  sitemapImages: string;
+  sitemapHreflang: string;
+  sitemapNews: string;
+  sitemapVideo: string;
   exportHtmlReport: string;
   bulkExport: string;
   exportSheets: string;
@@ -54,6 +59,10 @@ export interface MenuLabels {
   help: string;
   documentation: string;
   showLogs: string;
+  trayShow: string;
+  trayHide: string;
+  trayStopCrawl: string;
+  trayQuit: string;
   openLogsFolder: string;
   openLogsFolderTooltip: string;
   robotsTester: string;
@@ -147,7 +156,12 @@ const MENU_EN: MenuLabels = {
   emptyRecent: '(empty)',
   clearCrawlData: 'Clear Crawl Data',
   exportAs: 'Export Crawl Data…',
-  generateSitemap: 'Generate XML Sitemap…',
+  generateSitemap: 'Generate XML Sitemap',
+  sitemapStandard: 'Standard…',
+  sitemapImages: 'Images…',
+  sitemapHreflang: 'Hreflang…',
+  sitemapNews: 'News…',
+  sitemapVideo: 'Video…',
   exportHtmlReport: 'Export HTML Report…',
   bulkExport: 'Bulk Export…',
   exportSheets: 'Export to Google Sheets…',
@@ -179,6 +193,10 @@ const MENU_EN: MenuLabels = {
   help: 'Help',
   documentation: 'Documentation',
   showLogs: 'Show Logs…',
+  trayShow: 'Show FreeCrawl',
+  trayHide: 'Hide to Tray',
+  trayStopCrawl: 'Stop Crawl',
+  trayQuit: 'Quit FreeCrawl',
   openLogsFolder: 'Open Logs Folder',
   openLogsFolderTooltip:
     'Open the directory where rotated log files are persisted on disk',
@@ -275,7 +293,12 @@ const MENU_TR: MenuLabels = {
   emptyRecent: '(boş)',
   clearCrawlData: 'Crawl Verilerini Temizle',
   exportAs: 'Crawl Verilerini Dışa Aktar…',
-  generateSitemap: 'XML Sitemap Oluştur…',
+  generateSitemap: 'XML Sitemap Oluştur',
+  sitemapStandard: 'Standart…',
+  sitemapImages: 'Görseller…',
+  sitemapHreflang: 'Hreflang…',
+  sitemapNews: 'Haber…',
+  sitemapVideo: 'Video…',
   exportHtmlReport: 'HTML Rapor Dışa Aktar…',
   bulkExport: 'Toplu Dışa Aktarım…',
   exportSheets: 'Google Sheets\'e Aktar…',
@@ -307,6 +330,10 @@ const MENU_TR: MenuLabels = {
   help: 'Yardım',
   documentation: 'Dokümantasyon',
   showLogs: 'Logları Göster…',
+  trayShow: 'FreeCrawl\'i Göster',
+  trayHide: 'Tepsiye Gizle',
+  trayStopCrawl: 'Taramayı Durdur',
+  trayQuit: 'FreeCrawl\'ten Çık',
   openLogsFolder: 'Log Klasörünü Aç',
   openLogsFolderTooltip:
     'Diske kayıtlı, dönen log dosyalarının olduğu dizini aç',

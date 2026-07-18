@@ -131,6 +131,8 @@ const WARNING: UrlCategory[] = [
   'issues:twitter-image-wrong-aspect',
   'issues:low-contrast-text',
   'issues:focus-outline-suppressed',
+  'issues:font-too-small',
+  'issues:tap-targets-too-small',
   'issues:hreflang-inconsistent-lang',
   'issues:over-budget',
 ];

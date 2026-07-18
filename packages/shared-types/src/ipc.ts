@@ -462,6 +462,10 @@ export type MenuEvent =
   | 'open-project-encrypted'
   | 'open-visualization'
   | 'generate-sitemap'
+  | 'generate-sitemap-images'
+  | 'generate-sitemap-hreflang'
+  | 'generate-sitemap-news'
+  | 'generate-sitemap-video'
   | 'open-robots-tester'
   | 'open-sitemap-validator'
   | 'open-reports'
@@ -743,7 +747,7 @@ export interface SitemapGenerateInput {
    * Variant: `standard` (default), `image` (Google Images extension), or
    * `hreflang` (international targeting via `<xhtml:link>`).
    */
-  variant?: 'standard' | 'image' | 'hreflang';
+  variant?: 'standard' | 'image' | 'hreflang' | 'news' | 'video';
   /** Gzip the output (`.xml.gz`). Index file is gzipped too when sharded. */
   gzip?: boolean;
   /** Per-file URL cap (≤50,000). Sharding kicks in when exceeded. */

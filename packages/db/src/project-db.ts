@@ -141,6 +141,7 @@ interface UrlRowDb {
   pagination_prev: string | null;
   hreflangs: string | null;
   hreflang_count: number;
+  videos: string | null;
   amphtml: string | null;
   /** 1 when the page declares `<html ⚡>` / `<html amp>`, else 0. */
   amp_page: number;
@@ -155,6 +156,9 @@ interface UrlRowDb {
    *  NULL when not audited; a11y_low_contrast >=0, a11y_focus_suppressed 0/1. */
   a11y_low_contrast: number | null;
   a11y_focus_suppressed: number | null;
+  /** Mobile-usability a11y counts (JS-render pass); NULL until audited. */
+  a11y_small_font: number | null;
+  a11y_tap_targets_small: number | null;
   /** V2 Faz 15 — performance budget verdict bitmask
    *  (1=response, 2=size, 4=LCP, 8=CLS). 0 = within budget,
    *  NULL = budget disabled / page not an internal 200 HTML page. */
@@ -326,6 +330,8 @@ export interface UpsertUrlInput {
   /** JSON-stringified array of `HreflangEntry` objects, or null. */
   hreflangs?: string | null;
   hreflangCount?: number;
+  /** JSON-stringified array of `VideoEntry` objects, or null. */
+  videos?: string | null;
   amphtml?: string | null;
   ampPage?: boolean;
   /** JSON-stringified array of AMP validator error codes. */
@@ -427,7 +433,7 @@ const UPSERT_URL_SQL = `
     meta_keywords, meta_author, meta_generator, theme_color,
     hsts, x_frame_options, x_content_type_options, content_encoding,
     schema_types, schema_block_count, schema_invalid_count,
-    pagination_next, pagination_prev, hreflangs, hreflang_count,
+    pagination_next, pagination_prev, hreflangs, hreflang_count, videos,
     amphtml, favicon, mixed_content_count, mixed_content_active, mixed_content_passive,
     folder_depth, query_param_count,
     csp, referrer_policy, permissions_policy,
@@ -468,7 +474,7 @@ const UPSERT_URL_SQL = `
     :meta_keywords, :meta_author, :meta_generator, :theme_color,
     :hsts, :x_frame_options, :x_content_type_options, :content_encoding,
     :schema_types, :schema_block_count, :schema_invalid_count,
-    :pagination_next, :pagination_prev, :hreflangs, :hreflang_count,
+    :pagination_next, :pagination_prev, :hreflangs, :hreflang_count, :videos,
     :amphtml, :favicon, :mixed_content_count, :mixed_content_active, :mixed_content_passive,
     :folder_depth, :query_param_count,
     :csp, :referrer_policy, :permissions_policy,
@@ -554,6 +560,7 @@ const UPSERT_URL_SQL = `
     pagination_prev = excluded.pagination_prev,
     hreflangs = excluded.hreflangs,
     hreflang_count = excluded.hreflang_count,
+    videos = excluded.videos,
     amphtml = excluded.amphtml,
     favicon = excluded.favicon,
     mixed_content_count = excluded.mixed_content_count,
@@ -1427,6 +1434,7 @@ export class ProjectDb {
       pagination_next: input.paginationNext ?? null,
       pagination_prev: input.paginationPrev ?? null,
       hreflangs: input.hreflangs ?? null,
+      videos: input.videos ?? null,
       hreflang_count: input.hreflangCount ?? 0,
       amphtml: input.amphtml ?? null,
       amp_page: input.ampPage ? 1 : 0,
@@ -5234,6 +5242,12 @@ export class ProjectDb {
         `${html} AND a11y_low_contrast IS NOT NULL AND a11y_low_contrast > 0`,
       ),
       focusOutlineSuppressed: countWhere(`${html} AND a11y_focus_suppressed = 1`),
+      fontTooSmall: countWhere(
+        `${html} AND a11y_small_font IS NOT NULL AND a11y_small_font > 0`,
+      ),
+      tapTargetsTooSmall: countWhere(
+        `${html} AND a11y_tap_targets_small IS NOT NULL AND a11y_tap_targets_small > 0`,
+      ),
       paginationSequenceBreak: countWhere(
         `${html} AND pagination_sequence_break = 1`,
       ),
@@ -5734,18 +5748,29 @@ export class ProjectDb {
    */
   setUrlA11y(
     urlId: number,
-    audit: { lowContrast: number; sampled: number; focusSuppressed: boolean },
+    audit: {
+      lowContrast: number;
+      sampled: number;
+      focusSuppressed: boolean;
+      smallFont?: number;
+      tapTargetsSmall?: number;
+      tapTargetsSampled?: number;
+    },
   ): void {
     this.db
       .prepare(
         `UPDATE urls
            SET a11y_low_contrast = ?,
-               a11y_focus_suppressed = ?
+               a11y_focus_suppressed = ?,
+               a11y_small_font = ?,
+               a11y_tap_targets_small = ?
          WHERE id = ?`,
       )
       .run(
         Math.max(0, Math.round(audit.lowContrast)),
         audit.focusSuppressed ? 1 : 0,
+        Math.max(0, Math.round(audit.smallFont ?? 0)),
+        Math.max(0, Math.round(audit.tapTargetsSmall ?? 0)),
         urlId,
       );
   }
@@ -7531,12 +7556,15 @@ export class ProjectDb {
     paginationSequenceBreak: (r as unknown as { pagination_sequence_break?: number }).pagination_sequence_break === 1,
     hreflangs: r.hreflangs,
     hreflangCount: r.hreflang_count,
+    videos: r.videos ?? null,
     amphtml: r.amphtml,
     ampPage: r.amp_page === 1,
     ampValidationErrors: r.amp_validation_errors,
     boilerplateCoverage: r.boilerplate_coverage,
     a11yLowContrast: r.a11y_low_contrast ?? null,
     a11yFocusSuppressed: r.a11y_focus_suppressed ?? null,
+    a11ySmallFont: r.a11y_small_font ?? null,
+    a11yTapTargetsSmall: r.a11y_tap_targets_small ?? null,
     budgetStatus: r.budget_status ?? null,
     favicon: r.favicon,
     mixedContentCount: r.mixed_content_count,
@@ -9161,6 +9189,17 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // (not audited) excluded.
       return `is_external = 0 AND content_kind = 'html'
               AND a11y_focus_suppressed = 1`;
+    case 'issues:font-too-small':
+      // Pages with sampled text rendered below ~12px (hard to read on mobile
+      // without zooming), from the JS-render in-page audit. NULL (not
+      // audited) excluded — only flag pages we actually measured.
+      return `is_external = 0 AND content_kind = 'html'
+              AND a11y_small_font IS NOT NULL AND a11y_small_font > 0`;
+    case 'issues:tap-targets-too-small':
+      // Pages with interactive controls rendered below the WCAG 2.5.8
+      // 24×24px minimum. NULL (not audited) excluded.
+      return `is_external = 0 AND content_kind = 'html'
+              AND a11y_tap_targets_small IS NOT NULL AND a11y_tap_targets_small > 0`;
     case 'issues:pagination-sequence-break':
       // Set post-crawl by `recomputePaginationSequence()` — see the
       // implementation comment there for the gap-detection algorithm

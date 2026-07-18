@@ -354,6 +354,9 @@ export class Crawler extends EventEmitter {
       lowContrast: number;
       sampled: number;
       focusSuppressed: boolean;
+      smallFont: number;
+      tapTargetsSmall: number;
+      tapTargetsSampled: number;
     } | null;
   }>;
 
@@ -414,6 +417,9 @@ export class Crawler extends EventEmitter {
           lowContrast: number;
           sampled: number;
           focusSuppressed: boolean;
+          smallFont: number;
+          tapTargetsSmall: number;
+          tapTargetsSampled: number;
         } | null;
       }>;
     } = {},
@@ -2672,7 +2678,14 @@ export class Crawler extends EventEmitter {
         | { ok: boolean; overflowPx: number; hasViewportMeta: boolean }
         | null = null;
       let renderA11y:
-        | { lowContrast: number; sampled: number; focusSuppressed: boolean }
+        | {
+            lowContrast: number;
+            sampled: number;
+            focusSuppressed: boolean;
+            smallFont: number;
+            tapTargetsSmall: number;
+            tapTargetsSampled: number;
+          }
         | null = null;
       if (
         this.config.renderingMode === 'js' &&
@@ -2846,6 +2859,7 @@ export class Crawler extends EventEmitter {
           paginationPrev: parsed.paginationPrev,
           hreflangs: parsed.hreflangs.length > 0 ? JSON.stringify(parsed.hreflangs) : null,
           hreflangCount: parsed.hreflangs.length,
+          videos: parsed.videos.length > 0 ? JSON.stringify(parsed.videos) : null,
           amphtml: parsed.amphtml,
           ampPage: parsed.ampPage,
           ampValidationErrors: parsed.ampValidationErrors.length > 0

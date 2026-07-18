@@ -366,6 +366,18 @@ export function App() {
         case 'generate-sitemap':
           void window.freecrawl.sitemapGenerate({ filePath: '' });
           break;
+        case 'generate-sitemap-images':
+          void window.freecrawl.sitemapGenerate({ filePath: '', variant: 'image' });
+          break;
+        case 'generate-sitemap-hreflang':
+          void window.freecrawl.sitemapGenerate({ filePath: '', variant: 'hreflang' });
+          break;
+        case 'generate-sitemap-news':
+          void window.freecrawl.sitemapGenerate({ filePath: '', variant: 'news' });
+          break;
+        case 'generate-sitemap-video':
+          void window.freecrawl.sitemapGenerate({ filePath: '', variant: 'video' });
+          break;
         case 'export-html-report':
           void window.freecrawl.exportHtmlReport({ filePath: '' });
           break;

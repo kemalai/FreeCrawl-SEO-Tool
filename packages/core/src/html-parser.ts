@@ -19,6 +19,15 @@ export interface HreflangEntry {
   href: string;
 }
 
+export interface VideoEntry {
+  /** Direct media URL from `<video src>` / `<source src>` (Google `content_loc`). */
+  contentLoc: string | null;
+  /** Embed/player URL from a recognised `<iframe>` (Google `player_loc`). */
+  playerLoc: string | null;
+  /** Thumbnail URL (`<video poster>` or a derived YouTube thumbnail). */
+  thumbnail: string | null;
+}
+
 /**
  * One detected third-party analytics / marketing tracker on a page. The
  * `name` is the canonical product name (e.g. `"Google Analytics 4"`). The
@@ -130,6 +139,9 @@ export interface ParsedPage {
   paginationPrev: string | null;
   /** All `<link rel="alternate" hreflang>` entries on the page. */
   hreflangs: HreflangEntry[];
+  /** Videos found on the page (`<video>` + recognised embeds) for the
+   *  video-sitemap variant. Empty when the page has no detectable video. */
+  videos: VideoEntry[];
   /** `<link rel="amphtml" href>` if present, else null. */
   amphtml: string | null;
   /** True when the page declares itself AMP via `<html ⚡>` /
@@ -730,6 +742,40 @@ export function parseHtml(
     if (hreflangSet.has(key)) return;
     hreflangSet.add(key);
     hreflangs.push({ lang, href });
+  });
+
+  // Video — collected for the video-sitemap variant. Two sources: HTML5
+  // `<video>` (media = src / first `<source src>`, thumbnail = poster) and
+  // recognised `<iframe>` embeds (YouTube / Vimeo → player URL, with a
+  // derived thumbnail for YouTube). Deduped by media/player URL; title and
+  // description are taken from the page at sitemap-emit time, so only the
+  // media locations are persisted here.
+  const videoSet = new Set<string>();
+  const videos: VideoEntry[] = [];
+  const pushVideo = (
+    contentLoc: string | null,
+    playerLoc: string | null,
+    thumbnail: string | null,
+  ): void => {
+    const key = contentLoc ?? playerLoc ?? '';
+    if (!key || videoSet.has(key)) return;
+    videoSet.add(key);
+    videos.push({ contentLoc, playerLoc, thumbnail });
+  };
+  $('video').each((_, el) => {
+    const $v = $(el);
+    let rawSrc = ($v.attr('src') ?? '').trim();
+    if (!rawSrc) rawSrc = ($v.find('source[src]').first().attr('src') ?? '').trim();
+    if (!rawSrc) return;
+    const contentLoc = normalizeUrl(rawSrc, pageUrl, opts.urlRewrites);
+    if (!contentLoc) return;
+    const posterRaw = ($v.attr('poster') ?? '').trim();
+    const thumbnail = posterRaw ? normalizeUrl(posterRaw, pageUrl, opts.urlRewrites) : null;
+    pushVideo(contentLoc, null, thumbnail);
+  });
+  $('iframe[src]').each((_, el) => {
+    const embed = parseVideoEmbed(($(el).attr('src') ?? '').trim(), pageUrl, opts.urlRewrites);
+    if (embed) pushVideo(null, embed.playerLoc, embed.thumbnail);
   });
 
   // AMP variant — `<link rel="amphtml">` points to the AMP version of
@@ -1376,6 +1422,7 @@ export function parseHtml(
     paginationNext,
     paginationPrev,
     hreflangs,
+    videos,
     amphtml,
     ampPage,
     ampValidationErrors,
@@ -2252,4 +2299,47 @@ function computeReadability(text: string, wordCount: number): ReadabilityScores 
     sentenceCount,
     complexWordCount,
   };
+}
+
+/**
+ * Recognise a video `<iframe>` embed (YouTube / Vimeo) and return its
+ * player URL plus a derivable thumbnail. Returns null for iframes that
+ * aren't known video players (ads, maps, generic embeds) so they never
+ * pollute the video sitemap.
+ */
+function parseVideoEmbed(
+  rawSrc: string,
+  pageUrl: string,
+  rewrites?: UrlRewriteOptions,
+): { playerLoc: string; thumbnail: string | null } | null {
+  if (!rawSrc) return null;
+  const playerLoc = normalizeUrl(rawSrc, pageUrl, rewrites);
+  if (!playerLoc) return null;
+  let u: URL;
+  try {
+    u = new URL(playerLoc);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^www\./, '').toLowerCase();
+  // YouTube — /embed/<id> (also youtube-nocookie.com) or youtu.be/<id>.
+  if (host === 'youtube.com' || host === 'youtube-nocookie.com' || host === 'm.youtube.com') {
+    const id = u.pathname.match(/^\/embed\/([A-Za-z0-9_-]{6,})/)?.[1];
+    if (id) return { playerLoc, thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg` };
+    return null;
+  }
+  if (host === 'youtu.be') {
+    const id = u.pathname.replace(/^\//, '').split('/')[0];
+    if (id && /^[A-Za-z0-9_-]{6,}$/.test(id)) {
+      return { playerLoc, thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg` };
+    }
+    return null;
+  }
+  // Vimeo player embeds — /video/<id>. Thumbnail needs the oEmbed API, so
+  // it falls back to the page's og:image at sitemap-emit time.
+  if (host === 'player.vimeo.com') {
+    if (/^\/video\/\d+/.test(u.pathname)) return { playerLoc, thumbnail: null };
+    return null;
+  }
+  return null;
 }

@@ -302,6 +302,8 @@ const TR_LABELS: Record<string, string> = {
   'Twitter Image Dimensions': 'Twitter Görsel Boyutları',
   'Low Contrast Text': 'Düşük Kontrastlı Metin',
   'Focus Outline Suppressed': 'Odak Çerçevesi Bastırılmış',
+  'Font Size Too Small': 'Yazı Tipi Çok Küçük',
+  'Tap Target Too Small': 'Dokunma Hedefi Çok Küçük',
   'Low Contrast Elements': 'Düşük Kontrastlı Öğeler',
   'Performance Budget': 'Performans Bütçesi',
 

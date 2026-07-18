@@ -200,6 +200,8 @@ export type UrlCategory =
   | 'issues:twitter-image-wrong-aspect'
   | 'issues:low-contrast-text'
   | 'issues:focus-outline-suppressed'
+  | 'issues:font-too-small'
+  | 'issues:tap-targets-too-small'
   | 'issues:pagination-sequence-break'
   | 'issues:links-per-page-too-many'
   | 'tab:redirects'
@@ -488,6 +490,9 @@ export interface CrawlUrlRow {
   /** JSON-stringified array of `{ lang, href }` objects, or null. */
   hreflangs: string | null;
   hreflangCount: number;
+  /** JSON-stringified array of `{ contentLoc, playerLoc, thumbnail }` video
+   *  objects for the video-sitemap variant, or null. */
+  videos: string | null;
   amphtml: string | null;
   /** True when the page declares `<html ⚡>` / `<html amp>`. AMP-for-Ads
    *  / AMP-for-Email variants (`⚡4ads`, `⚡4email`) count too. */
@@ -512,6 +517,11 @@ export interface CrawlUrlRow {
    */
   a11yLowContrast: number | null;
   a11yFocusSuppressed: number | null;
+  /** Mobile-usability a11y counts (JS-render pass), NULL until audited.
+   *  `a11ySmallFont` = sampled text elements rendered below ~12px;
+   *  `a11yTapTargetsSmall` = interactive elements below 24×24 CSS px. */
+  a11ySmallFont: number | null;
+  a11yTapTargetsSmall: number | null;
   /**
    * V2 Faz 15 — performance budget verdict, a bitmask: 1=response time,
    * 2=transfer size, 4=LCP, 8=CLS. 0 = evaluated and within budget,
@@ -1677,6 +1687,9 @@ export interface OverviewCounts {
      */
     lowContrastText: number;
     focusOutlineSuppressed: number;
+    /** Mobile-usability checks from the same in-page a11y audit. */
+    fontTooSmall: number;
+    tapTargetsTooSmall: number;
     /**
      * Pages whose `twitter:image` dimensions don't fit the declared
      * card type — `summary_large_image` wants ~2:1 (min 300×157),
