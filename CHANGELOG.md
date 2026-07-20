@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.9] — 2026-07-20
+
+### Added
+- New Sitemap crawl mode plus an optional sitemap seed for spider crawls — crawl exactly what a sitemap lists, or feed one in for faster discovery and orphan detection.
+- A Desktop/Mobile toggle in the toolbar that crawls a site's mobile version (mobile User-Agent + viewport), useful when the mobile page renders differently.
+- New "Duplicate Alt Text" image check that flags distinct images sharing the same alt text.
+
+### Changed
+- The crawl mode selector (Spider / List / Sitemap) now sits in the toolbar beside the URL bar, with an inline editor for the List URL set.
+- The app now always opens in Spider mode with an empty URL bar.
+- Various small UI improvements across the Search Console and Images tabs.
+
+### Fixed
+- The "Empty Alt" image issue now counts images (not pages) and its click-through filter works, so the sidebar number matches what you see.
+
 ## [0.8.8] — 2026-07-18
 
 ### Added
