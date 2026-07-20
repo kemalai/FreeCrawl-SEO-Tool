@@ -35,6 +35,11 @@ export interface BrowserPoolOptions {
   headless: boolean;
   /** Viewport dimensions for every page in the pool. */
   viewport: { width: number; height: number };
+  /** Emulate a mobile device (touch, mobile meta viewport, DPR). Chromium
+   *  only — set when the crawl's device mode is 'mobile'. */
+  isMobile?: boolean;
+  /** Device pixel ratio (e.g. 3 for iPhone-class). Defaults to 1. */
+  deviceScaleFactor?: number;
   /** UA string applied at context level. */
   userAgent?: string;
   /** Accept-Language applied at context level. */
@@ -140,6 +145,11 @@ export class BrowserPool {
     this.context = await this.browser.newContext({
       viewport: this.opts.viewport,
       userAgent: this.opts.userAgent,
+      // Mobile emulation — makes responsive CSS/JS render the mobile layout,
+      // not just a narrow desktop window. Chromium-only; harmless when false.
+      isMobile: this.opts.isMobile,
+      hasTouch: this.opts.isMobile,
+      deviceScaleFactor: this.opts.deviceScaleFactor,
       locale: this.opts.acceptLanguage,
       extraHTTPHeaders: this.opts.acceptLanguage
         ? { 'Accept-Language': this.opts.acceptLanguage }

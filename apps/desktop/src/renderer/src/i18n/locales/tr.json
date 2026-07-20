@@ -70,7 +70,28 @@
     },
     "errorEmptyUrl": "Lütfen bir başlangıç URL'i gir.",
     "errorAddUrl": "URL kabul edilmedi (geçersiz format, zaten tam derinlikte tarandı ya da kuyruk dolu).",
-    "addUrlPrompt": "Kuyruğa eklenecek URL:"
+    "addUrlPrompt": "Kuyruğa eklenecek URL:",
+    "sitemapPlaceholder": "https://ornek.com/sitemap.xml",
+    "errorEmptyList": "Önce listeye en az bir URL ekle.",
+    "errorEmptySitemap": "Önce bir sitemap URL'si gir.",
+    "editList": "URL listesini düzenle ({{n}})",
+    "addList": "URL listesi ekle…",
+    "listTitle": "URL listesi — her satıra bir tane",
+    "listDone": "Tamam",
+    "listCount": "{{n}} URL",
+    "scopeSpiderOnly": "Kapsam yalnızca Spider modunda geçerli",
+    "mode": {
+      "spider": "Spider",
+      "spiderHint": "Başlangıç URL + linkleri takip et",
+      "list": "List",
+      "listHint": "Sabit URL listesi tara, link takip etme",
+      "sitemap": "Sitemap",
+      "sitemapHint": "Sitemap'te listelenen URL'leri tara"
+    },
+    "device": {
+      "desktop": "Masaüstü tarama",
+      "mobile": "Mobil tarama — sitenin mobil sürümünü tara (mobil User-Agent)"
+    }
   },
   "stats": {
     "discovered": "Keşfedilen",
@@ -382,11 +403,14 @@
       "outro": "Uygula veya İçe Aktar'a tıkladıktan sonra her paneli değerleri doğrulamak için gözden geçir, sonra altta Kaydet'e bas."
     },
     "mode": {
-      "intro": "Crawler'ın URL'leri nasıl keşfedeceğini seç. Spider başlangıç URL'inden linkleri takip eder; List sabit bir setten alır.",
+      "intro": "Crawler'ın URL'leri nasıl keşfedeceğini seç. Spider başlangıç URL'inden linkleri takip eder; List sabit bir setten alır; Sitemap bir sitemap'te listelenen URL'leri tarar.",
       "crawlMode": "Crawl Modu",
       "spiderOption": "Spider — başlangıç URL + linkleri takip et",
       "listOption": "List — sabit URL listesi getir, link takip etme",
-      "urlList": "URL Listesi (her satıra bir URL)"
+      "sitemapOption": "Sitemap — sitemap'te listelenen URL'leri tara",
+      "urlList": "URL Listesi (her satıra bir URL)",
+      "sitemapHint": "Üst çubuğa sitemap (ya da sitemap-index) URL'sini gir, sonra Başlat'a bas. Listelenen her sayfa bir kez taranır ve ayrıca orphan / sitemap raporları için kaydedilir.",
+      "seedSitemap": "Sitemap URL('ler)inden besle — opsiyonel"
     },
     "crawler": {
       "intro": "Gezinme limitleri ve crawl-kapsam toggle'ları. Screaming Frog karşılıkları parantez içinde gösterildi.",
@@ -969,6 +993,12 @@
   "imagesTab": {
     "searchPlaceholder": "Görsel URL / alt ara…",
     "missingAltOnly": "Yalnızca Alt eksik",
+    "emptyAltOnly": "Yalnızca boş Alt",
+    "duplicateAltOnly": "Yalnızca yinelenen Alt",
+    "emptyMissingAlt": "Alt metni olmayan görsel yok.",
+    "emptyEmptyAlt": "Boş alt=\"\" içeren görsel yok.",
+    "emptyDuplicateAlt": "Aynı alt metnini paylaşan görsel yok.",
+    "emptyDefault": "Görselleri keşfetmek için bir site tara.",
     "imagesUnit": "görsel",
     "loaded": "{{n}} yüklendi",
     "row": "Satır",

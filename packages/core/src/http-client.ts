@@ -32,6 +32,22 @@ export const BROWSER_FALLBACK_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
 /**
+ * User-Agent sent for every request when the crawl's device mode is
+ * 'mobile'. A modern iPhone Safari UA — the most universally-recognised
+ * trigger for a site's mobile layout (dynamic serving / adaptive delivery),
+ * and far less likely to be blocked than a spoofed Googlebot-Smartphone UA
+ * (which WAFs verify via reverse DNS). Sites that render a different mobile
+ * version key off this string.
+ */
+export const MOBILE_USER_AGENT =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
+
+/** Logical viewport + device metrics that pair with `MOBILE_USER_AGENT`
+ *  (iPhone-class). Applied to the JS-render browser context in mobile mode. */
+export const MOBILE_VIEWPORT = { width: 390, height: 844 } as const;
+export const MOBILE_DEVICE_SCALE_FACTOR = 3;
+
+/**
  * Configure the global undici dispatcher and Node DNS once per process.
  *
  * - `createResilientLookup` is a 3-tier DNS cascade (OS → public UDP →

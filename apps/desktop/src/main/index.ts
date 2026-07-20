@@ -170,6 +170,9 @@ import {
 import {
   BrowserPool,
   PlaywrightBrowserMissingError,
+  MOBILE_USER_AGENT,
+  MOBILE_VIEWPORT,
+  MOBILE_DEVICE_SCALE_FACTOR,
   Crawler,
   renderUrl,
   auditMobileUsability,
@@ -4735,17 +4738,25 @@ function registerIpc(): void {
       if (config.jsRender.blockResources.media) blocked.add('media');
       if (config.jsRender.blockResources.stylesheet) blocked.add('stylesheet');
       if (config.jsRender.blockResources.script) blocked.add('script');
+      // Mobile device mode overrides the JS-render context so responsive
+      // layouts render as the real mobile view (UA + mobile viewport + touch
+      // + DPR), matching the mobile User-Agent the HTTP paths already use.
+      const mobile = config.deviceMode === 'mobile';
       const pool = new BrowserPool({
         maxPages:
           config.jsRender.maxPages > 0
             ? config.jsRender.maxPages
             : Math.max(1, Math.min(8, config.maxConcurrency)),
         headless: config.jsRender.headless,
-        viewport: {
-          width: config.jsRender.viewportWidth,
-          height: config.jsRender.viewportHeight,
-        },
-        userAgent: config.userAgent || undefined,
+        viewport: mobile
+          ? { width: MOBILE_VIEWPORT.width, height: MOBILE_VIEWPORT.height }
+          : {
+              width: config.jsRender.viewportWidth,
+              height: config.jsRender.viewportHeight,
+            },
+        isMobile: mobile || undefined,
+        deviceScaleFactor: mobile ? MOBILE_DEVICE_SCALE_FACTOR : undefined,
+        userAgent: (mobile ? MOBILE_USER_AGENT : config.userAgent) || undefined,
         acceptLanguage: config.acceptLanguage || undefined,
         channel: config.jsRender.browserChannel || undefined,
         blockResourceTypes: blocked.size > 0 ? blocked : undefined,
@@ -5333,10 +5344,18 @@ function registerIpc(): void {
     },
 
     'export-images': async (input) => {
-      const i = input as { filePath?: string; missingAltOnly?: boolean; search?: string };
+      const i = input as {
+        filePath?: string;
+        missingAltOnly?: boolean;
+        emptyAltOnly?: boolean;
+        duplicateAltOnly?: boolean;
+        search?: string;
+      };
       if (!i.filePath) throw new Error('filePath is required.');
       const { rowsWritten } = await exportImagesToCsv(getDb(), i.filePath, {
         missingAltOnly: i.missingAltOnly,
+        emptyAltOnly: i.emptyAltOnly,
+        duplicateAltOnly: i.duplicateAltOnly,
         search: i.search,
       });
       return { filePath: i.filePath, rowsWritten };
@@ -6447,6 +6466,8 @@ function registerIpc(): void {
           offset: input.offset,
           search: input.search,
           missingAltOnly: input.missingAltOnly,
+          emptyAltOnly: input.emptyAltOnly,
+          duplicateAltOnly: input.duplicateAltOnly,
           internalOnly: input.internalOnly,
         },
       ];
@@ -6817,6 +6838,8 @@ function registerIpc(): void {
       }
       const { rowsWritten } = await exportImagesToCsv(getDb(), filePath, {
         missingAltOnly: input.missingAltOnly,
+        emptyAltOnly: input.emptyAltOnly,
+        duplicateAltOnly: input.duplicateAltOnly,
         search: input.search,
       });
       return { filePath, rowsWritten };

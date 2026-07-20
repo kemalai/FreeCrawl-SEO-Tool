@@ -40,6 +40,11 @@ export {
   type HreflangEntry,
 } from './html-parser.js';
 export { exportUrlsToCsv, exportBrokenLinksToCsv, exportImagesToCsv } from './csv-export.js';
+export {
+  MOBILE_USER_AGENT,
+  MOBILE_VIEWPORT,
+  MOBILE_DEVICE_SCALE_FACTOR,
+} from './http-client.js';
 export { exportUrlsToJson, type JsonExportOptions } from './json-export.js';
 export { exportUrlsToXml } from './xml-export.js';
 export {

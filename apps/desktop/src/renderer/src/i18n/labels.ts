@@ -275,6 +275,7 @@ const TR_LABELS: Record<string, string> = {
   // Images
   'Missing Alt': 'Alt Eksik',
   'Empty Alt': 'Boş Alt',
+  'Duplicate Alt Text': 'Yinelenen Alt Metni',
   'Broken Image Src': 'Bozuk Görsel Src',
   'Large Image (>100KB)': 'Büyük Görsel (>100KB)',
   'Slow-Loading Image (>200KB, no lazy)': 'Yavaş Yüklenen Görsel (>200KB, lazy yok)',

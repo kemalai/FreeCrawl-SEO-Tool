@@ -89,7 +89,12 @@ const IMAGES_CSV_HEADER = [
 export async function exportImagesToCsv(
   db: ProjectDb,
   filePath: string,
-  options: { missingAltOnly?: boolean; search?: string } = {},
+  options: {
+    missingAltOnly?: boolean;
+    emptyAltOnly?: boolean;
+    duplicateAltOnly?: boolean;
+    search?: string;
+  } = {},
 ): Promise<{ rowsWritten: number }> {
   let rowsWritten = 0;
   const header = IMAGES_CSV_HEADER.join(',') + '\n';
@@ -98,6 +103,8 @@ export async function exportImagesToCsv(
     yield '﻿' + header;
     for (const row of db.iterateImages({
       missingAltOnly: options.missingAltOnly,
+      emptyAltOnly: options.emptyAltOnly,
+      duplicateAltOnly: options.duplicateAltOnly,
       search: options.search,
     })) {
       const cells = [

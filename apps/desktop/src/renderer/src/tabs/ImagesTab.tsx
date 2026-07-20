@@ -33,9 +33,12 @@ export function ImagesTab() {
   const [exporting, setExporting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Missing-alt filter is driven by the Overview sidebar's Issues section —
-  // clicking "Images Missing Alt" switches category, which we watch here.
+  // Alt-issue filters are driven by the Overview sidebar's Issues section —
+  // clicking a node switches category, which we watch here. Each maps to a
+  // distinct DB filter so the count shown equals the rows listed.
   const missingAltOnly = activeCategory === 'issues:image-missing-alt';
+  const emptyAltOnly = activeCategory === 'issues:image-empty-alt';
+  const duplicateAltOnly = activeCategory === 'issues:image-duplicate-alt';
 
   useEffect(() => {
     let cancelled = false;
@@ -45,6 +48,8 @@ export function ImagesTab() {
         offset: 0,
         search: search || undefined,
         missingAltOnly,
+        emptyAltOnly,
+        duplicateAltOnly,
       });
       if (cancelled) return;
       setRows(res.rows);
@@ -57,7 +62,7 @@ export function ImagesTab() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [search, missingAltOnly, dataVersion, progress?.running]);
+  }, [search, missingAltOnly, emptyAltOnly, duplicateAltOnly, dataVersion, progress?.running]);
 
   const sorted = useMemo(() => {
     const copy = [...rows];
@@ -92,6 +97,8 @@ export function ImagesTab() {
     try {
       await window.freecrawl.exportImages({
         missingAltOnly,
+        emptyAltOnly,
+        duplicateAltOnly,
         search: search || undefined,
       });
     } finally {
@@ -170,6 +177,16 @@ export function ImagesTab() {
         {missingAltOnly && (
           <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
             {t('imagesTab.missingAltOnly', { defaultValue: 'Missing Alt only' })}
+          </span>
+        )}
+        {emptyAltOnly && (
+          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+            {t('imagesTab.emptyAltOnly', { defaultValue: 'Empty Alt only' })}
+          </span>
+        )}
+        {duplicateAltOnly && (
+          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+            {t('imagesTab.duplicateAltOnly', { defaultValue: 'Duplicate Alt only' })}
           </span>
         )}
         <div className="ml-auto text-[11px] text-surface-500">
@@ -360,8 +377,12 @@ export function ImagesTab() {
               <div className="mb-1 text-sm font-semibold text-surface-300">{t('imagesTab.noImages', { defaultValue: 'No images' })}</div>
               <div className="text-xs text-surface-500">
                 {missingAltOnly
-                  ? 'No images without alt text.'
-                  : 'Crawl a site to discover images.'}
+                  ? t('imagesTab.emptyMissingAlt', { defaultValue: 'No images without alt text.' })
+                  : emptyAltOnly
+                    ? t('imagesTab.emptyEmptyAlt', { defaultValue: 'No images with an empty alt="".' })
+                    : duplicateAltOnly
+                      ? t('imagesTab.emptyDuplicateAlt', { defaultValue: 'No images share the same alt text.' })
+                      : t('imagesTab.emptyDefault', { defaultValue: 'Crawl a site to discover images.' })}
               </div>
             </div>
           </div>

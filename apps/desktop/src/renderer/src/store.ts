@@ -381,14 +381,23 @@ function loadRecentUrls(): string[] {
  * the Settings dialog merges over the defaults so new fields added in
  * later versions still surface (the merge order is `defaults <- saved`).
  *
- * `startUrl` is intentionally NOT restored — every launch starts with an
- * empty URL bar; recent URLs are surfaced via a dropdown instead.
+ * `startUrl` and `mode` are intentionally NOT restored — every launch
+ * starts with an empty URL bar in Spider mode (the common default), so a
+ * one-off List/Sitemap crawl last session doesn't silently carry over.
+ * Recent URLs are surfaced via a dropdown instead. The saved `urlList` /
+ * `seedSitemapUrls` are still restored — only the *active mode* resets.
  */
 function loadInitialConfig(): CrawlConfig {
   if (typeof window === 'undefined' || !window.freecrawl) return DEFAULT_CRAWL_CONFIG;
   const saved = window.freecrawl.prefsGet('crawl-config');
   if (!saved || typeof saved !== 'object') return { ...DEFAULT_CRAWL_CONFIG, startUrl: '' };
-  return { ...DEFAULT_CRAWL_CONFIG, ...(saved as Partial<CrawlConfig>), startUrl: '' };
+  return {
+    ...DEFAULT_CRAWL_CONFIG,
+    ...(saved as Partial<CrawlConfig>),
+    startUrl: '',
+    mode: 'spider',
+    deviceMode: 'desktop',
+  };
 }
 
 /**
@@ -542,7 +551,11 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
   if (cat === 'tab:redirects') return 'redirects';
 
   // Issue groupings whose home tab is obvious.
-  if (cat === 'issues:image-missing-alt' || cat === 'issues:image-empty-alt') {
+  if (
+    cat === 'issues:image-missing-alt' ||
+    cat === 'issues:image-empty-alt' ||
+    cat === 'issues:image-duplicate-alt'
+  ) {
     return 'images';
   }
   if (

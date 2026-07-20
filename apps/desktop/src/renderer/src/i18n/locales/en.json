@@ -70,7 +70,28 @@
     },
     "errorEmptyUrl": "Please enter a starting URL.",
     "errorAddUrl": "URL not accepted (invalid format, already crawled at full depth, or queue full).",
-    "addUrlPrompt": "Add URL to queue:"
+    "addUrlPrompt": "Add URL to queue:",
+    "sitemapPlaceholder": "https://example.com/sitemap.xml",
+    "errorEmptyList": "Add at least one URL to the list first.",
+    "errorEmptySitemap": "Enter a sitemap URL first.",
+    "editList": "Edit URL list ({{n}})",
+    "addList": "Add URL list…",
+    "listTitle": "URL list — one per line",
+    "listDone": "Done",
+    "listCount": "{{n}} URL(s)",
+    "scopeSpiderOnly": "Scope applies to Spider mode only",
+    "mode": {
+      "spider": "Spider",
+      "spiderHint": "Start URL + follow links",
+      "list": "List",
+      "listHint": "Crawl a fixed URL list, no link follow",
+      "sitemap": "Sitemap",
+      "sitemapHint": "Crawl the URLs listed in a sitemap"
+    },
+    "device": {
+      "desktop": "Desktop crawl",
+      "mobile": "Mobile crawl — crawl the site’s mobile version (mobile User-Agent)"
+    }
   },
   "stats": {
     "discovered": "Discovered",
@@ -382,11 +403,14 @@
       "outro": "After clicking Apply or Import, review each panel to verify the values, then press Save at the bottom to persist."
     },
     "mode": {
-      "intro": "Choose how the crawler discovers URLs. Spider follows links from a start URL; List fetches a fixed set.",
+      "intro": "Choose how the crawler discovers URLs. Spider follows links from a start URL; List fetches a fixed set; Sitemap crawls the URLs listed in a sitemap.",
       "crawlMode": "Crawl Mode",
       "spiderOption": "Spider — start URL + follow links",
       "listOption": "List — fetch a fixed URL list, no link follow",
-      "urlList": "URL List (one URL per line)"
+      "sitemapOption": "Sitemap — crawl the URLs listed in a sitemap",
+      "urlList": "URL List (one URL per line)",
+      "sitemapHint": "Enter the sitemap (or sitemap-index) URL in the top bar, then press Start. Every page listed is crawled once and also recorded for the orphan / sitemap reports.",
+      "seedSitemap": "Seed from sitemap URL(s) — optional"
     },
     "crawler": {
       "intro": "Traversal limits and crawl-scope toggles. Screaming Frog equivalents shown in parentheses.",
@@ -969,6 +993,12 @@
   "imagesTab": {
     "searchPlaceholder": "Search image URLs / alt…",
     "missingAltOnly": "Missing Alt only",
+    "emptyAltOnly": "Empty Alt only",
+    "duplicateAltOnly": "Duplicate Alt only",
+    "emptyMissingAlt": "No images without alt text.",
+    "emptyEmptyAlt": "No images with an empty alt=\"\".",
+    "emptyDuplicateAlt": "No images share the same alt text.",
+    "emptyDefault": "Crawl a site to discover images.",
     "imagesUnit": "images",
     "loaded": "{{n}} loaded",
     "row": "Row",

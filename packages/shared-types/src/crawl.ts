@@ -14,12 +14,17 @@ export type CrawlScope = 'subdomain' | 'subfolder' | 'all-subdomains' | 'exact-u
 
 /**
  * Top-level crawl mode.
- *  - `spider` — start from `startUrl`, follow links by `scope`. Default.
- *  - `list`   — fetch every URL in `urlList` exactly once, no link follow.
- *               Used to audit a curated set of URLs (sitemap export,
- *               GSC URL inspection list, etc.).
+ *  - `spider`  — start from `startUrl`, follow links by `scope`. Default.
+ *  - `list`    — fetch every URL in `urlList` exactly once, no link follow.
+ *                Used to audit a curated set of URLs (sitemap export,
+ *                GSC URL inspection list, etc.).
+ *  - `sitemap` — treat `startUrl` as a sitemap (or sitemap-index) URL,
+ *                fetch + parse it, then crawl every `<loc>` it lists
+ *                exactly once (no link follow — like `list`, but the list
+ *                comes from the sitemap). The parsed entries are also
+ *                written to `sitemap_urls` so orphan / sitemap reports work.
  */
-export type CrawlMode = 'spider' | 'list';
+export type CrawlMode = 'spider' | 'list' | 'sitemap';
 
 export type UrlCategory =
   | 'all'
@@ -100,6 +105,7 @@ export type UrlCategory =
   | 'issues:non-200-in-sitemap'
   | 'issues:image-missing-alt'
   | 'issues:image-empty-alt'
+  | 'issues:image-duplicate-alt'
   | 'issues:meta-refresh-used'
   | 'issues:charset-missing'
   | 'issues:amp-validation-errors'
@@ -646,7 +652,22 @@ export interface CrawlConfig {
   mode: CrawlMode;
   /** When `mode === 'list'`, URLs to fetch (one per entry). Ignored in spider mode. */
   urlList: string[];
+  /**
+   * Spider start URL. When `mode === 'sitemap'` this field instead holds
+   * the sitemap (or sitemap-index) URL whose `<loc>` entries are crawled.
+   */
   startUrl: string;
+  /**
+   * Optional sitemap URLs used to *seed* a spider crawl (mode `spider`
+   * only). Their `<loc>` entries are fetched, parsed, and enqueued as
+   * extra depth-0 seeds alongside `startUrl` — so link discovery is
+   * faster/more complete and orphan detection runs against the real
+   * sitemap even when it lives at a non-standard path. Empty = disabled.
+   * Distinct from `discoverSitemaps` (which only records URLs, never
+   * enqueues them) and from `mode === 'sitemap'` (which crawls *only*
+   * the sitemap).
+   */
+  seedSitemapUrls: string[];
   scope: CrawlScope;
   maxDepth: number;
   maxUrls: number;
@@ -654,6 +675,18 @@ export interface CrawlConfig {
   maxRps: number;
   requestTimeoutMs: number;
   userAgent: string;
+  /**
+   * Device the crawl emulates.
+   *  - `desktop` — use `userAgent` as-is (default).
+   *  - `mobile`  — override every request's User-Agent with a smartphone UA
+   *                (`MOBILE_USER_AGENT`) so servers that serve a different
+   *                mobile HTML (dynamic serving / adaptive delivery) return
+   *                their mobile version; in JS-render mode the browser also
+   *                uses a mobile viewport (`isMobile`, touch, DPR 3).
+   * Applies to page fetches, robots.txt, sitemap fetches, and the start-URL
+   * probe — the whole crawl sees the mobile site.
+   */
+  deviceMode: 'desktop' | 'mobile';
   followRedirects: boolean;
   respectRobotsTxt: boolean;
   crawlExternal: boolean;
@@ -1361,6 +1394,9 @@ export interface OverviewCounts {
     totalIndexable: number;
     totalNonIndexable: number;
     totalExternalUrls: number;
+    /** Total distinct images discovered — the correct denominator for the
+     *  image-level alt issues (missing / empty / duplicate alt). */
+    totalImages: number;
   };
   internal: Record<string, number>;
   external: Record<string, number>;
@@ -1470,6 +1506,9 @@ export interface OverviewCounts {
     /** URLs flagged by `isUrlMalformed` (multiple `?`/`#`, control chars, unescaped reserved chars, double-encoding). */
     urlMalformed: number;
     imageEmptyAlt: number;
+    /** Distinct images whose (non-empty) alt text is shared by ≥2 other
+     *  distinct images — non-descriptive / templated alt reuse. */
+    imageDuplicateAlt: number;
     linkEmptyAnchor: number;
     appleTouchIconMissing: number;
     manifestMissing: number;
@@ -1937,6 +1976,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   mode: 'spider',
   urlList: [],
   startUrl: '',
+  seedSitemapUrls: [],
   scope: 'subdomain',
   maxDepth: 10,
   maxUrls: 1_000_000,
@@ -1944,6 +1984,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   maxRps: 20,
   requestTimeoutMs: 20_000,
   userAgent: 'FreeCrawlSEO/0.1 (+https://github.com/kemalai/FreeCrawl-SEO-Tool)',
+  deviceMode: 'desktop',
   followRedirects: true,
   respectRobotsTxt: true,
   crawlExternal: false,

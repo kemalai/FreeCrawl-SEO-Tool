@@ -37,10 +37,11 @@ import {
   type DigestChallenge,
   formatFetchError,
   initHttpClient,
+  MOBILE_USER_AGENT,
   parseDigestChallenge,
 } from './http-client.js';
 import { setActiveDnsHook } from './dns-resolver.js';
-import { discoverSitemapUrls, fetchSitemaps } from './sitemap.js';
+import { discoverSitemapUrls, fetchSitemaps, type SitemapEntry } from './sitemap.js';
 import { runJsonExtractionRules } from './extraction.js';
 import { SessionCookieJar } from './cookie-jar.js';
 import { runBrowserLogin } from './browser-login.js';
@@ -552,6 +553,18 @@ export class Crawler extends EventEmitter {
     this.startedAt = Date.now();
     this.stopped = false;
     this.running = true;
+
+    // Mobile device mode: swap the base User-Agent to a smartphone UA before
+    // ANY request goes out. Every request path (page fetch, robots.txt,
+    // sitemap, start-URL probe, form login) reads `this.config.userAgent`, so
+    // this single overwrite makes the whole crawl see the site's mobile
+    // version on servers that vary HTML by UA. Per-host UA overrides still
+    // win. The JS-render browser context is switched to a mobile viewport
+    // separately in the desktop host (it builds the BrowserPool).
+    if (this.config.deviceMode === 'mobile') {
+      this.config = { ...this.config, userAgent: MOBILE_USER_AGENT };
+    }
+
     this.setOp(`crawl:start:${this.config.startUrl}`);
 
     // Fire an immediate progress event so the UI can flip to "Running"
@@ -577,6 +590,11 @@ export class Crawler extends EventEmitter {
 
     if (this.config.mode === 'list') {
       await this.startListMode();
+      return;
+    }
+
+    if (this.config.mode === 'sitemap') {
+      await this.startSitemapMode();
       return;
     }
 
@@ -660,9 +678,14 @@ export class Crawler extends EventEmitter {
           }
         })
       : Promise.resolve();
-    const sitemapPromise = this.config.discoverSitemaps
-      ? this.discoverAndIngestSitemaps(origin)
-      : Promise.resolve();
+    // Runs when auto-discovery is on OR the user supplied explicit sitemap
+    // seed URLs — both are handled inside `discoverAndIngestSitemaps`, which
+    // writes `sitemap_urls` exactly once (merged) to avoid the replace-all
+    // race, and additionally enqueues the seed entries as crawl seeds.
+    const sitemapPromise =
+      this.config.discoverSitemaps || this.config.seedSitemapUrls.length > 0
+        ? this.discoverAndIngestSitemaps(origin)
+        : Promise.resolve();
 
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
 
@@ -1445,23 +1468,116 @@ export class Crawler extends EventEmitter {
    * queue and the disabled scope so links never get re-enqueued.
    */
   private async startListMode(): Promise<void> {
+    const urls = this.dedupeNormalized(this.config.urlList);
+    if (urls.length === 0) {
+      this.emit('error', 'List mode: urlList is empty (or no entries normalised to valid URLs).');
+      this.finishEmptyFixedCrawl();
+      return;
+    }
+    // Fingerprint: list signature is "list:<count>:<first-url>". Two crawls
+    // with the same first URL + same count look identical — good enough
+    // heuristic; users who really want a fresh start can use Clear.
+    const fingerprint = `list:${urls.length}:${urls[0] ?? ''}`;
+    await this.runFixedUrlCrawl(urls, fingerprint);
+  }
+
+  /**
+   * Sitemap-mode entry point — treat `startUrl` as a sitemap (or
+   * sitemap-index) URL, fetch + parse it, then crawl every `<loc>` it
+   * lists exactly once (no link follow — same engine as List mode). The
+   * parsed entries are also persisted to `sitemap_urls` so the post-crawl
+   * orphan / sitemap-issue reports have data to compare against. Fetch
+   * failures surface as an 'error' event, never thrown.
+   */
+  private async startSitemapMode(): Promise<void> {
+    const sitemapUrl = this.config.startUrl.trim();
+    if (!sitemapUrl) {
+      this.emit('error', 'Sitemap mode: no sitemap URL provided.');
+      this.finishEmptyFixedCrawl();
+      return;
+    }
+
+    this.applyProcessPriority();
+
+    const controller = new AbortController();
+    this.sitemapAbort = controller;
+    // Sitemap fetch gets a longer budget than passive discovery — it is
+    // the crawl's only URL source here, so a slow server shouldn't abort
+    // the whole run prematurely.
+    const t = setTimeout(
+      () => controller.abort(),
+      Math.max(30_000, this.config.requestTimeoutMs * 2),
+    );
+    let entries: SitemapEntry[] = [];
+    try {
+      const sitemapMaxUrls = Math.max(50_000, this.config.maxUrls);
+      const result = await fetchSitemaps([sitemapUrl], {
+        userAgent: this.config.userAgent,
+        signal: controller.signal,
+        timeoutMs: this.config.requestTimeoutMs,
+        maxUrls: sitemapMaxUrls,
+        maxDepth: 3,
+      });
+      entries = result.entries;
+      this.emit(
+        'info',
+        `Sitemap mode: parsed ${result.sitemapsParsed.length}/${result.sitemapsTried.length} sitemap(s), ${entries.length} URL(s)${result.truncated ? ` (truncated at ${sitemapMaxUrls.toLocaleString()})` : ''}`,
+      );
+    } catch (err) {
+      if (!this.stopped) {
+        this.emit(
+          'error',
+          `Sitemap mode: could not fetch ${sitemapUrl} — ${formatFetchError(err)}`,
+        );
+      }
+      this.finishEmptyFixedCrawl();
+      return;
+    } finally {
+      clearTimeout(t);
+      this.sitemapAbort = null;
+    }
+
+    if (this.stopped) return;
+
+    const urls = this.dedupeNormalized(entries.map((e) => e.url));
+    if (urls.length === 0) {
+      this.emit('error', `Sitemap mode: ${sitemapUrl} yielded no crawlable URLs.`);
+      this.finishEmptyFixedCrawl();
+      return;
+    }
+
+    const fingerprint = `sitemap:${sitemapUrl}:${urls.length}`;
+    // Persist entries for orphan / sitemap reports — but only *after* the
+    // reset inside runFixedUrlCrawl, else the DELETE-all in setSitemapUrls
+    // would be wiped by the table reset. The callback runs post-reset.
+    await this.runFixedUrlCrawl(urls, fingerprint, async () => {
+      if (entries.length > 0) {
+        await this.dbCall<void>('setSitemapUrls', [entries]);
+      }
+    });
+  }
+
+  /** Normalise + dedupe a raw URL list, dropping entries that don't
+   *  normalise to a valid URL. Shared by List and Sitemap modes. */
+  private dedupeNormalized(raw: readonly string[]): string[] {
     const urls: string[] = [];
     const seenInList = new Set<string>();
-    for (const raw of this.config.urlList) {
-      const norm = normalizeUrl(raw, undefined, this.urlRewrites);
+    for (const r of raw) {
+      const norm = normalizeUrl(r, undefined, this.urlRewrites);
       if (!norm) continue;
       if (seenInList.has(norm)) continue;
       seenInList.add(norm);
       urls.push(norm);
     }
-    if (urls.length === 0) {
-      this.emit('error', 'List mode: urlList is empty (or no entries normalised to valid URLs).');
-      this.running = false;
-      this.emitProgress();
-      if (!this.stopped) {
-      // Wave 6 — Clean completion clears the checkpoint so the next
-      // app launch doesn't offer to "resume" a crawl that already
-      // finished successfully.
+    return urls;
+  }
+
+  /** Clean-completion path for an empty fixed-URL crawl (List / Sitemap
+   *  with nothing to fetch): stop, clear the resume checkpoint, emit done. */
+  private finishEmptyFixedCrawl(): void {
+    this.running = false;
+    this.emitProgress();
+    if (!this.stopped) {
       try {
         this.db.clearQueueCheckpoint();
       } catch {
@@ -1469,18 +1585,27 @@ export class Crawler extends EventEmitter {
       }
       this.emit('done', this.db.getSummary());
     }
-      return;
-    }
+  }
 
-    // Fingerprint: list signature is "list:<count>:<first-url>". Two crawls
-    // with the same first URL + same count look identical — good enough
-    // heuristic; users who really want a fresh start can use Clear.
-    const fingerprint = `list:${urls.length}:${urls[0] ?? ''}`;
+  /**
+   * Shared engine for the two "fetch a fixed set of URLs, don't follow
+   * links" modes (List and Sitemap). Handles the reset/resume fingerprint,
+   * forces exact-url scope so outlinks never re-enqueue, runs the crawl to
+   * idle, then the standard post-crawl passes. `afterReset` (optional) runs
+   * after the reset/setMeta but before enqueue — used by Sitemap mode to
+   * (re)populate `sitemap_urls` once the table reset has settled.
+   */
+  private async runFixedUrlCrawl(
+    urls: string[],
+    fingerprint: string,
+    afterReset?: () => Promise<void>,
+  ): Promise<void> {
     const previousStart = this.db.getMeta('startUrl');
     if (previousStart !== fingerprint) {
       this.db.reset();
     }
     this.db.setMeta('startUrl', fingerprint);
+    if (afterReset) await afterReset();
 
     // Force exact-url scope so anything fetched in fetchAndProcess never
     // re-enqueues its outlinks, and bake the first URL into startUrl so
@@ -1543,6 +1668,15 @@ export class Crawler extends EventEmitter {
    * instead of staring at an empty table for 3–4 s while a 20k-URL
    * sitemap is fetched. Errors are surfaced via 'error' / 'info' events,
    * never thrown — sitemap discovery is best-effort.
+   *
+   * Handles two sources in one pass so `sitemap_urls` is written exactly
+   * once (it is a replace-all table — two concurrent writers would clobber
+   * each other):
+   *   1. Auto-discovered roots (robots.txt + conventional paths), when
+   *      `discoverSitemaps` is on. Recorded only.
+   *   2. User-supplied `seedSitemapUrls` (spider mode). Recorded AND their
+   *      `<loc>` entries are enqueued as extra depth-0 crawl seeds — so a
+   *      sitemap at a non-standard path still feeds discovery + reports.
    */
   private async discoverAndIngestSitemaps(origin: string): Promise<void> {
     try {
@@ -1555,32 +1689,65 @@ export class Crawler extends EventEmitter {
         Math.max(5000, this.config.requestTimeoutMs),
       );
       try {
-        const roots = await discoverSitemapUrls(
-          origin,
-          this.config.userAgent,
-          controller.signal,
-        );
-        // If stop() ran while we were discovering, bail without ingesting
-        // — otherwise a zombie 'info' / 'sitemap_urls' write leaks into
-        // whatever crawl ran next.
-        if (this.stopped) return;
         // Sitemap entry cap follows the crawl-level cap so 1M-URL crawls
         // can ingest the full sitemap, with a sensible floor for tiny caps.
         const sitemapMaxUrls = Math.max(50_000, this.config.maxUrls);
-        const result = await fetchSitemaps(roots, {
+        const fetchOpts = {
           userAgent: this.config.userAgent,
           signal: controller.signal,
           timeoutMs: this.config.requestTimeoutMs,
           maxUrls: sitemapMaxUrls,
           maxDepth: 3,
-        });
-        if (this.stopped) return;
-        await this.dbCall<void>('setSitemapUrls', [result.entries]);
-        if (result.entries.length > 0) {
+        };
+
+        // (1) Auto-discovered sitemaps — recorded only.
+        let autoEntries: SitemapEntry[] = [];
+        if (this.config.discoverSitemaps) {
+          const roots = await discoverSitemapUrls(
+            origin,
+            this.config.userAgent,
+            controller.signal,
+          );
+          // If stop() ran while we were discovering, bail without ingesting
+          // — otherwise a zombie 'info' / 'sitemap_urls' write leaks into
+          // whatever crawl ran next.
+          if (this.stopped) return;
+          const res = await fetchSitemaps(roots, fetchOpts);
+          if (this.stopped) return;
+          autoEntries = res.entries;
+          if (res.entries.length > 0) {
+            this.emit(
+              'info',
+              `Sitemap: parsed ${res.sitemapsParsed.length}/${res.sitemapsTried.length}, ${res.entries.length} URLs${res.truncated ? ` (truncated at ${sitemapMaxUrls.toLocaleString()})` : ''}`,
+            );
+          }
+        }
+
+        // (2) User-supplied seed sitemaps — recorded AND enqueued.
+        let seedEntries: SitemapEntry[] = [];
+        if (this.config.seedSitemapUrls.length > 0) {
+          const res = await fetchSitemaps(this.config.seedSitemapUrls, fetchOpts);
+          if (this.stopped) return;
+          seedEntries = res.entries;
+          let seeded = 0;
+          for (const e of res.entries) {
+            const norm = normalizeUrl(e.url, undefined, this.urlRewrites);
+            if (!norm) continue;
+            this.enqueue({ url: norm, depth: 0 });
+            seeded++;
+          }
           this.emit(
             'info',
-            `Sitemap: parsed ${result.sitemapsParsed.length}/${result.sitemapsTried.length}, ${result.entries.length} URLs${result.truncated ? ` (truncated at ${sitemapMaxUrls.toLocaleString()})` : ''}`,
+            `Sitemap seed: ${seeded} URL(s) from ${res.sitemapsParsed.length}/${res.sitemapsTried.length} sitemap(s) queued as crawl seeds`,
           );
+        }
+
+        // Single merged write — seed entries first so their source wins on
+        // `<loc>` conflicts (ON CONFLICT DO NOTHING keeps the first).
+        if (this.stopped) return;
+        const merged = [...seedEntries, ...autoEntries];
+        if (merged.length > 0) {
+          await this.dbCall<void>('setSitemapUrls', [merged]);
         }
       } finally {
         clearTimeout(t);

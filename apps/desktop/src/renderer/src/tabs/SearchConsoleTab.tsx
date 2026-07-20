@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Search, RefreshCw } from 'lucide-react';
+import { InfoTip } from '../components/InfoTip.js';
 import type {
   GoogleAuthState,
   GscFetchMeta,
@@ -426,7 +427,15 @@ export function SearchConsoleTab() {
       >
         <div className="flex-1 px-2">{t('gscTab.colUrl', { defaultValue: 'URL' })}</div>
         <div className="w-[54px] shrink-0 text-center">{t('gscTab.colStatus', { defaultValue: 'Status' })}</div>
-        <div className="w-[64px] shrink-0 text-center">{t('gscTab.colVerdict', { defaultValue: 'Index' })}</div>
+        <div className="flex w-[64px] shrink-0 items-center justify-center gap-1">
+          {t('gscTab.colVerdict', { defaultValue: 'Index' })}
+          <InfoTip
+            info={
+              "Google's index status, pulled from the URL Inspection API — not the Fetch button. Click \"Inspect (top 100)\" to fill this column; Fetch only pulls clicks / impressions / position."
+            }
+            example={'PASS = indexed · FAIL = not indexed · PART/NEU = discovered but not yet indexed'}
+          />
+        </div>
         <div className="w-[72px] shrink-0 text-right">{t('gscTab.colClicks', { defaultValue: 'Clicks' })}</div>
         <div className="w-[92px] shrink-0 text-right">{t('gscTab.colImpr', { defaultValue: 'Impressions' })}</div>
         <div className="w-[64px] shrink-0 text-right">{t('gscTab.colCtr', { defaultValue: 'CTR' })}</div>

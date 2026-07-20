@@ -155,6 +155,7 @@ const INFO: UrlCategory[] = [
   'issues:favicon-missing',
   'issues:url-many-params',
   'issues:image-empty-alt',
+  'issues:image-duplicate-alt',
   'issues:high-boilerplate',
   'issues:crawled-not-in-sitemap',
   'issues:h1-too-long',

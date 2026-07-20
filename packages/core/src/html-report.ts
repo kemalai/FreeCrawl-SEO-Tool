@@ -140,6 +140,7 @@ const ISSUES: IssueDef[] = [
   { key: 'urlFragment', label: 'Fragment in URL', severity: 'info' },
   { key: 'urlSpaces', label: 'Spaces in URL', severity: 'warn' },
   { key: 'imageEmptyAlt', label: 'Image Empty Alt', severity: 'info' },
+  { key: 'imageDuplicateAlt', label: 'Image Duplicate Alt', severity: 'warn' },
   { key: 'linkEmptyAnchor', label: 'Empty Anchor Text', severity: 'warn' },
   { key: 'titlePixelWidthTooLong', label: 'Title Pixel Width >600px', severity: 'warn' },
   { key: 'metaPixelWidthTooLong', label: 'Meta Description Pixel Width >990px', severity: 'warn' },

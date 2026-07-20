@@ -783,7 +783,12 @@ export function buildTools(): Tool[] {
             type: 'string',
             description: 'Substring match against src or alt.',
           },
-          missingAltOnly: { type: 'boolean' },
+          missingAltOnly: { type: 'boolean', description: 'Only images with no alt attribute.' },
+          emptyAltOnly: { type: 'boolean', description: 'Only images with an explicit empty alt="".' },
+          duplicateAltOnly: {
+            type: 'boolean',
+            description: 'Only images whose non-empty alt text is shared by ≥2 distinct images.',
+          },
           internalOnly: { type: 'boolean' },
           limit: { type: 'integer', minimum: 1, maximum: 5000 },
           offset: { type: 'integer', minimum: 0 },
@@ -795,6 +800,8 @@ export function buildTools(): Tool[] {
           offset: clamp(args.offset, 0, 10_000_000, 0),
           search: typeof args.search === 'string' ? args.search : undefined,
           missingAltOnly: args.missingAltOnly === true,
+          emptyAltOnly: args.emptyAltOnly === true,
+          duplicateAltOnly: args.duplicateAltOnly === true,
           internalOnly: args.internalOnly === true,
         }),
     },
@@ -1436,12 +1443,17 @@ export function buildTools(): Tool[] {
     {
       requiresDb: false,
       name: 'export_images',
-      description: 'Export every image the crawler saw to a CSV with src/alt/dimensions/byte_size/is_internal. Honours the Images tab\'s "Missing Alt only" toggle and search box.',
+      description: 'Export every image the crawler saw to a CSV with src/alt/dimensions/byte_size/is_internal. Honours the Images tab\'s alt filters (missing / empty / duplicate) and search box.',
       inputSchema: {
         type: 'object',
         properties: {
           filePath: { type: 'string' },
-          missingAltOnly: { type: 'boolean' },
+          missingAltOnly: { type: 'boolean', description: 'Only images with no alt attribute.' },
+          emptyAltOnly: { type: 'boolean', description: 'Only images with an explicit empty alt="".' },
+          duplicateAltOnly: {
+            type: 'boolean',
+            description: 'Only images whose non-empty alt is shared by ≥2 distinct images.',
+          },
           search: { type: 'string', description: 'Substring filter on src or alt.' },
         },
         required: ['filePath'],

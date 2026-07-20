@@ -11,6 +11,10 @@ interface Node {
   label: string;
   category?: UrlCategory;
   count?: number;
+  /** Denominator for this node's "% of Total". Defaults to the tree-wide
+   *  total (internal URLs); image-level nodes override it with the total
+   *  image count so an image ÷ page ratio never shows a bogus %. */
+  percentBase?: number;
   children?: Node[];
 }
 
@@ -231,7 +235,10 @@ const TreeNode = memo(function TreeNode({
               {node.count.toLocaleString()}
             </span>
             <span className="w-14 text-right font-mono tabular-nums text-surface-500">
-              {total > 0 ? ((node.count / total) * 100).toFixed(2) + '%' : '—'}
+              {(() => {
+                const base = node.percentBase ?? total;
+                return base > 0 ? ((node.count / base) * 100).toFixed(2) + '%' : '—';
+              })()}
             </span>
           </>
         )}
@@ -1378,12 +1385,21 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Missing Alt',
               count: o.issues.imageMissingAlt,
               category: 'issues:image-missing-alt',
+              percentBase: o.summary.totalImages,
             },
             {
               key: 'issues-images-empty-alt',
               label: 'Empty Alt',
               count: o.issues.imageEmptyAlt,
               category: 'issues:image-empty-alt',
+              percentBase: o.summary.totalImages,
+            },
+            {
+              key: 'issues-images-duplicate-alt',
+              label: 'Duplicate Alt Text',
+              count: o.issues.imageDuplicateAlt,
+              category: 'issues:image-duplicate-alt',
+              percentBase: o.summary.totalImages,
             },
             {
               key: 'issues-images-no-lazy-loading',

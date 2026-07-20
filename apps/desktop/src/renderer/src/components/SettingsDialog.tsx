@@ -74,6 +74,7 @@ interface FormState {
   // mode
   mode: CrawlMode;
   urlListText: string;
+  seedSitemapText: string;
   // crawler
   maxDepth: string;
   maxUrls: string;
@@ -403,6 +404,7 @@ function configToForm(c: CrawlConfig): FormState {
   return {
     mode: c.mode,
     urlListText: (c.urlList ?? []).join('\n'),
+    seedSitemapText: (c.seedSitemapUrls ?? []).join('\n'),
     maxDepth: String(c.maxDepth),
     maxUrls: String(c.maxUrls),
     maxConcurrency: String(c.maxConcurrency),
@@ -617,6 +619,7 @@ export function SettingsDialog({ open, onClose }: Props) {
     setConfig({
       mode: form.mode,
       urlList: parseLines(form.urlListText),
+      seedSitemapUrls: parseLines(form.seedSitemapText),
       maxDepth: Math.max(0, num(form.maxDepth, config.maxDepth)),
       maxUrls: Math.max(1, num(form.maxUrls, config.maxUrls)),
       maxConcurrency: Math.max(1, Math.min(200, num(form.maxConcurrency, config.maxConcurrency))),
@@ -1214,13 +1217,13 @@ function ModePanel({ form, update }: PanelProps) {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        {t('settingsPanels.mode.intro', { defaultValue: 'Choose how the crawler discovers URLs. Spider follows links from a start URL; List fetches a fixed set.' })}
+        {t('settingsPanels.mode.intro', { defaultValue: 'Choose how the crawler discovers URLs. Spider follows links from a start URL; List fetches a fixed set; Sitemap crawls the URLs listed in a sitemap.' })}
       </p>
       <label className="mb-2 flex flex-col gap-1">
         <FieldLabel
           label={t('settingsPanels.mode.crawlMode', { defaultValue: 'Crawl Mode' })}
-          info="Spider follows links from the start URL across the chosen scope. List fetches a fixed set of URLs once with no link-following."
-          example="Spider for full site audits; List for re-checking a known set of pages."
+          info="Spider follows links from the start URL across the chosen scope. List fetches a fixed set of URLs once with no link-following. Sitemap fetches a sitemap URL and crawls every page it lists (no link-following)."
+          example="Spider for full site audits; List for re-checking a known set of pages; Sitemap to audit exactly what's published in sitemap.xml."
         />
         <select
           className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
@@ -1233,6 +1236,9 @@ function ModePanel({ form, update }: PanelProps) {
           <option value="list">
             {t('settingsPanels.mode.listOption', { defaultValue: 'List — fetch a fixed URL list, no link follow' })}
           </option>
+          <option value="sitemap">
+            {t('settingsPanels.mode.sitemapOption', { defaultValue: 'Sitemap — crawl the URLs listed in a sitemap' })}
+          </option>
         </select>
       </label>
       {form.mode === 'list' && (
@@ -1244,6 +1250,25 @@ function ModePanel({ form, update }: PanelProps) {
           placeholder={'https://example.com/\nhttps://example.com/about\nhttps://example.com/contact'}
           info="One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored."
           example={'https://example.com/about\nhttps://example.com/pricing\n# old urls\nhttps://example.com/legacy'}
+        />
+      )}
+      {form.mode === 'sitemap' && (
+        <p className="rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
+          {t('settingsPanels.mode.sitemapHint', {
+            defaultValue:
+              'Enter the sitemap (or sitemap-index) URL in the top bar, then press Start. Every page listed is crawled once and also recorded for the orphan / sitemap reports.',
+          })}
+        </p>
+      )}
+      {form.mode === 'spider' && (
+        <Area
+          label={t('settingsPanels.mode.seedSitemap', { defaultValue: 'Seed from sitemap URL(s) — optional' })}
+          value={form.seedSitemapText}
+          onChange={(v) => update('seedSitemapText', v)}
+          rows={4}
+          placeholder={'https://example.com/sitemap.xml'}
+          info="One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable."
+          example={'https://example.com/sitemap_index.xml\nhttps://example.com/news-sitemap.xml'}
         />
       )}
     </>

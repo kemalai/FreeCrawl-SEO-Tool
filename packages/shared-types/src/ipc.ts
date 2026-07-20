@@ -409,7 +409,12 @@ export interface ImagesQueryInput {
   limit: number;
   offset: number;
   search?: string;
+  /** Only images with no `alt` attribute (accessibility/SEO issue). */
   missingAltOnly?: boolean;
+  /** Only images with an explicit empty `alt=""` (decorative). */
+  emptyAltOnly?: boolean;
+  /** Only images whose non-empty alt text is shared by ≥2 distinct images. */
+  duplicateAltOnly?: boolean;
   internalOnly?: boolean;
 }
 
@@ -522,6 +527,10 @@ export interface ExportImagesInput {
   /** When true, export only images with no `alt` attribute. Mirrors
    *  the Images tab's "Missing Alt only" sidebar filter. */
   missingAltOnly?: boolean;
+  /** Export only images with an explicit empty `alt=""` (decorative). */
+  emptyAltOnly?: boolean;
+  /** Export only images whose non-empty alt is shared by ≥2 distinct images. */
+  duplicateAltOnly?: boolean;
   /** Free-text URL/alt filter (substring match, case-insensitive).
    *  Mirrors the tab's search box. */
   search?: string;

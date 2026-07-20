@@ -662,6 +662,18 @@ function truncateUtf8(input: string, cap: number): string {
   return buf.subarray(0, end).toString('utf8');
 }
 
+/**
+ * SQL predicate (against the `images` table) matching images whose
+ * non-empty alt text is shared by ≥2 distinct images. The `images` table
+ * is deduped by `src`, so a self-join via `GROUP BY alt HAVING COUNT(*) > 1`
+ * yields alt texts reused across different image files — non-descriptive /
+ * templated alt. Shared by the overview count, `queryImages`, and the CSV
+ * export so all three agree on what "duplicate alt" means.
+ */
+const DUPLICATE_ALT_PREDICATE = `alt IS NOT NULL AND alt != '' AND alt IN (
+  SELECT alt FROM images WHERE alt IS NOT NULL AND alt != '' GROUP BY alt HAVING COUNT(*) > 1
+)`;
+
 export class ProjectDb {
   private readonly db: DatabaseSync;
   private readonly stmtUpsertUrl: StatementSync;
@@ -4434,6 +4446,8 @@ export class ProjectDb {
     offset: number;
     search?: string;
     missingAltOnly?: boolean;
+    emptyAltOnly?: boolean;
+    duplicateAltOnly?: boolean;
     internalOnly?: boolean;
   }): { rows: ImageRow[]; total: number } {
     const where: string[] = [];
@@ -4443,6 +4457,12 @@ export class ProjectDb {
     }
     if (params.missingAltOnly) {
       where.push('alt IS NULL');
+    }
+    if (params.emptyAltOnly) {
+      where.push("alt = ''");
+    }
+    if (params.duplicateAltOnly) {
+      where.push(DUPLICATE_ALT_PREDICATE);
     }
     if (params.search) {
       where.push('(src LIKE ? OR alt LIKE ?)');
@@ -4557,6 +4577,9 @@ export class ProjectDb {
     const totalNonIndexable = countWhere(
       "is_external = 0 AND content_kind = 'html' AND indexability LIKE 'non-indexable%'",
     );
+    const totalImages = (
+      this.db.prepare('SELECT COUNT(*) AS c FROM images').get() as { c: number }
+    ).c;
 
     return {
       summary: {
@@ -4564,6 +4587,7 @@ export class ProjectDb {
         totalIndexable,
         totalNonIndexable,
         totalExternalUrls,
+        totalImages,
       },
       internal: {
         all: totalInternalUrls,
@@ -4796,6 +4820,15 @@ export class ProjectDb {
           c: number;
         }
       ).c,
+      // Distinct images sharing a non-empty alt with ≥1 other image —
+      // non-descriptive / templated alt reuse. Counted image-level (the
+      // `images` table is deduped by src) so it lines up with the Images
+      // tab drill-down and with Missing/Empty Alt.
+      imageDuplicateAlt: (
+        this.db
+          .prepare(`SELECT COUNT(*) AS c FROM images WHERE ${DUPLICATE_ALT_PREDICATE}`)
+          .get() as { c: number }
+      ).c,
       metaRefreshUsed: countWhere(
         `${html} AND meta_refresh IS NOT NULL AND meta_refresh != ''`,
       ),
@@ -4861,7 +4894,14 @@ export class ProjectDb {
         `${html} AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)`,
       ),
       urlMalformed: countWhere(`${html} AND url_malformed = 1`),
-      imageEmptyAlt: countWhere(`${html} AND images_empty_alt > 0`),
+      // Image-level (was page-level `images_empty_alt > 0`): count distinct
+      // images with an explicit `alt=""` so it's the same unit as Missing
+      // Alt and matches the Images tab drill-down.
+      imageEmptyAlt: (
+        this.db.prepare("SELECT COUNT(*) AS c FROM images WHERE alt = ''").get() as {
+          c: number;
+        }
+      ).c,
       linkEmptyAnchor: countWhere(`${html} AND empty_anchor_count > 0`),
       appleTouchIconMissing: countWhere(
         `${html} AND status_code >= 200 AND status_code < 300
@@ -5831,11 +5871,15 @@ export class ProjectDb {
    */
   *iterateImages(options: {
     missingAltOnly?: boolean;
+    emptyAltOnly?: boolean;
+    duplicateAltOnly?: boolean;
     search?: string;
   } = {}): IterableIterator<ImageRow> {
     const where: string[] = [];
     const args: (string | number)[] = [];
     if (options.missingAltOnly) where.push('alt IS NULL');
+    if (options.emptyAltOnly) where.push("alt = ''");
+    if (options.duplicateAltOnly) where.push(DUPLICATE_ALT_PREDICATE);
     if (options.search) {
       where.push('(src LIKE ? OR alt LIKE ?)');
       const like = `%${options.search}%`;
