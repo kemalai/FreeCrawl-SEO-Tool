@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.9.0] — 2026-07-21
+
+### Added
+- The link visualiser now opens in WebGL 3D — a force-directed crawl tree and link graph you can orbit and fly through, matching how large sites are usually explored.
+- Crawl Tree and Directory Tree stay 2D and gained click-to-collapse branches, so a 100K-URL site can be folded down to the part you care about.
+- Hovering any node now shows a summary card with title, response code, indexability, H1, depth, inlinks, outlinks, and word count instead of just the URL.
+- Long crawls on macOS now hold a power assertion so App Nap can't throttle them while the window is in the background.
+- Crawl concurrency now scales down automatically as macOS reports rising thermal pressure, so fanless Macs degrade gracefully instead of stalling.
+
+### Changed
+- macOS keyboard shortcuts now match Windows — Cmd+C and the rest of the edit shortcuts work everywhere in the app.
+- Encrypted project save and open now stream, so protecting a multi-gigabyte project no longer depends on it fitting in memory.
+- Exports that must build the whole file in memory now check available headroom first and suggest a streaming format instead of failing late.
+- The Top Anchor Texts panel is now a ranked list with usage bars, replacing the hard-to-read word cloud.
+
+### Fixed
+- Fixed a crash that could end a long crawl on macOS during the post-crawl phase by running out of memory.
+- Fixed sidebar filter counts that didn't match the rows you got when clicking them, across Response Codes, Security, and Indexability.
+- Fixed word count including JavaScript and CSS from the page, which inflated it many times over and broke the thin-content, empty-page, and readability checks.
+- Fixed boilerplate detection reporting every sampled page as fully templated regardless of the site.
+- Various visualisation and performance refinements.
+
 ## [0.8.9] — 2026-07-20
 
 ### Added
