@@ -80,6 +80,11 @@ export function OverviewSidebar() {
           overviewAppliedRef.current = seq;
           setOverview(o);
         }
+      } catch {
+        // Heavy aggregates no longer fall back to the main thread when
+        // the reader worker is down — the call rejects instead. Keep
+        // the previous counts; the next poll tick retries against the
+        // respawned worker.
       } finally {
         inFlight = false;
       }
@@ -129,12 +134,17 @@ export function OverviewSidebar() {
     if (bucket === lastRefetchAtRef.current) return;
     lastRefetchAtRef.current = bucket;
     const seq = ++overviewSeqRef.current;
-    void window.freecrawl.overviewGet().then((o) => {
-      if (seq > overviewAppliedRef.current) {
-        overviewAppliedRef.current = seq;
-        setOverview(o);
-      }
-    });
+    void window.freecrawl
+      .overviewGet()
+      .then((o) => {
+        if (seq > overviewAppliedRef.current) {
+          overviewAppliedRef.current = seq;
+          setOverview(o);
+        }
+      })
+      .catch(() => {
+        // Reader worker down — keep previous counts, retry next bucket.
+      });
   }, [progressCrawled, progressRunning, setOverview]);
 
   const toggle = (k: string) => {

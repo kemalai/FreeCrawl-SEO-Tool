@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/desktop",
-  "version": "0.8.9",
+  "version": "0.9.0",
   "private": true,
   "description": "FreeCrawl SEO â€” desktop application",
   "homepage": "https://github.com/kemalai/FreeCrawl-SEO-Tool",
@@ -35,6 +35,7 @@
     "@tanstack/react-table": "^8.20.5",
     "@tanstack/react-virtual": "^3.10.0",
     "@types/cytoscape": "^3.21.9",
+    "3d-force-graph": "^1.80.0",
     "clsx": "^2.1.1",
     "cytoscape": "^3.33.2",
     "cytoscape-dagre": "^2.5.0",

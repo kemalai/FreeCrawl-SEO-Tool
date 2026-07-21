@@ -13,7 +13,7 @@ upgrading is the recommended remediation path.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| Latest stable (currently `0.3.x`) | Yes |
+| Latest stable (currently `0.9.x`) | Yes |
 | Older `0.x` releases              | No  |
 
 Release artifacts are published at:
@@ -60,8 +60,8 @@ possible:
   layer (`@freecrawl/db`), desktop shell, MCP server, or CLI
 - **Affected version(s)** — output of `Help → About`, or the `version`
   field in `package.json`
-- **Operating system + architecture** — Windows 11 / macOS 14 (Intel or
-  ARM64) / Linux distro
+- **Operating system + architecture** — Windows 10/11, macOS 13 or newer
+  (Intel or Apple Silicon), or your Linux distribution
 - **Reproduction steps** — minimal sequence that triggers the issue
 - **Proof-of-concept** — screenshot, video, or minimal code
 - **Impact assessment** — confidentiality / integrity / availability
@@ -143,12 +143,16 @@ Releases. The artifacts are produced by an automated GitHub Actions
 workflow defined in `.github/workflows/release.yml`. SHA512 digests are
 published alongside each release in `latest.yml` / `latest-mac.yml`.
 
-Code-signing for Windows installers is being established through
-[SignPath.io](https://signpath.io)'s open-source signing program. Once
-active, all `.exe` artifacts will be signed and the application will
-verify the publisher signature before applying any in-app update. macOS
-artifacts are currently unsigned; users should verify the SHA512 digest
-manually until Apple Developer ID notarization is in place.
+**Release artifacts are currently unsigned on every platform.** Verify
+the SHA512 digest of anything you download against the value published
+with the release before running it. Expect the usual first-launch
+warnings: SmartScreen on Windows, and Gatekeeper on macOS (documented
+in the README, along with the `xattr -cr` workaround).
+
+Code-signing for Windows installers is being pursued through
+[SignPath.io](https://signpath.io)'s open-source signing program, and
+macOS notarization requires an Apple Developer ID. Neither is active
+yet; this section will be updated when that changes.
 
 If you encounter an installer that fails signature verification or
 appears to come from any source other than the official GitHub Releases
@@ -167,9 +171,19 @@ page above, **do not run it** — please report it via the channels above.
   the crawls the user explicitly initiates and (when enabled) the
   on-demand "Check for Updates" call to the GitHub Releases API.
 - **Project files (`.seoproject`)** are SQLite databases containing
-  crawled content. They are not encrypted at rest in the current
-  release — users handling sensitive data should rely on full-disk
-  encryption at the OS level.
+  crawled content, and are **not** encrypted by default. Two options
+  exist for sensitive crawls:
+  - **Save As Encrypted** writes a password-protected snapshot
+    (AES-256-GCM, per-file random salt and IV, PBKDF2-SHA256 key
+    derivation at 200 000 iterations, authenticated header). Opening it
+    decrypts to a working copy, so the *open* project is still plaintext
+    on disk for the duration of the session.
+  - **RAM-only storage mode** keeps the crawl in memory and never writes
+    a project file at all.
+
+  Users handling sensitive data should still enable full-disk encryption
+  at the OS level — it is the only thing that protects the working copy
+  and SQLite's temporary files.
 
 ---
 

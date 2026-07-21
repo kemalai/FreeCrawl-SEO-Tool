@@ -922,7 +922,18 @@ export function parseHtml(
   }
   const mixedContentCount = mixedContentActive + mixedContentPassive;
 
-  const text = $('body').text().replace(/\s+/g, ' ').trim();
+  // Visible body prose. `$('body').text()` alone also returns the text
+  // nodes *inside* `<script>` / `<style>` / `<noscript>`, so on a
+  // JS-heavy page the minified bundle is counted as content: a real
+  // 400-word product page measured 12,900 "words", and every readability
+  // score was computed over JavaScript source. Strip those subtrees
+  // first — the same thing `textCodeRatio` does below, for the same
+  // reason. Note this deliberately keeps nav / header / footer copy
+  // (unlike `extractMainContentText`) so thin-content thresholds keep
+  // measuring the whole rendered page.
+  const $visibleBody = $('body').clone();
+  $visibleBody.find('script, style, noscript').remove();
+  const text = $visibleBody.text().replace(/\s+/g, ' ').trim();
   const wordCount = text.length > 0 ? text.split(' ').filter(Boolean).length : 0;
   const readability = computeReadability(text, wordCount);
 
@@ -1008,19 +1019,14 @@ export function parseHtml(
   const hasNofollow = metaRobots !== null && metaRobots.includes('nofollow');
 
   // Text/code ratio — visible body text bytes divided by raw HTML bytes,
-  // rounded to integer percent. Cheap to compute right next to the body
-  // text-length pass below. We strip <script>/<style>/<noscript> contents
-  // out of the visible-text count because their inner text isn't user-
-  // facing content (and would inflate the ratio on JS-heavy SPAs that
-  // ship a 200 KB script tag with no markup). Null when the body is
-  // empty or the HTML body byte count is zero.
+  // rounded to integer percent. Reuses the script/style/noscript-stripped
+  // `text` computed above: their inner text isn't user-facing content and
+  // would inflate the ratio on JS-heavy SPAs that ship a 200 KB script tag
+  // with no markup. Null when the HTML body byte count is zero.
   const totalHtmlBytes = Buffer.byteLength(html, 'utf8');
   let textCodeRatio: number | null = null;
   if (totalHtmlBytes > 0) {
-    const $body = $('body').clone();
-    $body.find('script, style, noscript').remove();
-    const visibleText = $body.text().replace(/\s+/g, ' ').trim();
-    const visibleBytes = Buffer.byteLength(visibleText, 'utf8');
+    const visibleBytes = Buffer.byteLength(text, 'utf8');
     textCodeRatio = Math.min(100, Math.round((visibleBytes / totalHtmlBytes) * 100));
   }
 

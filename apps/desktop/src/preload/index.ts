@@ -471,6 +471,7 @@ const api: FreeCrawlApi = {
   onDone: (cb) => subscribe<CrawlSummary>(IPC.crawlDone, cb),
   onError: (cb) => subscribe<string>(IPC.crawlError, cb),
   onMenuEvent: (cb) => subscribe<MenuEvent>(IPC.menuEvent, cb),
+  editCopyNative: (): Promise<void> => ipcRenderer.invoke(IPC.editCopyNative),
   onDataChanged: (cb) => {
     const listener = (): void => cb();
     ipcRenderer.on(IPC.dataChanged, listener);

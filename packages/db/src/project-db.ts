@@ -2304,8 +2304,11 @@ export class ProjectDb {
    * Why sampling instead of full-crawl pass: at 100K URLs × 50KB body
    * × 100 unique 5-word shingles, a full pass needs ~5GB of working
    * memory for the shingle→pageSet inverted index. Sampling 2K bodies
-   * keeps it under 200MB while still surfacing the same boilerplate
-   * (templated chrome doesn't change between page 2000 and page 100000).
+   * keeps the shingle index under ~60MB while still surfacing the same
+   * boilerplate (templated chrome doesn't change between page 2000 and
+   * page 100000). Bodies themselves are streamed in small batches with
+   * a per-body SUBSTR cap (see Phase 1) so raw HTML never accumulates
+   * in the JS heap — the sampled-index budget above is the whole cost.
    *
    * Pages with < shingleSize words contribute nothing (no shingles
    * generated) and get coverage = 0.
@@ -2350,6 +2353,15 @@ export class ProjectDb {
         .replace(/<script[\s\S]*?<\/script>/gi, ' ')
         .replace(/<style[\s\S]*?<\/style>/gi, ' ')
         .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+        // Unterminated trailing block. Bodies arrive truncated (the
+        // crawler's 1 MB snapshot cap, plus the SUBSTR cap below), so the
+        // cut routinely lands inside a <script>. The paired patterns above
+        // need a closing tag to match, so without this the whole minified
+        // bundle survives tag-stripping and becomes "text" — on a real
+        // crawl that turned 400 words of prose into 8,300 JS tokens, and
+        // since those tokens are near-identical across pages every shingle
+        // looked like boilerplate and coverage pinned at 100% site-wide.
+        .replace(/<(?:script|style|noscript)\b[\s\S]*$/i, ' ')
         .replace(/<!--[\s\S]*?-->/g, ' ')
         .replace(/<[^>]+>/g, ' ')
         .replace(/&[#a-z0-9]+;/gi, ' ')
@@ -2374,26 +2386,55 @@ export class ProjectDb {
     const pageShingles = new Map<number, Set<number>>();
     const shingleCounts = new Map<number, number>();
 
-    const rows = this.db
-      .prepare(
-        `SELECT u.id AS id, us.body AS body
-           FROM urls u
-           JOIN url_sources us ON us.url_id = u.id
-          WHERE u.is_external = 0
-            AND u.content_kind = 'html'
-            AND us.body IS NOT NULL
-            AND LENGTH(us.body) > 0
-          ORDER BY u.id
-          LIMIT ?`,
-      )
-      .all(sampleSize) as { id: number; body: string }[];
-
-    for (const row of rows) {
-      const shingles = shingleHashes(stripHtml(row.body));
-      pageShingles.set(row.id, shingles);
-      for (const h of shingles) {
-        shingleCounts.set(h, (shingleCounts.get(h) ?? 0) + 1);
+    // Bodies are read in small keyset-paginated batches, each body
+    // capped via SUBSTR, then shingled and dropped before the next
+    // batch loads. The previous single `.all(sampleSize)` materialised
+    // every sampled body at once — with 1 MB snapshot caps that's up
+    // to 2 GB of JS strings (4 GB the moment a body contains one
+    // non-Latin-1 char and V8 switches to two-byte strings), which
+    // blew Electron's hard 4 GB pointer-compression heap ceiling and
+    // crashed the app post-crawl. Peak is now ~BATCH × cap ≈ 25 MB.
+    //
+    // The cap matches the crawler's 1 MB body-snapshot ceiling, so a
+    // stored body is read whole and the shingle set covers the real
+    // page rather than its first third. An earlier 200K cap looked
+    // safer but skewed the result badly: it cut deep inside the inline
+    // JS most pages carry, and everything after that cut is unique
+    // *content*, so pages lost their distinguishing shingles while
+    // keeping the shared chrome — coverage collapsed to 100% for every
+    // sampled page. Peak heap stays bounded by BATCH × cap ≈ 64 MB,
+    // versus the ~2 GB the pre-batching `.all(sampleSize)` reached.
+    const BATCH = 64;
+    const BODY_CHAR_CAP = 1_048_576;
+    const pickBatch = this.db.prepare(
+      `SELECT u.id AS id, SUBSTR(us.body, 1, ${BODY_CHAR_CAP}) AS body
+         FROM urls u
+         JOIN url_sources us ON us.url_id = u.id
+        WHERE u.id > ?
+          AND u.is_external = 0
+          AND u.content_kind = 'html'
+          AND us.body IS NOT NULL
+          AND LENGTH(us.body) > 0
+        ORDER BY u.id
+        LIMIT ?`,
+    );
+    let lastId = 0;
+    let remaining = sampleSize;
+    while (remaining > 0) {
+      const batch = pickBatch.all(lastId, Math.min(BATCH, remaining)) as {
+        id: number;
+        body: string;
+      }[];
+      if (batch.length === 0) break;
+      for (const row of batch) {
+        const shingles = shingleHashes(stripHtml(row.body));
+        pageShingles.set(row.id, shingles);
+        for (const h of shingles) {
+          shingleCounts.set(h, (shingleCounts.get(h) ?? 0) + 1);
+        }
+        lastId = row.id;
       }
+      remaining -= batch.length;
     }
 
     // Phase 2 — identify boilerplate shingles (appear on more than
@@ -4510,6 +4551,15 @@ export class ProjectDb {
     });
     const sortCol = validSortColumn(params.sortBy);
     const sortDir = params.sortDir === 'desc' ? 'DESC' : 'ASC';
+    // Server-side clamp — this method is reachable from the renderer
+    // and the MCP bridge, so the limit can't be trusted to be sane. A
+    // runaway limit here materialises the whole table in one `.all()`;
+    // 10K rows is comfortably above every legitimate caller (virtual
+    // table chunks are ≤2K, MCP selection resolution caps at 5K).
+    // Callers that genuinely need the full table stream it through
+    // `iterateUrlsByCategory` instead.
+    const limit = Math.max(1, Math.min(10_000, Math.floor(params.limit) || 1));
+    const offset = Math.max(0, Math.floor(params.offset) || 0);
 
     const totalRow = this.db
       .prepare(`SELECT COUNT(*) AS c FROM urls ${whereSql}`)
@@ -4521,7 +4571,7 @@ export class ProjectDb {
       .prepare(
         `SELECT * FROM urls ${whereSql} ORDER BY ${sortCol} ${sortDir}${tieBreak} LIMIT ? OFFSET ?`,
       )
-      .all(...args, params.limit, params.offset) as unknown as UrlRowDb[];
+      .all(...args, limit, offset) as unknown as UrlRowDb[];
 
     return { rows: rowsDb.map(this.rowFromDb), total: totalRow.c };
   }
@@ -4564,6 +4614,17 @@ export class ProjectDb {
       }
       return out;
     };
+    // Count a sidebar node through the *same* predicate its click applies.
+    // These counters used to carry their own hand-written WHERE clauses,
+    // which had silently drifted from `categoryWhereClause`: the sidebar
+    // scoped Response Codes / Security / Indexability to internal URLs
+    // while the filter didn't, so "Success (2xx) 7,327" opened a table of
+    // 7,329 rows. Deriving the count from the clause makes the number and
+    // the row set the same query by construction.
+    const countCategory = (cat: UrlCategory): number => {
+      const clause = categoryWhereClause(cat);
+      return countWhere(clause ?? '1 = 1');
+    };
 
     const totalInternalUrls = countWhere('is_external = 0');
     const totalExternalUrls = countWhere('is_external = 1');
@@ -4571,12 +4632,10 @@ export class ProjectDb {
     // Headline indexability reflects PAGES only (content_kind = 'html').
     // Resources (image/css/js/font) are all `indexable` with a 2xx status,
     // so without this guard they would inflate the "Indexable URLs" stat.
-    const totalIndexable = countWhere(
-      "is_external = 0 AND content_kind = 'html' AND indexability = 'indexable' AND status_code IS NOT NULL",
-    );
-    const totalNonIndexable = countWhere(
-      "is_external = 0 AND content_kind = 'html' AND indexability LIKE 'non-indexable%'",
-    );
+    // The page-only scope lives in `categoryWhereClause` so the Directives
+    // tab shows exactly the rows this headline counts.
+    const totalIndexable = countCategory('indexability:indexable');
+    const totalNonIndexable = countCategory('indexability:non-indexable');
     const totalImages = (
       this.db.prepare('SELECT COUNT(*) AS c FROM images').get() as { c: number }
     ).c;
@@ -4604,33 +4663,28 @@ export class ProjectDb {
         html: countWhere("is_external = 1 AND content_kind = 'html'"),
         other: countWhere("is_external = 1 AND content_kind != 'html'"),
       },
+      // Response Codes covers every URL the crawl touched, external
+      // included — that group is how a user finds a broken outbound link,
+      // and the External tab keeps its own separate view.
       responseCodes: {
-        all: totalInternalUrls,
-        blockedRobots: countWhere(
-          "is_external = 0 AND indexability = 'non-indexable:robots-blocked'",
-        ),
-        noResponse: countWhere('is_external = 0 AND status_code IS NULL'),
-        success2xx: countWhere('is_external = 0 AND status_code >= 200 AND status_code < 300'),
-        redirect3xx: countWhere('is_external = 0 AND status_code >= 300 AND status_code < 400'),
-        clientError4xx: countWhere(
-          'is_external = 0 AND status_code >= 400 AND status_code < 500',
-        ),
-        serverError5xx: countWhere(
-          'is_external = 0 AND status_code >= 500 AND status_code < 600',
-        ),
+        all: countCategory('all'),
+        blockedRobots: countCategory('status:blocked-robots'),
+        noResponse: countCategory('status:no-response'),
+        success2xx: countCategory('status:2xx'),
+        redirect3xx: countCategory('status:3xx'),
+        clientError4xx: countCategory('status:4xx'),
+        serverError5xx: countCategory('status:5xx'),
       },
       security: {
-        https: countWhere("is_external = 0 AND url LIKE 'https://%'"),
-        http: countWhere("is_external = 0 AND url LIKE 'http://%'"),
+        https: countCategory('security:https'),
+        http: countCategory('security:http'),
       },
       indexability: {
         indexable: totalIndexable,
         nonIndexable: totalNonIndexable,
-        noindex: countWhere("is_external = 0 AND indexability = 'non-indexable:noindex'"),
-        canonicalised: countWhere("is_external = 0 AND indexability = 'non-indexable:canonical'"),
-        blockedRobots: countWhere(
-          "is_external = 0 AND indexability = 'non-indexable:robots-blocked'",
-        ),
+        noindex: countCategory('indexability:noindex'),
+        canonicalised: countCategory('indexability:canonicalised'),
+        blockedRobots: countCategory('indexability:blocked-robots'),
       },
       issues: this.getIssuesCounts(),
     };
@@ -5968,13 +6022,28 @@ export class ProjectDb {
    * `category === 'all'` walks the full urls table.
    */
   *iterateUrlsByCategory(category: UrlCategory): IterableIterator<CrawlUrlRow> {
+    // Keyset-paginated so this is a REAL streamer: the previous
+    // single `.all()` materialised every matching row up front, which
+    // on a 1M-URL export meant hundreds of MB of row objects pinned in
+    // the JS heap before the first CSV line was written — squarely
+    // inside Electron's 4 GB heap-cap budget. 2000-row batches keep
+    // peak memory flat regardless of table size while adding only
+    // ~500 statement executions per million rows.
     const where = categoryWhereClause(category);
+    const BATCH = 2000;
     const sql = where
-      ? `SELECT * FROM urls WHERE ${where} ORDER BY id`
-      : 'SELECT * FROM urls ORDER BY id';
-    const rows = this.db.prepare(sql).all() as unknown as UrlRowDb[];
-    for (const row of rows) {
-      yield this.rowFromDb(row);
+      ? `SELECT * FROM urls WHERE (${where}) AND id > ? ORDER BY id LIMIT ?`
+      : 'SELECT * FROM urls WHERE id > ? ORDER BY id LIMIT ?';
+    const stmt = this.db.prepare(sql);
+    let lastId = 0;
+    for (;;) {
+      const rows = stmt.all(lastId, BATCH) as unknown as UrlRowDb[];
+      if (rows.length === 0) return;
+      for (const row of rows) {
+        lastId = row.id;
+        yield this.rowFromDb(row);
+      }
+      if (rows.length < BATCH) return;
     }
   }
 
@@ -5984,18 +6053,32 @@ export class ProjectDb {
    * noindex, canonicalised, blocked, 4xx/5xx, and non-HTML resources.
    */
   *iterateIndexableUrls(): IterableIterator<CrawlUrlRow> {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM urls
-         WHERE is_external = 0
-           AND content_kind = 'html'
-           AND indexability = 'indexable'
-           AND status_code >= 200 AND status_code < 300
-         ORDER BY depth, id`,
-      )
-      .all() as unknown as UrlRowDb[];
-    for (const row of rows) {
-      yield this.rowFromDb(row);
+    // Composite (depth, id) keyset pagination — same real-streaming
+    // rationale as iterateUrlsByCategory, but this consumer (the XML
+    // sitemap generator) needs depth-then-id order, so the cursor
+    // carries both columns.
+    const BATCH = 2000;
+    const stmt = this.db.prepare(
+      `SELECT * FROM urls
+       WHERE is_external = 0
+         AND content_kind = 'html'
+         AND indexability = 'indexable'
+         AND status_code >= 200 AND status_code < 300
+         AND (depth > ? OR (depth = ? AND id > ?))
+       ORDER BY depth, id
+       LIMIT ?`,
+    );
+    let lastDepth = -1;
+    let lastId = 0;
+    for (;;) {
+      const rows = stmt.all(lastDepth, lastDepth, lastId, BATCH) as unknown as UrlRowDb[];
+      if (rows.length === 0) return;
+      for (const row of rows) {
+        lastDepth = (row as unknown as { depth: number }).depth;
+        lastId = row.id;
+        yield this.rowFromDb(row);
+      }
+      if (rows.length < BATCH) return;
     }
   }
 
@@ -6021,13 +6104,24 @@ export class ProjectDb {
       lcpResourceUrl: string | null;
       lcpCoverage: number | null;
       linkScore: number | null;
+      title: string | null;
+      h1: string | null;
+      h2Count: number;
+      wordCount: number | null;
+      outlinks: number;
+      followedOutlinks: number;
     }[];
     edges: { source: number; target: number }[];
+    /** Total internal HTML URLs in the project (NOT capped by
+     *  `nodeLimit`) — the denominator for the visualization tooltip's
+     *  "% of Total" inlink share. */
+    totalUrls: number;
   } {
     const nodes = this.db
       .prepare(
         `SELECT id, url, status_code, depth, inlinks, indexability,
-                lcp_tag, lcp_resource_url, lcp_coverage, link_score
+                lcp_tag, lcp_resource_url, lcp_coverage, link_score,
+                title, h1, h2_count, word_count, outlinks
            FROM urls
           WHERE is_external = 0 AND content_kind = 'html'
           ORDER BY inlinks DESC, id ASC
@@ -6044,9 +6138,23 @@ export class ProjectDb {
       lcp_resource_url: string | null;
       lcp_coverage: number | null;
       link_score: number | null;
+      title: string | null;
+      h1: string | null;
+      h2_count: number;
+      word_count: number | null;
+      outlinks: number;
     }[];
 
-    if (nodes.length === 0) return { nodes: [], edges: [] };
+    if (nodes.length === 0) return { nodes: [], edges: [], totalUrls: 0 };
+
+    const totalUrls = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM urls
+            WHERE is_external = 0 AND content_kind = 'html'`,
+        )
+        .get() as { c: number }
+    ).c;
 
     const idByUrl = new Map<string, number>();
     for (const n of nodes) idByUrl.set(n.url, n.id);
@@ -6058,12 +6166,27 @@ export class ProjectDb {
     const placeholders = fromIds.map(() => '?').join(',');
     const edgeRows = this.db
       .prepare(
-        `SELECT from_url_id AS source, to_url FROM links
+        `SELECT from_url_id AS source, to_url, rel FROM links
           WHERE is_internal = 1 AND from_url_id IN (${placeholders})`,
       )
-      .all(...fromIds) as { source: number; to_url: string }[];
+      .all(...fromIds) as { source: number; to_url: string; rel: string | null }[];
 
     const edges: { source: number; target: number }[] = [];
+    // Followed = distinct internal targets reached by a link whose rel
+    // doesn't carry nofollow — the outlinks that actually pass equity.
+    // Counted off the same rows we already fetched (no extra query) and
+    // BEFORE the node-cap filter, so the number reflects the real page
+    // rather than the visible slice of the graph.
+    const followedTargets = new Map<number, Set<string>>();
+    for (const e of edgeRows) {
+      if (e.rel && /\bnofollow\b/i.test(e.rel)) continue;
+      let set = followedTargets.get(e.source);
+      if (!set) {
+        set = new Set<string>();
+        followedTargets.set(e.source, set);
+      }
+      set.add(e.to_url);
+    }
     for (const e of edgeRows) {
       const target = idByUrl.get(e.to_url);
       if (target !== undefined && target !== e.source) {
@@ -6083,8 +6206,15 @@ export class ProjectDb {
         lcpResourceUrl: n.lcp_resource_url,
         lcpCoverage: n.lcp_coverage,
         linkScore: n.link_score,
+        title: n.title,
+        h1: n.h1,
+        h2Count: n.h2_count,
+        wordCount: n.word_count,
+        outlinks: n.outlinks,
+        followedOutlinks: followedTargets.get(n.id)?.size ?? 0,
       })),
       edges,
+      totalUrls,
     };
   }
 
@@ -8069,16 +8199,28 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return "url LIKE 'https://%'";
     case 'security:http':
       return "url LIKE 'http://%'";
+    // Indexability is a property of pages, not of the resources they
+    // pull in: a font or a stylesheet is stored as `indexable` with a
+    // 2xx status, and counting those as indexable URLs inflates the
+    // headline stat and fills the Directives tab with rows no directive
+    // can apply to. Every member of this group therefore carries the
+    // same internal-HTML scope. `indexable` additionally requires a
+    // response — a URL we never fetched isn't indexable.
     case 'indexability:indexable':
-      return "indexability = 'indexable'";
+      return `is_external = 0 AND content_kind = 'html'
+              AND indexability = 'indexable' AND status_code IS NOT NULL`;
     case 'indexability:non-indexable':
-      return "indexability LIKE 'non-indexable%'";
+      return `is_external = 0 AND content_kind = 'html'
+              AND indexability LIKE 'non-indexable%'`;
     case 'indexability:noindex':
-      return "indexability = 'non-indexable:noindex'";
+      return `is_external = 0 AND content_kind = 'html'
+              AND indexability = 'non-indexable:noindex'`;
     case 'indexability:canonicalised':
-      return "indexability = 'non-indexable:canonical'";
+      return `is_external = 0 AND content_kind = 'html'
+              AND indexability = 'non-indexable:canonical'`;
     case 'indexability:blocked-robots':
-      return "indexability = 'non-indexable:robots-blocked'";
+      return `is_external = 0 AND content_kind = 'html'
+              AND indexability = 'non-indexable:robots-blocked'`;
     case 'issues:title-missing':
       return "is_external = 0 AND content_kind = 'html' AND (title IS NULL OR title = '')";
     case 'issues:title-too-long':

@@ -138,6 +138,12 @@ export const IPC = {
   topAnchorTexts: 'graph:anchor-texts',
   sitemapGenerate: 'sitemap:generate',
   menuEvent: 'menu:event',
+  /** Renderer-requested native Copy (webContents.copy()). Used by the
+   * macOS Edit▸Copy round-trip: the native menu swallows Cmd+C before
+   * the page sees the keydown, so the menu item asks the renderer
+   * whether a custom table-selection copy applies — and when it
+   * doesn't, the renderer calls back here for the stock behaviour. */
+  editCopyNative: 'edit:copyNative',
   dataChanged: 'data:changed',
   appVersion: 'app:version',
   /** Returns live process + system memory stats for the in-app
@@ -477,6 +483,7 @@ export type MenuEvent =
   | 'open-log-analyzer'
   | 'open-settings'
   | 'open-scheduled-crawl'
+  | 'edit-copy'
   | 'about';
 
 export interface ExportCsvResult {
@@ -711,6 +718,18 @@ export interface GraphNode {
    *  Null until the post-crawl link-score pass runs. Powers the
    *  "By Link Score" visualization colour mode. */
   linkScore: number | null;
+  // ── Fields below feed the visualization's hover summary card ──
+  title: string | null;
+  h1: string | null;
+  /** Number of `<h2>` elements on the page (the crawler stores a count,
+   *  not the heading text). */
+  h2Count: number;
+  wordCount: number | null;
+  /** Unique outlinks recorded for the page (internal + external). */
+  outlinks: number;
+  /** Distinct internal outlink targets NOT marked rel="nofollow" — the
+   *  links that actually pass equity. */
+  followedOutlinks: number;
 }
 
 export interface GraphEdge {
@@ -725,6 +744,9 @@ export interface GraphSnapshotInput {
 export interface GraphSnapshotResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Total internal HTML URLs in the project, uncapped by `nodeLimit` —
+   *  denominator for the hover card's "% of Total" inlink share. */
+  totalUrls: number;
 }
 
 export interface CrawlPathInput {
@@ -1815,5 +1837,8 @@ export interface FreeCrawlApi {
   onDone(cb: (summary: CrawlSummary) => void): () => void;
   onError(cb: (message: string) => void): () => void;
   onMenuEvent(cb: (event: MenuEvent) => void): () => void;
+  /** Run the stock Copy command (native text-selection copy) on this
+   * window — the fallback leg of the macOS Edit▸Copy round-trip. */
+  editCopyNative(): Promise<void>;
   onDataChanged(cb: () => void): () => void;
 }

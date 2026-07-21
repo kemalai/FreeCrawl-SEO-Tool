@@ -32,6 +32,17 @@ export interface AppMenuHandlers {
   onCheckForUpdates: () => void;
   /** V2 Faz 2 — open the standalone Log File Analyzer window. */
   onOpenLogAnalyzer: () => void;
+  /**
+   * macOS Edit▸Copy dispatcher. On macOS the native menu's key
+   * equivalent swallows Cmd+C before the renderer ever sees a keydown
+   * — the exact opposite of Windows/Linux, where the page gets the key
+   * first. So on macOS the Copy item is a custom click that lets the
+   * host decide: project windows get a 'edit-copy' menu event (their
+   * renderer tries the custom table-selection copy, then falls back to
+   * native), auxiliary windows (Logs, Log Analyzer) get a plain
+   * `webContents.copy()`.
+   */
+  onEditCopy: () => void;
   /** UI language for menu labels. Falls back to `en` when missing. */
   lang?: MenuLang;
 }
@@ -154,7 +165,33 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
     },
-    { role: 'editMenu' as const },
+    // Windows/Linux keep the stock role — there the renderer receives
+    // Ctrl+C keydown BEFORE any menu accelerator, so the app's custom
+    // table-copy handlers work with zero interception. On macOS the
+    // native menu's key equivalent fires FIRST and the page never sees
+    // Cmd+C, so Copy must be a custom item that routes through
+    // `onEditCopy` (custom table copy → native copy fallback). Every
+    // other edit command keeps its native role.
+    isMac
+      ? {
+          label: L.edit,
+          submenu: [
+            { role: 'undo' as const },
+            { role: 'redo' as const },
+            { type: 'separator' as const },
+            { role: 'cut' as const },
+            {
+              label: L.copy,
+              accelerator: 'CmdOrCtrl+C',
+              click: () => handlers.onEditCopy(),
+            },
+            { role: 'paste' as const },
+            { role: 'pasteAndMatchStyle' as const },
+            { role: 'delete' as const },
+            { role: 'selectAll' as const },
+          ],
+        }
+      : { role: 'editMenu' as const },
     {
       label: L.view,
       submenu: [

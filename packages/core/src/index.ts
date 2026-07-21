@@ -53,6 +53,7 @@ export {
   type TabularExportResult,
   type TabularSection,
 } from './tabular-export.js';
+export { ensureHeapHeadroom, heapHeadroomBytes } from './heap-guard.js';
 export {
   testUrlAgainstRobots,
   validateRobotsTxt,

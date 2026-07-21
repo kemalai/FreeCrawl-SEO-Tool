@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { RefreshCw, Sparkles, Settings2, RotateCcw, Download, Route } from 'lucide-react';
 import cytoscape, { type Core } from 'cytoscape';
 import dagre from 'cytoscape-dagre';
+import ForceGraph3D, { type ForceGraph3DInstance } from '3d-force-graph';
 import { useTranslation } from 'react-i18next';
 import type {
   AnchorTextRow,
@@ -76,16 +77,28 @@ function downloadBlob(data: Blob, filename: string): void {
   }, 5_000);
 }
 
+// Matches the on-screen canvas colour so exports look identical.
+const CANVAS_BG = '#2F2F2F';
+
 function exportPng(cy: Core, filename = 'freecrawl-graph.png'): void {
   const dataUrl = cy.png({
     output: 'base64uri',
     full: true,
-    bg: '#0a0a0f',
+    bg: CANVAS_BG,
     scale: 2,
   });
   void fetch(dataUrl)
     .then((r) => r.blob())
     .then((b) => downloadBlob(b, filename));
+}
+
+/** Snapshot the 3D view's WebGL canvas (renderer created with
+ *  preserveDrawingBuffer so the backbuffer is readable). */
+function exportPng3d(fg: ForceGraph3DInstance, filename = 'freecrawl-graph-3d.png'): void {
+  const canvas = fg.renderer().domElement;
+  canvas.toBlob((b: Blob | null) => {
+    if (b) downloadBlob(b, filename);
+  }, 'image/png');
 }
 
 function exportSvg(cy: Core, filename = 'freecrawl-graph.svg'): void {
@@ -99,11 +112,11 @@ function exportSvg(cy: Core, filename = 'freecrawl-graph.svg'): void {
   parts.push(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
   );
-  parts.push(`<rect width="100%" height="100%" fill="#0a0a0f"/>`);
+  parts.push(`<rect width="100%" height="100%" fill="${CANVAS_BG}"/>`);
   cy.edges().forEach((e) => {
     const src = e.source().position();
     const tgt = e.target().position();
-    const c = String((e.style('line-color') as unknown) ?? '#475569');
+    const c = String((e.style('line-color') as unknown) ?? '#9ca3af');
     parts.push(
       `<line x1="${(src.x + tx).toFixed(1)}" y1="${(src.y + ty).toFixed(1)}" x2="${(tgt.x + tx).toFixed(1)}" y2="${(tgt.y + ty).toFixed(1)}" stroke="${escapeXml(c)}" stroke-width="0.6" opacity="0.6"/>`,
     );
@@ -111,9 +124,9 @@ function exportSvg(cy: Core, filename = 'freecrawl-graph.svg'): void {
   cy.nodes().forEach((n) => {
     const p = n.position();
     const r = Number(n.style('width') ?? 12) / 2;
-    const fill = String((n.style('background-color') as unknown) ?? '#3b82f6');
+    const fill = String((n.style('background-color') as unknown) ?? '#73b72b');
     parts.push(
-      `<circle cx="${(p.x + tx).toFixed(1)}" cy="${(p.y + ty).toFixed(1)}" r="${r.toFixed(1)}" fill="${escapeXml(fill)}" stroke="#0a0a0f" stroke-width="1"/>`,
+      `<circle cx="${(p.x + tx).toFixed(1)}" cy="${(p.y + ty).toFixed(1)}" r="${r.toFixed(1)}" fill="${escapeXml(fill)}" stroke="${CANVAS_BG}" stroke-width="1"/>`,
     );
   });
   parts.push(`</svg>`);
@@ -140,7 +153,7 @@ function exportStandaloneHtml(
 <meta charset="utf-8"/>
 <title>FreeCrawl Graph</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #0a0a0f; color: #e2e8f0; font-family: system-ui, sans-serif; }
+  html, body { margin: 0; height: 100%; background: #2F2F2F; color: #e2e8f0; font-family: system-ui, sans-serif; }
   #cy { position: absolute; inset: 0; }
   #legend { position: absolute; top: 12px; left: 12px; padding: 8px 12px; background: rgba(15,23,42,0.85); border: 1px solid #334155; border-radius: 6px; font-size: 12px; }
   #legend h1 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
@@ -160,8 +173,8 @@ function exportStandaloneHtml(
     container: document.getElementById('cy'),
     elements: elements,
     style: [
-      { selector: 'node', style: { 'background-color': 'data(color)', 'width': 'data(size)', 'height': 'data(size)', 'border-color': '#0a0a0f', 'border-width': 1, 'label': 'data(label)', 'color': '#cbd5e1', 'font-size': 9, 'text-valign': 'bottom', 'text-margin-y': 4 } },
-      { selector: 'edge', style: { 'width': 0.6, 'line-color': '#475569', 'opacity': 0.4, 'curve-style': 'bezier' } },
+      { selector: 'node', style: { 'background-color': 'data(color)', 'width': 'data(size)', 'height': 'data(size)', 'border-color': '#2F2F2F', 'border-width': 1, 'label': 'data(label)', 'color': '#cbd5e1', 'font-size': 9, 'text-valign': 'bottom', 'text-margin-y': 4 } },
+      { selector: 'edge', style: { 'width': 0.8, 'line-color': '#e8e8e8', 'opacity': 0.4, 'curve-style': 'straight' } },
     ],
     layout: { name: 'preset' },
   });
@@ -171,26 +184,166 @@ function exportStandaloneHtml(
   downloadBlob(new Blob([html], { type: 'text/html' }), filename);
 }
 
-type LayoutKind =
-  | 'cose'
-  | 'breadthfirst'
-  | 'dagre'
-  | 'radial'
-  | 'directory'
-  | 'circle'
-  | 'concentric';
+/**
+ * SEO-meaningful layout set. Every entry answers a concrete question:
+ *  - tree3d        "How does my site branch out from the homepage?"
+ *                  — 3D force-directed crawl diagram (rotate/zoom;
+ *                  dense sites stay legible because clusters separate
+ *                  in depth instead of overlapping on a plane)
+ *  - mesh3d        "What does the raw internal link mesh look like?" (3D)
+ *  - breadthfirst  "Same discovery tree, flat top-down levels." (2D)
+ *  - directory     "How is the URL folder structure organised?" (2D)
+ * Force-directed views are deliberately 3D-only and the hierarchical
+ * views 2D-only. The old Circle / Concentric / Radial layouts were
+ * dropped — generic geometry with no crawl semantics (radial is
+ * subsumed by the 3D tree: root at the centre, leaves outward).
+ */
+type LayoutKind = 'tree3d' | 'mesh3d' | 'tree2d' | 'directory';
 
 const LAYOUTS: { key: LayoutKind; label: string; hint: string }[] = [
-  { key: 'cose', label: 'Force-Directed', hint: 'Compound spring embedder' },
-  { key: 'breadthfirst', label: 'Tree (BFS)', hint: 'Roots-to-leaves layered' },
-  { key: 'dagre', label: 'Force-Directed Tree', hint: 'Sugiyama layered DAG (dagre)' },
-  { key: 'radial', label: 'Radial Tree', hint: 'Roots at centre, leaves outward' },
-  { key: 'directory', label: 'Directory Tree', hint: 'Grouped by URL path segments' },
-  { key: 'circle', label: 'Circle', hint: 'Equal radial spacing' },
-  { key: 'concentric', label: 'Concentric', hint: 'By inlinks (centre = most-linked)' },
+  { key: 'tree3d', label: '3D Force-Directed Crawl Tree', hint: 'Discovery tree in 3D — drag to rotate, scroll to zoom' },
+  { key: 'mesh3d', label: '3D Force-Directed Link Graph', hint: 'Full internal link mesh in 3D' },
+  { key: 'tree2d', label: 'Crawl Tree', hint: 'Left-to-right labelled discovery tree (2D)' },
+  { key: 'directory', label: 'Directory Tree', hint: 'Grouped by URL path segments (2D)' },
 ];
 
-type ColorMode = 'status' | 'depth' | 'indexability' | 'lcp' | 'linkScore';
+/** Layouts that draw the BFS discovery tree instead of the full link
+ *  mesh — one parent edge per node. This is what turns the hairball
+ *  into the clean dandelion clusters of a crawl diagram. Note the 2D
+ *  Crawl Tree uses the SAME BFS tree — the branching comes from link
+ *  discovery, not URL paths, so it stays "dallı budaklı" even on sites
+ *  whose URLs are all top-level slugs. */
+function usesTreeEdges(layout: LayoutKind): boolean {
+  return layout === 'tree3d' || layout === 'tree2d';
+}
+
+/** Force-directed layouts render through 3d-force-graph (three.js);
+ *  hierarchical layouts stay on cytoscape's 2D canvas. */
+function is3dLayout(layout: LayoutKind): boolean {
+  return layout === 'tree3d' || layout === 'mesh3d';
+}
+
+interface CrawlTree {
+  edges: { source: number; target: number }[];
+  /** BFS depth per node id — computed from the link structure, NOT the
+   *  stored crawl depth (which is flat on list/sitemap crawls). */
+  depthById: Map<number, number>;
+  maxDepth: number;
+}
+
+/**
+ * Reduce the link graph to a real BFS spanning tree. The tree is built
+ * by walking the link structure itself — the stored crawl depth is only
+ * used to pick the root(s), because list/sitemap crawls store the same
+ * depth for every URL (which is exactly the case that turned the first
+ * depth-difference-based implementation into 150 disconnected dots
+ * packed in a grid).
+ *
+ *  1. Roots: the minimum-stored-depth nodes. If that "minimum" is every
+ *     node (flat-depth crawl), fall back to the single most-linked node
+ *     — the de-facto homepage/hub.
+ *  2. BFS over DIRECTED edges from the roots; the first discoverer of a
+ *     node becomes its tree parent (adjacency sorted by id ⇒
+ *     deterministic, ≈ discovery order).
+ *  3. Nodes the directed walk can't reach are attached via a second
+ *     UNDIRECTED BFS pass seeded from every visited node, so pages that
+ *     only link *to* the crawled set still hang off the tree instead of
+ *     floating.
+ *  4. Fully disconnected leftovers get maxDepth (they render as pale
+ *     leaves at the rim).
+ */
+function buildCrawlTree(
+  nodes: GraphSnapshotResult['nodes'],
+  edges: GraphSnapshotResult['edges'],
+): CrawlTree {
+  const ids = new Set(nodes.map((n) => n.id));
+  const outAdj = new Map<number, number[]>();
+  const undirAdj = new Map<number, number[]>();
+  const push = (m: Map<number, number[]>, k: number, v: number) => {
+    const arr = m.get(k);
+    if (arr) arr.push(v);
+    else m.set(k, [v]);
+  };
+  for (const e of edges) {
+    if (!ids.has(e.source) || !ids.has(e.target) || e.source === e.target) continue;
+    push(outAdj, e.source, e.target);
+    push(undirAdj, e.source, e.target);
+    push(undirAdj, e.target, e.source);
+  }
+  for (const arr of outAdj.values()) arr.sort((a, b) => a - b);
+  for (const arr of undirAdj.values()) arr.sort((a, b) => a - b);
+
+  const minStoredDepth = nodes.reduce(
+    (m, n) => Math.min(m, n.depth),
+    Number.POSITIVE_INFINITY,
+  );
+  let roots = nodes.filter((n) => n.depth === minStoredDepth);
+  if (roots.length === nodes.length && nodes.length > 1) {
+    const hub = nodes.reduce((a, b) =>
+      b.inlinks > a.inlinks || (b.inlinks === a.inlinks && b.id < a.id) ? b : a,
+    );
+    roots = [hub];
+  }
+
+  const depthById = new Map<number, number>();
+  const parent = new Map<number, number>();
+  const queue: number[] = [];
+  for (const r of [...roots].sort((a, b) => a.id - b.id)) {
+    depthById.set(r.id, 0);
+    queue.push(r.id);
+  }
+  const walk = (adj: Map<number, number[]>) => {
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      const d = depthById.get(cur)!;
+      for (const next of adj.get(cur) ?? []) {
+        if (depthById.has(next)) continue;
+        depthById.set(next, d + 1);
+        parent.set(next, cur);
+        queue.push(next);
+      }
+    }
+  };
+  // Pass 1 — follow real link direction. Pass 2 — sweep up anything the
+  // directed walk missed, treating links as undirected, seeded from all
+  // already-placed nodes (shallowest first so attachments stay short).
+  walk(outAdj);
+  queue.push(...[...depthById.keys()].sort((a, b) => depthById.get(a)! - depthById.get(b)!));
+  walk(undirAdj);
+
+  let maxDepth = 0;
+  for (const d of depthById.values()) maxDepth = Math.max(maxDepth, d);
+  for (const n of nodes) {
+    if (!depthById.has(n.id)) depthById.set(n.id, maxDepth);
+  }
+  return {
+    edges: [...parent].map(([target, source]) => ({ source, target })),
+    depthById,
+    maxDepth,
+  };
+}
+
+type ColorMode = 'crawl' | 'status' | 'depth' | 'indexability' | 'lcp' | 'linkScore';
+
+/**
+ * Default crawl-diagram palette: non-indexable pages red, unresponsive
+ * pages pale salmon, and indexable pages a green whose lightness rises
+ * with crawl depth — saturated hubs near the root, near-white leaves
+ * at the edge of the crawl. Reads at a glance as "healthy structure
+ * with red problem spots".
+ */
+function crawlColor(
+  n: GraphSnapshotResult['nodes'][number],
+  depth: number,
+  maxDepth: number,
+): string {
+  if (n.statusCode === null || n.statusCode === 0) return '#ff8d8d';
+  if (n.indexability.startsWith('non-indexable') || n.statusCode >= 400) return '#c92d2d';
+  // Base green hsl(88, 55%, 30%) fading to 88% lightness at max depth.
+  const frac = maxDepth <= 0 ? 0 : Math.min(1, depth / maxDepth);
+  const lightness = 30 + (88 - 30) * frac;
+  return `hsl(88, 55%, ${lightness.toFixed(0)}%)`;
+}
 
 /** Colour a node by its Largest-Contentful-Paint candidate: grey when no
  *  render data, amber when the LCP is an image (a prime optimisation
@@ -203,28 +356,47 @@ function lcpColor(n: GraphSnapshotResult['nodes'][number]): string {
 }
 
 /**
- * Build a directory-hierarchy element set from the link-graph nodes: a
- * synthetic folder node per URL path segment, with each page hanging under
- * its containing directory. Pure renderer-side transform — no extra query.
+ * Left-to-right tidy directory tree — the classic crawl-visualisation
+ * look: root host at the far left, folders fanning right, one row per
+ * leaf, every node a small labelled dot (labels sit left of folders,
+ * right of pages). The hierarchy is a strict tree, so the tidy layout
+ * is computed right here ("leaves take consecutive rows, parents centre
+ * on their children") and rendered via cytoscape's 'preset' layout —
+ * no layout algorithm involved, fully deterministic.
  */
+const DIR_X_SPACING = 260;
+const DIR_Y_SPACING = 22;
+
+interface DirTreeNode {
+  id: string;
+  label: string;
+  children: Map<string, DirTreeNode>;
+  page?: GraphSnapshotResult['nodes'][number];
+  x: number;
+  y: number;
+}
+
 function buildDirectoryElements(
   nodes: GraphSnapshotResult['nodes'],
   colorFn: (n: GraphSnapshotResult['nodes'][number]) => string,
   sizeScale: number,
-): { data: Record<string, unknown> }[] {
-  const elements: { data: Record<string, unknown> }[] = [];
-  const dirSeen = new Set<string>();
-  const edgeSeen = new Set<string>();
-  const ensureDir = (id: string, label: string) => {
-    if (dirSeen.has(id)) return;
-    dirSeen.add(id);
-    elements.push({ data: { id, label, kind: 'dir', color: '#475569', size: 12 } });
-  };
-  const ensureEdge = (source: string, target: string) => {
-    const key = `${source}>${target}`;
-    if (edgeSeen.has(key)) return;
-    edgeSeen.add(key);
-    elements.push({ data: { id: `de:${key}`, source, target } });
+  collapsed: ReadonlySet<string>,
+): { data: Record<string, unknown>; classes?: string; position?: { x: number; y: number } }[] {
+  const mkNode = (id: string, label: string): DirTreeNode => ({
+    id,
+    label,
+    children: new Map(),
+    x: 0,
+    y: 0,
+  });
+  // Phase 1 — hierarchy: host root → folder chain → page leaf.
+  const roots = new Map<string, DirTreeNode>();
+  const ensureChild = (parent: DirTreeNode, id: string, label: string): DirTreeNode => {
+    const existing = parent.children.get(id);
+    if (existing) return existing;
+    const created = mkNode(id, label);
+    parent.children.set(id, created);
+    return created;
   };
   for (const n of nodes) {
     let host = '';
@@ -236,34 +408,224 @@ function buildDirectoryElements(
     } catch {
       continue;
     }
-    const rootId = `dir:${host}/`;
-    ensureDir(rootId, host);
-    // All but the final segment are the page's containing folders.
-    const dirSegs = segs.slice(0, Math.max(0, segs.length - 1));
-    let parentId = rootId;
-    let acc = '';
-    for (const seg of dirSegs) {
-      acc += `/${seg}`;
-      const id = `dir:${host}${acc}`;
-      ensureDir(id, `${seg}/`);
-      ensureEdge(parentId, id);
-      parentId = id;
+    let root = roots.get(host);
+    if (root === undefined) {
+      root = mkNode(`dir:${host}/`, host);
+      roots.set(host, root);
     }
-    const leafLabel = segs.length > 0 ? segs[segs.length - 1]! : host;
+    let cur: DirTreeNode = root;
+    let acc = '';
+    for (const seg of segs.slice(0, Math.max(0, segs.length - 1))) {
+      acc += `/${seg}`;
+      cur = ensureChild(cur, `dir:${host}${acc}`, `${seg}/`);
+    }
+    const leaf = mkNode(String(n.id), segs.length > 0 ? segs[segs.length - 1]! : '/');
+    leaf.page = n;
+    cur.children.set(`page:${n.id}`, leaf);
+  }
+  // Phase 2 — tidy positions. Alphabetical sibling order, folders and
+  // pages interleaved, like a file browser. A collapsed node keeps its
+  // row but contributes no children.
+  let leafRow = 0;
+  const kidsOf = (node: DirTreeNode): DirTreeNode[] =>
+    collapsed.has(node.id)
+      ? []
+      : [...node.children.values()].sort((a, b) => a.label.localeCompare(b.label));
+  const assign = (node: DirTreeNode, depth: number): number => {
+    node.x = depth * DIR_X_SPACING;
+    const kids = kidsOf(node);
+    if (kids.length === 0) {
+      node.y = leafRow++ * DIR_Y_SPACING;
+      return node.y;
+    }
+    const ys = kids.map((k) => assign(k, depth + 1));
+    node.y = (ys[0]! + ys[ys.length - 1]!) / 2;
+    return node.y;
+  };
+  const subtreeSize = (node: DirTreeNode): number => {
+    let n = 0;
+    const stack = [...node.children.values()];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      n++;
+      stack.push(...cur.children.values());
+    }
+    return n;
+  };
+  // Phase 3 — flatten into cytoscape elements with preset positions.
+  const elements: { data: Record<string, unknown>; classes?: string; position?: { x: number; y: number } }[] = [];
+  const dotScale = sizeScale / DEFAULT_TUNING.nodeSizeScale;
+  const walk = (node: DirTreeNode, parentId: string | null) => {
+    const childCount = node.children.size;
+    const isCollapsed = collapsed.has(node.id);
+    const label = isCollapsed ? `${node.label}  +${subtreeSize(node)}` : node.label;
+    const classes: string[] = [node.page ? 'lbl-right' : 'lbl-left'];
+    if (childCount > 0) classes.push('has-kids');
+    if (isCollapsed) classes.push('collapsed');
+    elements.push({
+      data: node.page
+        ? {
+            id: node.id,
+            label,
+            fullUrl: node.page.url,
+            statusCode: node.page.statusCode ?? '',
+            inlinks: node.page.inlinks,
+            color: colorFn(node.page),
+            size: 9 * dotScale,
+            kind: 'page',
+            childCount,
+          }
+        : {
+            id: node.id,
+            label,
+            kind: 'dir',
+            color: '#8f8f8f',
+            size: 10 * dotScale,
+            childCount,
+          },
+      classes: classes.join(' '),
+      position: { x: node.x, y: node.y },
+    });
+    if (parentId) {
+      elements.push({ data: { id: `de:${parentId}>${node.id}`, source: parentId, target: node.id } });
+    }
+    if (!isCollapsed) {
+      for (const kid of node.children.values()) walk(kid, node.id);
+    }
+  };
+  for (const r of roots.values()) {
+    assign(r, 0);
+    walk(r, null);
+  }
+  return elements;
+}
+
+/**
+ * Left-to-right tidy tree over the BFS *crawl* tree — the classic
+ * "Crawl Tree Graph": root page at the far left, pages discovered from
+ * it fanning right, every node a labelled dot. Same tidy algorithm as
+ * the directory view, but the hierarchy is link-discovery, not URL
+ * paths — which is what makes it branch richly even on flat-URL sites.
+ *
+ * `collapsed` holds node ids whose subtree is folded away: the branch
+ * root stays visible (marked so it renders amber with a child count),
+ * its descendants are dropped from the element set entirely and the
+ * tidy pass re-flows the remaining rows around the gap.
+ */
+const TREE2D_X_SPACING = 340;
+
+function buildCrawlTree2dElements(
+  nodes: GraphSnapshotResult['nodes'],
+  treeEdges: { source: number; target: number }[],
+  colorFn: (n: GraphSnapshotResult['nodes'][number]) => string,
+  sizeScale: number,
+  collapsed: ReadonlySet<string>,
+): { data: Record<string, unknown>; classes?: string; position?: { x: number; y: number } }[] {
+  const kidsOf = new Map<number, number[]>();
+  const hasParent = new Set<number>();
+  for (const e of treeEdges) {
+    const arr = kidsOf.get(e.source);
+    if (arr) arr.push(e.target);
+    else kidsOf.set(e.source, [e.target]);
+    hasParent.add(e.target);
+  }
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const labelOf = (id: number) => {
+    const n = byId.get(id);
+    return n ? shortenUrl(n.url) : String(id);
+  };
+  for (const arr of kidsOf.values()) {
+    arr.sort((a, b) => labelOf(a).localeCompare(labelOf(b)));
+  }
+  /** Descendant count, for the "+N" badge on a folded branch. */
+  const subtreeSize = (id: number): number => {
+    let n = 0;
+    const stack = [...(kidsOf.get(id) ?? [])];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      n++;
+      stack.push(...(kidsOf.get(cur) ?? []));
+    }
+    return n;
+  };
+  const posn = new Map<number, { x: number; y: number }>();
+  const visible = new Set<number>();
+  let row = 0;
+  const assign = (id: number, depth: number): number => {
+    visible.add(id);
+    const kids = collapsed.has(String(id)) ? [] : (kidsOf.get(id) ?? []);
+    let y: number;
+    if (kids.length === 0) {
+      y = row++ * DIR_Y_SPACING;
+    } else {
+      const ys = kids.map((k) => assign(k, depth + 1));
+      y = (ys[0]! + ys[ys.length - 1]!) / 2;
+    }
+    posn.set(id, { x: depth * TREE2D_X_SPACING, y });
+    return y;
+  };
+  const roots = [...nodes].filter((n) => !hasParent.has(n.id)).sort((a, b) => a.id - b.id);
+  // Reachability with NOTHING folded. Anything outside this set is a
+  // genuine orphan (cycle-only, or truncated by the node cap) and still
+  // deserves a row; anything inside it that the folded walk skipped is
+  // hidden on purpose and must stay hidden — without this distinction
+  // collapsing a branch re-emits its descendants as stray rows.
+  const reachable = new Set<number>();
+  for (const r of roots) {
+    const stack = [r.id];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      if (reachable.has(cur)) continue;
+      reachable.add(cur);
+      stack.push(...(kidsOf.get(cur) ?? []));
+    }
+  }
+  for (const r of roots) assign(r.id, 0);
+  for (const n of nodes) {
+    if (!visible.has(n.id) && !reachable.has(n.id)) {
+      visible.add(n.id);
+      posn.set(n.id, { x: 0, y: row++ * DIR_Y_SPACING });
+    }
+  }
+
+  const dotScale = sizeScale / DEFAULT_TUNING.nodeSizeScale;
+  const elements: { data: Record<string, unknown>; classes?: string; position?: { x: number; y: number } }[] = [];
+  for (const n of nodes) {
+    if (!visible.has(n.id)) continue;
+    const childCount = kidsOf.get(n.id)?.length ?? 0;
+    const isCollapsed = collapsed.has(String(n.id));
+    const classes: string[] = [childCount > 0 ? 'lbl-left' : 'lbl-right'];
+    if (childCount > 0) classes.push('has-kids');
+    if (isCollapsed) classes.push('collapsed');
     elements.push({
       data: {
         id: String(n.id),
-        label: leafLabel,
+        label: isCollapsed
+          ? `${shortenUrl(n.url)}  +${subtreeSize(n.id)}`
+          : shortenUrl(n.url),
         fullUrl: n.url,
         statusCode: n.statusCode ?? '',
         inlinks: n.inlinks,
         color: colorFn(n),
-        size: nodeSize(n.inlinks, sizeScale),
-        kind: 'page',
-        isTop: 0,
+        size: 9 * dotScale,
+        childCount,
+      },
+      // SF's tidy-tree label convention: parents label toward the root
+      // (left of the dot), leaves toward the open side (right).
+      classes: classes.join(' '),
+      position: posn.get(n.id)!,
+    });
+  }
+  for (const e of treeEdges) {
+    if (!visible.has(e.source) || !visible.has(e.target)) continue;
+    if (collapsed.has(String(e.source))) continue;
+    elements.push({
+      data: {
+        id: `e${e.source}-${e.target}`,
+        source: String(e.source),
+        target: String(e.target),
       },
     });
-    ensureEdge(parentId, String(n.id));
   }
   return elements;
 }
@@ -307,13 +669,6 @@ function indexColor(i: Indexability): string {
   return '#737373';
 }
 
-function nodeSize(inlinks: number, scale = 1): number {
-  const raw = 6 + Math.log2(inlinks + 1) * 1.8;
-  return Math.min(raw, 24) * scale;
-}
-
-type LabelMode = 'hover' | 'top' | 'always';
-
 export function VisualizationTab() {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -322,10 +677,9 @@ export function VisualizationTab() {
   const dataVersion = useAppStore((s) => s.dataVersion);
   const [graph, setGraph] = useState<GraphSnapshotResult | null>(null);
   const [anchors, setAnchors] = useState<AnchorTextRow[]>([]);
-  const [layout, setLayout] = useState<LayoutKind>('cose');
-  const [colorMode, setColorMode] = useState<ColorMode>('status');
+  const [layout, setLayout] = useState<LayoutKind>('tree3d');
+  const [colorMode, setColorMode] = useState<ColorMode>('crawl');
   const [nodeLimit, setNodeLimit] = useState(150);
-  const [labelMode, setLabelMode] = useState<LabelMode>('hover');
   // Crawl-path trace: when enabled, selecting a node fetches & highlights
   // the shortest discovery path from the crawl root to that page.
   const [pathMode, setPathMode] = useState(false);
@@ -341,8 +695,26 @@ export function VisualizationTab() {
   const [loading, setLoading] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<Core | null>(null);
+  const fgRef = useRef<ForceGraph3DInstance | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
+  /** Collapsed subtree roots (2D trees). Clicking a node with children
+   *  toggles membership; every descendant is then hidden and the tidy
+   *  layout re-flows around the gap. */
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const collapsedRef = useRef(collapsed);
+  useEffect(() => {
+    collapsedRef.current = collapsed;
+  }, [collapsed]);
+  /** Viewport carried across a collapse-driven rebuild so toggling a
+   *  branch doesn't snap the camera back to "fit". */
+  const viewportRef = useRef<{ zoom: number; pan: { x: number; y: number } } | null>(null);
+  /** Hover summary card — the SF-style detail panel. */
+  const [hoverCard, setHoverCard] = useState<{
+    node: GraphSnapshotResult['nodes'][number];
+    x: number;
+    y: number;
+  } | null>(null);
   const [tuning, setTuning] = useState<VisTuning>(() => loadTuning());
   // Debounced copy that drives the expensive cytoscape rebuild. A tuning
   // slider drag fires onChange on every step; rebuilding the graph and
@@ -408,7 +780,18 @@ export function VisualizationTab() {
   useEffect(() => {
     if (!containerRef.current || !graph) return;
 
+    // Tree modes drive colour/size from the BFS tree depth (computed
+    // from the link structure) so the depth-faded palette works even on
+    // list/sitemap crawls where every stored depth is identical.
+    const treeMode = usesTreeEdges(layout);
+    const tree = treeMode ? buildCrawlTree(graph.nodes, graph.edges) : null;
+    const depthOf = (n: GraphSnapshotResult['nodes'][number]) =>
+      tree ? (tree.depthById.get(n.id) ?? tree.maxDepth) : n.depth;
+    const maxDepth = tree
+      ? tree.maxDepth
+      : graph.nodes.reduce((m, n) => Math.max(m, n.depth), 0);
     const colorFn = (n: GraphSnapshotResult['nodes'][number]) => {
+      if (colorMode === 'crawl') return crawlColor(n, depthOf(n), maxDepth);
       if (colorMode === 'depth') return depthColor(n.depth);
       if (colorMode === 'indexability') return indexColor(n.indexability);
       if (colorMode === 'lcp') return lcpColor(n);
@@ -416,122 +799,171 @@ export function VisualizationTab() {
       return statusColor(n.statusCode);
     };
 
-    const TOP_LABEL_COUNT = 20;
-    const topByInlinks = [...graph.nodes]
-      .sort((a, b) => b.inlinks - a.inlinks)
-      .slice(0, TOP_LABEL_COUNT);
-    const topIds = new Set(topByInlinks.map((n) => String(n.id)));
+    // Directory mode swaps the link graph for a path-segment hierarchy;
+    // tree modes reduce it to the BFS discovery tree; the 3D link mesh
+    // renders every internal link edge.
+    const edgeList = tree ? tree.edges : graph.edges;
 
-    // Directory mode swaps the link graph for a path-segment hierarchy; all
-    // other layouts render the actual internal link graph.
-    const elements =
-      layout === 'directory'
-        ? buildDirectoryElements(graph.nodes, colorFn, debouncedTuning.nodeSizeScale)
-        : [
-            ...graph.nodes.map((n) => ({
-              data: {
-                id: String(n.id),
-                label: shortenUrl(n.url),
-                fullUrl: n.url,
-                statusCode: n.statusCode ?? '',
-                inlinks: n.inlinks,
-                color: colorFn(n),
-                size: nodeSize(n.inlinks, debouncedTuning.nodeSizeScale),
-                isTop: topIds.has(String(n.id)) ? 1 : 0,
-              },
-            })),
-            ...graph.edges.map((e) => ({
-              data: {
-                id: `e${e.source}-${e.target}`,
-                source: String(e.source),
-                target: String(e.target),
-              },
-            })),
-          ];
-
+    // Tear down whichever renderer the previous layout used.
     if (cyRef.current) {
       cyRef.current.destroy();
       cyRef.current = null;
     }
+    if (fgRef.current) {
+      fgRef.current._destructor();
+      fgRef.current = null;
+    }
+    containerRef.current.innerHTML = '';
 
-    const baseLabelSelector =
-      labelMode === 'always'
-        ? 'node'
-        : labelMode === 'top'
-          ? 'node[isTop = 1]'
-          : 'node.focus';
+    // ── 3D branch — force-directed views via 3d-force-graph ──────────
+    if (is3dLayout(layout)) {
+      // Sphere volume scale, SF-style: linear from 40 (root) down to 1
+      // (deepest leaf) for the tree; log-inlinks for the mesh. Radius is
+      // nodeRelSize × ∛val, so this yields big saturated hubs and small
+      // pale leaves.
+      const treeVal = (n: GraphSnapshotResult['nodes'][number]) =>
+        maxDepth <= 0 ? 40 : 1 + 39 * (1 - depthOf(n) / maxDepth);
+      const meshVal = (n: GraphSnapshotResult['nodes'][number]) =>
+        1 + Math.min(39, Math.log2(n.inlinks + 1) * 4);
+      interface FgNode {
+        id: number;
+        url: string;
+        color: string;
+        val: number;
+        x?: number;
+        y?: number;
+        z?: number;
+      }
+      const nodes3d: FgNode[] = graph.nodes.map((n) => ({
+        id: n.id,
+        url: n.url,
+        color: colorFn(n),
+        val: layout === 'tree3d' ? treeVal(n) : meshVal(n),
+      }));
+      const links3d = edgeList.map((e) => ({ source: e.source, target: e.target }));
 
-    // `radial` and `directory` are UI choices that map onto real cytoscape
-    // layout algorithms (breadthfirst-circle / dagre respectively).
-    const layoutName =
-      layout === 'radial' ? 'breadthfirst' : layout === 'directory' ? 'dagre' : layout;
+      const fg = new ForceGraph3D(containerRef.current, {
+        // preserveDrawingBuffer keeps the WebGL backbuffer readable so
+        // the PNG export can snapshot the canvas.
+        rendererConfig: { antialias: true, preserveDrawingBuffer: true },
+      })
+        .backgroundColor(CANVAS_BG)
+        .showNavInfo(false)
+        .nodeRelSize(4 * (debouncedTuning.nodeSizeScale / DEFAULT_TUNING.nodeSizeScale))
+        .nodeVal('val')
+        .nodeColor('color')
+        .nodeOpacity(1)
+        .nodeLabel((n) => escapeXml(String((n as FgNode).url ?? '')))
+        .linkColor(() => '#FFFFFF')
+        // Tuning default 0.4 maps to the reference diagram's 0.7.
+        .linkOpacity(Math.min(1, debouncedTuning.edgeOpacity * 1.75))
+        .linkWidth(0)
+        .graphData({ nodes: nodes3d, links: links3d });
+      // d3-force knobs — link rest length 30 matches the reference
+      // diagram; charge default is -30, scaled by the tuning slider.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (fg.d3Force('link') as any)?.distance(30 * debouncedTuning.edgeLengthScale);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (fg.d3Force('charge') as any)?.strength(-30 * debouncedTuning.repulsionScale);
+      const byId3d = new Map(graph.nodes.map((n) => [n.id, n] as const));
+      fg.onNodeHover((n) => {
+        if (!n) {
+          setHover(null);
+          setHoverCard(null);
+          return;
+        }
+        const fn = n as FgNode;
+        setHover(String(fn.url ?? ''));
+        const full = byId3d.get(fn.id);
+        if (!full) {
+          setHoverCard(null);
+          return;
+        }
+        // 3D has no stable 2D anchor for a node under the cursor —
+        // pin the card to a fixed corner instead of chasing the
+        // projected position every frame.
+        setHoverCard({ node: full, x: -1, y: -1 });
+      });
+      fg.onNodeClick((node) => {
+        // Fly the camera to the node — aim from just outside it.
+        const { x = 0, y = 0, z = 0 } = node as FgNode;
+        const distance = 120;
+        const len = Math.hypot(x, y, z) || 1;
+        const ratio = 1 + distance / len;
+        fg.cameraPosition({ x: x * ratio, y: y * ratio, z: z * ratio }, { x, y, z }, 1200);
+      });
+      fg.onNodeRightClick((node) => {
+        const u = (node as FgNode).url;
+        if (u) window.open(u, '_blank');
+      });
+      // 3d-force-graph reads the container size once at init — track
+      // resizes (standalone window, detail-panel toggles) manually.
+      const ro = new ResizeObserver(() => {
+        const el = containerRef.current;
+        if (el) fg.width(el.clientWidth).height(el.clientHeight);
+      });
+      ro.observe(containerRef.current);
+      fgRef.current = fg;
+      return () => {
+        ro.disconnect();
+        fg._destructor();
+        if (fgRef.current === fg) fgRef.current = null;
+      };
+    }
+
+    // ── 2D branch — labelled tidy trees via cytoscape ────────────────
+    // Both 2D views precompute their positions (tidy-tree pass in the
+    // builders) and render with 'preset' — no layout algorithm runs.
+    const elements =
+      layout === 'directory'
+        ? buildDirectoryElements(
+            graph.nodes,
+            colorFn,
+            debouncedTuning.nodeSizeScale,
+            collapsed,
+          )
+        : buildCrawlTree2dElements(
+            graph.nodes,
+            edgeList,
+            colorFn,
+            debouncedTuning.nodeSizeScale,
+            collapsed,
+          );
+
+    // A collapse toggle rebuilds the graph; skip the auto-fit so the
+    // camera stays where the user left it (viewport restored below).
+    const keepViewport = viewportRef.current;
     const layoutCfg: Record<string, unknown> = {
-      name: layoutName,
+      name: 'preset',
       animate: false,
       padding: 30,
+      fit: keepViewport === null,
     };
-    if (layout === 'dagre' || layout === 'directory') {
-      // Sugiyama layered DAG — top-to-bottom ranks, crossing-minimised.
-      layoutCfg.rankDir = 'TB';
-      layoutCfg.nodeSep = layout === 'directory' ? 24 : 36;
-      layoutCfg.rankSep = layout === 'directory' ? 55 : 70;
-      layoutCfg.edgeSep = 12;
-      layoutCfg.ranker = 'network-simplex';
-    } else if (layout === 'radial') {
-      layoutCfg.circle = true;
-      layoutCfg.directed = true;
-      layoutCfg.spacingFactor = 1.5;
-    } else if (layout === 'cose') {
-      layoutCfg.nodeRepulsion = () => 1_000_000 * debouncedTuning.repulsionScale;
-      layoutCfg.idealEdgeLength = () => 400 * debouncedTuning.edgeLengthScale;
-      layoutCfg.edgeElasticity = () => 20;
-      layoutCfg.gravity = 0;
-      layoutCfg.gravityRange = 5.0;
-      layoutCfg.gravityCompound = 0;
-      layoutCfg.numIter = 6000;
-      layoutCfg.nodeOverlap = 200;
-      layoutCfg.componentSpacing = 400 * debouncedTuning.componentSpacingScale;
-      layoutCfg.nestingFactor = 1.2;
-      layoutCfg.initialTemp = 2000;
-      layoutCfg.coolingFactor = 0.995;
-      layoutCfg.minTemp = 1.0;
-      layoutCfg.randomize = true;
-      layoutCfg.refresh = 30;
-      layoutCfg.boundingBox = { x1: 0, y1: 0, w: 5000, h: 5000 };
-    } else if (layout === 'breadthfirst') {
-      layoutCfg.spacingFactor = 1.6;
-      layoutCfg.directed = true;
-    } else if (layout === 'circle') {
-      layoutCfg.spacingFactor = 1.4;
-    } else if (layout === 'concentric') {
-      layoutCfg.minNodeSpacing = 30;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      layoutCfg.concentric = (n: any) => Number(n.data('inlinks') ?? 0);
-      layoutCfg.levelWidth = () => 1;
-    }
 
     const cy = cytoscape({
       container: containerRef.current,
       elements,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       style: ([
+        // Every 2D view is a labelled tidy tree — labels are always on,
+        // sitting beside the dots (left of parents/folders, right of
+        // leaves — the d3 tidy-tree convention).
         {
           selector: 'node',
           style: {
+            shape: 'ellipse',
             'background-color': 'data(color)',
-            label: '',
-            color: '#e5e5e5',
-            'font-size': 9,
+            label: 'data(label)',
+            color: '#e8e8e8',
+            'font-size': 10,
             'font-weight': 500,
-            'text-outline-color': '#0a0a0a',
+            'text-outline-color': '#2F2F2F',
             'text-outline-width': 2,
-            'text-background-color': '#0a0a0a',
-            'text-background-opacity': 0.6,
-            'text-background-padding': 2,
-            'text-valign': 'bottom',
-            'text-halign': 'center',
-            'text-margin-y': 4,
-            'text-max-width': 140,
+            'text-background-opacity': 0,
+            'text-valign': 'center',
+            'text-halign': 'right',
+            'text-margin-x': 5,
+            'text-max-width': 300,
             'text-wrap': 'ellipsis',
             'border-width': 0,
             width: 'data(size)',
@@ -539,9 +971,38 @@ export function VisualizationTab() {
           },
         },
         {
-          selector: baseLabelSelector,
+          selector: 'node.lbl-left',
           style: {
-            label: 'data(label)',
+            'text-halign': 'left',
+            'text-margin-x': -5,
+          },
+        },
+        {
+          selector: 'node.lbl-right',
+          style: {
+            'text-halign': 'right',
+            'text-margin-x': 5,
+          },
+        },
+        // Branch nodes are clickable (collapse/expand) — give them a
+        // faint ring so it's discoverable, and turn a folded branch
+        // amber (the reference diagram's collapsed-node colour).
+        {
+          selector: 'node.has-kids',
+          style: {
+            'border-width': 1.5,
+            'border-color': '#ffffff',
+            'border-opacity': 0.45,
+          },
+        },
+        {
+          selector: 'node.collapsed',
+          style: {
+            'background-color': '#fcbb31',
+            'border-width': 2,
+            'border-color': '#fcbb31',
+            'border-opacity': 0.9,
+            color: '#fcd88a',
           },
         },
         {
@@ -558,24 +1019,6 @@ export function VisualizationTab() {
             'border-width': 3,
             'border-color': '#f59e0b',
             'z-index': 1000,
-          },
-        },
-        {
-          selector: "node[kind = 'dir']",
-          style: {
-            shape: 'round-rectangle',
-            'background-color': '#334155',
-            'border-width': 1,
-            'border-color': '#475569',
-            label: 'data(label)',
-            color: '#94a3b8',
-            'font-size': 9,
-            'text-valign': 'center',
-            'text-halign': 'center',
-            'text-outline-width': 0,
-            'text-background-opacity': 0,
-            width: 'data(size)',
-            height: 'data(size)',
           },
         },
         {
@@ -596,13 +1039,16 @@ export function VisualizationTab() {
         {
           selector: 'edge',
           style: {
-            width: 0.7,
-            'line-color': '#404040',
-            'curve-style': 'bezier',
-            'target-arrow-color': '#525252',
-            'target-arrow-shape': 'triangle',
-            'arrow-scale': 0.6,
-            opacity: debouncedTuning.edgeOpacity,
+            width: 1,
+            // Light rounded-elbow links on the charcoal canvas — the
+            // closest cytoscape gets to the reference's d3 linkHorizontal
+            // curves. No arrowheads: direction is implicit root→leaf.
+            'line-color': '#c9c9c9',
+            'curve-style': 'round-taxi',
+            'taxi-direction': 'rightward',
+            'taxi-turn': '45%',
+            'target-arrow-shape': 'none',
+            opacity: Math.max(0.5, debouncedTuning.edgeOpacity),
           },
         },
         {
@@ -635,10 +1081,27 @@ export function VisualizationTab() {
       ] as any),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       layout: layoutCfg as any,
-      wheelSensitivity: 0.2,
+      // 0.2 was tuned for the old force-directed hairball where one
+      // wheel tick could overshoot the whole graph. The tidy trees
+      // start fully zoomed OUT (fit of a tall layout), so the user
+      // always has to travel a long zoom range to reach readable
+      // labels — a low multiplier makes that feel glacial.
+      wheelSensitivity: 0.8,
       minZoom: 0.05,
       maxZoom: 4,
+      // Keep pan/zoom gestures fluid on big trees: skip edge drawing
+      // mid-gesture (they pop back in at rest).
+      hideEdgesOnViewport: graph.nodes.length > 600,
     });
+
+    // Restore the pre-collapse viewport, then clear the marker so the
+    // next non-collapse rebuild (layout / colour change) refits.
+    if (keepViewport) {
+      cy.viewport({ zoom: keepViewport.zoom, pan: keepViewport.pan });
+      viewportRef.current = null;
+    }
+
+    const nodeById = new Map(graph.nodes.map((n) => [n.id, n] as const));
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const placeLabel = (node: any) => {
@@ -651,6 +1114,21 @@ export function VisualizationTab() {
         y: pos.y,
         radius,
       });
+    };
+
+    /** Position the SF-style summary card next to a hovered page node.
+     *  Folder nodes (directory view) carry no crawl data — skipped. */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const placeHoverCard = (node: any) => {
+      const idNum = Number(node.id());
+      const data = Number.isFinite(idNum) ? nodeById.get(idNum) : undefined;
+      if (!data) {
+        setHoverCard(null);
+        return;
+      }
+      const pos = node.renderedPosition();
+      const radius = (node.data('size') as number) * cy.zoom() * 0.5;
+      setHoverCard({ node: data, x: pos.x + radius + 10, y: pos.y });
     };
 
     const highlightPath = (res: CrawlPathResult) => {
@@ -673,7 +1151,7 @@ export function VisualizationTab() {
     cy.on('mouseover', 'node', (e) => {
       const node = e.target;
       setHover(String(node.data('fullUrl')));
-      placeLabel(node);
+      placeHoverCard(node);
       cy.batch(() => {
         cy.elements().not('.selected').addClass('faded');
         const neighbourhood = node.closedNeighborhood();
@@ -684,6 +1162,7 @@ export function VisualizationTab() {
     });
     cy.on('mouseout', 'node', () => {
       setHover(null);
+      setHoverCard(null);
       const sel = cy.$('node.selected');
       if (sel.length > 0) {
         placeLabel(sel[0]!);
@@ -703,6 +1182,29 @@ export function VisualizationTab() {
 
     cy.on('tap', 'node', (e) => {
       const node = e.target;
+      const kind = String(node.data('kind') ?? 'page');
+      const idNum = Number(node.data('id'));
+
+      // Branch node → fold/unfold its subtree (skipped while Crawl Path
+      // is armed, where a click means "trace this page" and a rebuild
+      // would wipe the highlight). Preserve the viewport across the
+      // rebuild so the branch stays under the cursor.
+      const childCount = Number(node.data('childCount') ?? 0);
+      if (!pathModeRef.current && childCount > 0) {
+        viewportRef.current = { zoom: cy.zoom(), pan: { ...cy.pan() } };
+        // The rebuild tears down this cy instance, so mouseout never
+        // fires — drop the hover chrome by hand.
+        setHoverCard(null);
+        setLabelOverlay(null);
+        setHover(null);
+        const id = node.id();
+        const next = new Set(collapsedRef.current);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        setCollapsed(next);
+        return;
+      }
+
       setSelectedUrl(String(node.data('fullUrl')));
       placeLabel(node);
       cy.batch(() => {
@@ -713,8 +1215,6 @@ export function VisualizationTab() {
         keep.removeClass('faded');
         keep.edges().addClass('focus');
       });
-      const kind = String(node.data('kind') ?? 'page');
-      const idNum = Number(node.data('id'));
       if (pathModeRef.current && kind !== 'dir' && Number.isFinite(idNum)) {
         void window.freecrawl.crawlPath({ urlId: idNum }).then((res) => {
           setCrawlPath(res);
@@ -742,11 +1242,27 @@ export function VisualizationTab() {
       }
     });
 
-    cy.on('pan zoom render', () => {
-      const sel = cy.$('node.selected');
-      if (sel.length > 0) {
-        placeLabel(sel[0]!);
-      }
+    // Keep the floating URL overlay glued to the selected node while
+    // the viewport moves. Coalesced to one update per animation frame —
+    // the previous version also listened to 'render' (fires EVERY
+    // canvas frame) and called a React setState from it, so a zoom
+    // gesture with a selection active re-rendered React per frame and
+    // made zooming feel sluggish.
+    let overlayRafPending = false;
+    cy.on('pan zoom', () => {
+      // The card is anchored to a screen position; moving the viewport
+      // invalidates it. Cheaper (and less jittery) to drop it than to
+      // re-anchor per frame.
+      setHoverCard(null);
+      if (overlayRafPending) return;
+      overlayRafPending = true;
+      requestAnimationFrame(() => {
+        overlayRafPending = false;
+        const sel = cy.$('node.selected');
+        if (sel.length > 0) {
+          placeLabel(sel[0]!);
+        }
+      });
     });
 
     cy.on('dbltap', 'node', (e) => {
@@ -761,7 +1277,23 @@ export function VisualizationTab() {
       cy.destroy();
       cyRef.current = null;
     };
-  }, [graph, layout, colorMode, labelMode, debouncedTuning]);
+  }, [graph, layout, colorMode, debouncedTuning, collapsed]);
+
+  // Collapse state is keyed by node id and the two 2D views use
+  // different id spaces (page ids vs `dir:` paths) — reset whenever the
+  // view or the underlying data changes so stale folds can't leak.
+  useEffect(() => {
+    setCollapsed((prev) => (prev.size === 0 ? prev : new Set()));
+    viewportRef.current = null;
+    // Drop hover chrome too: these overlays are anchored to the old
+    // renderer's screen coordinates, so without this a 2D label pill
+    // stays stranded on the canvas after switching to a 3D view.
+    setLabelOverlay(null);
+    setHoverCard(null);
+    setHover(null);
+  }, [layout, graph]);
+
+  const is3d = is3dLayout(layout);
 
   return (
     <div className="flex h-full w-full flex-col bg-surface-950">
@@ -775,7 +1307,12 @@ export function VisualizationTab() {
             <select
               className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
               value={layout}
-              onChange={(e) => setLayout(e.target.value as LayoutKind)}
+              onChange={(e) => {
+                const next = e.target.value as LayoutKind;
+                setLayout(next);
+                // Crawl-path tracing is a 2D (cytoscape) feature.
+                if (is3dLayout(next)) setPathMode(false);
+              }}
             >
               {LAYOUTS.map((l) => (
                 <option key={l.key} value={l.key} title={translateLabel(l.hint, lang)}>
@@ -791,6 +1328,7 @@ export function VisualizationTab() {
               value={colorMode}
               onChange={(e) => setColorMode(e.target.value as ColorMode)}
             >
+              <option value="crawl">{t('viz.byCrawl', { defaultValue: 'Crawl Diagram (Depth × Indexability)' })}</option>
               <option value="status">{t('viz.byStatus', { defaultValue: 'By Status' })}</option>
               <option value="depth">{t('viz.byDepth', { defaultValue: 'By Depth' })}</option>
               <option value="indexability">{t('viz.byIndexability', { defaultValue: 'By Indexability' })}</option>
@@ -814,40 +1352,32 @@ export function VisualizationTab() {
               <option value="2000">2,000</option>
             </select>
           </label>
-          <label className="flex items-center gap-1 text-surface-400">
-            {t('viz.labels', { defaultValue: 'Labels:' })}
-            <select
-              className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
-              value={labelMode}
-              onChange={(e) => setLabelMode(e.target.value as LabelMode)}
-              title={t('viz.labelsTooltip', { defaultValue: 'Hover = on demand · Top 20 = only the most-linked hubs · All = every node' })}
-            >
-              <option value="hover">{t('viz.hoverOnly', { defaultValue: 'Hover Only' })}</option>
-              <option value="top">{t('viz.top20', { defaultValue: 'Top 20' })}</option>
-              <option value="always">{t('viz.all', { defaultValue: 'All' })}</option>
-            </select>
-          </label>
           <button
             className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
-            onClick={() => cyRef.current?.fit(undefined, 30)}
+            onClick={() => {
+              cyRef.current?.fit(undefined, 30);
+              fgRef.current?.zoomToFit(400, 30);
+            }}
             title={t('viz.fitTitle', { defaultValue: 'Fit graph to view' })}
           >
             {t('viz.fit', { defaultValue: 'Fit' })}
           </button>
-          <button
-            className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] ${
-              pathMode
-                ? 'border-cyan-500 bg-surface-800 text-cyan-200'
-                : 'border-surface-700 text-surface-200 hover:border-blue-500 hover:bg-surface-800'
-            }`}
-            onClick={() => setPathMode((v) => !v)}
-            title={t('viz.crawlPathTitle', {
-              defaultValue: 'Crawl Path mode — click a page node to trace its shortest path from the crawl root',
-            })}
-          >
-            <Route className="h-3 w-3" />
-            {t('viz.crawlPath', { defaultValue: 'Crawl Path' })}
-          </button>
+          {!is3d && (
+            <button
+              className={`flex items-center gap-1 rounded border px-2 py-1 text-[11px] ${
+                pathMode
+                  ? 'border-cyan-500 bg-surface-800 text-cyan-200'
+                  : 'border-surface-700 text-surface-200 hover:border-blue-500 hover:bg-surface-800'
+              }`}
+              onClick={() => setPathMode((v) => !v)}
+              title={t('viz.crawlPathTitle', {
+                defaultValue: 'Crawl Path mode — click a page node to trace its shortest path from the crawl root',
+              })}
+            >
+              <Route className="h-3 w-3" />
+              {t('viz.crawlPath', { defaultValue: 'Crawl Path' })}
+            </button>
+          )}
           <button
             className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
             onClick={() => loadGraph()}
@@ -907,29 +1437,34 @@ export function VisualizationTab() {
                   className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
                   onClick={() => {
                     if (cyRef.current) exportPng(cyRef.current);
+                    else if (fgRef.current) exportPng3d(fgRef.current);
                     setExportMenuOpen(false);
                   }}
                 >
                   {t('viz.exportPng', { defaultValue: 'PNG (high-DPI raster)' })}
                 </button>
-                <button
-                  className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
-                  onClick={() => {
-                    if (cyRef.current) exportSvg(cyRef.current);
-                    setExportMenuOpen(false);
-                  }}
-                >
-                  {t('viz.exportSvg', { defaultValue: 'SVG (vector — Illustrator/Figma)' })}
-                </button>
-                <button
-                  className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
-                  onClick={() => {
-                    if (cyRef.current) exportStandaloneHtml(cyRef.current);
-                    setExportMenuOpen(false);
-                  }}
-                >
-                  {t('viz.exportHtml', { defaultValue: 'Standalone HTML (shareable)' })}
-                </button>
+                {!is3d && (
+                  <button
+                    className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
+                    onClick={() => {
+                      if (cyRef.current) exportSvg(cyRef.current);
+                      setExportMenuOpen(false);
+                    }}
+                  >
+                    {t('viz.exportSvg', { defaultValue: 'SVG (vector — Illustrator/Figma)' })}
+                  </button>
+                )}
+                {!is3d && (
+                  <button
+                    className="block w-full px-3 py-1.5 text-left text-[11px] text-surface-200 hover:bg-surface-800"
+                    onClick={() => {
+                      if (cyRef.current) exportStandaloneHtml(cyRef.current);
+                      setExportMenuOpen(false);
+                    }}
+                  >
+                    {t('viz.exportHtml', { defaultValue: 'Standalone HTML (shareable)' })}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -937,7 +1472,13 @@ export function VisualizationTab() {
       </div>
 
       <div className="flex flex-1 min-h-0">
-        <div className="relative flex-1 overflow-hidden bg-surface-950">
+        {/* Charcoal (#2F2F2F) canvas — the classic crawl-diagram
+            backdrop that makes the depth-faded green→white nodes and
+            light links read correctly. */}
+        <div
+          className="relative flex-1 overflow-hidden"
+          style={{ backgroundColor: '#2F2F2F' }}
+        >
           <div ref={containerRef} className="absolute inset-0" />
           {labelOverlay && (
             <div
@@ -953,6 +1494,14 @@ export function VisualizationTab() {
               {labelOverlay.text}
             </div>
           )}
+          {hoverCard && graph && (
+            <NodeSummaryCard
+              node={hoverCard.node}
+              totalUrls={graph.totalUrls}
+              x={hoverCard.x}
+              y={hoverCard.y}
+            />
+          )}
           {graph && (
             <div className="pointer-events-none absolute left-3 top-3 rounded bg-surface-900/80 px-2 py-1 text-[10px] text-surface-300">
               {t('viz.nodesEdgesCount', {
@@ -964,7 +1513,9 @@ export function VisualizationTab() {
           )}
           {graph && (
             <div className="pointer-events-none absolute right-3 top-3 rounded bg-surface-900/80 px-2 py-1 text-[10px] text-surface-400">
-              {t('viz.interactionHint', { defaultValue: 'Hover = neighbours · Click = select · Empty click = clear · Double-click node = open · Double-click canvas = fit' })}
+              {is3d
+                ? t('viz.interactionHint3d', { defaultValue: 'Drag = rotate · Scroll = zoom · Right-drag = pan · Click = fly to node · Right-click = open' })
+                : t('viz.interactionHint', { defaultValue: 'Hover = summary · Click branch = collapse/expand · Double-click node = open · Double-click canvas = fit' })}
             </div>
           )}
           {hover && (
@@ -1045,40 +1596,156 @@ export function VisualizationTab() {
               <Sparkles className="h-3 w-3" /> {t('viz.topAnchorTexts', { defaultValue: 'Top Anchor Texts' })}
             </div>
           </div>
-          <div className="flex-1 overflow-auto p-2 leading-snug">
+          {/* Ranked list instead of the old variable-font-size word
+              cloud — the cloud read as visual noise (mixed sizes, no
+              counts, ragged wrapping). Rows: rank · anchor (truncated,
+              full text on hover) · count, with a subtle proportional
+              usage bar behind the text. */}
+          <div className="flex-1 overflow-auto py-1 leading-snug">
             {anchors.length === 0 && (
-              <div className="px-2 py-3 text-[11px] italic text-surface-500">
+              <div className="px-3 py-3 text-[11px] italic text-surface-500">
                 {t('viz.anchorsEmpty', { defaultValue: 'No internal-link anchors collected yet.' })}
               </div>
             )}
             {anchors.length > 0 && (
-              <div className="flex flex-wrap items-baseline gap-2">
-                {anchors.map((a) => {
+              <ol className="flex flex-col px-1">
+                {anchors.map((a, i) => {
                   const max = anchors[0]?.count ?? 1;
-                  const min = anchors[anchors.length - 1]?.count ?? 1;
-                  const range = Math.max(1, Math.log2(max) - Math.log2(min));
-                  const frac =
-                    (Math.log2(a.count) - Math.log2(min)) / range;
-                  const size = 9 + frac * 13;
+                  const pct = Math.max(3, Math.round((a.count / max) * 100));
                   return (
-                    <span
+                    <li
                       key={a.anchor}
-                      className="text-surface-200"
-                      style={{ fontSize: `${size}px` }}
+                      className="flex items-center gap-2 rounded px-2 py-[3px] hover:bg-surface-800/60"
                       title={t('viz.occurrences', {
                         defaultValue: '{{count}} occurrences',
                         count: a.count.toLocaleString(),
                       })}
                     >
-                      {a.anchor}
-                    </span>
+                      <span className="w-6 shrink-0 text-right font-mono text-[10px] tabular-nums text-surface-500">
+                        {i + 1}
+                      </span>
+                      <span className="relative min-w-0 flex-1">
+                        <span
+                          className="absolute inset-y-[1px] left-0 rounded-sm bg-blue-500/15"
+                          style={{ width: `${pct}%` }}
+                        />
+                        <span className="relative block truncate text-[11px] text-surface-200">
+                          {a.anchor}
+                        </span>
+                      </span>
+                      <span className="shrink-0 font-mono text-[10px] tabular-nums text-surface-400">
+                        {a.count.toLocaleString()}
+                      </span>
+                    </li>
                   );
                 })}
-              </div>
+              </ol>
             )}
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Screaming-Frog-style hover summary: the SEO facts you want without
+ * leaving the graph. Positioned next to the hovered dot in 2D; pinned
+ * to the canvas corner in 3D (`x < 0`), where a node has no stable 2D
+ * anchor. Clamped so it never runs off the right/bottom edge.
+ */
+function NodeSummaryCard({
+  node,
+  totalUrls,
+  x,
+  y,
+}: {
+  node: GraphSnapshotResult['nodes'][number];
+  totalUrls: number;
+  x: number;
+  y: number;
+}) {
+  const { t } = useTranslation();
+  const pinned = x < 0;
+  const pctOfTotal = totalUrls > 0 ? (node.inlinks / totalUrls) * 100 : 0;
+  const rows: { label: string; value: string; mono?: boolean }[] = [
+    { label: t('viz.cardTitle', { defaultValue: 'Page Title' }), value: node.title ?? '—' },
+    {
+      label: t('viz.cardResponse', { defaultValue: 'Response Code' }),
+      value: node.statusCode === null ? '—' : String(node.statusCode),
+      mono: true,
+    },
+    { label: t('viz.cardIndexability', { defaultValue: 'Indexability' }), value: node.indexability },
+    { label: t('viz.cardH1', { defaultValue: 'H1' }), value: node.h1 ?? '—' },
+    {
+      label: t('viz.cardH2Count', { defaultValue: 'H2 Count' }),
+      value: node.h2Count.toLocaleString(),
+      mono: true,
+    },
+    {
+      label: t('viz.cardDepth', { defaultValue: 'Crawl Depth' }),
+      value: String(node.depth),
+      mono: true,
+    },
+    {
+      label: t('viz.cardInlinks', { defaultValue: 'Unique Inlinks' }),
+      value: node.inlinks.toLocaleString(),
+      mono: true,
+    },
+    {
+      label: t('viz.cardOutlinks', { defaultValue: 'Unique Outlinks' }),
+      value: node.outlinks.toLocaleString(),
+      mono: true,
+    },
+    {
+      label: t('viz.cardFollowed', { defaultValue: 'Followed Outlinks' }),
+      value: node.followedOutlinks.toLocaleString(),
+      mono: true,
+    },
+    {
+      label: t('viz.cardPctTotal', { defaultValue: '% of Total' }),
+      value: `${pctOfTotal.toFixed(2)}%`,
+      mono: true,
+    },
+    {
+      label: t('viz.cardWordCount', { defaultValue: 'Word Count' }),
+      value: node.wordCount === null ? '—' : node.wordCount.toLocaleString(),
+      mono: true,
+    },
+  ];
+  return (
+    <div
+      className="pointer-events-none absolute z-20 w-[380px] max-w-[calc(100%-24px)] rounded-md border border-surface-600 p-2.5 text-[11px] shadow-2xl"
+      // Fully opaque on purpose: the card sits over the graph, and any
+      // translucency lets nodes/links bleed through the stat rows and
+      // makes them unreadable. Set inline (not via a Tailwind opacity
+      // modifier) so it can't be diluted by a utility class later.
+      style={{
+        backgroundColor: '#0a0a0a',
+        ...(pinned
+          ? { right: 12, bottom: 12 }
+          : {
+              left: `min(${x}px, calc(100% - 392px))`,
+              top: `max(8px, min(${y}px, calc(100% - 300px)))`,
+            }),
+      }}
+    >
+      <div className="mb-1.5 break-all border-b border-surface-800 pb-1.5 font-mono text-[11px] leading-snug text-blue-300">
+        {node.url}
+      </div>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-[3px]">
+        {rows.map((r) => (
+          <Fragment key={r.label}>
+            <dt className="whitespace-nowrap text-surface-400">{r.label}</dt>
+            <dd
+              className={`min-w-0 truncate text-surface-100 ${r.mono ? 'text-right font-mono tabular-nums' : ''}`}
+              title={r.value}
+            >
+              {r.value}
+            </dd>
+          </Fragment>
+        ))}
+      </dl>
     </div>
   );
 }
@@ -1149,7 +1816,7 @@ function TuningPopover({
         step={0.1}
         format={(v) => `${v.toFixed(1)}×`}
         onChange={(v) => patch({ repulsionScale: v })}
-        hint={t('viz.repulsionHint', { defaultValue: 'How strongly nodes push each other apart. Higher = more breathing room. Force-Directed only.' })}
+        hint={t('viz.repulsionHint', { defaultValue: 'How strongly nodes push each other apart. Higher = more breathing room. 3D force views only.' })}
       />
       <Slider
         label={t('viz.edgeLength', { defaultValue: 'Edge length' })}
@@ -1159,17 +1826,7 @@ function TuningPopover({
         step={0.1}
         format={(v) => `${v.toFixed(1)}×`}
         onChange={(v) => patch({ edgeLengthScale: v })}
-        hint={t('viz.edgeLengthHint', { defaultValue: 'Target rest-length for connections. Higher = longer edges. Force-Directed only.' })}
-      />
-      <Slider
-        label={t('viz.clusterSpacing', { defaultValue: 'Cluster spacing' })}
-        value={tuning.componentSpacingScale}
-        min={0.3}
-        max={4}
-        step={0.1}
-        format={(v) => `${v.toFixed(1)}×`}
-        onChange={(v) => patch({ componentSpacingScale: v })}
-        hint={t('viz.clusterSpacingHint', { defaultValue: 'Gap between disconnected sub-graphs. Higher = isolated clusters spread further apart.' })}
+        hint={t('viz.edgeLengthHint', { defaultValue: 'Target rest-length for connections. Higher = longer edges. 3D force views only.' })}
       />
       <Slider
         label={t('viz.edgeOpacity', { defaultValue: 'Edge opacity' })}

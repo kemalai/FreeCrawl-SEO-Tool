@@ -452,20 +452,15 @@ const TR_LABELS: Record<string, string> = {
   Pages: 'Sayfalar',
 
   // VisualizationTab layout names + hints
-  'Force-Directed': 'Force-Directed',
-  'Compound spring embedder': 'Bileşik yay yerleştirici',
-  'Tree (BFS)': 'Ağaç (BFS)',
-  'Roots-to-leaves layered': 'Kök-yaprak katmanlı',
-  'Force-Directed Tree': 'Force-Directed Ağaç',
-  'Sugiyama layered DAG (dagre)': 'Sugiyama katmanlı DAG (dagre)',
-  'Radial Tree': 'Radyal Ağaç',
-  'Roots at centre, leaves outward': 'Kök merkezde, yapraklar dışa',
+  '3D Force-Directed Crawl Tree': '3D Force-Directed Tarama Ağacı',
+  'Discovery tree in 3D — drag to rotate, scroll to zoom':
+    '3B keşif ağacı — döndürmek için sürükle, yakınlaştırmak için kaydır',
+  '3D Force-Directed Link Graph': '3D Force-Directed Bağlantı Grafiği',
+  'Full internal link mesh in 3D': 'Tam iç bağlantı ağı, 3B',
+  'Crawl Tree': 'Tarama Ağacı',
+  'Left-to-right labelled discovery tree (2D)': 'Soldan sağa etiketli keşif ağacı (2D)',
   'Directory Tree': 'Dizin Ağacı',
-  'Grouped by URL path segments': 'URL yol segmentlerine göre gruplu',
-  Circle: 'Çember',
-  'Equal radial spacing': 'Eşit radyal boşluk',
-  Concentric: 'Konsantrik',
-  'By inlinks (centre = most-linked)': 'Inlinks\'e göre (merkez = en çok linklenen)',
+  'Grouped by URL path segments (2D)': 'URL yol segmentlerine göre gruplu (2D)',
 
   // BrokenLinksTab column headers
   Source: 'Kaynak',

@@ -5,6 +5,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import type { ProjectDb } from '@freecrawl/db';
 import type { CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
+import { ensureHeapHeadroom } from './heap-guard.js';
 
 export interface TabularSection {
   label: string;
@@ -506,17 +507,26 @@ export async function exportTabular(
 
   if (format === 'xlsx') {
     // xlsx — single workbook, one sheet per section. subdir/filename
-    // are ignored; the workbook lives at `outputPath`.
+    // are ignored; the workbook lives at `outputPath`. Unlike the
+    // CSV/JSON/XML writers below (which stream row-by-row), the xlsx
+    // container format forces every sheet into memory at once — so
+    // guard the heap while accumulating: better a clear "use CSV for
+    // datasets this big" error than a V8 OOM abort of the whole app.
     const usedNames = new Set<string>();
     let total = 0;
     const sheets = sections.map((section) => {
       const rows: CrawlUrlRow[] = [];
       for (const row of rowSource(db, section.category, selectedIds)) {
         rows.push(row);
+        if (rows.length % 50_000 === 0) {
+          ensureHeapHeadroom('XLSX export', 128 * 1024 * 1024);
+        }
       }
       total += rows.length;
       return { name: sanitizeSheetName(section.label, usedNames), rows };
     });
+    // Workbook buffer is roughly rows × columns × ~24 B of XML.
+    ensureHeapHeadroom('XLSX export', total * columns.length * 24);
     const buf = buildXlsxBuffer(sheets, columns);
     writeFileSync(outputPath, buf);
     return { filePath: outputPath, files: [outputPath], rowsWritten: total };

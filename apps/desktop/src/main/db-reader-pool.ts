@@ -323,6 +323,15 @@ export function setReaderPoolResolver(fn: () => DbReaderPool): void {
  * to the synchronous main-process DB on any worker error. The fallback
  * path keeps the UI working even if every worker is crashed/restarting,
  * at the cost of running on the main thread for that one query.
+ *
+ * HEAVY methods never fall back. If a heavy aggregate crashed or timed
+ * out its reader worker, re-running the exact same query on the main
+ * thread escalates a contained worker failure into a main-process
+ * stall (multi-second aggregate blocking every IPC) or — for
+ * OOM-class failures — a process crash, since Electron's V8 heap is
+ * hard-capped at 4 GB per process. Callers get a rejection instead;
+ * the sidebar keeps its previous counts and the next poll tick retries
+ * against the (by then respawned) worker.
  */
 export async function callReaderOrFallback<T>(
   method: string,
@@ -330,13 +339,25 @@ export async function callReaderOrFallback<T>(
   fallback: () => T | Promise<T>,
 ): Promise<T> {
   const pool = resolveReaderPool();
+  const heavy = HEAVY_METHODS.has(method);
   if (!pool.isReady()) {
+    if (heavy) {
+      throw new Error(`reader-unavailable: '${method}' skips main-thread fallback`);
+    }
     return fallback();
   }
   try {
     return await pool.call<T>(method, args);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    if (heavy) {
+      logger.log(
+        'warn',
+        'db-reader',
+        `'${method}' failed on reader pool (${msg}) — heavy query, NOT retrying on main thread.`,
+      );
+      throw err;
+    }
     logger.log(
       'warn',
       'db-reader',

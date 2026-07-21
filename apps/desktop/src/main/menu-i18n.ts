@@ -45,6 +45,8 @@ export interface MenuLabels {
   openProjectEncrypted: string;
   openProjectEncryptedTooltip: string;
   settings: string;
+  edit: string;
+  copy: string;
   view: string;
   overviewSidebar: string;
   detailPanel: string;
@@ -178,6 +180,8 @@ const MENU_EN: MenuLabels = {
   openProjectEncryptedTooltip:
     'Decrypt a .seoproject.enc snapshot with its password and open the recovered project.',
   settings: 'Settings…',
+  edit: 'Edit',
+  copy: 'Copy',
   view: 'View',
   overviewSidebar: 'Overview Sidebar',
   detailPanel: 'Detail Panel',
@@ -315,6 +319,8 @@ const MENU_TR: MenuLabels = {
   openProjectEncryptedTooltip:
     'Bir .seoproject.enc snapshot\'ını parolasıyla çöz ve kurtarılan projeyi aç.',
   settings: 'Ayarlar…',
+  edit: 'Düzen',
+  copy: 'Kopyala',
   view: 'Görünüm',
   overviewSidebar: 'Genel Bakış Kenar Çubuğu',
   detailPanel: 'Detay Paneli',

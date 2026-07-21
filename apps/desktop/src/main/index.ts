@@ -6,6 +6,8 @@ import {
   dialog,
   Menu,
   Notification,
+  powerMonitor,
+  powerSaveBlocker,
   session,
   shell,
   Tray,
@@ -24,6 +26,7 @@ import { totalmem, freemem } from 'node:os';
 import {
   DEFAULT_CRAWL_CONFIG,
   IPC,
+  type MenuEvent,
   type ConfirmClearResult,
   type CrawlConfig,
   type CrawlProgress,
@@ -184,6 +187,7 @@ import {
   exportTabular,
   exportSitemap,
   exportHtmlReport,
+  ensureHeapHeadroom,
   compareCrawls,
   testUrlAgainstRobots,
   validateRobotsTxt,
@@ -1035,6 +1039,92 @@ async function recomputeIssuesViaPool(
  * 5–15 s on a 5K-URL crawl — exactly the window where users hit
  * Stop/Pause and "nothing happens".
  */
+/**
+ * Ref-counted power-save blocker held while any window's crawl runs.
+ * First active crawl starts the blocker, last one to end releases it —
+ * keyed by Crawler instance so double-release (e.g. stop() during
+ * clearCrawlDb after the Stop IPC already fired) is a no-op. Without
+ * this, macOS App Nap throttles a backgrounded crawl's timers, CPU
+ * share and disk I/O, and laptop sleep kills it entirely.
+ */
+const crawlsHoldingPowerBlocker = new Set<Crawler>();
+let crawlPowerBlockerId: number | null = null;
+
+function acquireCrawlPowerBlocker(crawler: Crawler): void {
+  if (crawlsHoldingPowerBlocker.has(crawler)) return;
+  crawlsHoldingPowerBlocker.add(crawler);
+  if (crawlPowerBlockerId !== null) return;
+  try {
+    crawlPowerBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+    logger.log('info', 'main', 'Power-save blocker acquired (crawl running)');
+  } catch (err) {
+    // Non-fatal — the crawl still runs, just without suspension immunity.
+    crawlPowerBlockerId = null;
+    logger.log(
+      'warn',
+      'main',
+      `powerSaveBlocker.start failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+function releaseCrawlPowerBlocker(crawler: Crawler): void {
+  if (!crawlsHoldingPowerBlocker.delete(crawler)) return;
+  if (crawlsHoldingPowerBlocker.size > 0 || crawlPowerBlockerId === null) return;
+  try {
+    powerSaveBlocker.stop(crawlPowerBlockerId);
+  } catch {
+    /* already stopped — ignore */
+  }
+  crawlPowerBlockerId = null;
+  logger.log('info', 'main', 'Power-save blocker released (no crawls running)');
+}
+
+/**
+ * Thermal-adaptive crawl throttling (macOS-only — Electron emits
+ * `thermal-state-change` only there). On fanless Apple Silicon
+ * machines (MacBook Air) a 40-minute crawl at full concurrency drives
+ * the SoC into sustained throttling; Apple's guidance is to shed CPU
+ * and I/O proactively from the `fair` state onward, before the OS
+ * starts enacting its own countermeasures at `serious`. The scale is
+ * applied as a concurrency *ceiling* on every live crawler — the
+ * crawler's lag-adaptive loop keeps operating underneath it.
+ * `nominal`/`unknown` map to 1 (unsupported systems always report
+ * `nominal`, so this path is a safe no-op for them).
+ */
+function thermalScaleFor(state: string): number {
+  switch (state) {
+    case 'critical':
+      return 0.25;
+    case 'serious':
+      return 0.5;
+    case 'fair':
+      return 0.75;
+    default:
+      return 1;
+  }
+}
+
+function applyThermalStateToCrawlers(state: string): void {
+  const scale = thermalScaleFor(state);
+  for (const s of [defaultSession, ...sessionsByWc.values()]) {
+    s.activeCrawler?.setThrottleScale(scale, `thermal:${state}`);
+  }
+}
+
+/** Seed a freshly launched crawler with the current thermal state so a
+ *  crawl started on an already-hot machine begins throttled instead of
+ *  waiting for the next state *change*. */
+function applyCurrentThermalState(crawler: Crawler): void {
+  if (process.platform !== 'darwin') return;
+  try {
+    const state = powerMonitor.getCurrentThermalState();
+    crawler.setThrottleScale(thermalScaleFor(state), `thermal:${state}`);
+  } catch {
+    /* powerMonitor not ready pre-app-ready — crawls can't start then */
+  }
+}
+
 async function runDbPassViaPool(
   session: ProjectSession,
   method: string,
@@ -1352,6 +1442,22 @@ function rebuildMenu(): void {
       onOpenLogsFolder: () => openLogsFolder(),
       onCheckForUpdates: () => void checkForUpdates(),
       onOpenLogAnalyzer: () => openLogAnalyzerWindow(),
+      onEditCopy: () => {
+        const win = BrowserWindow.getFocusedWindow();
+        if (!win || win.isDestroyed()) return;
+        // Project windows understand the 'edit-copy' menu event and run
+        // the custom-table-copy → native-copy round-trip. Auxiliary
+        // windows (Logs, Log Analyzer, viz popouts) don't subscribe to
+        // menu events — give them the stock native copy directly so
+        // Cmd+C on selected text keeps working there.
+        const isProjectWindow =
+          win === mainWindow || sessionsByWc.has(win.webContents.id);
+        if (isProjectWindow) {
+          win.webContents.send(IPC.menuEvent, 'edit-copy' satisfies MenuEvent);
+        } else {
+          win.webContents.copy();
+        }
+      },
     }),
   );
 }
@@ -2466,6 +2572,13 @@ function seedDiscoveryUrls(limit: number): LogSeedDiscoveryResult {
 
 function registerIpc(): void {
   registerHandle(IPC.appVersion, () => app.getVersion());
+  // Native-copy fallback leg of the macOS Edit▸Copy round-trip: the
+  // renderer calls this when no custom table selection consumed the
+  // copy, so the stock behaviour (copy the DOM text selection / the
+  // focused input's selection) still happens.
+  registerHandle(IPC.editCopyNative, (e): void => {
+    e.sender.copy();
+  });
 
   // Live memory snapshot for the in-app monitor (status bar). Returns
   // process RSS / heap + system total/free + the active project's URL
@@ -2622,6 +2735,10 @@ function registerIpc(): void {
         filePath = res.filePath;
       }
       const db = getDb();
+      // Bounded but chunky: up to 250K+ small rows plus the workbook
+      // buffer, all materialised at once. Verify the heap can absorb
+      // it before starting — a clear error beats a V8 OOM abort.
+      ensureHeapHeadroom('Log analysis export', 256 * 1024 * 1024);
       const tables: LogExportTables = {
         overview: db.getLogOverview(),
         urlStats: db.queryLogUrlStats({ limit: 100_000, offset: 0, sortBy: 'totalHits', filter: 'all' }).rows,
@@ -4593,6 +4710,23 @@ function registerIpc(): void {
    * in the Start dialog again. Persisted across restarts via DB
    * project_meta so it survives the very crash we're recovering from. */
   function attachCrawlerListeners(crawler: Crawler, sess: ProjectSession): void {
+    // Keep the OS from suspending/App-Napping us while this crawl runs.
+    // On macOS a backgrounded crawl otherwise gets App Nap's priority
+    // reduction + timer throttling + disk-I/O throttling (and on Apple
+    // Silicon, background-QoS work is confined to E-cores); on laptops
+    // generally, system sleep would kill the crawl outright.
+    // `prevent-app-suspension` is the cheapest blocker level — the
+    // display may still turn off. Released on 'done' AND 'stopped'
+    // (done is suppressed after stop(), so both hooks are required),
+    // deliberately BEFORE the zombie-crawler guard in the handlers
+    // below: a superseded crawler must still drop its blocker hold.
+    acquireCrawlPowerBlocker(crawler);
+    crawler.on('done', () => releaseCrawlPowerBlocker(crawler));
+    crawler.on('stopped', () => releaseCrawlPowerBlocker(crawler));
+    // Start throttled if the machine is already hot (macOS-only no-op
+    // elsewhere) — the thermal-state-change listener only covers
+    // *changes* after launch.
+    applyCurrentThermalState(crawler);
     // Bound to the launching session so progress/done/error reach THAT
     // window (multi-window) — these callbacks run outside any IPC handler's
     // AsyncLocalStorage context, so they can't use `currentSession()`.
@@ -6002,7 +6136,7 @@ function registerIpc(): void {
         const rawDb = (database as any).db as { exec: (sql: string) => void };
         rawDb.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
         const { encryptFile } = await import('./project-encryption.js');
-        const result = encryptFile(tmpPath, i.filePath, i.password);
+        const result = await encryptFile(tmpPath, i.filePath, i.password);
         return { filePath: i.filePath, bytesWritten: result.bytesWritten };
       } finally {
         try {
@@ -6022,7 +6156,7 @@ function registerIpc(): void {
       if (!i.password) throw new Error('password is required.');
       if (!i.destPath) throw new Error('destPath is required (output .seoproject path).');
       const { decryptFile } = await import('./project-encryption.js');
-      decryptFile(i.filePath, i.destPath, i.password);
+      await decryptFile(i.filePath, i.destPath, i.password);
       openProjectAtPath(i.destPath);
       return { filePath: i.destPath };
     },
@@ -6310,7 +6444,7 @@ function registerIpc(): void {
         rawDb.exec(`VACUUM INTO '${escaped}'`);
 
         const { encryptFile } = await import('./project-encryption.js');
-        const result = encryptFile(tmpPath, target, password);
+        const result = await encryptFile(tmpPath, target, password);
 
         await dialog.showMessageBox(win, {
           type: 'info',
@@ -6379,7 +6513,7 @@ function registerIpc(): void {
 
       try {
         const { decryptFile } = await import('./project-encryption.js');
-        decryptFile(srcPath, dstPath, password);
+        await decryptFile(srcPath, dstPath, password);
         openProjectAtPath(dstPath);
         return { filePath: dstPath };
       } catch (err) {
@@ -7346,6 +7480,16 @@ void app.whenReady().then(async () => {
   createWindow();
   logger.log('info', 'main', `App ready — version ${app.getVersion()}`);
   freezeWatchdog.setMainOp('idle');
+
+  // Thermal-adaptive crawl throttling — macOS-only (Electron emits
+  // `thermal-state-change` only on macOS; other platforms never fire it).
+  // See applyThermalStateToCrawlers for the state → concurrency mapping.
+  if (process.platform === 'darwin') {
+    powerMonitor.on('thermal-state-change', (details) => {
+      logger.log('info', 'main', `Thermal state → ${details.state}`);
+      applyThermalStateToCrawlers(details.state);
+    });
+  }
 
   // Open the localhost MCP bridge so Claude Code / Claude Desktop can
   // drive crawls + poll progress against this running instance. Bind

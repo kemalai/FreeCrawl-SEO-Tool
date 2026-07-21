@@ -49,6 +49,15 @@ import { runBrowserLogin } from './browser-login.js';
 export interface CrawlerEvents {
   progress: (p: CrawlProgress) => void;
   done: (summary: CrawlSummary) => void;
+  /**
+   * Fired exactly once when `stop()` transitions the crawler into the
+   * stopped state. `done` is deliberately suppressed after a stop (a
+   * zombie crawler's done-event would clobber the next crawl's UI
+   * state), so hosts that need a "this crawl is over, whatever the
+   * reason" signal must listen to BOTH `done` and `stopped` — e.g. the
+   * desktop app's power-save blocker release.
+   */
+  stopped: () => void;
   error: (message: string) => void;
   warn: (message: string) => void;
   info: (message: string) => void;
@@ -875,11 +884,20 @@ export class Crawler extends EventEmitter {
       // clustering because both are content-similarity passes; surfaces the
       // repeated chrome (nav, footer, sidebar) that dilutes thin-content
       // detection. Memory-bounded, skipped when no body snapshots are stored.
+      // Routed through dbCall (writer worker on desktop) rather than the
+      // main-thread ProjectDb: the pass reads thousands of body snapshots
+      // and its JS-string churn belongs off the UI-serving thread — a
+      // main-thread run of this exact pass was the post-crawl V8 OOM
+      // crash on macOS (Electron's 4 GB pointer-compression heap cap).
       await yieldToEventLoop();
       this.emit('info', 'Detecting boilerplate coverage…');
       this.setOp('post-crawl:boilerplate-coverage');
       try {
-        const result = this.db.recomputeBoilerplateCoverage();
+        const result = await this.dbCall<{
+          sampled: number;
+          boilerplateShingles: number;
+          pagesAboveHighThreshold: number;
+        }>('recomputeBoilerplateCoverage', []);
         if (result.sampled > 0) {
           this.emit(
             'info',
@@ -929,6 +947,20 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.setOp('post-crawl:performance-budget');
     this.runBudgetPass();
+    // Fold the WAL back into the main DB file now that the write burst
+    // is over. wal_autocheckpoint bounds WAL growth *during* the crawl;
+    // this TRUNCATE pass reclaims the file afterwards so the project
+    // on disk is compact and the first post-crawl reader queries don't
+    // pay WAL-frame lookup overhead. Matters double on macOS/APFS
+    // where checkpoint fsyncs are the expensive operation — better one
+    // deliberate pass here than implicit ones during the next crawl.
+    await yieldToEventLoop();
+    this.setOp('post-crawl:wal-checkpoint');
+    try {
+      await this.dbCall<void>('walCheckpoint', []);
+    } catch {
+      /* non-fatal — a reader mid-query can block the checkpoint */
+    }
   }
 
   /**
@@ -1944,6 +1976,9 @@ export class Crawler extends EventEmitter {
   }
 
   stop(): void {
+    // Emit 'stopped' only on the first transition — clearCrawlDb and
+    // the Stop IPC handler can both call stop() on the same instance.
+    const wasStopped = this.stopped;
     this.stopped = true;
     this.running = false;
     this.paused = false;
@@ -1985,6 +2020,7 @@ export class Crawler extends EventEmitter {
     this.externalQueue.clear();
     this.queue.start();
     this.externalQueue.start();
+    if (!wasStopped) this.emit('stopped');
   }
 
   pause(): void {
@@ -3736,12 +3772,53 @@ export class Crawler extends EventEmitter {
   private currentConcurrency = 0;
   private lastAdaptTs = 0;
   private static readonly ADAPT_COOLDOWN_MS = 2_000;
+
+  /**
+   * Externally imposed concurrency scale, 0.1–1. Fed by the desktop
+   * host from OS pressure signals — today macOS thermal state
+   * (nominal 1 / fair 0.75 / serious 0.5 / critical 0.25), by design
+   * open to other sources (memory pressure) later. Scales the ceiling
+   * the lag-adaptive loop is allowed to reach, so the two mechanisms
+   * compose instead of fighting: shrink is applied immediately
+   * (Apple's guidance — react to `serious` at once, the OS is already
+   * enacting countermeasures), recovery is gradual via
+   * `reportRendererLag`'s +1-per-cooldown growth once the ceiling
+   * lifts.
+   */
+  private throttleScale = 1;
+
+  /** Configured ceiling with the external throttle scale applied. */
+  private effectiveCeiling(): number {
+    const base = Math.max(1, Math.min(200, this.config.maxConcurrency));
+    return Math.max(1, Math.round(base * this.throttleScale));
+  }
+
+  /** Public — the desktop main process maps thermal state changes here. */
+  setThrottleScale(scale: number, reason: string): void {
+    const s = Math.min(1, Math.max(0.1, scale));
+    if (s === this.throttleScale) return;
+    this.throttleScale = s;
+    const ceiling = this.effectiveCeiling();
+    if (this.currentConcurrency === 0 || this.currentConcurrency > ceiling) {
+      this.currentConcurrency = ceiling;
+      this.queue.concurrency = ceiling;
+    }
+    // External probes get the same cut. Constructor band is 2..10;
+    // under throttle we additionally allow dropping to 1 so a
+    // `critical` state really does quiesce the network.
+    this.externalQueue.concurrency = Math.max(1, Math.min(10, ceiling));
+    this.emit(
+      'info',
+      `Throttle: concurrency ceiling → ${ceiling}/${Math.max(1, Math.min(200, this.config.maxConcurrency))} (${reason})`,
+    );
+  }
+
   /** Public so the desktop main process can pipe in renderer Lag reports. */
   reportRendererLag(lagMs: number): void {
     if (!this.running || this.paused) return;
     const now = Date.now();
     if (now - this.lastAdaptTs < Crawler.ADAPT_COOLDOWN_MS) return;
-    const ceiling = Math.max(1, Math.min(200, this.config.maxConcurrency));
+    const ceiling = this.effectiveCeiling();
     if (this.currentConcurrency === 0) this.currentConcurrency = ceiling;
     let next = this.currentConcurrency;
     // Floor 5 (was 1). The renderer's lag probe occasionally spikes
@@ -3750,8 +3827,10 @@ export class Crawler extends EventEmitter {
     // single-task dispatch — which on a slow remote server (avg resp
     // 1.5-2 s) cuts throughput from 10 URL/s to 0.5 URL/s and the
     // queue never recovers because the user never produces zero lag.
+    // The floor never exceeds the throttled ceiling — under thermal
+    // pressure the external cap wins.
     if (lagMs > 200) {
-      next = Math.max(5, this.currentConcurrency - 1);
+      next = Math.max(Math.min(5, ceiling), this.currentConcurrency - 1);
     } else if (lagMs < 30) {
       next = Math.min(ceiling, this.currentConcurrency + 1);
     }

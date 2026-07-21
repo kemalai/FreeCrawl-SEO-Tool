@@ -31,7 +31,18 @@ import {
   pbkdf2Sync,
   randomBytes,
 } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  createReadStream,
+  createWriteStream,
+  openSync,
+  readSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { finished, pipeline } from 'node:stream/promises';
 
 const MAGIC = Buffer.from('FCRYPT01', 'utf8'); // 8 bytes
 const VERSION = 0x01;
@@ -42,22 +53,29 @@ const TAG_LEN = 16;
 const PBKDF2_ITERATIONS = 200_000;
 const HEADER_LEN = MAGIC.length + 1 + SALT_LEN + IV_LEN; // magic + version + salt + iv
 
+/** Streaming chunk size — large enough that syscall overhead is noise,
+ *  small enough that peak memory stays flat for any project size. */
+const STREAM_HIGH_WATER_MARK = 8 * 1024 * 1024;
+
 /**
  * Encrypt the file at `srcPath` and write the encrypted container to
- * `dstPath`. The source file is read into memory in one shot — fine for
- * `.seoproject` snapshots which are tens of MB; for hundreds of MB we'd
- * want a streaming variant. Throws if the password is empty or the
- * source file can't be read.
+ * `dstPath`. Fully streaming: read → AES-GCM transform → write in 8 MB
+ * chunks, so peak memory is O(chunk) no matter how large the project
+ * file is. The previous whole-file-in-a-Buffer version needed
+ * plaintext + ciphertext resident at once — on a multi-GB project
+ * that alone could blow Electron's 4 GB heap cap (Buffers count
+ * against it, unlike plain Node). Throws if the password is empty or
+ * the source file can't be read.
  */
-export function encryptFile(
+export async function encryptFile(
   srcPath: string,
   dstPath: string,
   password: string,
-): { bytesWritten: number } {
+): Promise<{ bytesWritten: number }> {
   if (!password || password.length === 0) {
     throw new Error('Password is required.');
   }
-  const plaintext = readFileSync(srcPath);
+  const srcSize = statSync(srcPath).size;
   const salt = randomBytes(SALT_LEN);
   const iv = randomBytes(IV_LEN);
   const key = pbkdf2Sync(password, salt, PBKDF2_ITERATIONS, KEY_LEN, 'sha256');
@@ -65,12 +83,21 @@ export function encryptFile(
   const header = Buffer.concat([MAGIC, Buffer.from([VERSION]), salt, iv]);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(header);
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
 
-  const out = Buffer.concat([header, ciphertext, tag]);
-  writeFileSync(dstPath, out);
-  return { bytesWritten: out.length };
+  const out = createWriteStream(dstPath);
+  out.write(header);
+  // `end: false` keeps the sink open — the GCM auth tag only exists
+  // after the cipher flushes, and it goes at the end of the container.
+  await pipeline(
+    createReadStream(srcPath, { highWaterMark: STREAM_HIGH_WATER_MARK }),
+    cipher,
+    out,
+    { end: false },
+  );
+  out.end(cipher.getAuthTag());
+  await finished(out);
+  // GCM ciphertext length equals plaintext length.
+  return { bytesWritten: HEADER_LEN + srcSize + TAG_LEN };
 }
 
 /**
@@ -78,49 +105,91 @@ export function encryptFile(
  * `.seoproject` bytes to `dstPath`. Throws on bad magic, unsupported
  * version, or an authentication-tag mismatch (wrong password / file
  * tampered with).
+ *
+ * Streaming, with the same all-or-nothing contract as the old
+ * in-memory version: plaintext is streamed into a sibling temp file
+ * and only renamed onto `dstPath` after `decipher.final()` verifies
+ * the GCM tag — so `dstPath` never contains unauthenticated bytes.
  */
-export function decryptFile(
+export async function decryptFile(
   srcPath: string,
   dstPath: string,
   password: string,
-): { bytesWritten: number } {
+): Promise<{ bytesWritten: number }> {
   if (!password || password.length === 0) {
     throw new Error('Password is required.');
   }
-  const buf = readFileSync(srcPath);
-  if (buf.length < HEADER_LEN + TAG_LEN) {
+  const srcSize = statSync(srcPath).size;
+  if (srcSize < HEADER_LEN + TAG_LEN) {
     throw new Error('Encrypted file is truncated or not a FreeCrawl encrypted project.');
   }
-  if (!buf.subarray(0, MAGIC.length).equals(MAGIC)) {
+  // Positional reads for the fixed-size header and the trailing tag —
+  // the ciphertext between them is never held in memory.
+  const header = Buffer.alloc(HEADER_LEN);
+  const tag = Buffer.alloc(TAG_LEN);
+  const fd = openSync(srcPath, 'r');
+  try {
+    if (
+      readSync(fd, header, 0, HEADER_LEN, 0) !== HEADER_LEN ||
+      readSync(fd, tag, 0, TAG_LEN, srcSize - TAG_LEN) !== TAG_LEN
+    ) {
+      throw new Error('Encrypted file is truncated or not a FreeCrawl encrypted project.');
+    }
+  } finally {
+    closeSync(fd);
+  }
+  if (!header.subarray(0, MAGIC.length).equals(MAGIC)) {
     throw new Error('File is not a FreeCrawl encrypted project (bad magic).');
   }
-  const version = buf[MAGIC.length];
+  const version = header[MAGIC.length];
   if (version !== VERSION) {
     throw new Error(`Unsupported encrypted-project version: 0x${version?.toString(16) ?? '??'}.`);
   }
-  const salt = buf.subarray(MAGIC.length + 1, MAGIC.length + 1 + SALT_LEN);
-  const iv = buf.subarray(
+  const salt = header.subarray(MAGIC.length + 1, MAGIC.length + 1 + SALT_LEN);
+  const iv = header.subarray(
     MAGIC.length + 1 + SALT_LEN,
     MAGIC.length + 1 + SALT_LEN + IV_LEN,
   );
-  const header = buf.subarray(0, HEADER_LEN);
-  const tag = buf.subarray(buf.length - TAG_LEN);
-  const ciphertext = buf.subarray(HEADER_LEN, buf.length - TAG_LEN);
 
   const key = pbkdf2Sync(password, salt, PBKDF2_ITERATIONS, KEY_LEN, 'sha256');
   const decipher = createDecipheriv('aes-256-gcm', key, iv);
   decipher.setAAD(header);
   decipher.setAuthTag(tag);
-  let plaintext: Buffer;
+
+  const ciphertextLen = srcSize - HEADER_LEN - TAG_LEN;
+  if (ciphertextLen === 0) {
+    // Degenerate empty-payload container — still verify the tag.
+    try {
+      decipher.final();
+    } catch {
+      throw new Error(
+        'Could not decrypt — the password is wrong, or the file has been altered.',
+      );
+    }
+    writeFileSync(dstPath, Buffer.alloc(0));
+    return { bytesWritten: 0 };
+  }
+
+  const tmpPath = `${dstPath}.decrypt-tmp`;
   try {
-    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    await pipeline(
+      createReadStream(srcPath, {
+        start: HEADER_LEN,
+        end: srcSize - TAG_LEN - 1, // `end` is inclusive
+        highWaterMark: STREAM_HIGH_WATER_MARK,
+      }),
+      decipher,
+      createWriteStream(tmpPath),
+    );
   } catch {
-    // GCM auth failure — wrong password or corrupted ciphertext. Don't
-    // leak which one; surface a single user-friendly error.
+    // GCM auth failure (decipher.final threw inside the pipeline) or
+    // an I/O error — either way, drop the partial output. Don't leak
+    // which failure it was; surface a single user-friendly error.
+    rmSync(tmpPath, { force: true });
     throw new Error(
       'Could not decrypt — the password is wrong, or the file has been altered.',
     );
   }
-  writeFileSync(dstPath, plaintext);
-  return { bytesWritten: plaintext.length };
+  renameSync(tmpPath, dstPath);
+  return { bytesWritten: ciphertextLen };
 }

@@ -228,6 +228,31 @@ export function App() {
     });
     const off4 = window.freecrawl.onMenuEvent((event: MenuEvent) => {
       switch (event) {
+        case 'edit-copy': {
+          // macOS-only round-trip (see menu.ts): the native menu eats
+          // Cmd+C before the page sees a keydown, so the Copy item
+          // forwards here instead. Re-dispatch a synthetic keydown so
+          // the existing document-level Ctrl/Cmd+C table-copy handlers
+          // (detail panel cells, broken-links cells) run unchanged; if
+          // none of them preventDefault'ed — no table selection — fall
+          // back to the stock native copy for text selections/inputs.
+          const ae = document.activeElement as HTMLElement | null;
+          const editable =
+            ae !== null &&
+            (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+          if (!editable) {
+            const synthetic = new KeyboardEvent('keydown', {
+              key: 'c',
+              metaKey: true,
+              bubbles: true,
+              cancelable: true,
+            });
+            document.dispatchEvent(synthetic);
+            if (synthetic.defaultPrevented) break;
+          }
+          void window.freecrawl.editCopyNative();
+          break;
+        }
         case 'toggle-sidebar':
           toggleSidebar();
           break;
