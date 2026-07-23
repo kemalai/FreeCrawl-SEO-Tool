@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.1] — 2026-07-23
+
+### Added
+- Offline spell checking for languages LanguageTool can't cover — Turkish ships with a bundled dictionary, so its pages get real findings instead of a warning.
+- Each project now saves as a single compressed file, so moving or emailing one means one file instead of three.
+- Any sub-table in the URL Details panel (Inlinks, Outlinks, Images, Resources) can now be exported on its own to CSV or Excel.
+- JavaScript rendering now provisions its own Chromium automatically — bundled in the installer, or downloaded in the background when the bundle can't run on your machine.
+- Turkish tooltips for the on-screen ⓘ help text across table columns and settings.
+
+### Changed
+- Spelling & grammar now detects each page's language locally before checking, so Turkish and other pages are no longer graded against the wrong language and flagged word-by-word.
+- Pages in a language LanguageTool has no dictionary for are now marked "unsupported" instead of being scored against a substitute language.
+- The "Add API Key" and Spelling "Options" buttons now open Settings directly on the right panel and highlight the field to fill in.
+- Applying a crawl preset now shows a clear confirmation so it's obvious the settings changed.
+
 ## [0.9.0] — 2026-07-21
 
 ### Added
