@@ -39,7 +39,20 @@ export interface MenuLabels {
   compareWith: string;
   scheduledCrawl: string;
   scheduledCrawlTooltip: string;
+  saveProject: string;
   saveProjectAs: string;
+  /** Window title shown before a project has been saved to disk. */
+  titleUntitledProject: string;
+  dlgSaveProjectAsTitle: string;
+  dlgExportTableTitle: string;
+  dlgSaveFailedTitle: string;
+  /** `{size}` = archive MB, `{from}` = uncompressed MB. */
+  msgProjectSaved: string;
+  dlgUnsavedTitle: string;
+  msgUnsavedChanges: string;
+  detailUnsavedChanges: string;
+  btnSaveChanges: string;
+  btnDiscardChanges: string;
   saveProjectEncrypted: string;
   saveProjectEncryptedTooltip: string;
   openProjectEncrypted: string;
@@ -172,7 +185,19 @@ const MENU_EN: MenuLabels = {
   scheduledCrawl: 'Scheduled Crawl…',
   scheduledCrawlTooltip:
     'Set up an in-app recurring crawl for the currently-open project. Fires only while FreeCrawl is open; use the CLI + OS scheduler for triggers that survive restarts.',
+  saveProject: 'Save Project',
   saveProjectAs: 'Save Project As…',
+  titleUntitledProject: 'Untitled project',
+  dlgSaveProjectAsTitle: 'Save Project As…',
+  dlgExportTableTitle: 'Export Table',
+  dlgSaveFailedTitle: 'Could Not Save Project',
+  msgProjectSaved: 'Saved as a single compressed file: {size} MB (from {from} MB).',
+  dlgUnsavedTitle: 'Unsaved Changes',
+  msgUnsavedChanges: 'This project has changes that are not saved yet.',
+  detailUnsavedChanges:
+    'Crawl results live in a working copy until you save them into the project file.',
+  btnSaveChanges: 'Save',
+  btnDiscardChanges: "Don't Save",
   saveProjectEncrypted: 'Save Encrypted Snapshot…',
   saveProjectEncryptedTooltip:
     'Export the active project to an AES-256-GCM-encrypted .seoproject.enc file protected by a password.',
@@ -311,7 +336,19 @@ const MENU_TR: MenuLabels = {
   scheduledCrawl: 'Zamanlanmış Crawl…',
   scheduledCrawlTooltip:
     'Şu an açık olan proje için uygulama içi tekrarlayan crawl kur. Yalnızca FreeCrawl açıkken çalışır; yeniden başlatmaya dayanan tetikler için CLI + OS zamanlayıcısını kullan.',
+  saveProject: 'Projeyi Kaydet',
   saveProjectAs: 'Projeyi Farklı Kaydet…',
+  titleUntitledProject: 'Adsız proje',
+  dlgSaveProjectAsTitle: 'Projeyi Farklı Kaydet…',
+  dlgExportTableTitle: 'Tabloyu Dışa Aktar',
+  dlgSaveFailedTitle: 'Proje Kaydedilemedi',
+  msgProjectSaved: 'Tek sıkıştırılmış dosya olarak kaydedildi: {size} MB ({from} MB yerine).',
+  dlgUnsavedTitle: 'Kaydedilmemiş Değişiklikler',
+  msgUnsavedChanges: 'Bu projede henüz kaydedilmemiş değişiklikler var.',
+  detailUnsavedChanges:
+    'Crawl sonuçları, proje dosyasına kaydedene kadar bir çalışma kopyasında tutulur.',
+  btnSaveChanges: 'Kaydet',
+  btnDiscardChanges: 'Kaydetme',
   saveProjectEncrypted: 'Şifreli Snapshot Kaydet…',
   saveProjectEncryptedTooltip:
     'Aktif projeyi parolayla korunan AES-256-GCM şifreli .seoproject.enc dosyasına dışa aktar.',

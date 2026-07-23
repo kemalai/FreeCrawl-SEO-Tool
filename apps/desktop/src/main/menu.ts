@@ -141,6 +141,11 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => send('open-scheduled-crawl'),
         },
         {
+          label: L.saveProject,
+          accelerator: 'CmdOrCtrl+S',
+          click: () => send('save-project'),
+        },
+        {
           label: L.saveProjectAs,
           accelerator: 'CmdOrCtrl+Shift+S',
           click: () => send('save-project-as'),

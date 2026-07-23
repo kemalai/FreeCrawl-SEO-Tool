@@ -18,9 +18,8 @@
  * wipe the session we just established).
  */
 
-import { existsSync } from 'node:fs';
-import { chromium, type LaunchOptions } from 'playwright';
-import { PlaywrightBrowserMissingError } from './browser-pool.js';
+import type { LaunchOptions } from 'playwright';
+import { PlaywrightBrowserMissingError, resolveChromiumBinaries } from './browser-pool.js';
 
 export interface BrowserLoginInput {
   loginUrl: string;
@@ -82,23 +81,24 @@ export async function runBrowserLogin(
   // Pre-flight the bundled-browser case so a missing binary surfaces a
   // single clean install prompt instead of Playwright's per-call banner
   // (mirrors BrowserPool.doStart).
+  const launchOpts: LaunchOptions = { headless: opts.headless };
   if (!opts.channel && !opts.executablePath) {
-    let resolved = '';
-    try {
-      resolved = chromium.executablePath();
-    } catch {
-      /* unresolved → treat as missing below */
-    }
-    if (!resolved || !existsSync(resolved)) {
-      throw new PlaywrightBrowserMissingError(resolved, opts.channel);
+    const bins = await resolveChromiumBinaries();
+    if (!bins.installed) {
+      if (opts.headless && bins.chromiumInstalled) {
+        launchOpts.channel = 'chromium';
+      } else if (!bins.chromiumInstalled) {
+        throw new PlaywrightBrowserMissingError(bins.chromiumPath, opts.channel);
+      }
     }
   }
-
-  const launchOpts: LaunchOptions = { headless: opts.headless };
   if (opts.channel) launchOpts.channel = opts.channel;
   if (opts.executablePath) launchOpts.executablePath = opts.executablePath;
 
   const timeout = Math.max(5000, opts.timeoutMs ?? 30_000);
+  // Lazy import — see the note in browser-pool.ts: a module-scope
+  // import would freeze PLAYWRIGHT_BROWSERS_PATH before the app sets it.
+  const { chromium } = await import('playwright');
   const browser = await chromium.launch(launchOpts);
   try {
     const context = await browser.newContext({

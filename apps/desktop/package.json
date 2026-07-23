@@ -1,6 +1,6 @@
 {
   "name": "@freecrawl/desktop",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "description": "FreeCrawl SEO â€” desktop application",
   "homepage": "https://github.com/kemalai/FreeCrawl-SEO-Tool",
@@ -40,8 +40,12 @@
     "cytoscape": "^3.33.2",
     "cytoscape-dagre": "^2.5.0",
     "dagre": "^0.8.5",
+    "dictionary-tr": "^2.0.0",
+    "eld": "^2.0.3",
+    "franc": "^6.2.0",
     "i18next": "^26.2.0",
     "lucide-react": "^0.544.0",
+    "nspell": "^2.1.5",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-i18next": "^17.0.8",
@@ -52,6 +56,7 @@
   "devDependencies": {
     "@types/cytoscape-dagre": "^2.3.4",
     "@types/dagre": "^0.7.54",
+    "@types/nspell": "^2.1.6",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.0.0",

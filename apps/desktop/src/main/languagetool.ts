@@ -6,19 +6,35 @@
  * endpoint / credentials come from the `languagetool` integration in the
  * credential store and are resolved in the main process only.
  *
- * Two layers, mirroring `pagespeed.ts` / `crux.ts`:
+ * Three layers, mirroring `pagespeed.ts` / `crux.ts`:
+ *   - `fetchSupportedLanguages` — what this endpoint actually offers,
+ *     cached per endpoint. Every check is validated against it.
  *   - `checkText` — one page's prose → matches (never throws; failures
  *     resolve to an `error` result so a single bad page can't abort a run).
  *   - `runSpellingBatch` — a concurrency pool over many URLs, with progress
  *     and cooperative cancellation. Text is supplied lazily per item by the
  *     caller so a 1000-page run never holds every page body in memory.
+ *
+ * The check language is resolved locally (see `language-detect.ts`) and
+ * `auto` is never sent. LanguageTool's detector can only answer with a
+ * language it supports, so on a Turkish page it reports "English, 0.99
+ * confident" and flags every word — output that is indistinguishable from
+ * a genuinely error-ridden page once it reaches the UI.
  */
 import type {
+  SpellingLanguageOption,
   SpellingLevel,
   SpellingMatch,
   SpellingResult,
 } from '@freecrawl/shared-types';
 import { Agent, ProxyAgent, fetch as undiciFetch, type Dispatcher } from 'undici';
+import {
+  indexSupportedLanguages,
+  languageName,
+  resolveCheckLanguage,
+  type SupportedLanguages,
+} from './language-detect.js';
+import { checkTextLocally } from './local-spell.js';
 import * as logger from './logger.js';
 
 export const PUBLIC_LT_ENDPOINT = 'https://api.languagetool.org';
@@ -39,30 +55,145 @@ const CONCURRENCY_PUBLIC = 1;
 const CONCURRENCY_SELF_HOSTED = 4;
 
 /**
- * Languages LanguageTool refuses to accept as a bare code — it demands an
- * explicit regional variant. Everything else passes through as-is.
+ * Share of words that may be flagged as *misspellings* before the result
+ * is treated as a language mismatch rather than a finding list.
+ *
+ * Calibrated against real responses: clean Spanish prose graded as
+ * Galician — two languages close enough that detection can confuse them —
+ * comes back at 24%, well under LanguageTool's own 60% bail-out, so
+ * relying on that alone lets a whole page of false positives through.
+ * Genuinely sloppy copy in the right language sits in the low single
+ * digits. 20% separates the two with room to spare.
+ *
+ * Misspellings only: grammar and style rules fire on correct prose too, so
+ * counting them would drag legitimate pages over the line. Applied only
+ * above `MISMATCH_MIN_WORDS`, and never when the user pinned the language.
  */
-const VARIANT_REQUIRED: Record<string, string> = {
-  en: 'en-US',
-  de: 'de-DE',
-  pt: 'pt-PT',
-  ca: 'ca-ES',
-};
+const MISMATCH_RATIO = 0.2;
+const MISMATCH_MIN_WORDS = 40;
+
+/** How long a fetched `/v2/languages` list stays fresh. */
+const LANGUAGES_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
- * Map a page's `html[lang]` to a LanguageTool language code. Returns
- * `auto` when the page declares nothing, letting LanguageTool detect it.
+ * Languages the public API offered as of writing. Used only when
+ * `/v2/languages` cannot be reached, so a transient network failure
+ * degrades to a slightly stale list instead of blocking every check.
  */
-export function resolveLanguage(pageLang: string | null): string {
-  const raw = (pageLang ?? '').trim().toLowerCase();
-  if (!raw) return 'auto';
-  const parts = raw.split('-');
-  const primary = parts[0] ?? '';
-  if (!primary) return 'auto';
-  if (parts.length >= 2 && parts[1]) {
-    return `${primary}-${parts[1].toUpperCase()}`;
+const FALLBACK_LANGUAGES: SpellingLanguageOption[] = [
+  { name: 'Arabic', code: 'ar', longCode: 'ar' },
+  { name: 'Asturian', code: 'ast', longCode: 'ast-ES' },
+  { name: 'Belarusian', code: 'be', longCode: 'be-BY' },
+  { name: 'Breton', code: 'br', longCode: 'br-FR' },
+  { name: 'Catalan', code: 'ca', longCode: 'ca-ES' },
+  { name: 'Crimean Tatar', code: 'crh', longCode: 'crh-UA' },
+  { name: 'Danish', code: 'da', longCode: 'da-DK' },
+  { name: 'German (Germany)', code: 'de', longCode: 'de-DE' },
+  { name: 'German (Austria)', code: 'de', longCode: 'de-AT' },
+  { name: 'German (Swiss)', code: 'de', longCode: 'de-CH' },
+  { name: 'Greek', code: 'el', longCode: 'el-GR' },
+  { name: 'English (US)', code: 'en', longCode: 'en-US' },
+  { name: 'English (GB)', code: 'en', longCode: 'en-GB' },
+  { name: 'English (Australian)', code: 'en', longCode: 'en-AU' },
+  { name: 'English (Canadian)', code: 'en', longCode: 'en-CA' },
+  { name: 'English (New Zealand)', code: 'en', longCode: 'en-NZ' },
+  { name: 'English (South African)', code: 'en', longCode: 'en-ZA' },
+  { name: 'Esperanto', code: 'eo', longCode: 'eo' },
+  { name: 'Spanish', code: 'es', longCode: 'es-ES' },
+  { name: 'Spanish (Argentina)', code: 'es', longCode: 'es-AR' },
+  { name: 'Persian', code: 'fa', longCode: 'fa-IR' },
+  { name: 'French', code: 'fr', longCode: 'fr-FR' },
+  { name: 'French (Belgium)', code: 'fr', longCode: 'fr-BE' },
+  { name: 'French (Canada)', code: 'fr', longCode: 'fr-CA' },
+  { name: 'French (Switzerland)', code: 'fr', longCode: 'fr-CH' },
+  { name: 'Irish', code: 'ga', longCode: 'ga-IE' },
+  { name: 'Galician', code: 'gl', longCode: 'gl-ES' },
+  { name: 'Italian', code: 'it', longCode: 'it-IT' },
+  { name: 'Japanese', code: 'ja', longCode: 'ja-JP' },
+  { name: 'Khmer', code: 'km', longCode: 'km-KH' },
+  { name: 'Norwegian (Bokmål)', code: 'nb', longCode: 'nb-NO' },
+  { name: 'Dutch', code: 'nl', longCode: 'nl-NL' },
+  { name: 'Dutch (Belgium)', code: 'nl', longCode: 'nl-BE' },
+  { name: 'Polish', code: 'pl', longCode: 'pl-PL' },
+  { name: 'Portuguese (Portugal)', code: 'pt', longCode: 'pt-PT' },
+  { name: 'Portuguese (Brazil)', code: 'pt', longCode: 'pt-BR' },
+  { name: 'Romanian', code: 'ro', longCode: 'ro-RO' },
+  { name: 'Russian', code: 'ru', longCode: 'ru-RU' },
+  { name: 'Slovak', code: 'sk', longCode: 'sk-SK' },
+  { name: 'Slovenian', code: 'sl', longCode: 'sl-SI' },
+  { name: 'Swedish', code: 'sv', longCode: 'sv-SE' },
+  { name: 'Tamil', code: 'ta', longCode: 'ta-IN' },
+  { name: 'Tagalog', code: 'tl', longCode: 'tl-PH' },
+  { name: 'Ukrainian', code: 'uk', longCode: 'uk-UA' },
+  { name: 'Chinese', code: 'zh', longCode: 'zh-CN' },
+];
+
+interface LanguagesCacheEntry {
+  at: number;
+  supported: SupportedLanguages;
+}
+
+const languagesCache = new Map<string, LanguagesCacheEntry>();
+
+function normaliseEndpoint(endpoint: string): string {
+  return endpoint.replace(/\/+$/, '');
+}
+
+/**
+ * The set of languages one endpoint offers. Self-hosted servers ship
+ * different language modules than the public API — and an n-gram-less
+ * build offers fewer still — so this must be asked per endpoint rather
+ * than assumed. Cached for `LANGUAGES_TTL_MS`; a failure falls back to the
+ * bundled snapshot and is not cached, so the next run retries.
+ */
+export async function fetchSupportedLanguages(
+  endpoint: string,
+): Promise<SupportedLanguages> {
+  const base = normaliseEndpoint(endpoint);
+  const cached = languagesCache.get(base);
+  if (cached && Date.now() - cached.at < LANGUAGES_TTL_MS) {
+    return cached.supported;
   }
-  return VARIANT_REQUIRED[primary] ?? primary;
+  try {
+    const res = await undiciFetch(`${base}/v2/languages`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(20_000),
+      headers: { Accept: 'application/json' },
+      dispatcher: ltDispatcher,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = (await res.json()) as unknown;
+    if (!Array.isArray(json) || json.length === 0) {
+      throw new Error('empty language list');
+    }
+    const options: SpellingLanguageOption[] = [];
+    for (const entry of json as Record<string, unknown>[]) {
+      const name = typeof entry['name'] === 'string' ? entry['name'] : '';
+      const code = typeof entry['code'] === 'string' ? entry['code'] : '';
+      const longCode =
+        typeof entry['longCode'] === 'string' ? entry['longCode'] : code;
+      if (!code || !longCode) continue;
+      options.push({ name: name || longCode, code, longCode });
+    }
+    if (options.length === 0) throw new Error('no usable language entries');
+    const supported = indexSupportedLanguages(options);
+    languagesCache.set(base, { at: Date.now(), supported });
+    return supported;
+  } catch (err) {
+    logger.log(
+      'warn',
+      'languagetool',
+      `could not read supported languages from ${base} (${
+        err instanceof Error ? err.message : String(err)
+      }) — using the bundled list`,
+    );
+    return indexSupportedLanguages(FALLBACK_LANGUAGES);
+  }
+}
+
+/** Drop the cached language list — call when the endpoint changes. */
+export function clearSupportedLanguagesCache(): void {
+  languagesCache.clear();
 }
 
 function createLtDispatcher(): Dispatcher {
@@ -82,12 +213,25 @@ function createLtDispatcher(): Dispatcher {
 
 const ltDispatcher = createLtDispatcher();
 
-function errorResult(fetchedAt: string, message: string): SpellingResult {
+/** A result carrying no findings — the shape shared by every non-`ok` outcome. */
+function emptyResult(
+  fetchedAt: string,
+  status: SpellingResult['status'],
+  message: string | null,
+  lang: {
+    language?: string | null;
+    detected?: string | null;
+    declared?: string | null;
+  } = {},
+): SpellingResult {
   return {
-    language: null,
+    language: lang.language ?? null,
+    detectedLanguage: lang.detected ?? null,
+    declaredLanguage: lang.declared ?? null,
     matchCount: 0,
     matches: [],
-    status: 'error',
+    status,
+    engine: null,
     error: message,
     fetchedAt,
   };
@@ -152,16 +296,34 @@ export interface SpellingCheckOptions {
   level: SpellingLevel;
   /** Lower-cased surface forms to suppress (the custom dictionary). */
   ignoreWords: ReadonlySet<string>;
+  /** Languages this endpoint offers — every check is validated against it. */
+  supported: SupportedLanguages;
+  /**
+   * User-pinned LanguageTool code from Settings. When set it wins over
+   * both the page's `html[lang]` and local detection, and disables the
+   * mismatch guard — the user has asserted the answer.
+   */
+  languageOverride?: string | undefined;
 }
 
 /** undici's Response — inferred rather than cast to the DOM `Response`. */
 type LtResponse = Awaited<ReturnType<typeof undiciFetch>>;
 
+/**
+ * POST one check. The body is read as text first and only then parsed:
+ * LanguageTool reports failures as a plain-text `Error: …` line, not JSON,
+ * so parsing straight to JSON throws away the one thing that explains what
+ * went wrong — including its "this text isn't in that language" verdict.
+ */
 async function postCheck(
   text: string,
   language: string,
   opts: SpellingCheckOptions,
-): Promise<{ res: LtResponse; json: Record<string, unknown> | null }> {
+): Promise<{
+  res: LtResponse;
+  json: Record<string, unknown> | null;
+  body: string;
+}> {
   const body = new URLSearchParams({
     text,
     language,
@@ -183,20 +345,48 @@ async function postCheck(
     body: body.toString(),
     dispatcher: ltDispatcher,
   });
-  const json = (await res.json().catch(() => null)) as Record<
-    string,
-    unknown
-  > | null;
-  return { res, json };
+  const raw = await res.text().catch(() => '');
+  let json: Record<string, unknown> | null = null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      json = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Plain-text error body — `raw` carries the message.
+  }
+  return { res, json, body: raw };
+}
+
+/** Rough word count of the checked sample, for the mismatch ratio. */
+function countWords(text: string): number {
+  const words = text.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu);
+  return words ? words.length : 0;
 }
 
 /**
- * Check one page's prose. Never throws. A page with too little prose
- * resolves to `skipped`; a transport/API failure to `error`.
+ * LanguageTool's own bail-out when the text is clearly in another
+ * language: `Text checking was stopped due to too many errors (more than
+ * 60% of words seem to have an error)`. That is a language verdict, not a
+ * transport failure, and reads far better as one.
+ */
+function isLanguageBailout(message: string): boolean {
+  return /too many errors|correct text language/i.test(message);
+}
+
+/**
+ * Check one page's prose. Never throws.
  *
- * When the declared `html[lang]` is a code LanguageTool rejects, the call
- * is retried once with `auto` so a bad lang attribute doesn't silently
- * cost the user the whole page.
+ * The language is resolved locally first — from the prose itself,
+ * reconciled with `html[lang]` — and validated against the endpoint's own
+ * language list. A page whose language this endpoint does not offer
+ * resolves to `unsupported` *without* a request: substituting the nearest
+ * supported language (which is what LanguageTool's `auto` does) returns a
+ * finding on almost every word, and those findings are worse than none.
+ *
+ * A result that comes back with an implausible share of the page flagged
+ * is treated the same way — `mismatch` — because that is what a wrong
+ * language looks like from the outside.
  */
 export async function checkText(
   text: string,
@@ -206,49 +396,92 @@ export async function checkText(
   const fetchedAt = new Date().toISOString();
   const prose = text.trim();
   if (prose.length < MIN_PROSE_CHARS) {
-    return {
-      language: null,
-      matchCount: 0,
-      matches: [],
-      status: 'skipped',
-      error: null,
-      fetchedAt,
-    };
+    return emptyResult(fetchedAt, 'skipped', null);
   }
   const clipped =
     prose.length > MAX_TEXT_CHARS ? prose.slice(0, MAX_TEXT_CHARS) : prose;
 
-  const attempt = async (
-    language: string,
-  ): Promise<{ ok: boolean; result: SpellingResult }> => {
-    const { res, json } = await postCheck(clipped, language, opts);
+  const decision = await resolveCheckLanguage({
+    text: clipped,
+    pageLang,
+    supported: opts.supported,
+    override: opts.languageOverride,
+  });
+  const langInfo = {
+    detected: decision.detected,
+    declared: decision.declared,
+  };
+
+  if (!decision.language) {
+    // LanguageTool cannot check this language — but a bundled Hunspell
+    // dictionary may still be able to. Spelling only; the result records
+    // which engine ran so nothing implies the grammar was examined.
+    const fallbackLang = decision.detected ?? decision.declared;
+    if (decision.reason === 'unsupported' && fallbackLang) {
+      const local = await checkTextLocally(
+        clipped,
+        fallbackLang,
+        opts.ignoreWords,
+      );
+      if (local) {
+        return {
+          language: fallbackLang,
+          detectedLanguage: decision.detected,
+          declaredLanguage: decision.declared,
+          matchCount: local.matches.length,
+          matches: local.matches,
+          status: 'ok',
+          engine: 'local',
+          error: null,
+          fetchedAt,
+        };
+      }
+    }
+    return emptyResult(
+      fetchedAt,
+      decision.reason === 'unsupported' ? 'unsupported' : 'skipped',
+      decision.message,
+      langInfo,
+    );
+  }
+  const language = decision.language;
+
+  try {
+    const { res, json, body } = await postCheck(clipped, language, opts);
     if (!res.ok) {
       const apiErr =
         (json?.['message'] as string | undefined) ??
-        (json?.['error'] as string | undefined);
-      return {
-        ok: false,
-        result: errorResult(
+        (json?.['error'] as string | undefined) ??
+        // Plain-text `Error: …` body, trimmed to something a table cell
+        // and a tooltip can carry.
+        (body.trim().length > 0
+          ? body.trim().replace(/^Error:\s*/i, '').slice(0, 400)
+          : `LanguageTool returned HTTP ${res.status}`);
+      if (isLanguageBailout(apiErr)) {
+        return emptyResult(
           fetchedAt,
-          apiErr ?? `LanguageTool returned HTTP ${res.status}`,
-        ),
-      };
+          'mismatch',
+          `LanguageTool stopped checking — the page does not read as ${languageName(language)}. Pin the language under Settings → Spelling if this is wrong.`,
+          { ...langInfo, language },
+        );
+      }
+      return emptyResult(fetchedAt, 'error', apiErr, {
+        ...langInfo,
+        language,
+      });
     }
     if (!json) {
-      return {
-        ok: false,
-        result: errorResult(fetchedAt, 'LanguageTool returned an empty response'),
-      };
+      return emptyResult(
+        fetchedAt,
+        'error',
+        'LanguageTool returned an empty response',
+        { ...langInfo, language },
+      );
     }
-    const langBlock = json['language'] as
-      | { code?: unknown; detectedLanguage?: { code?: unknown } }
-      | undefined;
+
+    const langBlock = json['language'] as { code?: unknown } | undefined;
     const usedLang =
-      typeof langBlock?.code === 'string'
-        ? langBlock.code
-        : typeof langBlock?.detectedLanguage?.code === 'string'
-          ? langBlock.detectedLanguage.code
-          : null;
+      typeof langBlock?.code === 'string' ? langBlock.code : language;
 
     const rawMatches = Array.isArray(json['matches'])
       ? (json['matches'] as LtMatch[])
@@ -260,30 +493,44 @@ export async function checkText(
       .filter((m) => !opts.ignoreWords.has(m.text.toLowerCase()))
       .slice(0, MAX_STORED_MATCHES);
 
-    return {
-      ok: true,
-      result: {
-        language: usedLang,
-        matchCount: matches.length,
-        matches,
-        status: 'ok',
-        error: null,
-        fetchedAt,
-      },
-    };
-  };
-
-  try {
-    const language = resolveLanguage(pageLang);
-    const first = await attempt(language);
-    if (first.ok) return first.result;
-    // A rejected language code is the one failure worth retrying — fall
-    // back to LanguageTool's own detection rather than losing the page.
-    if (language !== 'auto' && /lang/i.test(first.result.error ?? '')) {
-      const retry = await attempt('auto');
-      if (retry.ok) return retry.result;
+    // Density guard — the last line of defence against a wrong language
+    // reaching the UI as a finding list.
+    //
+    // Only consulted when the language was actually in doubt. If the page's
+    // own `html[lang]` and the trigram detector independently named the
+    // same language, two signals already agree and a high error rate is the
+    // finding, not a reason to doubt them — a genuinely typo-ridden English
+    // page must still report its typos. Likewise skipped when the user
+    // pinned the language: they overruled the detector on purpose.
+    if (!opts.languageOverride && !decision.agreed) {
+      const words = countWords(clipped);
+      const misspellings = matches.filter(
+        (m) => m.issueType === 'misspelling',
+      ).length;
+      if (
+        words >= MISMATCH_MIN_WORDS &&
+        misspellings / words > MISMATCH_RATIO
+      ) {
+        return emptyResult(
+          fetchedAt,
+          'mismatch',
+          `${Math.round((misspellings / words) * 100)}% of words were flagged when checked as ${languageName(usedLang)} — the page is almost certainly written in another language, so the findings were discarded. Pin the language under Settings → Spelling if this is wrong.`,
+          { ...langInfo, language: usedLang },
+        );
+      }
     }
-    return first.result;
+
+    return {
+      language: usedLang,
+      detectedLanguage: decision.detected,
+      declaredLanguage: decision.declared,
+      matchCount: matches.length,
+      matches,
+      status: 'ok',
+      engine: 'languagetool',
+      error: null,
+      fetchedAt,
+    };
   } catch (err) {
     const name = (err as { name?: string } | null)?.name;
     const cause = (err as { cause?: unknown } | null)?.cause as
@@ -302,7 +549,10 @@ export async function checkText(
           ? `${err.message} (${cause.message})`
           : err.message
         : String(err);
-    return errorResult(fetchedAt, message);
+    return emptyResult(fetchedAt, 'error', message, {
+      ...langInfo,
+      language,
+    });
   }
 }
 
@@ -324,6 +574,8 @@ export interface SpellingBatchOptions {
 export interface SpellingBatchResult {
   completed: number;
   failed: number;
+  /** Pages whose language this endpoint does not support. */
+  unsupported: number;
   cancelled: boolean;
 }
 
@@ -340,6 +592,7 @@ export async function runSpellingBatch(
   let done = 0;
   let completed = 0;
   let failed = 0;
+  let unsupported = 0;
   let cursor = 0;
 
   const ERROR_LOG_LIMIT = 3;
@@ -351,6 +604,8 @@ export async function runSpellingBatch(
       logger.log('warn', 'languagetool', `${url} — ${message}`);
     }
   };
+  /** Languages seen that this endpoint cannot check, for the summary line. */
+  const unsupportedLangs = new Map<string, number>();
 
   onProgress(0, total, null);
 
@@ -368,20 +623,14 @@ export async function runSpellingBatch(
       try {
         const page = await loadPage(url);
         if (!page.text || page.text.trim().length === 0) {
-          result = {
-            language: null,
-            matchCount: 0,
-            matches: [],
-            status: 'skipped',
-            error: null,
-            fetchedAt,
-          };
+          result = emptyResult(fetchedAt, 'skipped', null);
         } else {
           result = await checkText(page.text, page.lang, check);
         }
       } catch (err) {
-        result = errorResult(
+        result = emptyResult(
           fetchedAt,
+          'error',
           err instanceof Error ? err.message : String(err),
         );
       }
@@ -404,6 +653,12 @@ export async function runSpellingBatch(
         failed++;
         if (result.status === 'error') {
           recordFailure(url, result.error ?? 'Unknown error');
+        } else if (result.status === 'unsupported') {
+          unsupported++;
+          const lang = languageName(
+            result.detectedLanguage ?? result.declaredLanguage,
+          );
+          unsupportedLangs.set(lang, (unsupportedLangs.get(lang) ?? 0) + 1);
         }
       }
       onProgress(done, total, null);
@@ -445,5 +700,16 @@ export async function runSpellingBatch(
       );
     }
   }
-  return { completed, failed, cancelled };
+  if (unsupportedLangs.size > 0) {
+    const breakdown = [...unsupportedLangs.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([lang, count]) => `${count}× ${lang}`)
+      .join(', ');
+    logger.log(
+      'warn',
+      'languagetool',
+      `${unsupported} page(s) were not checked — LanguageTool has no rules for their language (${breakdown}). This is a limitation of LanguageTool itself, not of the crawl.`,
+    );
+  }
+  return { completed, failed, unsupported, cancelled };
 }

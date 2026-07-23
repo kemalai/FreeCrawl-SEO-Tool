@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IPC,
+  type BrowserInstallState,
   type ConfirmClearResult,
   type CrawlConfig,
   type RecentProject,
@@ -18,6 +19,8 @@ import {
   type ExportImagesResult,
   type ExportTabularInput,
   type ExportTabularResult,
+  type ExportGridInput,
+  type ExportGridResult,
   type DataDeleteByDomainInput,
   type DataDeleteByDomainResult,
   type CrashRecoveryStatus,
@@ -112,6 +115,7 @@ import {
   type SpellingRunResult,
   type SpellingProgress,
   type SpellingMatchesResult,
+  type SpellingLanguageOption,
   type GoogleAuthState,
   type GoogleAuthResult,
   type GscListSitesResult,
@@ -181,6 +185,8 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.crawlAddUrl, url),
   projectSaveAs: (): Promise<{ filePath: string; bytesWritten: number } | null> =>
     ipcRenderer.invoke(IPC.projectSaveAs),
+  projectSave: (): Promise<{ filePath: string; bytesWritten: number } | null> =>
+    ipcRenderer.invoke(IPC.projectSave),
   projectOpen: (filePath?: string): Promise<{ filePath: string } | null> =>
     ipcRenderer.invoke(IPC.projectOpen, filePath),
   projectCurrentPath: (): Promise<string | null> =>
@@ -191,6 +197,12 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.projectConfigSet, config),
   onProjectConfigChanged: (cb: (config: CrawlConfig | null) => void) =>
     subscribe<CrawlConfig | null>(IPC.projectConfigChanged, cb),
+  browserInstallGet: (): Promise<BrowserInstallState> =>
+    ipcRenderer.invoke(IPC.browserInstallGet),
+  browserInstallStart: (): Promise<BrowserInstallState> =>
+    ipcRenderer.invoke(IPC.browserInstallStart),
+  onBrowserInstallState: (cb: (state: BrowserInstallState) => void) =>
+    subscribe<BrowserInstallState>(IPC.browserInstallState, cb),
   recentProjectsList: (): Promise<RecentProject[]> =>
     ipcRenderer.invoke(IPC.recentProjectsList),
   recentProjectSetArchived: (path: string, archived: boolean): Promise<void> =>
@@ -241,6 +253,8 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.exportImages, input),
   exportTabular: (input: ExportTabularInput): Promise<ExportTabularResult> =>
     ipcRenderer.invoke(IPC.exportTabular, input),
+  exportGrid: (input: ExportGridInput): Promise<ExportGridResult> =>
+    ipcRenderer.invoke(IPC.exportGrid, input),
   dataDeleteByDomain: (
     input: DataDeleteByDomainInput,
   ): Promise<DataDeleteByDomainResult> =>
@@ -402,6 +416,8 @@ const api: FreeCrawlApi = {
     subscribe<SpellingProgress>(IPC.spellingProgress, cb),
   spellingMatches: (url: string): Promise<SpellingMatchesResult | null> =>
     ipcRenderer.invoke(IPC.spellingMatches, url),
+  spellingLanguages: (): Promise<SpellingLanguageOption[]> =>
+    ipcRenderer.invoke(IPC.spellingLanguages),
   googleAuthStart: (id: string): Promise<GoogleAuthResult> =>
     ipcRenderer.invoke(IPC.googleAuthStart, id),
   googleAuthStatus: (id: string): Promise<GoogleAuthState> =>

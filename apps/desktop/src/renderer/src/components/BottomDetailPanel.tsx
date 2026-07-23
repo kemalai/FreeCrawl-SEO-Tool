@@ -18,6 +18,7 @@ import type {
   UrlAnalyticsDetail,
   SpellingMatchesResult,
 } from '@freecrawl/shared-types';
+import { GridExportButton } from './GridExportButton.js';
 import { useAppStore } from '../store.js';
 import { diagnoseStatus, type StatusDiagnosis } from '../utils/statusDiagnosis.js';
 
@@ -39,6 +40,59 @@ type SubTab =
   | 'duplicates'
   | 'analytics'
   | 'spelling';
+
+/**
+ * Right-aligned Export control shared by the detail-panel sub-tabs, with
+ * optional status text (e.g. "Showing 500 of 1,703") on the left.
+ */
+function SubTabExportBar({
+  fileName,
+  sheetName,
+  disabled,
+  getData,
+  children,
+}: {
+  fileName: string;
+  sheetName?: string;
+  disabled?: boolean;
+  getData: () => { headers: string[]; rows: (string | number | boolean | null)[][] };
+  children?: ReactNode;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-3 px-3 pt-2 text-[11px] text-surface-500">
+      {children}
+      <GridExportButton
+        className="ml-auto"
+        fileName={fileName}
+        sheetName={sheetName}
+        disabled={disabled}
+        getData={getData}
+      />
+    </div>
+  );
+}
+
+/**
+ * Turn a page URL into a file-name stem for the detail-panel exports:
+ * host + path, punctuation collapsed to single dashes. Falls back to
+ * "url-details" when nothing is selected so the dialog still opens with
+ * a sane name.
+ */
+function urlExportStem(url: string | undefined): string {
+  if (!url) return 'url-details';
+  let raw = url;
+  try {
+    const u = new URL(url);
+    raw = u.hostname.replace(/^www\./i, '') + u.pathname;
+  } catch {
+    /* not parseable — fall back to the raw string */
+  }
+  const stem = raw
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+  return stem || 'url-details';
+}
 
 const SUB_TABS: { key: SubTab; label: string; disabled?: boolean }[] = [
   { key: 'url-details', label: 'URL Details' },
@@ -246,9 +300,20 @@ export function BottomDetailPanel() {
 
   const showSingleScopeBanner = isMulti && SINGLE_URL_ONLY_TABS.has(subTab);
 
+  // Shared file-name stem for every sub-tab's Export button, so a saved
+  // file says which page it came from ("example.com-blog-post-1-inlinks")
+  // instead of a generic name the user has to rename.
+  const exportStem = useMemo(
+    () => (isMulti ? `${multiPages.length}-urls` : urlExportStem(detail?.row.url)),
+    [isMulti, multiPages.length, detail?.row.url],
+  );
+
   return (
     <div className="flex h-full flex-col bg-surface-950">
-      <div className="flex items-center border-b border-surface-800 bg-surface-900">
+      {/* Single row that scrolls sideways, matching the main TabsBar. The
+          scrollbar sits directly under the tabs; `shrink-0` stops the flex
+          column from squeezing the bar when the panel is short. */}
+      <div className="flex shrink-0 items-center overflow-x-auto border-b border-surface-800 bg-surface-900">
         {SUB_TABS.map((tab) => (
           <button
             key={tab.key}
@@ -306,12 +371,15 @@ export function BottomDetailPanel() {
         {effectiveIds.length > 0 && !detail && loading && (
           <div className="p-4 text-xs text-surface-500">{tx('common.loading', { defaultValue: 'Loading…' })}</div>
         )}
-        {detail && subTab === 'url-details' && <NameValueView row={detail.row} />}
+        {detail && subTab === 'url-details' && (
+          <NameValueView row={detail.row} exportName={exportStem} />
+        )}
         {subTab === 'inlinks' &&
           (isMulti ? (
             details.length > 0 && (
               <LinksView
                 tableId="inlinks-multi"
+                exportName={`${exportStem}-inlinks`}
                 selectedUrlId={detail?.row.id ?? null}
                 total={aggregatedInlinksTotal}
                 shown={aggregatedInlinks.length}
@@ -323,6 +391,7 @@ export function BottomDetailPanel() {
             detail && (
               <LinksView
                 tableId="inlinks"
+                exportName={`${exportStem}-inlinks`}
                 selectedUrlId={detail.row.id}
                 total={detail.inlinksTotal}
                 shown={detail.inlinks.length}
@@ -352,6 +421,7 @@ export function BottomDetailPanel() {
             details.length > 0 && (
               <LinksView
                 tableId="outlinks-multi"
+                exportName={`${exportStem}-outlinks`}
                 selectedUrlId={detail?.row.id ?? null}
                 total={aggregatedOutlinksTotal}
                 shown={aggregatedOutlinks.length}
@@ -363,6 +433,7 @@ export function BottomDetailPanel() {
             detail && (
               <LinksView
                 tableId="outlinks"
+                exportName={`${exportStem}-outlinks`}
                 selectedUrlId={detail.row.id}
                 total={detail.outlinksTotal}
                 shown={detail.outlinks.length}
@@ -387,31 +458,57 @@ export function BottomDetailPanel() {
               />
             )
           ))}
-        {detail && subTab === 'outline' && <OutlineView row={detail.row} />}
+        {detail && subTab === 'outline' && (
+          <OutlineView row={detail.row} exportName={exportStem} />
+        )}
         {subTab === 'images' &&
           (isMulti ? (
-            <MultiImagesView pages={multiPages} />
+            <MultiImagesView pages={multiPages} exportName={exportStem} />
           ) : (
-            detail && <ImagesView urlId={detail.row.id} row={detail.row} />
+            detail && (
+              <ImagesView
+                urlId={detail.row.id}
+                row={detail.row}
+                exportName={exportStem}
+              />
+            )
           ))}
         {subTab === 'resources' &&
           (isMulti ? (
-            <MultiResourcesView pages={multiPages} />
+            <MultiResourcesView pages={multiPages} exportName={exportStem} />
           ) : (
-            detail && <ResourcesView urlId={detail.row.id} row={detail.row} />
+            detail && (
+              <ResourcesView
+                urlId={detail.row.id}
+                row={detail.row}
+                exportName={exportStem}
+              />
+            )
           ))}
         {detail && subTab === 'extracted-data' && (
-          <ExtractedDataView row={detail.row} />
+          <ExtractedDataView row={detail.row} exportName={exportStem} />
         )}
         {detail && subTab === 'serp-snippet' && <SerpSnippet row={detail.row} />}
         {detail && subTab === 'http-headers' && (
-          <HttpHeadersView headers={detail.headers} row={detail.row} />
+          <HttpHeadersView
+            headers={detail.headers}
+            row={detail.row}
+            exportName={exportStem}
+          />
         )}
         {detail && subTab === 'cookies' && (
-          <CookiesView row={detail.row} headers={detail.headers} />
+          <CookiesView
+            row={detail.row}
+            headers={detail.headers}
+            exportName={exportStem}
+          />
         )}
         {detail && subTab === 'structured-data' && (
-          <StructuredDataView urlId={detail.row.id} row={detail.row} />
+          <StructuredDataView
+            urlId={detail.row.id}
+            row={detail.row}
+            exportName={exportStem}
+          />
         )}
         {detail && subTab === 'view-source' && (
           <ViewSourceView urlId={detail.row.id} pageUrl={detail.row.url} kind="raw" />
@@ -423,13 +520,17 @@ export function BottomDetailPanel() {
           <ScreenshotView urlId={detail.row.id} />
         )}
         {detail && subTab === 'duplicates' && (
-          <DuplicatesView urlId={detail.row.id} row={detail.row} />
+          <DuplicatesView
+            urlId={detail.row.id}
+            row={detail.row}
+            exportName={exportStem}
+          />
         )}
         {detail && subTab === 'analytics' && (
-          <AnalyticsView pageUrl={detail.row.url} />
+          <AnalyticsView pageUrl={detail.row.url} exportName={exportStem} />
         )}
         {detail && subTab === 'spelling' && (
-          <SpellingView pageUrl={detail.row.url} />
+          <SpellingView pageUrl={detail.row.url} exportName={exportStem} />
         )}
       </div>
     </div>
@@ -453,7 +554,13 @@ function issueTypeClass(issueType: string): string {
  * context so the user can see the error in situ, with suggested
  * replacements listed beside it.
  */
-function SpellingView({ pageUrl }: { pageUrl: string }) {
+function SpellingView({
+  pageUrl,
+  exportName,
+}: {
+  pageUrl: string;
+  exportName: string;
+}) {
   const { t } = useTranslation();
   const [data, setData] = useState<SpellingMatchesResult | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -496,21 +603,51 @@ function SpellingView({ pageUrl }: { pageUrl: string }) {
       </div>
     );
   }
+  // Not failures — LanguageTool has no rules for this language, or the
+  // results were so noisy the language must have been wrong. Either way the
+  // honest answer is "no findings", not a list of false positives.
+  if (data.status === 'unsupported' || data.status === 'mismatch') {
+    return (
+      <div className="p-3 text-[11px] text-amber-300">
+        {data.error ??
+          t('spelling.unsupported', {
+            defaultValue:
+              'Not checked — LanguageTool has no rules for this page’s language.',
+          })}
+        {data.detectedLanguage && (
+          <span className="ml-1 text-surface-500">
+            {t('spelling.detectedAs', {
+              defaultValue: '(detected: {{lang}})',
+              lang: data.detectedLanguage,
+            })}
+          </span>
+        )}
+      </div>
+    );
+  }
   if (data.status === 'skipped') {
     return (
       <div className="p-3 text-[11px] text-surface-500">
-        {t('spelling.skipped', {
-          defaultValue: 'Skipped — the page has too little prose to check.',
-        })}
+        {data.error ??
+          t('spelling.skipped', {
+            defaultValue: 'Skipped — the page has too little prose to check.',
+          })}
       </div>
     );
   }
   if (data.matches.length === 0) {
     return (
       <div className="p-3 text-[11px] text-emerald-400">
-        {t('spelling.clean', {
-          defaultValue: 'No spelling or grammar issues found.',
-        })}
+        {/* Saying "no grammar issues" would be a claim the offline
+            dictionary never made — it only ever looked at spelling. */}
+        {data.engine === 'local'
+          ? t('spelling.cleanLocal', {
+              defaultValue:
+                'No spelling mistakes found. Grammar was not checked — LanguageTool has no rules for this language, so an offline dictionary was used instead.',
+            })
+          : t('spelling.clean', {
+              defaultValue: 'No spelling or grammar issues found.',
+            })}
       </div>
     );
   }
@@ -530,6 +667,53 @@ function SpellingView({ pageUrl }: { pageUrl: string }) {
             <span className="text-surface-200">{data.language}</span>
           </span>
         )}
+        {/* The engine determines what these findings can and cannot cover,
+            so it belongs next to them rather than buried in a tooltip. */}
+        {data.engine === 'local' && (
+          <span className="text-amber-400">
+            {t('spelling.engineLocal', {
+              defaultValue: 'offline dictionary — spelling only, no grammar',
+            })}
+          </span>
+        )}
+        {/* A `lang` attribute that contradicts the page's own text is worth
+            surfacing on its own — it misleads search engines and screen
+            readers, not just this checker. */}
+        {data.detectedLanguage &&
+          data.declaredLanguage &&
+          data.detectedLanguage !== data.declaredLanguage && (
+            <span className="text-amber-400">
+              {t('spelling.langConflict', {
+                defaultValue:
+                  'html[lang] says {{declared}}, the text reads as {{detected}}',
+                declared: data.declaredLanguage,
+                detected: data.detectedLanguage,
+              })}
+            </span>
+          )}
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-spelling`}
+          sheetName="Spelling"
+          getData={() => ({
+            headers: [
+              t('spelling.colType', { defaultValue: 'Type' }),
+              t('spelling.colCategory', { defaultValue: 'Category' }),
+              t('spelling.colText', { defaultValue: 'Text' }),
+              t('spelling.colSuggestions', { defaultValue: 'Suggestions' }),
+              t('spelling.colMessage', { defaultValue: 'Message' }),
+              t('spelling.colContext', { defaultValue: 'Context' }),
+            ],
+            rows: data.matches.map((m) => [
+              m.issueType,
+              m.category,
+              m.text,
+              m.replacements.join(', '),
+              m.message,
+              m.context,
+            ]),
+          })}
+        />
       </div>
       <ol className="flex-1 overflow-y-auto text-[11px]">
         {data.matches.map((m, i) => {
@@ -581,7 +765,13 @@ function SpellingView({ pageUrl }: { pageUrl: string }) {
   );
 }
 
-function AnalyticsView({ pageUrl }: { pageUrl: string }) {
+function AnalyticsView({
+  pageUrl,
+  exportName,
+}: {
+  pageUrl: string;
+  exportName: string;
+}) {
   const { t } = useTranslation();
   const [data, setData] = useState<UrlAnalyticsDetail | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -620,7 +810,55 @@ function AnalyticsView({ pageUrl }: { pageUrl: string }) {
   }
 
   const { gsc, ga4, inspection } = data;
+  // The cards are three unrelated metric sets; exporting them as one
+  // metric/value sheet keeps a single file per URL rather than three.
+  const exportRows = (): (string | number | boolean | null)[][] => {
+    const out: (string | number | boolean | null)[][] = [];
+    if (gsc) {
+      out.push(['Search Console', 'Clicks', gsc.clicks]);
+      out.push(['Search Console', 'Impressions', gsc.impressions]);
+      out.push(['Search Console', 'CTR', `${(gsc.ctr * 100).toFixed(1)}%`]);
+      out.push(['Search Console', 'Avg position', gsc.position.toFixed(1)]);
+    }
+    if (ga4) {
+      out.push(['Analytics 4', 'Sessions', ga4.sessions]);
+      out.push(['Analytics 4', 'Users', ga4.users]);
+      out.push(['Analytics 4', 'Pageviews', ga4.pageviews]);
+      out.push([
+        'Analytics 4',
+        'Engagement rate',
+        `${(ga4.engagementRate * 100).toFixed(1)}%`,
+      ]);
+      out.push([
+        'Analytics 4',
+        'Avg session duration',
+        Math.round(ga4.avgSessionDuration),
+      ]);
+    }
+    if (inspection) {
+      out.push(['URL Inspection', 'Verdict', inspection.verdict ?? '']);
+      out.push(['URL Inspection', 'Coverage state', inspection.coverageState ?? '']);
+      out.push(['URL Inspection', 'Robots state', inspection.robotsTxtState ?? '']);
+      out.push(['URL Inspection', 'Indexing state', inspection.indexingState ?? '']);
+      out.push(['URL Inspection', 'Canonical (Google)', inspection.googleCanonical ?? '']);
+      out.push(['URL Inspection', 'Last crawl', inspection.lastCrawlTime ?? '']);
+    }
+    return out;
+  };
   return (
+    <div className="flex h-full flex-col">
+      <SubTabExportBar
+        fileName={`${exportName}-analytics`}
+        sheetName="Analytics"
+        getData={() => ({
+          headers: [
+            t('analyticsView.colSource', { defaultValue: 'Source' }),
+            t('analyticsView.colMetric', { defaultValue: 'Metric' }),
+            t('analyticsView.colValue', { defaultValue: 'Value' }),
+          ],
+          rows: exportRows(),
+        })}
+      />
     <div className="grid grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-3">
       <AnalyticsCard
         title={t('analyticsView.gscTitle', { defaultValue: 'Search Console' })}
@@ -685,6 +923,7 @@ function AnalyticsView({ pageUrl }: { pageUrl: string }) {
           </>
         )}
       </AnalyticsCard>
+    </div>
     </div>
   );
 }
@@ -1177,7 +1416,15 @@ function ViewSourceScrollEffect({
   return null;
 }
 
-function DuplicatesView({ urlId, row }: { urlId: number; row: CrawlUrlRow }) {
+function DuplicatesView({
+  urlId,
+  row,
+  exportName,
+}: {
+  urlId: number;
+  row: CrawlUrlRow;
+  exportName: string;
+}) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const [members, setMembers] = useState<UrlClusterMember[] | null>(null);
@@ -1230,6 +1477,32 @@ function DuplicatesView({ urlId, row }: { urlId: number; row: CrawlUrlRow }) {
         <span className="text-surface-500">
           {t('duplicates.hammingHint', { defaultValue: '(Hamming distance from this URL — lower means more similar)' })}
         </span>
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-duplicates`}
+          sheetName="Duplicates"
+          disabled={members.length === 0}
+          getData={() => ({
+            headers: [
+              translateLabel('Hamming', lang),
+              'URL',
+              translateLabel('Status', lang),
+              translateLabel('Indexability', lang),
+              translateLabel('Words', lang),
+              translateLabel('Inlinks', lang),
+              translateLabel('Title', lang),
+            ],
+            rows: members.map((m) => [
+              m.hammingDistance,
+              m.url,
+              m.statusCode ?? '',
+              m.indexability ?? '',
+              m.wordCount ?? '',
+              m.inlinks ?? '',
+              m.title ?? '',
+            ]),
+          })}
+        />
       </div>
       <div className="flex-1 overflow-auto">
         <table className="w-full text-[11px]">
@@ -1344,9 +1617,11 @@ function renderHighlighted(
 function HttpHeadersView({
   headers,
   row,
+  exportName,
 }: {
   headers: { name: string; value: string }[];
   row: CrawlUrlRow;
+  exportName: string;
 }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -1413,6 +1688,15 @@ function HttpHeadersView({
               })
             : t('detail.headersCapturedNote', { defaultValue: 'Captured at crawl time.' })}
         </span>
+        <GridExportButton
+          fileName={`${exportName}-http-headers-${side}`}
+          sheetName={side === 'request' ? 'Request Headers' : 'Response Headers'}
+          disabled={rows.length === 0}
+          getData={() => ({
+            headers: [translateLabel('Header', lang), translateLabel('Value', lang)],
+            rows: rows.map((h) => [h.name, h.value]),
+          })}
+        />
       </div>
       <div className="flex-1 overflow-auto">
         {showDiag && <StatusDiagnosisBanner diag={diag} />}
@@ -1593,7 +1877,7 @@ function fleschBand(score: number): string {
   return 'very difficult';
 }
 
-function NameValueView({ row }: { row: CrawlUrlRow }) {
+function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: string }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   // Server-side pixel-width is the source of truth (drives the issue
@@ -1911,6 +2195,17 @@ function NameValueView({ row }: { row: CrawlUrlRow }) {
 
   return (
     <div className="p-3">
+      <SubTabExportBar
+        fileName={`${exportName}-url-details`}
+        sheetName="URL Details"
+        getData={() => ({
+          headers: [translateLabel('Name', lang), translateLabel('Value', lang)],
+          rows: fields.map(([label, value]) => [
+            translateLabel(label, lang),
+            value === null || value === undefined ? '' : String(value),
+          ]),
+        })}
+      />
       <table className="w-full text-[11px]">
         <thead className="sticky top-0 bg-surface-900">
           <tr className="text-surface-400">
@@ -2046,6 +2341,7 @@ function LinksView({
   shown,
   columns,
   rows,
+  exportName,
 }: {
   tableId: string;
   selectedUrlId: number | null;
@@ -2053,6 +2349,8 @@ function LinksView({
   shown: number;
   columns: LinksColumn[];
   rows: string[][];
+  /** File-name stem for the Export button (already page-specific). */
+  exportName: string;
 }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -2345,11 +2643,22 @@ function LinksView({
 
   return (
     <div ref={rootRef} className="relative flex h-full select-none flex-col">
-      <div className="shrink-0 px-3 pt-2 text-[11px] text-surface-500">
-        {t('links.showing', { defaultValue: 'Showing' })}{' '}
-        <span className="font-mono text-surface-200">{shown.toLocaleString()}</span>{' '}
-        {t('links.of', { defaultValue: 'of' })}{' '}
-        <span className="font-mono text-surface-200">{total.toLocaleString()}</span>
+      <div className="flex shrink-0 items-center gap-3 px-3 pt-2 text-[11px] text-surface-500">
+        <span>
+          {t('links.showing', { defaultValue: 'Showing' })}{' '}
+          <span className="font-mono text-surface-200">{shown.toLocaleString()}</span>{' '}
+          {t('links.of', { defaultValue: 'of' })}{' '}
+          <span className="font-mono text-surface-200">{total.toLocaleString()}</span>
+        </span>
+        <GridExportButton
+          className="ml-auto"
+          fileName={exportName}
+          disabled={rows.length === 0}
+          getData={() => ({
+            headers: columns.map((c) => translateLabel(c.header, lang)),
+            rows,
+          })}
+        />
       </div>
       {rows.length === 0 ? (
         <div className="py-8 text-center text-xs text-surface-500">{t('links.noLinks', { defaultValue: 'No links.' })}</div>
@@ -2955,9 +3264,11 @@ function splitJoinedSetCookie(joined: string): string[] {
 function CookiesView({
   row,
   headers,
+  exportName,
 }: {
   row: CrawlUrlRow;
   headers: { name: string; value: string }[];
+  exportName: string;
 }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -3004,6 +3315,31 @@ function CookiesView({
             {t('cookies.missing', { defaultValue: '{{n}} missing', n: row.cookiesNoSameSite })} <code>SameSite</code>
           </span>
         )}
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-cookies`}
+          sheetName="Cookies"
+          getData={() => ({
+            headers: [
+              translateLabel('Name', lang),
+              translateLabel('Domain', lang),
+              translateLabel('Path', lang),
+              translateLabel('Expires', lang),
+              'Secure',
+              'HttpOnly',
+              'SameSite',
+            ],
+            rows: cookies.map((c) => [
+              c.name,
+              c.domain ?? '',
+              c.path ?? '/',
+              c.expires ?? (c.maxAge ? `Max-Age ${c.maxAge}` : 'session'),
+              c.secure,
+              c.httpOnly,
+              c.sameSite ?? '',
+            ]),
+          })}
+        />
       </div>
       <table className="w-full text-[11px]">
         <thead className="sticky top-0 bg-surface-900">
@@ -3094,9 +3430,11 @@ function extractJsonLdBlocks(html: string): JsonLdBlock[] {
 function StructuredDataView({
   urlId,
   row,
+  exportName,
 }: {
   urlId: number | null;
   row: CrawlUrlRow;
+  exportName: string;
 }) {
   const { t } = useTranslation();
   const [src, setSrc] = useState<UrlSourceResult | null>(null);
@@ -3156,6 +3494,26 @@ function StructuredDataView({
         <span>
           <span className="font-medium text-surface-200">{row.rdfaCount}</span> {t('structured.rdfaAttrs', { defaultValue: 'RDFa attrs' })}
         </span>
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-structured-data`}
+          sheetName="Structured Data"
+          disabled={blocks.length === 0}
+          getData={() => ({
+            headers: [
+              t('structured.colBlock', { defaultValue: 'Block' }),
+              t('structured.colValid', { defaultValue: 'Valid JSON' }),
+              t('structured.colTypes', { defaultValue: 'Types' }),
+              t('structured.colJson', { defaultValue: 'JSON' }),
+            ],
+            rows: blocks.map((b) => [
+              b.index + 1,
+              b.ok,
+              types.join(', '),
+              b.raw,
+            ]),
+          })}
+        />
       </div>
 
       <div className="flex-1 overflow-auto p-3">
@@ -3230,9 +3588,11 @@ function StructuredDataView({
 function ImagesView({
   urlId,
   row,
+  exportName,
 }: {
   urlId: number | null;
   row: CrawlUrlRow;
+  exportName: string;
 }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -3311,6 +3671,29 @@ function ImagesView({
             })})
           </span>
         )}
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-images`}
+          sheetName="Images"
+          getData={() => ({
+            headers: [
+              translateLabel('Source', lang),
+              translateLabel('Alt', lang),
+              'W',
+              'H',
+              translateLabel('Size', lang),
+              translateLabel('Scope', lang),
+            ],
+            rows: rows.map((r) => [
+              r.src,
+              r.alt ?? '',
+              r.width ?? '',
+              r.height ?? '',
+              r.byteSize ?? '',
+              r.isInternal ? 'internal' : 'external',
+            ]),
+          })}
+        />
       </div>
       <div className="flex-1 overflow-auto p-3">
         <table className="w-full text-[11px]">
@@ -3483,12 +3866,32 @@ function extractResources(html: string, pageUrl: string): ResourceEntry[] {
   return out;
 }
 
+/**
+ * Loading hints shown as chips next to a subresource (async / defer /
+ * module / SRI / …). Shared by the Resources table and its Export button
+ * so the exported "Hints" column always matches what is on screen.
+ */
+function resourceHints(r: { attrs: Record<string, string> }): string[] {
+  const hints: string[] = [];
+  if (r.attrs['async'] !== undefined) hints.push('async');
+  if (r.attrs['defer'] !== undefined) hints.push('defer');
+  if ((r.attrs['type'] ?? '').toLowerCase() === 'module') hints.push('module');
+  if (r.attrs['crossorigin']) {
+    hints.push(`crossorigin=${r.attrs['crossorigin'] || 'anonymous'}`);
+  }
+  if (r.attrs['integrity']) hints.push('SRI');
+  if ((r.attrs['media'] ?? '').toLowerCase() === 'print') hints.push('print-only');
+  return hints;
+}
+
 function ResourcesView({
   urlId,
   row,
+  exportName,
 }: {
   urlId: number | null;
   row: CrawlUrlRow;
+  exportName: string;
 }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -3576,6 +3979,28 @@ function ResourcesView({
             {translateLabel(f.label, lang)} <span className="text-surface-500">({f.count})</span>
           </button>
         ))}
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-resources`}
+          sheetName="Resources"
+          disabled={filtered.length === 0}
+          getData={() => ({
+            headers: [
+              translateLabel('Type', lang),
+              'URL',
+              '3rd-party',
+              translateLabel('Hints', lang),
+            ],
+            // Mirrors the visible table: the active filter applies, and
+            // the hint chips are flattened to one space-separated cell.
+            rows: filtered.map((r) => [
+              r.type,
+              r.url,
+              r.isExternal,
+              resourceHints(r).join(' '),
+            ]),
+          })}
+        />
       </div>
       <div className="flex-1 overflow-auto p-3">
         {filtered.length === 0 ? (
@@ -3592,21 +4017,7 @@ function ResourcesView({
             </thead>
             <tbody>
               {filtered.map((r, i) => {
-                const hints: string[] = [];
-                if (r.attrs['async'] !== undefined) hints.push('async');
-                if (r.attrs['defer'] !== undefined) hints.push('defer');
-                if (
-                  (r.attrs['type'] ?? '').toLowerCase() === 'module'
-                ) {
-                  hints.push('module');
-                }
-                if (r.attrs['crossorigin']) {
-                  hints.push(`crossorigin=${r.attrs['crossorigin'] || 'anonymous'}`);
-                }
-                if (r.attrs['integrity']) hints.push('SRI');
-                if ((r.attrs['media'] ?? '').toLowerCase() === 'print') {
-                  hints.push('print-only');
-                }
+                const hints = resourceHints(r);
                 return (
                   <tr
                     key={`${r.url}-${i}`}
@@ -3659,7 +4070,13 @@ interface MultiPage {
  * shows them in a single flat table with a leading Page column so the
  * source URL of each image is unambiguous.
  */
-function MultiImagesView({ pages }: { pages: MultiPage[] }) {
+function MultiImagesView({
+  pages,
+  exportName,
+}: {
+  pages: MultiPage[];
+  exportName: string;
+}) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const [byPage, setByPage] = useState<Map<number, UrlPageImageRow[]>>(new Map());
@@ -3734,6 +4151,33 @@ function MultiImagesView({ pages }: { pages: MultiPage[] }) {
         {largeCount > 0 && (
           <span className="text-amber-400">{t('imagesView.largeCount', { defaultValue: '{{n}} > 100 KB', n: largeCount })}</span>
         )}
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-images`}
+          sheetName="Images"
+          getData={() => ({
+            headers: [
+              translateLabel('Page', lang),
+              translateLabel('Source', lang),
+              translateLabel('Alt', lang),
+              'W',
+              'H',
+              translateLabel('Size', lang),
+              translateLabel('Scope', lang),
+            ],
+            rows: pages.flatMap((p) =>
+              (byPage.get(p.id) ?? []).map((r) => [
+                p.row.url,
+                r.src,
+                r.alt ?? '',
+                r.width ?? '',
+                r.height ?? '',
+                r.byteSize ?? '',
+                r.isInternal ? 'internal' : 'external',
+              ]),
+            ),
+          })}
+        />
       </div>
       <div className="flex-1 overflow-auto p-3">
         <table className="w-full text-[11px]">
@@ -3821,7 +4265,13 @@ function MultiImagesView({ pages }: { pages: MultiPage[] }) {
  * parallel, runs the same `extractResources` parser per page, and merges
  * everything into one flat table with a leading Page column.
  */
-function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
+function MultiResourcesView({
+  pages,
+  exportName,
+}: {
+  pages: MultiPage[];
+  exportName: string;
+}) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const [byPage, setByPage] = useState<Map<number, ResourceEntry[]>>(new Map());
@@ -3938,6 +4388,26 @@ function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
             {t('resources.missingSnapshots', { defaultValue: '{{missing}} of {{total}} pages have no stored body', missing: missingSnapshots, total: pages.length })}
           </span>
         )}
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-resources`}
+          sheetName="Resources"
+          disabled={filtered.length === 0}
+          getData={() => ({
+            headers: [
+              translateLabel('Page', lang),
+              translateLabel('Type', lang),
+              'URL',
+              '3rd-party',
+            ],
+            rows: filtered.map((x) => [
+              x.page.row.url,
+              x.entry.type,
+              x.entry.url,
+              x.entry.isExternal,
+            ]),
+          })}
+        />
       </div>
       <div className="flex-1 overflow-auto p-3">
         {filtered.length === 0 ? (
@@ -3996,7 +4466,13 @@ function MultiResourcesView({ pages }: { pages: MultiPage[] }) {
   );
 }
 
-function ExtractedDataView({ row }: { row: CrawlUrlRow }) {
+function ExtractedDataView({
+  row,
+  exportName,
+}: {
+  row: CrawlUrlRow;
+  exportName: string;
+}) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
   const extraction = row.extractionResults
@@ -4029,6 +4505,41 @@ function ExtractedDataView({ row }: { row: CrawlUrlRow }) {
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-auto p-3">
+      <SubTabExportBar
+        fileName={`${exportName}-extracted-data`}
+        sheetName="Extracted Data"
+        getData={() => ({
+          headers: [
+            t('extraction.colSource', { defaultValue: 'Source' }),
+            translateLabel('Name', lang),
+            translateLabel('Value', lang),
+          ],
+          // Both blocks land in one sheet, tagged by source, so a rule
+          // named the same as a search term stays distinguishable.
+          rows: [
+            ...(hasExtraction
+              ? Object.entries(extraction as Record<string, unknown>).map(
+                  ([k, v]) => [
+                    t('extraction.customExtraction', { defaultValue: 'Custom Extraction' }),
+                    k,
+                    v === null || v === undefined
+                      ? ''
+                      : typeof v === 'object'
+                        ? JSON.stringify(v)
+                        : String(v),
+                  ],
+                )
+              : []),
+            ...(hasSearch
+              ? Object.entries(search as Record<string, unknown>).map(([k, v]) => [
+                  t('extraction.customSearch', { defaultValue: 'Custom Search' }),
+                  k,
+                  v === null || v === undefined ? '' : String(v),
+                ])
+              : []),
+          ] as (string | number | boolean | null)[][],
+        })}
+      />
       {hasExtraction && (
         <section>
           <div className="mb-2 text-[10px] uppercase tracking-wide text-surface-500">
@@ -4136,7 +4647,7 @@ function parseHeadings(json: string | null): HeadingEntry[] {
   }
 }
 
-function OutlineView({ row }: { row: CrawlUrlRow }) {
+function OutlineView({ row, exportName }: { row: CrawlUrlRow; exportName: string }) {
   const { t } = useTranslation();
   const outline = parseHeadings(row.headings);
 
@@ -4188,6 +4699,19 @@ function OutlineView({ row }: { row: CrawlUrlRow }) {
         {outline.length === 200 && (
           <span className="text-surface-500">{t('outline.capped', { defaultValue: '(capped at 200)' })}</span>
         )}
+        <GridExportButton
+          className="ml-auto"
+          fileName={`${exportName}-outline`}
+          sheetName="Outline"
+          getData={() => ({
+            headers: [
+              t('outline.colLevel', { defaultValue: 'Level' }),
+              t('outline.colText', { defaultValue: 'Heading' }),
+              t('outline.colIssue', { defaultValue: 'Issue' }),
+            ],
+            rows: annotated.map((h) => [`h${h.level}`, h.text, h.skipped ?? '']),
+          })}
+        />
       </div>
       <div className="flex-1 overflow-auto p-3">
         <ol className="space-y-1 text-[11px]">

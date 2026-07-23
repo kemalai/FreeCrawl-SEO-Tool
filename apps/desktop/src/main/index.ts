@@ -20,9 +20,21 @@ import {
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, resolve as resolvePath, sep as pathSep } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+} from 'node:fs';
+import { copyFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { totalmem, freemem } from 'node:os';
+// Lives under src/main/assets (not resources/) on purpose: electron-vite
+// treats resources/ as the public dir and references it in place, which the
+// packaged app doesn't ship — assets/ files get copied into out/main/chunks.
+import appIcon from './assets/window-icon.png?asset';
 import {
   DEFAULT_CRAWL_CONFIG,
   IPC,
@@ -43,6 +55,8 @@ import {
   type ExportImagesResult,
   type ExportTabularInput,
   type ExportTabularResult,
+  type ExportGridInput,
+  type ExportGridResult,
   type DataDeleteByDomainInput,
   type DataDeleteByDomainResult,
   type CrashRecoveryStatus,
@@ -118,6 +132,7 @@ import {
   type CruxFormFactor,
   type SpellingQueryInput,
   type SpellingQueryResult,
+  type SpellingLanguageOption,
   type SpellingRunInput,
   type SpellingRunResult,
   type SpellingMatchesResult,
@@ -169,7 +184,20 @@ import {
   type LogExportInput,
   type LogExportResult,
   type LogEntry,
+  type BrowserInstallState,
 } from '@freecrawl/shared-types';
+import {
+  setupPlaywrightBrowsersPath,
+  chromiumInstalled,
+  installChromiumBrowsers,
+  installInProgress,
+  abortChromiumInstall,
+} from './playwright-setup.js';
+import {
+  detectProjectFormat,
+  packProject,
+  unpackProject,
+} from './project-archive.js';
 import {
   BrowserPool,
   PlaywrightBrowserMissingError,
@@ -185,6 +213,7 @@ import {
   exportUrlsToJson,
   exportUrlsToXml,
   exportTabular,
+  exportGrid,
   exportSitemap,
   exportHtmlReport,
   ensureHeapHeadroom,
@@ -207,7 +236,6 @@ import {
 } from '@freecrawl/core';
 import { fetch as undiciFetch } from 'undici';
 import { apiFetch } from './api-fetch.js';
-import { spawn } from 'node:child_process';
 import { ProjectDb } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
 import { getMenuLabels, isMenuLang, type MenuLang } from './menu-i18n.js';
@@ -221,9 +249,13 @@ import { runPagespeedBatch, type PagespeedBatchItem } from './pagespeed.js';
 import { runCruxBatch, type CruxBatchItem } from './crux.js';
 import {
   runSpellingBatch,
+  fetchSupportedLanguages,
+  clearSupportedLanguagesCache,
   PUBLIC_LT_ENDPOINT,
   type SpellingCheckOptions,
 } from './languagetool.js';
+import { warmLanguageDetector } from './language-detect.js';
+import { warmLocalDictionary } from './local-spell.js';
 import { startAuth, getAuthState, revokeAuth } from './google-oauth.js';
 import { listSites, querySearchAnalytics, inspectUrl } from './gsc.js';
 import { exportCategoryToSheets } from './sheets-export.js';
@@ -343,8 +375,20 @@ class ProjectSession {
   db: ProjectDb | null = null;
   activeCrawler: Crawler | null = null;
   activeBrowserPool: BrowserPool | null = null;
-  /** Open `.seoproject` file path; '' means the default scratch DB. */
+  /**
+   * The `.seoproject` document this session is bound to; '' means the
+   * work has never been saved (scratch). Since projects became
+   * compressed containers this is NOT the database being written to —
+   * that is `scratchPath`, a working copy in userData. Keeping the
+   * distinction means the user's file stays a single opaque archive
+   * instead of a live SQLite database trailing `-wal`/`-shm` sidecars.
+   */
   currentProjectPath = '';
+  /**
+   * Working-copy contents differ from the saved archive. Drives the
+   * title-bar dot and the save prompt on close.
+   */
+  dirty = false;
   storageModeActive: 'disk' | 'ram' = 'disk';
   lastCrawlConfig: CrawlConfig | null = null;
   latestProgress: CrawlProgress | null = null;
@@ -699,6 +743,10 @@ function flushPrefs(): void {
 }
 
 function fireDataChanged(sess: ProjectSession = currentSession()): void {
+  // Every mutation in the app funnels through here, which makes it the
+  // one place that can reliably notice the working copy has diverged
+  // from the saved archive. Open/save reset the flag afterwards.
+  markDirty(sess);
   // Refresh the owning window (multi-window: each session's data change
   // repaints its own renderer). Callers inside an IPC handler get the
   // right session for free; crawler callbacks pass their captured session.
@@ -1239,13 +1287,82 @@ function getDb(): ProjectDb {
   return currentSession().getDb();
 }
 
+/** Monotonic suffix so each open gets its own working file. */
+let workingDbCounter = 0;
+
 /**
- * Swap the active DB to an existing `.seoproject` file. Stops any running
- * crawl, closes the previous DB, and broadcasts `dataChanged` so the
- * renderer reloads its views. Used by File → Open Recent and Open Project.
+ * Allocate a fresh working-copy path under userData.
+ *
+ * A new file per open rather than reusing one fixed path: on Windows the
+ * previous working database is still memory-mapped by the reader/writer
+ * worker threads at the moment we want to replace it, and writing over a
+ * mapped file fails. Swapping the pools onto a brand-new path sidesteps
+ * the lock entirely; the old file is deleted afterwards, and any that
+ * survive a crash are swept at startup.
  */
-function openProjectAtPath(filePath: string): void {
+function newWorkingDbPath(): string {
+  const dir = join(app.getPath('userData'), 'projects');
+  mkdirSync(dir, { recursive: true });
+  workingDbCounter += 1;
+  return join(dir, `work-${process.pid}-${workingDbCounter}.seoproject`);
+}
+
+/** Delete working copies orphaned by a crash (never the live one). */
+function sweepStaleWorkingCopies(keep: ReadonlySet<string>): void {
+  try {
+    const dir = join(app.getPath('userData'), 'projects');
+    if (!existsSync(dir)) return;
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith('work-')) continue;
+      const full = join(dir, name);
+      // Includes the `-wal` / `-shm` sidecars of dead working copies.
+      if (keep.has(full)) continue;
+      if (keep.has(full.replace(/-(wal|shm)$/, ''))) continue;
+      try {
+        rmSync(full, { force: true });
+      } catch {
+        /* still locked by a second instance — leave it */
+      }
+    }
+  } catch (err) {
+    logger.log('warn', 'main', `working-copy sweep failed: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Materialise a project document into a working database this session
+ * can write to, then swap the DB + worker pools onto it.
+ *
+ * `documentPath` is what the user picked in the file dialog and what we
+ * save back to; the database that actually gets opened is always a
+ * private working copy. Compressed containers are expanded; legacy bare
+ * SQLite projects are copied verbatim, so files written by older builds
+ * keep opening — they simply become containers the next time they are
+ * saved.
+ */
+async function openProjectAtPath(documentPath: string): Promise<void> {
   const s = currentSession();
+  const format = detectProjectFormat(documentPath);
+  if (format === 'unknown') {
+    throw new Error(
+      'This file is not a FreeCrawl project (unrecognised format). It may be corrupt or a different file type.',
+    );
+  }
+
+  const workingPath = newWorkingDbPath();
+  logger.log(
+    'info',
+    'main',
+    `Opening project ${documentPath} (${format}) → working copy ${workingPath}`,
+  );
+  if (format === 'archive') {
+    await unpackProject(documentPath, workingPath);
+  } else {
+    // Legacy project: a bare database. Copy rather than open in place so
+    // the user's file stops accumulating SQLite sidecars.
+    await copyFile(documentPath, workingPath);
+  }
+
   const running = s.activeCrawler;
   if (running) {
     running.stop();
@@ -1259,9 +1376,12 @@ function openProjectAtPath(filePath: string): void {
     }
     s.db = null;
   }
-  s.db = new ProjectDb(filePath);
-  s.scratchPath = filePath;
-  s.currentProjectPath = filePath;
+  const previousWorking = s.scratchPath;
+  s.db = new ProjectDb(workingPath);
+  s.scratchPath = workingPath;
+  s.currentProjectPath = documentPath;
+  s.dirty = false;
+  const filePath = workingPath;
   // Opening a real `.seoproject` file always lands us in disk mode, even
   // when the previous project was an in-memory (RAM-only) scratch DB — the
   // pool `swap` below spins the worker pools up against the disk file.
@@ -1287,11 +1407,14 @@ function openProjectAtPath(filePath: string): void {
       `db-writer pool swap failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-  pushRecentProject(filePath, new Date().toISOString());
+  // Recents and the title track the document the user knows about, not
+  // the working copy backing it.
+  pushRecentProject(documentPath, new Date().toISOString());
   rebuildMenu();
-  const win = s.window ?? mainWindow;
-  if (win) {
-    win.setTitle(`FreeCrawl SEO Tool v${app.getVersion()} — ${filePath}`);
+  updateWindowTitle(s);
+  // The database we just replaced is nobody's now — reclaim its disk.
+  if (previousWorking && previousWorking !== workingPath) {
+    sweepStaleWorkingCopies(new Set([workingPath]));
   }
   // Rehydrate the crawl config from the project we just opened and push it
   // to the renderer so the UI reflects THIS project's saved settings
@@ -1309,6 +1432,245 @@ function openProjectAtPath(filePath: string): void {
   }
   s.send(IPC.projectConfigChanged, projectConfig);
   fireDataChanged(s);
+  // `fireDataChanged` marks the session dirty — but loading a document is
+  // not an edit to it.
+  s.dirty = false;
+  updateWindowTitle(s);
+}
+
+/**
+ * Title shows the document name, with a leading dot when the working copy
+ * has changes that are not in the saved archive yet. Unsaved scratch work
+ * reads "Untitled" so it is obvious nothing is on disk.
+ */
+function updateWindowTitle(s: ProjectSession): void {
+  const win = s.window ?? mainWindow;
+  if (!win || win.isDestroyed()) return;
+  const name = s.currentProjectPath
+    ? basename(s.currentProjectPath)
+    : L().titleUntitledProject;
+  const mark = s.dirty ? '● ' : '';
+  win.setTitle(`FreeCrawl SEO Tool v${app.getVersion()} — ${mark}${name}`);
+}
+
+/**
+ * Flag the working copy as diverged from the saved archive. Called from
+ * `fireDataChanged`, which every mutation already funnels through, so a
+ * crawl, a delete, an import or an enrichment run all count.
+ */
+function markDirty(s: ProjectSession): void {
+  if (s.dirty) return;
+  s.dirty = true;
+  updateWindowTitle(s);
+}
+
+/**
+ * Write the working database to `documentPath` as a compressed container.
+ *
+ * `VACUUM INTO` is what makes the snapshot safe to take while the app is
+ * running: it produces a self-contained, transactionally consistent copy,
+ * where a plain file copy could catch a torn page or miss committed data
+ * still sitting in the WAL.
+ */
+async function saveProjectDocument(
+  s: ProjectSession,
+  documentPath: string,
+): Promise<{ bytesWritten: number; sourceBytes: number }> {
+  const database = s.getDb();
+  try {
+    database.walCheckpoint();
+  } catch {
+    /* best-effort; VACUUM INTO still snapshots consistently */
+  }
+  const tmpPath = join(
+    app.getPath('temp'),
+    `freecrawl-save-${process.pid}-${workingDbCounter}-${Math.round(performance.now())}.seoproject`,
+  );
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rawDb = (database as any).db as { exec: (sql: string) => void };
+    rawDb.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
+    const result = await packProject(tmpPath, documentPath);
+    s.currentProjectPath = documentPath;
+    s.dirty = false;
+    updateWindowTitle(s);
+    pushRecentProject(documentPath, new Date().toISOString());
+    rebuildMenu();
+    logger.log(
+      'info',
+      'main',
+      `Saved ${documentPath}: ${(result.sourceBytes / 1048576).toFixed(1)} MB database → ` +
+        `${(result.bytesWritten / 1048576).toFixed(1)} MB archive.`,
+    );
+    return result;
+  } finally {
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      /* best-effort tmp cleanup */
+    }
+  }
+}
+
+/**
+ * Default file name offered by Save As: the domain of the site that was
+ * crawled, so the common case is press-Enter. Falls back to a previously
+ * chosen project name, then to a generic label when nothing has been
+ * crawled yet.
+ */
+function suggestedProjectName(s: ProjectSession): string {
+  const sanitise = (raw: string): string =>
+    Array.from(raw)
+      // Windows rejects \ / : * ? " < > | and every control character in
+      // a file name; leading/trailing dots and spaces are invalid there
+      // too. Mapping by code point instead of matching a regex keeps the
+      // control-char range out of the pattern entirely.
+      .map((ch) => (ch.codePointAt(0)! < 0x20 || '\\/:*?"<>|'.includes(ch) ? '-' : ch))
+      .join('')
+      .replace(/^[\s.]+|[\s.]+$/g, '')
+      .slice(0, 80);
+
+  try {
+    const saved = s.getDb().getMeta('projectName');
+    if (saved && saved.trim()) return sanitise(saved) || 'crawl';
+  } catch {
+    /* fall through to the crawl config */
+  }
+  const startUrl = s.lastCrawlConfig?.startUrl?.trim();
+  if (startUrl) {
+    try {
+      const host = new URL(startUrl).hostname.replace(/^www\./i, '');
+      if (host) return sanitise(host) || 'crawl';
+    } catch {
+      /* not a parseable URL — fall through */
+    }
+  }
+  return 'crawl';
+}
+
+/**
+ * Save As: ask where/what to call it, then write the container. The save
+ * dialog doubles as the project-name prompt — pre-filled with the crawled
+ * domain, and whatever the user types becomes the project's name.
+ */
+async function runSaveProjectAs(): Promise<{
+  filePath: string;
+  bytesWritten: number;
+} | null> {
+  const win = dialogParent();
+  if (!win) return null;
+  // Honour the user-configured default save directory (Settings →
+  // Storage). Falls back to the OS Documents folder when unset.
+  loadPrefs();
+  const baseDir = (() => {
+    const raw = prefsCache['projectSaveDir'];
+    if (typeof raw === 'string' && raw.trim().length > 0) return raw;
+    return app.getPath('documents');
+  })();
+  const sess = currentSession();
+  const res = await dialog.showSaveDialog(win, {
+    title: L().dlgSaveProjectAsTitle,
+    defaultPath: join(baseDir, `${suggestedProjectName(sess)}.seoproject`),
+    filters: [
+      { name: 'FreeCrawl Project', extensions: ['seoproject'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  if (res.canceled || !res.filePath) return null;
+  const target = res.filePath;
+  try {
+    const { bytesWritten, sourceBytes } = await saveProjectDocument(sess, target);
+    try {
+      sess.getDb().setMeta('projectName', basename(target, '.seoproject'));
+    } catch {
+      /* the name is cosmetic — never fail a save over it */
+    }
+    await dialog.showMessageBox(win, {
+      type: 'info',
+      title: L().dlgProjectSavedTitle,
+      message: L()
+        .msgProjectSaved.replace('{size}', (bytesWritten / 1048576).toFixed(1))
+        .replace('{from}', (sourceBytes / 1048576).toFixed(1)),
+      detail: target,
+      buttons: [L().btnOk],
+      noLink: true,
+    });
+    return { filePath: target, bytesWritten };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.log('error', 'main', `Save Project As failed: ${message}`);
+    dialog.showErrorBox(L().dlgSaveFailedTitle, message);
+    return null;
+  }
+}
+
+/**
+ * Ask before closing a window whose crawl results are not in the project
+ * file yet.
+ *
+ * A project is a document now: results accumulate in a working copy and
+ * only land in the `.seoproject` archive on save. Closing without asking
+ * would strand them, so the window's `close` is held back until the user
+ * answers. `close` (not `before-quit`) is the right hook because on
+ * Windows and Linux the last window is destroyed *before* the app quits,
+ * leaving nothing to parent a modal on.
+ */
+function attachUnsavedGuard(win: BrowserWindow): void {
+  let allowClose = false;
+  win.on('close', (event) => {
+    if (allowClose) return;
+    const s = sessionFor(win.webContents);
+    if (!s.dirty) return;
+    event.preventDefault();
+    void (async () => {
+      const res = await dialog.showMessageBox(win, {
+        type: 'warning',
+        title: L().dlgUnsavedTitle,
+        message: L().msgUnsavedChanges,
+        detail: L().detailUnsavedChanges,
+        buttons: [L().btnSaveChanges, L().btnDiscardChanges, L().btnCancel],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
+      });
+      if (res.response === 2) return; // Cancel — stay open.
+      if (res.response === 0) {
+        const target = s.currentProjectPath;
+        const saved = target
+          ? await saveProjectDocument(s, target).then(
+              () => true,
+              (err: unknown) => {
+                dialog.showErrorBox(L().dlgSaveFailedTitle, (err as Error).message);
+                return false;
+              },
+            )
+          : (await runSaveProjectAs()) !== null;
+        // A failed or cancelled save must not throw the data away.
+        if (!saved) return;
+      }
+      allowClose = true;
+      s.dirty = false;
+      win.close();
+    })();
+  });
+}
+
+/** Save to the bound document, falling back to Save As when there is none. */
+async function runSaveProject(): Promise<{
+  filePath: string;
+  bytesWritten: number;
+} | null> {
+  const sess = currentSession();
+  if (!sess.currentProjectPath) return runSaveProjectAs();
+  try {
+    const { bytesWritten } = await saveProjectDocument(sess, sess.currentProjectPath);
+    return { filePath: sess.currentProjectPath, bytesWritten };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.log('error', 'main', `Save failed: ${message}`);
+    dialog.showErrorBox(L().dlgSaveFailedTitle, message);
+    return null;
+  }
 }
 
 /** Max recent entries retained (archived ones included). */
@@ -1423,9 +1785,10 @@ function rebuildMenu(): void {
       onNewProjectWindow: () => createProjectWindow(),
       onOpenProject: () => runInFocusedSession(() => void promptOpenProject()),
       onOpenRecent: (path) => {
-        try {
-          runInFocusedSession(() => openProjectAtPath(path));
-        } catch (err) {
+        // Opening is async now (a project file has to be decompressed into
+        // its working copy first), so the failure path has to hang off the
+        // promise — a sync try/catch would never see the rejection.
+        runInFocusedSession(() => openProjectAtPath(path)).catch((err: unknown) => {
           dialog.showErrorBox(
             L().dlgOpenProjectFailedTitle,
             `Could not open ${path}.\n\n${(err as Error).message}`,
@@ -1434,7 +1797,7 @@ function rebuildMenu(): void {
           // object-model remover so archived/tags/lastOpened on the
           // OTHER recents are preserved (rebuilds the menu itself).
           removeRecentProject(path);
-        }
+        });
       },
       onClearRecent: () => clearRecentProjects(),
       recentProjects: getRecentProjects(),
@@ -1967,7 +2330,7 @@ async function promptOpenProject(): Promise<void> {
   });
   if (res.canceled || res.filePaths.length === 0) return;
   try {
-    openProjectAtPath(res.filePaths[0]!);
+    await openProjectAtPath(res.filePaths[0]!);
   } catch (err) {
     dialog.showErrorBox(
       L().dlgOpenProjectFailedTitle,
@@ -1976,11 +2339,15 @@ async function promptOpenProject(): Promise<void> {
   }
 }
 
-/** Placeholder tray icon — a 32×32 white magnifying glass on a transparent
- *  background, generated as a PNG (no branded icon asset exists yet; swap
- *  this base64 for the real icon when one lands). */
+/** Window icon for Windows/Linux windows — macOS takes the Dock icon from
+ *  the app bundle's .icns instead (BrowserWindow `icon` is a no-op there). */
+const WINDOW_ICON = process.platform === 'darwin' ? {} : { icon: appIcon };
+
+/** Tray icon — the FreeCrawl logo as a 32×32 white silhouette on a
+ *  transparent background. White reads on Windows' dark tray; on macOS
+ *  it's a template image (only the alpha channel matters there). */
 const TRAY_ICON_PNG_BASE64 =
-  'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAWUlEQVR4nO3OQQoAIAgF0e5/6dqHpZYaxMxavq81IqWu9PR5KsL6PAVhHU9BeEfDESdjAAD8C7AMeu9DEfNdGGA1bg1EOOIGCQIECBA7RBlghSgFSIhygNQAumhY0n/Yk+0AAAAASUVORK5CYII=';
+  'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAACoUlEQVRYhe2WW4iNURTHz2Bm3NK4NWUayrVIpryQZJRhhHJ5onjRhKZhJpEXESGTmtwLkxIJDxjyIl5MTWIU5VbGvIyEMS45KJef1un/Nbtv9neOy3Gevn99ndbea+3/3mv/19onkYgRI0aOABQDq4CTwJr/SVQEzALmAIuB3UAr8JNufAMmZpu4ENgGJOmJT0ATsA5Yrs1czSb5bOCJyH7o9xmwHZgL9JXfAKBR82+yQTwCOOOk105ZHZw65FsGPHay8vFfiEcBB4HPWuwFsExzAzW3WnYesB74CnwHdgHPgc6/Ia4ALkpEhi/AXmBQhP8wZcXQAZRrfCNw5U+I5wEtTvreAfVASQZdGKnhMjDUmZsBLPod4n7AMYe4DagyMaWJ6QPsVLotQ3XAWuAAUAsMVsXkZSIvAe6LuFPBBZrrnUYbzYp5CMwEHoVK0vQyJhP5cCfwATBS45OBo8B+T8wSXQ3KWn/gCH5cS0deCNyV43UTmL5Gie94cJ8mMieuSzF7nLHw6QMko7KYUJkY7qlxjFb92n0udPy2Aicce6lKzRZfoLHbERt4HUVeplMmRVysjmaCqgz5nlbKi5yxcuC91rCHZ0PEBhqiNnBBDltkX5Jd7/Gt1Jz55IcO8VLdcbOakvsQnTd9+MhLtfMudbOA4K3Z8ikAaoA7emACtKpJpUrLVK7MGfaZiIH5wFhVSs/7BzYpIKVw4IYrKmBIqBl1qC8Eyjc81Ys4XtdnOjKcCrIkEU/wbaBJzhUKDl61qZo/K/smMMmJ6wVMAXZoQ25WrCG1y75lV6t1p/k28Mojlg96TMbJbvPeX/ca5jsdOGRKJxqlvuAG1b37HXb6utnVUeSe9fKtHPVch/+kpMo0Z5CoVwLngBU5JY8RI5EBvwAD+Q6gT36I9wAAAABJRU5ErkJggg==';
 let tray: Tray | null = null;
 
 /** Show the main window if it's hidden/minimized, else hide it to the tray.
@@ -2054,6 +2421,7 @@ function createTray(): void {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
+    ...WINDOW_ICON,
     width: 1440,
     height: 900,
     minWidth: 1024,
@@ -2153,6 +2521,12 @@ function createWindow(): void {
     mainWindow = null;
   });
 
+  // The save prompt has to happen HERE, not in `before-quit`. Closing the
+  // last window on Windows/Linux destroys it and only then quits, so by
+  // the time `before-quit` runs there is no parent left to show a modal
+  // on — the unsaved crawl would be dropped without a word.
+  attachUnsavedGuard(mainWindow);
+
   if (process.env['ELECTRON_RENDERER_URL']) {
     void mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL']);
   } else {
@@ -2185,6 +2559,7 @@ function createProjectWindow(): void {
     scratchPath,
   });
   const win = new BrowserWindow({
+    ...WINDOW_ICON,
     width: 1360,
     height: 860,
     minWidth: 1024,
@@ -2214,6 +2589,7 @@ function createProjectWindow(): void {
     sessionsByWc.delete(wcId);
     void sess.teardown();
   });
+  attachUnsavedGuard(win);
   if (process.env['ELECTRON_RENDERER_URL']) {
     void win.loadURL(process.env['ELECTRON_RENDERER_URL']);
   } else {
@@ -2257,6 +2633,7 @@ function openLogsWindow(ownerWcId: number): void {
       ? 'Primary'
       : 'New Project';
   const win = new BrowserWindow({
+    ...WINDOW_ICON,
     width: 1000,
     height: 640,
     minWidth: 560,
@@ -2365,6 +2742,7 @@ function openVisualizationWindow(): void {
     return;
   }
   const win = new BrowserWindow({
+    ...WINDOW_ICON,
     width: 1280,
     height: 800,
     minWidth: 640,
@@ -2426,6 +2804,7 @@ function openLogAnalyzerWindow(): void {
     return;
   }
   const win = new BrowserWindow({
+    ...WINDOW_ICON,
     width: 1280,
     height: 820,
     minWidth: 720,
@@ -2570,6 +2949,108 @@ function seedDiscoveryUrls(limit: number): LogSeedDiscoveryResult {
   return { enqueued, hasActiveCrawl: true };
 }
 
+/** Latest provisioning state, replayed to windows that mount later. */
+let lastInstallState: BrowserInstallState = { state: 'unknown', percent: null };
+
+/** Push the browser-provisioning state to every open window. */
+function broadcastInstallState(state: BrowserInstallState): void {
+  lastInstallState = state;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(IPC.browserInstallState, state);
+  }
+}
+
+/**
+ * V2 Faz 1 — Download the Chromium binaries JS rendering needs.
+ *
+ * Runs Playwright's own installer through our Electron binary in Node
+ * mode, so it works on a machine with no Node, no npm and no terminal —
+ * the previous `npx` spawn died with ENOENT on exactly those machines,
+ * which is every stock macOS install. Progress is streamed to the
+ * renderer's status bar; concurrent callers share one download.
+ */
+function runBrowserInstall(): Promise<boolean> {
+  broadcastInstallState({ state: 'downloading', percent: null });
+  return installChromiumBrowsers(
+    (p) => broadcastInstallState({ state: 'downloading', percent: p.percent }),
+    (line) => {
+      // Playwright redraws its progress bar on every chunk — hundreds of
+      // near-identical lines. The percentage already goes to the status
+      // bar, so the log keeps only the milestones.
+      if (line.startsWith('|')) return;
+      logger.log('info', 'playwright-install', line);
+    },
+  ).then((res) => {
+    if (res.ok) {
+      logger.log('info', 'playwright-install', 'Browser install complete.');
+      broadcastInstallState({ state: 'ready', percent: 100 });
+      return true;
+    }
+    logger.log(
+      'error',
+      'playwright-install',
+      `Browser install failed (${res.reason}): ${res.detail}`,
+    );
+    broadcastInstallState({ state: 'failed', percent: null, error: res.detail });
+    return false;
+  });
+}
+
+/**
+ * Startup provisioning. When the installer's bundled browsers are
+ * unusable (missing, or built for another CPU architecture) the download
+ * starts on its own in the background — the user never has to find a
+ * terminal. The crawl path can still trigger it on demand if the machine
+ * was offline at launch.
+ */
+async function ensureBrowsersAtStartup(): Promise<void> {
+  if (chromiumInstalled()) {
+    logger.log('info', 'playwright', 'Chromium is present — JS rendering is ready.');
+    broadcastInstallState({ state: 'ready', percent: 100 });
+    return;
+  }
+  logger.log(
+    'info',
+    'playwright-install',
+    'No usable Chromium found — starting background browser download.',
+  );
+  await runBrowserInstall();
+}
+
+/**
+ * Mid-crawl fallback: JS rendering was requested but the browser is
+ * missing. If a background install is already running we just wait for
+ * it; otherwise we ask first, since this is a ~250 MB download the user
+ * did not initiate. Returns true when the browser ends up ready.
+ */
+async function offerPlaywrightInstall(): Promise<boolean> {
+  if (!installInProgress() && mainWindow) {
+    const res = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      title: L().dlgPlaywrightTitle,
+      message:
+        'FreeCrawl needs to download a Chromium browser before JavaScript rendering can run.',
+      detail:
+        'This is a one-time ~250 MB download that runs inside the app — no terminal needed. The browser is stored in your user folder; only the binary is downloaded, from cdn.playwright.dev.\n\nDownload now?',
+      buttons: [L().btnDownloadNow, L().btnSkipJsRender],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (res.response !== 0) return false;
+  }
+  const ok = await runBrowserInstall();
+  if (!ok && mainWindow) {
+    dialog.showErrorBox(
+      L().dlgBrowserInstallFailedTitle,
+      'The Chromium download could not be completed.\n\n' +
+        'Check your internet connection (or proxy settings) and start the crawl again — ' +
+        'FreeCrawl will retry the download automatically. JavaScript rendering stays ' +
+        'disabled until it succeeds; text-mode crawling is unaffected.',
+    );
+  }
+  return ok;
+}
+
 function registerIpc(): void {
   registerHandle(IPC.appVersion, () => app.getVersion());
   // Native-copy fallback leg of the macOS Edit▸Copy round-trip: the
@@ -2578,6 +3059,19 @@ function registerIpc(): void {
   // focused input's selection) still happens.
   registerHandle(IPC.editCopyNative, (e): void => {
     e.sender.copy();
+  });
+
+  // JS-rendering browser provisioning. `get` lets a freshly mounted
+  // window catch up on a download that started before it opened;
+  // `start` is the status bar's retry button.
+  registerHandle(IPC.browserInstallGet, (): BrowserInstallState => lastInstallState);
+  registerHandle(IPC.browserInstallStart, async (): Promise<BrowserInstallState> => {
+    if (chromiumInstalled()) {
+      broadcastInstallState({ state: 'ready', percent: 100 });
+    } else {
+      await runBrowserInstall();
+    }
+    return lastInstallState;
   });
 
   // Live memory snapshot for the in-app monitor (status bar). Returns
@@ -3392,10 +3886,14 @@ function registerIpc(): void {
   registerHandle(
     IPC.integrationsSet,
     (_e, id: string, fields: Record<string, string>) => {
+      // Pointing LanguageTool at a different server means a different set
+      // of installed language modules — the cached list is now wrong.
+      if (id === 'languagetool') clearSupportedLanguagesCache();
       return setIntegrationCredentials(id, fields);
     },
   );
   registerHandle(IPC.integrationsClear, (_e, id: string) => {
+    if (id === 'languagetool') clearSupportedLanguagesCache();
     return clearIntegrationCredentials(id);
   });
 
@@ -3750,11 +4248,48 @@ function registerIpc(): void {
       ),
   );
 
-  /** Resolve the LanguageTool endpoint + credentials + user preferences. */
-  function resolveSpellingOptions(): SpellingCheckOptions {
+  // Which languages this endpoint can actually check — Settings lists
+  // them in the language picker, and the checker validates every page
+  // against the same list.
+  registerHandle(
+    IPC.spellingLanguages,
+    async (): Promise<SpellingLanguageOption[]> => {
+      const supported = await fetchSupportedLanguages(
+        resolveSpellingEndpoint(),
+      );
+      return [...supported.options].sort((a, b) =>
+        a.name.localeCompare(b.name),
+      );
+    },
+  );
+
+  /** Resolve the configured LanguageTool base URL. */
+  function resolveSpellingEndpoint(): string {
+    const endpointRaw = (
+      resolveCredentials('languagetool')['endpoint'] ?? ''
+    ).trim();
+    return endpointRaw.length > 0 ? endpointRaw : PUBLIC_LT_ENDPOINT;
+  }
+
+  /**
+   * Resolve the LanguageTool endpoint + credentials + user preferences.
+   * Async because the endpoint's language list is fetched (and cached)
+   * up front — every page's check is validated against it rather than
+   * being handed to LanguageTool's `auto` detection, which answers with
+   * the nearest supported language even when the page is in one it has
+   * never heard of.
+   */
+  async function resolveSpellingOptions(): Promise<SpellingCheckOptions> {
     loadPrefs();
+    // Pull the language model in parallel with the endpoint's language
+    // list rather than making the batch's first page wait for it.
+    warmLanguageDetector();
+    // Likewise the offline dictionary used for languages LanguageTool has
+    // no rules for. Warmed unconditionally: which pages need it is only
+    // known once detection has run, and loading it is idempotent.
+    warmLocalDictionary('tr');
     const creds = resolveCredentials('languagetool');
-    const endpointRaw = (creds['endpoint'] ?? '').trim();
+    const endpoint = resolveSpellingEndpoint();
     const level: SpellingLevel =
       prefsCache['spellingLevel'] === 'picky' ? 'picky' : 'default';
     const ignoreRaw = prefsCache['spellingIgnoreWords'];
@@ -3764,12 +4299,19 @@ function registerIpc(): void {
         .map((w) => w.trim().toLowerCase())
         .filter((w) => w.length > 0),
     );
+    const overrideRaw = prefsCache['spellingLanguage'];
+    const languageOverride =
+      typeof overrideRaw === 'string' && overrideRaw.trim().length > 0
+        ? overrideRaw.trim()
+        : undefined;
     return {
-      endpoint: endpointRaw.length > 0 ? endpointRaw : PUBLIC_LT_ENDPOINT,
+      endpoint,
       username: (creds['username'] ?? '').trim() || undefined,
       apiKey: (creds['apiKey'] ?? '').trim() || undefined,
       level,
       ignoreWords,
+      supported: await fetchSupportedLanguages(endpoint),
+      languageOverride,
     };
   }
 
@@ -3810,7 +4352,7 @@ function registerIpc(): void {
     const runSession = currentSession();
     const run = runSession.fetchRuns.spelling;
     if (run.active) {
-      return { completed: 0, failed: 0, cancelled: true };
+      return { completed: 0, failed: 0, unsupported: 0, cancelled: true };
     }
     const urls = Array.from(
       new Set(
@@ -3824,10 +4366,10 @@ function registerIpc(): void {
         ...idleFetchSnapshot(),
         finishedAt: new Date().toISOString(),
       };
-      return { completed: 0, failed: 0, cancelled: false };
+      return { completed: 0, failed: 0, unsupported: 0, cancelled: false };
     }
 
-    const check = resolveSpellingOptions();
+    const check = await resolveSpellingOptions();
     run.active = true;
     run.cancelRequested = false;
     run.snapshot = {
@@ -3840,7 +4382,11 @@ function registerIpc(): void {
     logger.log(
       'info',
       'languagetool',
-      `run started — ${urls.length} page(s) against ${check.endpoint} (level: ${check.level}, ${check.ignoreWords.size} ignored word(s))`,
+      `run started — ${urls.length} page(s) against ${check.endpoint} (level: ${check.level}, ${
+        check.ignoreWords.size
+      } ignored word(s), language: ${
+        check.languageOverride ?? 'auto-detected locally'
+      }, ${check.supported.primaries.size} supported)`,
     );
     try {
       const result = await runSpellingBatch({
@@ -5098,80 +5644,6 @@ function registerIpc(): void {
    * Lives alongside the `.seoproject` file as `<project>.screenshots/`
    * so it tracks with Save As / move operations.
    */
-  /**
-   * V2 Faz 1 — Once-per-session prompt asking the user to install the
-   * Playwright browser binaries when JS rendering is enabled but the
-   * binaries are missing on disk. Spawned via `npx playwright install`
-   * inheriting the user-data env so the cache lands in the standard
-   * location. Returns true when the install command finished cleanly
-   * (the caller can then retry the BrowserPool start).
-   */
-  let playwrightInstallPromise: Promise<boolean> | null = null;
-  async function offerPlaywrightInstall(): Promise<boolean> {
-    if (playwrightInstallPromise) return playwrightInstallPromise;
-    if (!mainWindow) return false;
-    const res = await dialog.showMessageBox(mainWindow, {
-      type: 'question',
-      title: L().dlgPlaywrightTitle,
-      message:
-        'Playwright needs to download a Chromium browser before JavaScript rendering can run.',
-      detail:
-        'This is a one-time ~250 MB download. The browser is stored in your user cache; FreeCrawl never sends any data to Playwright servers — only the binary is downloaded from cdn.playwright.dev.\n\nDownload now?',
-      buttons: [L().btnDownloadNow, L().btnSkipJsRender],
-      defaultId: 0,
-      cancelId: 1,
-    });
-    if (res.response !== 0) return false;
-    playwrightInstallPromise = new Promise<boolean>((resolve) => {
-      const proc = spawn(
-        'npx',
-        ['playwright', 'install', 'chromium', 'chromium-headless-shell'],
-        {
-          shell: process.platform === 'win32',
-          windowsHide: true,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        },
-      );
-      let stderr = '';
-      proc.stdout?.on('data', (chunk: Buffer) => {
-        const line = chunk.toString().trim();
-        if (line) logger.log('info', 'playwright-install', line);
-      });
-      proc.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
-      });
-      proc.on('close', (code) => {
-        playwrightInstallPromise = null;
-        if (code === 0) {
-          logger.log('info', 'playwright-install', 'Browser install complete.');
-          resolve(true);
-        } else {
-          logger.log(
-            'error',
-            'playwright-install',
-            `Browser install failed (exit ${code}). stderr: ${stderr.slice(0, 500)}`,
-          );
-          dialog.showErrorBox(
-            L().dlgBrowserInstallFailedTitle,
-            `Playwright install exited with code ${code}.\n\n` +
-              `Try running "npx playwright install chromium chromium-headless-shell" manually from a terminal in the FreeCrawl source folder.\n\n${stderr.slice(0, 400)}`,
-          );
-          resolve(false);
-        }
-      });
-      proc.on('error', (err) => {
-        playwrightInstallPromise = null;
-        logger.log('error', 'playwright-install', `spawn failed: ${err.message}`);
-        dialog.showErrorBox(
-          L().dlgBrowserInstallFailedTitle,
-          `Could not run "npx playwright install": ${err.message}\n\nPlease install Playwright browsers manually from a terminal.`,
-        );
-        resolve(false);
-      });
-    });
-    return playwrightInstallPromise;
-  }
-
   function resolveScreenshotDir(projectPath: string): string | null {
     if (!projectPath) return null;
     const dir = dirname(projectPath);
@@ -6102,22 +6574,21 @@ function registerIpc(): void {
     },
 
     'project-save-as': async (input) => {
-      // Snapshot the live DB to a new .seoproject via VACUUM INTO (atomic,
-      // WAL-safe). Unlike the desktop handler this does NOT switch the
-      // active project — an agent snapshotting shouldn't yank the UI.
+      // Writes the same single compressed container the UI writes, so an
+      // agent-made snapshot is a normal project file. Unlike the desktop
+      // handler this does NOT bind the session to it — an agent taking a
+      // snapshot shouldn't yank the UI onto a different document.
       const target = (input as { filePath?: string }).filePath;
       if (!target) throw new Error('filePath is required (MCP cannot open dialogs).');
-      const database = getDb();
-      try {
-        database.walCheckpoint();
-      } catch {
-        /* best-effort */
-      }
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rawDb = (database as any).db as { exec: (sql: string) => void };
-      rawDb.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
-      const { statSync } = await import('node:fs');
-      return { filePath: target, bytesWritten: statSync(target).size };
+      const sess = currentSession();
+      const wasDirty = sess.dirty;
+      const boundPath = sess.currentProjectPath;
+      const result = await saveProjectDocument(sess, target);
+      // Restore the binding: this was a snapshot, not a Save As.
+      sess.currentProjectPath = boundPath;
+      sess.dirty = wasDirty;
+      updateWindowTitle(sess);
+      return { filePath: target, bytesWritten: result.bytesWritten };
     },
 
     'project-save-encrypted': async (input) => {
@@ -6157,7 +6628,7 @@ function registerIpc(): void {
       if (!i.destPath) throw new Error('destPath is required (output .seoproject path).');
       const { decryptFile } = await import('./project-encryption.js');
       await decryptFile(i.filePath, i.destPath, i.password);
-      openProjectAtPath(i.destPath);
+      await openProjectAtPath(i.destPath);
       return { filePath: i.destPath };
     },
   };
@@ -6254,59 +6725,8 @@ function registerIpc(): void {
     return { accepted };
   });
 
-  registerHandle(
-    IPC.projectSaveAs,
-    async (): Promise<{ filePath: string; bytesWritten: number } | null> => {
-      const win = dialogParent();
-      if (!win) return null;
-      // Honour the user-configured default save directory (Settings →
-      // Storage). Falls back to the OS Documents folder when unset.
-      loadPrefs();
-      const baseDir = (() => {
-        const raw = prefsCache['projectSaveDir'];
-        if (typeof raw === 'string' && raw.trim().length > 0) return raw;
-        return app.getPath('documents');
-      })();
-      const res = await dialog.showSaveDialog(win, {
-        title: 'Save Project As…',
-        defaultPath: join(baseDir, 'crawl.seoproject'),
-        filters: [
-          { name: 'FreeCrawl Project', extensions: ['seoproject'] },
-          { name: 'All Files', extensions: ['*'] },
-        ],
-      });
-      if (res.canceled || !res.filePath) return null;
-      // Snapshot the live SQLite DB. WAL mode means a plain file copy
-      // can miss in-flight writes — use the SQLite VACUUM INTO command,
-      // which produces a self-contained, consistent snapshot atomically.
-      const target = res.filePath;
-      const database = getDb();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rawDb = (database as any).db as { exec: (sql: string) => void };
-      const escaped = target.replace(/'/g, "''");
-      rawDb.exec(`VACUUM INTO '${escaped}'`);
-      const { statSync } = await import('node:fs');
-      const bytes = statSync(target).size;
-      await dialog.showMessageBox(win, {
-        type: 'info',
-        title: L().dlgProjectSavedTitle,
-        message: `Snapshot written: ${(bytes / (1024 * 1024)).toFixed(1)} MB.`,
-        detail: target,
-        buttons: [L().btnOk],
-        noLink: true,
-      });
-      // Saved snapshot is a valid project on disk — pin it as the active
-      // project and add to recents.
-      try {
-        openProjectAtPath(target);
-      } catch (err) {
-        // Fall through; saving succeeded even if reopening failed for some
-        // reason (rare — same file we just wrote).
-        logger.log('warn', 'main', `Save Project As: reopen failed: ${(err as Error).message}`);
-      }
-      return { filePath: target, bytesWritten: bytes };
-    },
-  );
+  registerHandle(IPC.projectSaveAs, () => runSaveProjectAs());
+  registerHandle(IPC.projectSave, () => runSaveProject());
 
   registerHandle(
     IPC.projectOpen,
@@ -6330,7 +6750,7 @@ function registerIpc(): void {
         target = res.filePaths[0]!;
       }
       try {
-        openProjectAtPath(target);
+        await openProjectAtPath(target);
         return { filePath: target };
       } catch (err) {
         if (mainWindow) {
@@ -6514,7 +6934,7 @@ function registerIpc(): void {
       try {
         const { decryptFile } = await import('./project-encryption.js');
         await decryptFile(srcPath, dstPath, password);
-        openProjectAtPath(dstPath);
+        await openProjectAtPath(dstPath);
         return { filePath: dstPath };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -6981,6 +7401,46 @@ function registerIpc(): void {
   );
 
   registerHandle(
+    IPC.exportGrid,
+    async (_e, input: ExportGridInput): Promise<ExportGridResult> => {
+      const win = dialogParent();
+      if (!win) return { filePath: null, rowsWritten: 0 };
+      loadPrefs();
+      const baseDir = (() => {
+        const raw = prefsCache['exportDir'] ?? prefsCache['projectSaveDir'];
+        if (typeof raw === 'string' && raw.trim().length > 0) return raw;
+        return app.getPath('documents');
+      })();
+      // The chosen filter decides the format, so the user picks CSV vs
+      // Excel the same way they do in every other save dialog — no extra
+      // format toggle in the panel UI.
+      const res = await dialog.showSaveDialog(win, {
+        title: L().dlgExportTableTitle,
+        defaultPath: join(baseDir, `${input.fileName}.xlsx`),
+        filters: [
+          { name: 'Excel Workbook', extensions: ['xlsx'] },
+          { name: 'CSV', extensions: ['csv'] },
+        ],
+      });
+      if (res.canceled || !res.filePath) return { filePath: null, rowsWritten: 0 };
+      const target = res.filePath;
+      const format = target.toLowerCase().endsWith('.csv') ? 'csv' : 'xlsx';
+      const result = await exportGrid(target, {
+        format,
+        headers: input.headers,
+        rows: input.rows,
+        sheetName: input.sheetName ?? input.fileName,
+      });
+      logger.log(
+        'info',
+        'main',
+        `Exported ${result.rowsWritten} row(s) to ${target}`,
+      );
+      return { filePath: result.filePath, rowsWritten: result.rowsWritten };
+    },
+  );
+
+  registerHandle(
     IPC.exportTabular,
     async (_e, input: ExportTabularInput): Promise<ExportTabularResult> => {
       const { format, sections, columns, selectedIds, csvBom } = input;
@@ -7351,15 +7811,13 @@ if (!gotSingleInstanceLock) {
         mainWindow.show();
         mainWindow.focus();
       }
-      try {
-        openProjectAtPath(path);
-      } catch (err) {
+      openProjectAtPath(path).catch((err: unknown) => {
         logger.log(
           'warn',
           'main',
           `Open project from second-instance argv failed: ${(err as Error).message}`,
         );
-      }
+      });
       return;
     }
     // Faz B — plain re-launch (the user clicked the shortcut / ran the exe
@@ -7379,11 +7837,9 @@ let pendingOpenFilePath: string | null = null;
 app.on('open-file', (event, filePath) => {
   event.preventDefault();
   if (mainWindow) {
-    try {
-      openProjectAtPath(filePath);
-    } catch (err) {
+    openProjectAtPath(filePath).catch((err: unknown) => {
       logger.log('warn', 'main', `Open project from open-file event failed: ${(err as Error).message}`);
-    }
+    });
   } else {
     pendingOpenFilePath = filePath;
   }
@@ -7413,30 +7869,23 @@ function pickProjectPathFromArgv(argv: readonly string[]): string | null {
 app.commandLine.appendSwitch('disable-gpu-disk-cache');
 app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling');
 
-// V2 Faz 1 — Production builds may ship the Playwright browser cache
-// inside the installer (when `BUNDLE_PLAYWRIGHT=1` is set at build
-// time, see apps/desktop/scripts/prepare-playwright-bundle.mjs).
-// Playwright reads PLAYWRIGHT_BROWSERS_PATH at module load, so we
-// must set it BEFORE the BrowserPool import gets touched. Setting it
-// to a path that doesn't exist is harmless — Playwright simply falls
-// back to its default cache lookup.
+// V2 Faz 1 — Point Playwright at the browsers shipped inside the
+// installer (or at the writable cache we download into). Playwright's
+// registry reads PLAYWRIGHT_BROWSERS_PATH once, while its module is
+// evaluated, so this must happen before the first `import('playwright')`
+// — which is why `BrowserPool` loads Playwright lazily rather than at
+// module scope.
 //
-// Must run before `app.whenReady()` so subsequent `import('playwright')`
-// calls inherit the env. `process.resourcesPath` is undefined in dev
-// (`electron-vite dev`) so the bundled-browser branch is production-only.
+// The outcome is only *recorded* here: disk logging isn't up until
+// `app.whenReady()`, and anything logged before that never reaches the
+// file. Which browser cache was chosen is the first thing worth knowing
+// when a user reports "JS rendering doesn't work", so it's replayed
+// below once the log file exists.
+let browserCacheDecision: string;
 try {
-  if (
-    app.isPackaged &&
-    typeof process.resourcesPath === 'string' &&
-    process.resourcesPath
-  ) {
-    const bundled = join(process.resourcesPath, 'playwright-browsers');
-    if (existsSync(bundled)) {
-      process.env.PLAYWRIGHT_BROWSERS_PATH = bundled;
-    }
-  }
-} catch {
-  /* fall through to default Playwright lookup */
+  browserCacheDecision = setupPlaywrightBrowsersPath();
+} catch (err) {
+  browserCacheDecision = `resolution failed: ${(err as Error).message} — using Playwright defaults`;
 }
 
 void app.whenReady().then(async () => {
@@ -7479,6 +7928,7 @@ void app.whenReady().then(async () => {
   registerIpc();
   createWindow();
   logger.log('info', 'main', `App ready — version ${app.getVersion()}`);
+  logger.log('info', 'playwright', `Browser cache: ${browserCacheDecision}`);
   freezeWatchdog.setMainOp('idle');
 
   // Thermal-adaptive crawl throttling — macOS-only (Electron emits
@@ -7585,6 +8035,30 @@ void app.whenReady().then(async () => {
     void checkForUpdates({ silent: true });
   }, 8_000);
 
+  // V2 Faz 1 — Provision the JS-rendering browser without the user ever
+  // touching a terminal. Normally the installer already carries a
+  // matching Chromium and this is a no-op; it only downloads when the
+  // bundle is absent or was built for a different CPU architecture.
+  // Delayed past first paint so the download never competes with the
+  // window opening, and deliberately not awaited — a slow or failed
+  // download must not hold up anything else.
+  setTimeout(() => {
+    void ensureBrowsersAtStartup();
+  }, 12_000);
+
+  // Reclaim working copies left behind by a previous crash. Anything a
+  // live session is using is passed in as `keep`; on a cold start the
+  // only live one is whatever the default session already resolved.
+  try {
+    const live = new Set<string>();
+    for (const s of [defaultSession, ...sessionsByWc.values()]) {
+      if (s.scratchPath) live.add(s.scratchPath);
+    }
+    sweepStaleWorkingCopies(live);
+  } catch (err) {
+    logger.log('warn', 'main', `startup working-copy sweep failed: ${(err as Error).message}`);
+  }
+
   // V1 Faz 6 — start the in-app crawl scheduler. The tick is a no-op
   // until the user configures a schedule via the Scheduled Crawl
   // dialog, so it's safe to leave running for the lifetime of the app.
@@ -7600,7 +8074,7 @@ void app.whenReady().then(async () => {
   pendingOpenFilePath = null;
   if (coldStartPath) {
     try {
-      openProjectAtPath(coldStartPath);
+      await openProjectAtPath(coldStartPath);
     } catch (err) {
       logger.log(
         'warn',
@@ -7624,6 +8098,9 @@ let shutdownComplete = false;
 function performShutdown(): void {
   if (shutdownComplete) return;
   shutdownComplete = true;
+  // Stop an in-flight browser download — otherwise the detached child
+  // keeps writing into the cache after the app window is gone.
+  abortChromiumInstall();
   // Drop the tray so its icon doesn't linger after quit.
   if (tray) {
     try {

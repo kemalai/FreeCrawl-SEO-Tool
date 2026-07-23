@@ -3,7 +3,9 @@ export type { CrawlerEvents } from './crawler.js';
 export {
   BrowserPool,
   PlaywrightBrowserMissingError,
+  resolveChromiumBinaries,
   type BrowserPoolOptions,
+  type ChromiumBinaries,
 } from './browser-pool.js';
 export {
   renderUrl,
@@ -49,9 +51,12 @@ export { exportUrlsToJson, type JsonExportOptions } from './json-export.js';
 export { exportUrlsToXml } from './xml-export.js';
 export {
   exportTabular,
+  exportGrid,
   type TabularExportOptions,
   type TabularExportResult,
   type TabularSection,
+  type GridExportOptions,
+  type GridExportResult,
 } from './tabular-export.js';
 export { ensureHeapHeadroom, heapHeadroomBytes } from './heap-guard.js';
 export {

@@ -33,6 +33,7 @@
     "cancel": "İptal",
     "close": "Kapat",
     "apply": "Uygula",
+    "applied": "Uygulandı",
     "ok": "Tamam",
     "remove": "Kaldır",
     "reset": "Sıfırla",
@@ -92,6 +93,11 @@
       "desktop": "Masaüstü tarama",
       "mobile": "Mobil tarama — sitenin mobil sürümünü tara (mobil User-Agent)"
     }
+  },
+  "browserInstall": {
+    "downloading": "Tarayıcı",
+    "downloadingTitle": "JavaScript render için kullanılan Chromium tarayıcısı indiriliyor. Metin modunda tarama bundan etkilenmez.",
+    "failed": "Tarayıcı indirme başarısız — tekrar dene"
   },
   "stats": {
     "discovered": "Keşfedilen",
@@ -392,6 +398,7 @@
   "settingsPanels": {
     "presets": {
       "intro": "Yaygın crawl senaryoları için tek tık profilleri. Bir preset'e tıklamak yalnızca etkilenen alanları üzerine yazar — URL listen, özel kuralların, filtrelerin ve çıkarım kuralların korunur.",
+      "applied": "\"{{name}}\" preset'i uygulandı — panelleri gözden geçir, sonra değişiklikleri korumak için Kaydet'e bas.",
       "importExport": "İçe / Dışa Aktar",
       "importExportIntro": "Mevcut ayarları bir JSON dosyasına kaydet (örn. ekip arkadaşıyla paylaşmak veya versiyon kontrolü için) ya da daha önce dışa aktarılmış bir ayar dosyasını yükle. İçe aktarmak mevcut formu dosyanın içeriğiyle değiştirir — kalıcı kaydetmek için alttaki Kaydet'e bas.",
       "exportBtn": "Dışa Aktar…",
@@ -818,7 +825,8 @@
     "empty3": "üzerinden veya arama terimlerini",
     "empty4": "üzerinden ayarla, sonra yeniden crawl çalıştır.",
     "customExtraction": "Özel Çıkarım",
-    "customSearchHits": "Özel Arama Sonuçları"
+    "customSearchHits": "Özel Arama Sonuçları",
+    "colSource": "Kaynak"
   },
   "extractionPreview": {
     "title": "Özel Çıkarım Önizlemesi",
@@ -850,7 +858,11 @@
     "parsedOk": "parse edildi",
     "parseFailed": "parse başarısız",
     "snapshotUnavailable1": "Crawl sırasında JSON-LD blokları algılandı ama sayfa gövde snapshot'ı mevcut değil. Ham payload'u görmek için",
-    "snapshotUnavailable2": "etkin halde yeniden crawl çalıştır."
+    "snapshotUnavailable2": "etkin halde yeniden crawl çalıştır.",
+    "colBlock": "Blok",
+    "colValid": "Geçerli JSON",
+    "colTypes": "Türler",
+    "colJson": "JSON"
   },
   "imagesView": {
     "loading": "Görseller yükleniyor…",
@@ -896,7 +908,10 @@
     "skipped": "Atlandı: önceki h{{n}}",
     "skippedCount": "{{n}} seviye atlandı",
     "capped": "(200 ile sınırlı)",
-    "emptyHeading": "(boş başlık)"
+    "emptyHeading": "(boş başlık)",
+    "colLevel": "Seviye",
+    "colText": "Başlık",
+    "colIssue": "Sorun"
   },
   "viewSource": {
     "searchPlaceholder": "Kaynakta ara…",
@@ -1123,11 +1138,20 @@
     "statusError": "HATA",
     "statusSkipped": "atlandı",
     "statusSkippedTip": "Sayfada denetlenecek kadar düzyazı yok.",
-    "summary": "{{shown}} sayfa · {{checked}} denetlendi · {{errors}} bulgulu · {{selected}} seçildi",
+    "summary": "{{shown}} sayfa · {{checked}} denetlendi · {{errors}} bulgulu · {{unsupported}} desteklenmeyen · {{selected}} seçildi",
     "firstN": "(ilk {{n}})",
     "checking": "Denetleniyor: {{url}}",
     "emptyNoData": "Henüz taranmış iç HTML sayfası yok — önce bir crawl çalıştır, sonra denetlenecek sayfaları seç.",
-    "emptyNoMatch": "Mevcut filtreyle eşleşen sayfa yok."
+    "emptyNoMatch": "Mevcut filtreyle eşleşen sayfa yok.",
+    "filterUnsupported": "Desteklenmeyen dil",
+    "statusUnsupported": "yok",
+    "statusUnsupportedTip": "LanguageTool bu sayfanın dili için kural içermiyor, bu yüzden denetlenmedi.",
+    "statusMismatch": "dil?",
+    "statusMismatchTip": "Bulgular atıldı — sayfa, denetlendiği dilde yazılmış görünmüyor.",
+    "langConflict": "Sayfa lang=\"{{declared}}\" bildiriyor ama metni {{detected}} olarak okunuyor. Denetim {{used}} ile yapıldı.",
+    "unsupportedBanner": "{{count}} sayfa denetlenmeden bırakıldı: LanguageTool’un {{langs}} için kuralı yok ve bu metni yerine geçecek bir dille değerlendirmek neredeyse her kelimeye hata bastırırdı. Yanlış bir ayar yok — hiçbir ayar bu motora {{langs}} denetletemez.",
+    "statusOkLocal": "tamam*",
+    "statusOkLocalTip": "Çevrimdışı sözlükle denetlendi: yalnızca yazım, dilbilgisi yok. LanguageTool bu dil için kural içermiyor."
   },
   "projects": {
     "title": "Projeler",
@@ -1169,7 +1193,18 @@
     "clean": "Yazım veya dilbilgisi sorunu bulunamadı.",
     "summary": "{{n}} bulgu",
     "language": "Dil",
-    "suggestions": "Öneriler"
+    "suggestions": "Öneriler",
+    "colType": "Tür",
+    "colCategory": "Kategori",
+    "colText": "Metin",
+    "colSuggestions": "Öneriler",
+    "colMessage": "Mesaj",
+    "colContext": "Bağlam",
+    "unsupported": "Denetlenmedi — LanguageTool bu sayfanın dili için kural içermiyor.",
+    "detectedAs": "(algılanan: {{lang}})",
+    "langConflict": "html[lang] {{declared}} diyor, metin {{detected}} olarak okunuyor",
+    "cleanLocal": "Yazım hatası bulunamadı. Dilbilgisi denetlenmedi — LanguageTool bu dil için kural içermediğinden çevrimdışı sözlük kullanıldı.",
+    "engineLocal": "çevrimdışı sözlük — yalnızca yazım, dilbilgisi yok"
   },
   "gscTab": {
     "title": "Search Console",
@@ -1301,7 +1336,10 @@
     "ga4Title": "Analytics 4",
     "ga4Empty": "Henüz GA4 trafik verisi yok.",
     "inspectionTitle": "URL Inspection",
-    "inspectionEmpty": "URL Inspection sonucu yok — Search Console sekmesinden çalıştır."
+    "inspectionEmpty": "URL Inspection sonucu yok — Search Console sekmesinden çalıştır.",
+    "colSource": "Kaynak",
+    "colMetric": "Metrik",
+    "colValue": "Değer"
   },
   "brokenTab": {
     "searchPlaceholder": "Kırık hedef URL ara…",
@@ -1389,13 +1427,17 @@
     },
     "spelling": {
       "title": "Yazım",
-      "intro": "Yazım, dilbilgisi ve stil denetimleri, Yazım sekmesinde seçtiğiniz sayfalar üzerinde LanguageTool ile çalışır. Dil, sayfanın kendi html[lang] değerinden seçilir; bildirmeyen sayfalar otomatik algılanır. Uç noktayı (genel API veya kendi sunucunuz) Entegrasyonlar → LanguageTool altından ayarlayın.",
+      "intro": "Yazım, dilbilgisi ve stil denetimleri, Yazım sekmesinde seçtiğiniz sayfalar üzerinde LanguageTool ile çalışır. Her sayfanın dili kendi metninden algılanır ve html[lang] ile karşılaştırılır; LanguageTool’un kuralı olmayan bir dildeki sayfalar yanlış sözlükle değerlendirilmek yerine desteklenmiyor olarak raporlanır. Uç noktayı (genel API veya kendi sunucunuz) Entegrasyonlar → LanguageTool altından ayarlayın.",
       "levelLabel": "Kural Seviyesi",
       "levelDefault": "Varsayılan — yalnızca yazım ve dilbilgisi hataları",
       "levelPicky": "Titiz — stil, tipografi ve gereksiz uzunluğu da işaretler",
       "dictionaryLabel": "Özel Sözlük",
       "dictionaryHint": "Asla işaretlenmeyecek kelimeler — marka adları, ürün adları, sektör jargonu. Her satıra bir tane veya virgülle ayrılmış. Büyük/küçük harf duyarsız.",
-      "dictionaryCount": "{{n}} kelime yok sayılıyor"
+      "dictionaryCount": "{{n}} kelime yok sayılıyor",
+      "languageLabel": "Dil",
+      "languageHint": "Algılama bir siteyi yanlış okumadıkça otomatik bırakın. Bir dil sabitlemek her sayfayı o dilde denetler — html[lang] değeri yanlış olan tek dilli siteler için yararlıdır ve inandırıcı olmayan gürültülü sonuçları atan güvenlik kontrolünü de kapatır.",
+      "languageAuto": "Otomatik — her sayfanın metninden algıla (önerilen)",
+      "languageCount": "Bu uç nokta {{n}} dil varyantı sunuyor. Bu listenin dışındaki diller — Türkçe, Macarca, Çekçe ve diğerleri — LanguageTool ile hiç denetlenemez."
     },
     "storage": {
       "title": "Depolama",
@@ -1501,5 +1543,10 @@
     "seedNoActive": "Aktif crawl yok — önce bir crawl başlatın, sonra ekleyin.",
     "seedNoOrigin": "Temel origin türetmek için henüz taranmış URL yok.",
     "seedNone": "Eklenecek yeni bir şey yok."
+  },
+  "detailExport": {
+    "label": "Dışa Aktar",
+    "title": "Bu tabloyu Excel veya CSV olarak dışa aktar",
+    "nothing": "Dışa aktarılacak veri yok"
   }
 }

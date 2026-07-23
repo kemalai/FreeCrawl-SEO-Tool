@@ -14,6 +14,10 @@ files:
   - package.json
   - "!**/*.map"
   - "!**/*.ts"
+  # The language detector loads only `eld/large`; the other three n-gram
+  # databases are ~4.5 MB of dead weight in the installer. ELD is a module
+  # singleton — one database per process — so the rest can never be reached.
+  - "!node_modules/eld/src/ngrams/{extrasmall,small,medium}.js"
 asar: true
 asarUnpack:
   - "**/*.node"

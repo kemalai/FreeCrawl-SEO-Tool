@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../store.js';
 import { usePerfMeter } from '../hooks/usePerfMeter.js';
 import { useMemoryMonitor } from '../hooks/useMemoryMonitor.js';
+import { useBrowserInstall } from '../hooks/useBrowserInstall.js';
 
 function Stat({
   label,
@@ -108,6 +109,7 @@ export function StatsBar() {
   const setError = useAppStore((s) => s.setError);
   const perf = usePerfMeter();
   const mem = useMemoryMonitor();
+  const browser = useBrowserInstall();
 
   const elapsed = progress?.elapsedMs ?? 0;
   const elapsedStr = formatElapsed(elapsed);
@@ -225,6 +227,35 @@ export function StatsBar() {
       />
 
       <div className="ml-auto flex items-center gap-2">
+        {/* JS-rendering browser provisioning. Silent when everything is
+            already in place — only surfaces while downloading or after a
+            failure, where it doubles as the retry button. */}
+        {browser.state.state === 'downloading' && (
+          <span
+            className="inline-flex items-center gap-1.5 text-sky-300"
+            title={t('browserInstall.downloadingTitle', {
+              defaultValue:
+                'Downloading the Chromium browser used for JavaScript rendering. Crawling in text mode is unaffected.',
+            })}
+          >
+            <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" />
+            <span>
+              {t('browserInstall.downloading', { defaultValue: 'Browser' })}{' '}
+              {browser.state.percent !== null ? `${browser.state.percent}%` : '…'}
+            </span>
+          </span>
+        )}
+        {browser.state.state === 'failed' && (
+          <button
+            className="rounded bg-amber-900/50 px-2 py-0.5 text-amber-200 hover:bg-amber-900/70"
+            onClick={browser.retry}
+            title={browser.state.error}
+          >
+            {t('browserInstall.failed', {
+              defaultValue: 'Browser download failed — retry',
+            })}
+          </button>
+        )}
         {progress?.running ? (
           progress.paused ? (
             <span className="inline-flex items-center gap-1.5">

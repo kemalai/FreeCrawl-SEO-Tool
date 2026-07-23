@@ -33,9 +33,9 @@ FreeCrawl crawls your website and checks it for SEO problems — a free, desktop
 
 It runs **150+ SEO checks across 32 tabs** — page titles, meta descriptions, headings, duplicate content, broken links, redirects, canonicals, hreflang, structured data, security headers, readability, and more. It can also render JavaScript pages with a real headless browser to capture the final DOM, screenshots, and Core Web Vitals.
 
-Pull in real data from **Google Search Console, Analytics 4, PageSpeed Insights, and Chrome UX Report**, check spelling and grammar with **LanguageTool**, and run your own **AI prompts** on each page (OpenAI, Claude, or Ollama). Open several projects side by side, each in its own window running its own crawl, and manage them from a Projects dialog with search, tags, and starter templates.
+Pull in real data from **Google Search Console, Analytics 4, PageSpeed Insights, and Chrome UX Report**, check spelling and grammar with **LanguageTool** — with a **bundled offline dictionary** for languages LanguageTool has no rules for, such as Turkish — and run your own **AI prompts** on each page (OpenAI, Claude, or Ollama). Open several projects side by side, each in its own window running its own crawl, and manage them from a Projects dialog with search, tags, and starter templates.
 
-Export to **Excel, CSV, JSON, XML**, an HTML report, sitemaps, **Google Sheets**, or **BigQuery**, and save projects as **password-protected encrypted files**. A built-in **MCP server** (96 tools) lets AI agents like Claude drive crawls live and read every result — every action a human can take in the desktop is callable from an agent. Everything runs **fully local** — no telemetry, no cloud, MIT-licensed.
+Export to **Excel, CSV, JSON, XML**, an HTML report, sitemaps, **Google Sheets**, or **BigQuery**, save each project as **one compressed file** (or a **password-protected encrypted file**), and export any URL Details sub-table on its own. A built-in **MCP server** (96 tools) lets AI agents like Claude drive crawls live and read every result — every action a human can take in the desktop is callable from an agent. Everything runs **fully local** — no telemetry, no cloud, MIT-licensed.
 
 <br />
 

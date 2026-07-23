@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import {
   SUPPORTED_LANGUAGES,
@@ -40,6 +40,7 @@ import {
   BookOpen,
   Chrome,
   Target,
+  Check,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -52,6 +53,7 @@ import type {
   HttpAuth,
   IntegrationDef,
   IntegrationsState,
+  SpellingLanguageOption,
 } from '@freecrawl/shared-types';
 import { DEFAULT_CRAWL_CONFIG, INTEGRATIONS } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
@@ -189,7 +191,11 @@ interface FormState {
   budgetMaxCls: string;
 }
 
-type SectionKey =
+/**
+ * Exported so callers elsewhere in the app can deep-link into a panel —
+ * see `SettingsTarget` in the store.
+ */
+export type SettingsSectionKey =
   | 'presets'
   | 'mode'
   | 'crawler'
@@ -217,6 +223,9 @@ type SectionKey =
   | 'spelling'
   | 'privacy'
   | 'language';
+
+/** Local alias — the exported name is the one other modules import. */
+type SectionKey = SettingsSectionKey;
 
 interface SectionDef {
   key: SectionKey;
@@ -550,6 +559,7 @@ export function SettingsDialog({ open, onClose }: Props) {
   const lang = i18n.language;
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
+  const target = useAppStore((s) => s.settingsTarget);
   const [form, setForm] = useState<FormState>(() => configToForm(config));
   const [active, setActive] = useState<SectionKey>('mode');
   const [search, setSearch] = useState('');
@@ -563,6 +573,12 @@ export function SettingsDialog({ open, onClose }: Props) {
       setSearch('');
     }
   }, [open, config]);
+
+  // Follow a deep link ("Add API Key…" and friends). Without a target the
+  // dialog stays on whichever section the user last used.
+  useEffect(() => {
+    if (open && target) setActive(target.section);
+  }, [open, target]);
 
   // ESC closes — common modal expectation.
   useEffect(() => {
@@ -948,7 +964,9 @@ export function SettingsDialog({ open, onClose }: Props) {
               {active === 'per-host-ua' && (
                 <PerHostUaPanel form={form} update={update} />
               )}
-              {active === 'integrations' && <IntegrationsPanel />}
+              {active === 'integrations' && (
+                <IntegrationsPanel focusId={target?.integration ?? null} />
+              )}
               {active === 'rendering' && (
                 <RenderingPanel form={form} update={update} />
               )}
@@ -1127,36 +1145,89 @@ function PresetsPanel({
   const { t, i18n } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Which preset was just applied. Drives the confirmation banner + the
+  // button's "Applied ✓" state so the click has a visible result — the
+  // fields it changes live on other panels, so without this the button
+  // looks inert.
+  const [appliedKey, setAppliedKey] = useState<string | null>(null);
+  const appliedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (appliedTimer.current) clearTimeout(appliedTimer.current);
+    },
+    [],
+  );
+
+  const onApply = (p: PresetDef) => {
+    apply(p);
+    setAppliedKey(p.key);
+    if (appliedTimer.current) clearTimeout(appliedTimer.current);
+    appliedTimer.current = setTimeout(() => setAppliedKey(null), 4000);
+  };
+
+  const appliedPreset = PRESETS.find((p) => p.key === appliedKey) ?? null;
+
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
         {t('settingsPanels.presets.intro', { defaultValue: 'One-click profiles for common crawl scenarios. Clicking a preset overwrites the affected fields only — your URL list, custom rules, filters, and extraction rules are preserved.' })}
       </p>
+      {appliedPreset && (
+        <div className="mb-3 flex items-center gap-2 rounded border border-emerald-700/50 bg-emerald-900/25 px-3 py-1.5 text-[11px] text-emerald-200">
+          <Check className="h-3.5 w-3.5 shrink-0" />
+          <span>
+            {t('settingsPanels.presets.applied', {
+              defaultValue:
+                '"{{name}}" preset applied — review the panels, then press Save to keep the changes.',
+              name: translateLabel(appliedPreset.label, i18n.language),
+            })}
+          </span>
+        </div>
+      )}
       <div className="space-y-2">
-        {PRESETS.map((p) => (
-          <div
-            key={p.key}
-            className="flex items-start gap-3 rounded border border-surface-800 bg-surface-950/40 p-3"
-          >
-            <div className="flex-1 min-w-0">
-              <div className="text-[12px] font-medium text-surface-100">{translateLabel(p.label, i18n.language)}</div>
-              <div className="mt-0.5 text-[11px] text-surface-400">{translateLabel(p.description, i18n.language)}</div>
-              <div className="mt-1.5 flex flex-wrap gap-1 font-mono text-[10px] text-surface-500">
-                {Object.entries(p.overrides).map(([k, v]) => (
-                  <span key={k} className="rounded border border-surface-800 px-1.5 py-0.5">
-                    {k}={String(v)}
-                  </span>
-                ))}
-              </div>
-            </div>
-            <button
-              className="rounded border border-blue-700/60 bg-blue-900/30 px-3 py-1 text-[11px] text-blue-200 hover:bg-blue-900/50"
-              onClick={() => apply(p)}
+        {PRESETS.map((p) => {
+          const justApplied = appliedKey === p.key;
+          return (
+            <div
+              key={p.key}
+              className={clsx(
+                'flex items-start gap-3 rounded border bg-surface-950/40 p-3 transition-colors',
+                justApplied ? 'border-emerald-700/50' : 'border-surface-800',
+              )}
             >
-              {t('common.apply', { defaultValue: 'Apply' })}
-            </button>
-          </div>
-        ))}
+              <div className="flex-1 min-w-0">
+                <div className="text-[12px] font-medium text-surface-100">{translateLabel(p.label, i18n.language)}</div>
+                <div className="mt-0.5 text-[11px] text-surface-400">{translateLabel(p.description, i18n.language)}</div>
+                <div className="mt-1.5 flex flex-wrap gap-1 font-mono text-[10px] text-surface-500">
+                  {Object.entries(p.overrides).map(([k, v]) => (
+                    <span key={k} className="rounded border border-surface-800 px-1.5 py-0.5">
+                      {k}={String(v)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <button
+                className={clsx(
+                  'inline-flex items-center gap-1 rounded border px-3 py-1 text-[11px] transition-colors',
+                  justApplied
+                    ? 'border-emerald-600/70 bg-emerald-900/40 text-emerald-200'
+                    : 'border-blue-700/60 bg-blue-900/30 text-blue-200 hover:bg-blue-900/50',
+                )}
+                onClick={() => onApply(p)}
+              >
+                {justApplied ? (
+                  <>
+                    <Check className="h-3.5 w-3.5" />
+                    {t('common.applied', { defaultValue: 'Applied' })}
+                  </>
+                ) : (
+                  t('common.apply', { defaultValue: 'Apply' })
+                )}
+              </button>
+            </div>
+          );
+        })}
       </div>
 
       <div className="mt-5 border-t border-surface-800 pt-4">
@@ -3744,9 +3815,16 @@ function PerformanceBudgetPanel({ form, update }: PanelProps) {
   );
 }
 
-function IntegrationsPanel() {
+/**
+ * @param focusId Integration the user was sent here to configure. The
+ *   panel lists a dozen-plus cards across four categories, so landing on
+ *   the section alone would still leave them hunting; the matching card
+ *   is scrolled into view and outlined for as long as the panel is open.
+ */
+function IntegrationsPanel({ focusId }: { focusId: string | null }) {
   const { t, i18n } = useTranslation();
   const [state, setState] = useState<IntegrationsState | null>(null);
+  const focusRef = useRef<HTMLDivElement | null>(null);
   // Per-integration → per-field draft text. Only fields the user has
   // actually typed into are tracked; a save sends just these so an
   // untouched "saved" secret is never overwritten.
@@ -3757,6 +3835,10 @@ function IntegrationsPanel() {
   useEffect(() => {
     void window.freecrawl.integrationsGetAll().then(setState);
   }, []);
+
+  useEffect(() => {
+    focusRef.current?.scrollIntoView({ block: 'center' });
+  }, [focusId]);
 
   const setDraft = (id: string, key: string, value: string) => {
     setDrafts((d) => ({ ...d, [id]: { ...(d[id] ?? {}), [key]: value } }));
@@ -3813,6 +3895,8 @@ function IntegrationsPanel() {
                 <IntegrationCard
                   key={def.id}
                   def={def}
+                  cardRef={def.id === focusId ? focusRef : undefined}
+                  focused={def.id === focusId}
                   state={state?.[def.id]}
                   draft={drafts[def.id] ?? {}}
                   busy={busy === def.id}
@@ -3832,6 +3916,8 @@ function IntegrationsPanel() {
 
 function IntegrationCard({
   def,
+  cardRef,
+  focused,
   state,
   draft,
   busy,
@@ -3841,6 +3927,8 @@ function IntegrationCard({
   onClear,
 }: {
   def: IntegrationDef;
+  cardRef?: RefObject<HTMLDivElement | null>;
+  focused?: boolean;
   state: IntegrationsState[string] | undefined;
   draft: Record<string, string>;
   busy: boolean;
@@ -3855,7 +3943,15 @@ function IntegrationCard({
   const [guideOpen, setGuideOpen] = useState(false);
 
   return (
-    <div className="rounded border border-surface-800 bg-surface-950/40 p-3">
+    <div
+      ref={cardRef}
+      className={clsx(
+        'rounded border bg-surface-950/40 p-3',
+        focused
+          ? 'border-accent-500 ring-1 ring-accent-500/40'
+          : 'border-surface-800',
+      )}
+    >
       <div className="mb-1 flex items-center gap-2">
         <span className="text-[12px] font-medium text-surface-100">{def.name}</span>
         <span className="rounded bg-surface-800 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-surface-400">
@@ -4005,6 +4101,38 @@ function SpellingPanel() {
     const raw = window.freecrawl.prefsGet('spellingIgnoreWords');
     return typeof raw === 'string' ? raw : '';
   });
+  const [language, setLanguage] = useState<string>(() => {
+    const raw = window.freecrawl.prefsGet('spellingLanguage');
+    return typeof raw === 'string' ? raw : '';
+  });
+  const [languages, setLanguages] = useState<SpellingLanguageOption[]>([]);
+  const [languagesLoaded, setLanguagesLoaded] = useState(false);
+
+  // Asked of the configured endpoint rather than hardcoded — a self-hosted
+  // LanguageTool ships whichever language modules its operator installed.
+  useEffect(() => {
+    let cancelled = false;
+    void window.freecrawl
+      .spellingLanguages()
+      .then((list) => {
+        if (cancelled) return;
+        setLanguages(list);
+        setLanguagesLoaded(true);
+      })
+      .catch(() => {
+        if (!cancelled) setLanguagesLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function pickLanguage(code: string) {
+    setLanguage(code);
+    // Empty means auto — clear the pref rather than storing a sentinel.
+    if (code) window.freecrawl.prefsSet('spellingLanguage', code);
+    else window.freecrawl.prefsDelete('spellingLanguage');
+  }
 
   function pickLevel(l: 'default' | 'picky') {
     setLevel(l);
@@ -4030,8 +4158,40 @@ function SpellingPanel() {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        {t('settings.spelling.intro', { defaultValue: "Spelling, grammar and style checks run through LanguageTool against pages you select in the Spelling tab. The page's own html[lang] picks the language; pages that don't declare one are auto-detected. Configure the endpoint (public API or self-hosted) under Integrations → LanguageTool." })}
+        {t('settings.spelling.intro', { defaultValue: "Spelling, grammar and style checks run through LanguageTool against pages you select in the Spelling tab. Each page's language is detected from its own text and cross-checked against html[lang]; pages in a language LanguageTool has no rules for are reported as unsupported rather than graded against the wrong dictionary. Configure the endpoint (public API or self-hosted) under Integrations → LanguageTool." })}
       </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.spelling.languageLabel', { defaultValue: "Language" })}
+        </div>
+        <p className="mb-2 text-[11px] text-surface-400">
+          {t('settings.spelling.languageHint', { defaultValue: "Leave on auto unless detection gets a site wrong. Pinning a language forces every page to be checked in it — useful for a single-language site whose html[lang] is wrong, and it also turns off the safety check that discards implausibly noisy results." })}
+        </p>
+        <select
+          className="h-7 w-full rounded border border-surface-700 bg-surface-950 px-2 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+          value={language}
+          onChange={(e) => pickLanguage(e.target.value)}
+          disabled={!languagesLoaded}
+        >
+          <option value="">
+            {t('settings.spelling.languageAuto', { defaultValue: "Auto — detect from each page's text (recommended)" })}
+          </option>
+          {languages.map((l) => (
+            <option key={l.longCode} value={l.longCode}>
+              {l.name} ({l.longCode})
+            </option>
+          ))}
+        </select>
+        {languagesLoaded && languages.length > 0 && (
+          <p className="mt-1 text-[10px] text-surface-500">
+            {t('settings.spelling.languageCount', {
+              defaultValue: "This endpoint offers {{n}} language variant(s). Languages outside that list — Turkish, Hungarian, Czech and others — cannot be checked by LanguageTool at all.",
+              n: languages.length,
+            })}
+          </p>
+        )}
+      </div>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">

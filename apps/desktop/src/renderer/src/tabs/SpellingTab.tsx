@@ -14,7 +14,7 @@ const POLL_MS_RUNNING = 5000;
 /** The public LanguageTool API allows ~20 requests/min — warn past this. */
 const CONFIRM_THRESHOLD = 20;
 
-type FilterMode = 'all' | 'checked' | 'unchecked' | 'errors';
+type FilterMode = 'all' | 'checked' | 'unchecked' | 'errors' | 'unsupported';
 
 /** Colour the match count by severity. */
 function countClass(n: number | null): string {
@@ -149,13 +149,32 @@ export function SpellingTab() {
   }, []);
 
   const checkedCount = useMemo(
-    () => rows.filter((r) => r.status !== null).length,
+    () => rows.filter((r) => r.status === 'ok').length,
     [rows],
   );
   const withErrors = useMemo(
-    () => rows.filter((r) => (r.matchCount ?? 0) > 0).length,
+    () => rows.filter((r) => r.status === 'ok' && (r.matchCount ?? 0) > 0).length,
     [rows],
   );
+  const unsupportedCount = useMemo(
+    () => rows.filter((r) => r.status === 'unsupported').length,
+    [rows],
+  );
+  /**
+   * The languages that came back unsupported, for the banner. Every
+   * unsupported row carries the language it was detected as, so a Turkish
+   * site names Turkish rather than leaving the user to guess why an entire
+   * crawl produced no findings.
+   */
+  const unsupportedLangs = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) {
+      if (r.status === 'unsupported') {
+        set.add(r.detectedLanguage ?? r.lang ?? '?');
+      }
+    }
+    return [...set].sort();
+  }, [rows]);
 
   return (
     <div className="flex h-full w-full flex-col bg-surface-950">
@@ -193,6 +212,11 @@ export function SpellingTab() {
           <option value="errors">
             {t('spellingTab.filterErrors', { defaultValue: 'With findings' })}
           </option>
+          <option value="unsupported">
+            {t('spellingTab.filterUnsupported', {
+              defaultValue: 'Unsupported language',
+            })}
+          </option>
         </select>
         <button
           type="button"
@@ -204,7 +228,7 @@ export function SpellingTab() {
         </button>
         <button
           type="button"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => setSettingsOpen(true, { section: 'spelling' })}
           className="h-6 rounded border border-surface-700 bg-surface-800 px-2 text-[11px] text-surface-300 hover:bg-surface-700"
           title={t('spellingTab.optionsTitle', {
             defaultValue: 'Rule level and custom dictionary live in Settings → Spelling.',
@@ -248,6 +272,21 @@ export function SpellingTab() {
         </div>
       </div>
 
+      {/* LanguageTool ships rules for ~33 languages; Turkish, Hungarian,
+          Czech, Finnish and many others are simply not among them. Saying
+          so once, plainly, beats leaving the user to wonder why a whole
+          crawl came back empty. */}
+      {unsupportedCount > 0 && (
+        <div className="shrink-0 border-b border-amber-900/60 bg-amber-950/40 px-3 py-1.5 text-[11px] text-amber-200">
+          {t('spellingTab.unsupportedBanner', {
+            defaultValue:
+              '{{count}} page(s) left unchecked: LanguageTool has no rules for {{langs}}, and grading that text against a substitute language would report an error on nearly every word. Nothing here is misconfigured — no setting makes this engine check {{langs}}.',
+            count: unsupportedCount,
+            langs: unsupportedLangs.join(', '),
+          })}
+        </div>
+      )}
+
       {/* Column header */}
       <div
         className="flex shrink-0 select-none items-center border-b border-surface-800 bg-surface-900/60 text-[10px] font-medium text-surface-400"
@@ -268,7 +307,7 @@ export function SpellingTab() {
         <div className="flex-1 px-2">
           {t('spellingTab.colUrl', { defaultValue: 'URL' })}
         </div>
-        <div className="w-[60px] shrink-0 text-center">
+        <div className="w-[76px] shrink-0 text-center">
           {t('spellingTab.colLang', { defaultValue: 'Lang' })}
         </div>
         <div className="w-[76px] shrink-0 text-right">
@@ -341,10 +380,11 @@ export function SpellingTab() {
         <span>
           {t('spellingTab.summary', {
             defaultValue:
-              '{{shown}} pages · {{checked}} checked · {{errors}} with findings · {{selected}} selected',
+              '{{shown}} pages · {{checked}} checked · {{errors}} with findings · {{unsupported}} unsupported · {{selected}} selected',
             shown: rows.length.toLocaleString(),
             checked: checkedCount.toLocaleString(),
             errors: withErrors.toLocaleString(),
+            unsupported: unsupportedCount.toLocaleString(),
             selected: selected.size.toLocaleString(),
           })}
           {total > rows.length &&
@@ -382,15 +422,72 @@ function StatusBadge({ row }: { row: SpellingRow }) {
       </span>
     );
   }
+  // Neither of these is a failure — LanguageTool simply has no rules for
+  // the page's language, or the check came back so noisy that the language
+  // must have been wrong. Both are amber, not red, and both explain
+  // themselves on hover.
+  if (row.status === 'unsupported') {
+    return (
+      <span
+        className="cursor-help text-amber-400"
+        title={
+          row.error ??
+          t('spellingTab.statusUnsupportedTip', {
+            defaultValue:
+              'LanguageTool has no rules for this page’s language, so it was not checked.',
+          })
+        }
+      >
+        {t('spellingTab.statusUnsupported', { defaultValue: 'n/a' })}
+      </span>
+    );
+  }
+  if (row.status === 'mismatch') {
+    return (
+      <span
+        className="cursor-help text-amber-400"
+        title={
+          row.error ??
+          t('spellingTab.statusMismatchTip', {
+            defaultValue:
+              'The findings were discarded — the page does not read as the language it was checked in.',
+          })
+        }
+      >
+        {t('spellingTab.statusMismatch', { defaultValue: 'lang?' })}
+      </span>
+    );
+  }
   if (row.status === 'skipped') {
     return (
       <span
-        className="text-surface-500"
-        title={t('spellingTab.statusSkippedTip', {
-          defaultValue: 'Too little prose on the page to check.',
-        })}
+        className="cursor-help text-surface-500"
+        // A page can also be skipped for declaring no language and carrying
+        // too little text to detect one — that reason is stored, so prefer
+        // it over the generic tooltip.
+        title={
+          row.error ??
+          t('spellingTab.statusSkippedTip', {
+            defaultValue: 'Too little prose on the page to check.',
+          })
+        }
       >
         {t('spellingTab.statusSkipped', { defaultValue: 'skipped' })}
+      </span>
+    );
+  }
+  // Checked, but by the offline dictionary — spelling only. Marked so a
+  // clean row is not read as "grammar checked and fine".
+  if (row.engine === 'local') {
+    return (
+      <span
+        className="cursor-help text-emerald-400"
+        title={t('spellingTab.statusOkLocalTip', {
+          defaultValue:
+            'Checked with the offline dictionary: spelling only, no grammar. LanguageTool has no rules for this language.',
+        })}
+      >
+        {t('spellingTab.statusOkLocal', { defaultValue: 'ok*' })}
       </span>
     );
   }
@@ -398,6 +495,44 @@ function StatusBadge({ row }: { row: SpellingRow }) {
     <span className="text-emerald-400">
       {t('spellingTab.statusOk', { defaultValue: 'ok' })}
     </span>
+  );
+}
+
+/**
+ * Language cell — the code the check ran under, or the code detected from
+ * the page's prose when it hasn't run. When the page's own `html[lang]`
+ * disagrees with what the prose reads as, the cell is marked: that is a
+ * genuine SEO defect (a stale `lang="en"` on a theme is common) and it is
+ * also the reason the old auto-detected results were nonsense.
+ */
+function LangCell({ row }: { row: SpellingRow }) {
+  const { t } = useTranslation();
+  const used = row.language ?? row.detectedLanguage ?? row.lang ?? null;
+  const declaredPrimary = row.lang?.split(/[-_]/)[0]?.toLowerCase() ?? null;
+  const detected = row.detectedLanguage;
+  const conflict =
+    !!detected && !!declaredPrimary && detected !== declaredPrimary;
+
+  return (
+    <div
+      className={`w-[76px] shrink-0 truncate text-center ${
+        conflict ? 'cursor-help text-amber-400' : 'text-surface-400'
+      }`}
+      title={
+        conflict
+          ? t('spellingTab.langConflict', {
+              defaultValue:
+                'The page declares lang="{{declared}}" but its text reads as {{detected}}. The check used {{used}}.',
+              declared: row.lang ?? '',
+              detected,
+              used: used ?? detected,
+            })
+          : undefined
+      }
+    >
+      {used ?? '—'}
+      {conflict && ' ⚠'}
+    </div>
   );
 }
 
@@ -431,16 +566,19 @@ function SpellingTableRow({
       <div className="flex-1 truncate px-2 text-surface-200" title={row.url}>
         {row.url}
       </div>
-      <div className="w-[60px] shrink-0 text-center text-surface-400">
-        {row.language ?? row.lang ?? '—'}
-      </div>
+      <LangCell row={row} />
       <div className="w-[76px] shrink-0 text-right tabular-nums text-surface-400">
         {row.wordCount?.toLocaleString() ?? '—'}
       </div>
       <div
-        className={`w-[80px] shrink-0 text-right font-mono tabular-nums ${countClass(row.matchCount)}`}
+        className={`w-[80px] shrink-0 text-right font-mono tabular-nums ${
+          row.status === 'ok' ? countClass(row.matchCount) : 'text-surface-700'
+        }`}
       >
-        {row.matchCount?.toLocaleString() ?? '—'}
+        {/* A count is only meaningful when the page was actually checked —
+            an unsupported or mismatched page has zero findings because none
+            were collected, not because the copy is clean. */}
+        {row.status === 'ok' ? (row.matchCount?.toLocaleString() ?? '—') : '—'}
       </div>
       <div className="w-[78px] shrink-0 text-center">
         <StatusBadge row={row} />

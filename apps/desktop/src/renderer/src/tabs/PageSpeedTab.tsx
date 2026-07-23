@@ -336,7 +336,9 @@ export function PageSpeedTab() {
           </span>
           <button
             type="button"
-            onClick={() => setSettingsOpen(true)}
+            onClick={() =>
+              setSettingsOpen(true, { section: 'integrations', integration: 'pagespeed' })
+            }
             className="rounded border border-amber-500/60 bg-amber-700/40 px-2 py-0.5 text-[10px] font-medium text-amber-50 hover:bg-amber-700/70"
           >
             {t('pagespeedTab.addKeyCta', { defaultValue: 'Add API Key…' })}

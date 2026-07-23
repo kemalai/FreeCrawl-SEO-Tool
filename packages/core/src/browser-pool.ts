@@ -1,11 +1,22 @@
 import { existsSync } from 'node:fs';
-import {
-  chromium,
-  type Browser,
-  type BrowserContext,
-  type LaunchOptions,
-  type Page,
-} from 'playwright';
+import type { Browser, BrowserContext, LaunchOptions, Page } from 'playwright';
+
+/**
+ * Playwright is imported lazily, never at module scope.
+ *
+ * Its browser registry reads `PLAYWRIGHT_BROWSERS_PATH` exactly once —
+ * while the module is being evaluated — and caches the resolved cache
+ * directory forever. A static `import { chromium } from 'playwright'`
+ * here therefore froze the lookup to the per-user cache before the
+ * Electron main process had a chance to point it at the browsers
+ * shipped inside the installer, which made the bundled browsers dead
+ * weight and sent every packaged user down the "browser missing"
+ * path. Loading on first use keeps that env var assignment effective.
+ */
+async function loadChromium() {
+  const { chromium } = await import('playwright');
+  return chromium;
+}
 
 /**
  * Distinct error code so callers (main-process diagnostic dialog,
@@ -26,6 +37,82 @@ export class PlaywrightBrowserMissingError extends Error {
     );
     this.name = 'PlaywrightBrowserMissingError';
   }
+}
+
+/** Where both Chromium builds live, and whether each is on disk. */
+export interface ChromiumBinaries {
+  /** Full Chrome-for-Testing build — used for headed launches. */
+  chromiumPath: string;
+  /** chrome-headless-shell — what Playwright launches when headless. */
+  headlessShellPath: string;
+  chromiumInstalled: boolean;
+  headlessShellInstalled: boolean;
+  /** True only when both binaries are present. */
+  installed: boolean;
+}
+
+/**
+ * Derive the chrome-headless-shell path from the full Chromium path.
+ *
+ * Playwright installs the two as siblings under the same revision
+ * (`chromium-1223` / `chromium_headless_shell-1223`) but exposes only
+ * the former through `chromium.executablePath()`. The per-platform
+ * folder names mirror Playwright's own EXECUTABLE_PATHS table; note
+ * that the macOS and Linux-x64 layouts are arch-suffixed since the
+ * switch to Chrome-for-Testing builds. Returns '' when the layout is
+ * unrecognised — callers then treat the shell as "unknown" rather
+ * than "missing".
+ */
+function deriveHeadlessShellPath(chromiumPath: string): string {
+  if (!chromiumPath) return '';
+  const base = chromiumPath.replace(/chromium-(\d+)/, 'chromium_headless_shell-$1');
+  // Windows — chrome-win64\chrome.exe
+  const win = base.replace(
+    /chrome-win64[\\/]chrome\.exe$/i,
+    'chrome-headless-shell-win64\\chrome-headless-shell.exe',
+  );
+  if (win !== base) return win;
+  // macOS — chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/…
+  const mac = base.replace(
+    /chrome-mac-(arm64|x64)[\\/].*$/i,
+    'chrome-headless-shell-mac-$1/chrome-headless-shell',
+  );
+  if (mac !== base) return mac;
+  // Linux x64 — chrome-linux64/chrome
+  const linux = base.replace(
+    /chrome-linux64[\\/]chrome$/,
+    'chrome-headless-shell-linux64/chrome-headless-shell',
+  );
+  if (linux !== base) return linux;
+  // Linux arm64 — Playwright's own build, chrome-linux/chrome
+  const linuxArm = base.replace(/chrome-linux[\\/]chrome$/, 'chrome-linux/headless_shell');
+  if (linuxArm !== base) return linuxArm;
+  return '';
+}
+
+/**
+ * Resolve both Chromium binaries and report which are on disk. Used by
+ * the pool pre-flight and by the desktop app's startup check that
+ * decides whether to download the browser in the background.
+ */
+export async function resolveChromiumBinaries(): Promise<ChromiumBinaries> {
+  const chromium = await loadChromium();
+  let chromiumPath = '';
+  try {
+    chromiumPath = chromium.executablePath();
+  } catch {
+    /* no browser registered at all → both count as missing */
+  }
+  const headlessShellPath = deriveHeadlessShellPath(chromiumPath);
+  const chromiumInstalled = Boolean(chromiumPath) && existsSync(chromiumPath);
+  const headlessShellInstalled = Boolean(headlessShellPath) && existsSync(headlessShellPath);
+  return {
+    chromiumPath,
+    headlessShellPath,
+    chromiumInstalled,
+    headlessShellInstalled,
+    installed: chromiumInstalled && headlessShellInstalled,
+  };
 }
 
 export interface BrowserPoolOptions {
@@ -122,25 +209,24 @@ export class BrowserPool {
     // surface a single install prompt and abort the JS render mode.
     //
     // When no explicit executable path or system channel is set,
-    // Playwright resolves the bundled browser. `chromium.executablePath()`
-    // throws when none is registered yet (very old install) — we treat
-    // that as "missing" too. For `headless: true` (default) Playwright
-    // 1.49+ also requires the chrome-headless-shell binary, which lives
-    // in a sibling directory; checking the regular chromium path is a
-    // good-enough proxy because both binaries are installed together
-    // by `npx playwright install`.
+    // Playwright resolves the bundled browser. A headless launch uses
+    // chrome-headless-shell, a headed one the full Chrome-for-Testing
+    // build — so both are checked independently. If only the shell is
+    // absent we degrade to the full build via `channel: 'chromium'`
+    // (Playwright's new-headless mode) instead of failing the crawl.
     if (!this.opts.channel && !this.opts.executablePath) {
-      let resolved = '';
-      try {
-        resolved = chromium.executablePath();
-      } catch {
-        /* unresolved → fall through to the missing check below */
-      }
-      if (!resolved || !existsSync(resolved)) {
-        throw new PlaywrightBrowserMissingError(resolved, this.opts.channel);
+      const bins = await resolveChromiumBinaries();
+      if (!bins.installed) {
+        const needsShell = this.opts.headless;
+        if (needsShell && bins.chromiumInstalled) {
+          launchOpts.channel = 'chromium';
+        } else if (!bins.chromiumInstalled) {
+          throw new PlaywrightBrowserMissingError(bins.chromiumPath, this.opts.channel);
+        }
       }
     }
 
+    const chromium = await loadChromium();
     this.browser = await chromium.launch(launchOpts);
     this.context = await this.browser.newContext({
       viewport: this.opts.viewport,

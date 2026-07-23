@@ -663,14 +663,14 @@ export function buildTools(): Tool[] {
     {
       name: 'query_spelling',
       description:
-        'Spelling & grammar check summary per crawled page (LanguageTool): match count, language used, status. Use filter "errors" for pages with ≥1 finding. Populate via Settings → Integrations → LanguageTool, then run a batch from the desktop Spelling tab (or spelling_run). Call get_url_spelling for a page\'s full match list.',
+        'Spelling & grammar check summary per crawled page (LanguageTool): match count, language used and detected, status. Use filter "errors" for pages with ≥1 finding, "unsupported" for pages LanguageTool has no dictionary for (it covers ~33 languages — Turkish, Hungarian, Czech and others are absent, and those pages are reported rather than graded against a substitute language). Status "mismatch" means the findings were discarded because the page did not read as the language it was checked in. Populate via Settings → Integrations → LanguageTool, then run a batch from the desktop Spelling tab (or spelling_run). Call get_url_spelling for a page\'s full match list.',
       inputSchema: {
         type: 'object',
         properties: {
           search: { type: 'string' },
           filter: {
             type: 'string',
-            enum: ['all', 'checked', 'unchecked', 'errors'],
+            enum: ['all', 'checked', 'unchecked', 'errors', 'unsupported'],
           },
           limit: { type: 'integer', minimum: 1, maximum: 1000 },
           offset: { type: 'integer', minimum: 0 },
@@ -686,6 +686,7 @@ export function buildTools(): Tool[] {
             | 'checked'
             | 'unchecked'
             | 'errors'
+            | 'unsupported'
             | undefined,
         }),
     },

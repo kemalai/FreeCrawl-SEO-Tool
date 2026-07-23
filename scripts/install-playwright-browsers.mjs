@@ -39,33 +39,32 @@ async function main() {
   }
 
   const fullBrowserOk = chromiumPath && existsSync(chromiumPath);
-  // Headless-shell binary path — derive by replacing the chromium-NNNN
-  // directory with chromium_headless_shell-NNNN. Playwright stores them
-  // as siblings in the cache (same revision number, different folder
-  // and exe name). Best-effort; if the regex fails to normalise we
-  // assume the binary is missing and let `playwright install` redo
-  // both — the command is idempotent.
+  // Headless-shell binary path — derive by swapping the chromium-NNNN
+  // directory for chromium_headless_shell-NNNN and the per-platform
+  // folder for its headless-shell counterpart. Playwright stores the two
+  // as siblings in the cache (same revision, different folder and exe
+  // name) but only exposes the full browser through executablePath().
+  // Since the move to Chrome-for-Testing builds these folder names are
+  // arch-suffixed on macOS and Linux-x64 — matching that exactly is what
+  // keeps this check from reporting "missing" on every single run.
   const headlessShellPath = (() => {
     if (!chromiumPath) return '';
-    // Windows: ...\chromium-1223\chrome-win64\chrome.exe
-    //        → ...\chromium_headless_shell-1223\chrome-headless-shell-win64\chrome-headless-shell.exe
-    if (process.platform === 'win32') {
-      return chromiumPath
-        .replace(/chromium-(\d+)/, 'chromium_headless_shell-$1')
-        .replace(/chrome-win64\\chrome\.exe$/, 'chrome-headless-shell-win64\\chrome-headless-shell.exe');
+    const base = chromiumPath.replace(/chromium-(\d+)/, 'chromium_headless_shell-$1');
+    const rules = [
+      // Windows: ...\chrome-win64\chrome.exe
+      [/chrome-win64[\\/]chrome\.exe$/i, 'chrome-headless-shell-win64\\chrome-headless-shell.exe'],
+      // macOS: .../chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/…
+      [/chrome-mac-(arm64|x64)[\\/].*$/i, 'chrome-headless-shell-mac-$1/chrome-headless-shell'],
+      // Linux x64: .../chrome-linux64/chrome
+      [/chrome-linux64[\\/]chrome$/, 'chrome-headless-shell-linux64/chrome-headless-shell'],
+      // Linux arm64: Playwright's own build, .../chrome-linux/chrome
+      [/chrome-linux[\\/]chrome$/, 'chrome-linux/headless_shell'],
+    ];
+    for (const [pattern, replacement] of rules) {
+      const out = base.replace(pattern, replacement);
+      if (out !== base) return out;
     }
-    // macOS: .../chromium-1223/chrome-mac/Chromium.app/Contents/MacOS/Chromium
-    //      → .../chromium_headless_shell-1223/chrome-mac/headless_shell
-    if (process.platform === 'darwin') {
-      return chromiumPath
-        .replace(/chromium-(\d+)/, 'chromium_headless_shell-$1')
-        .replace(/chrome-mac\/Chromium\.app\/Contents\/MacOS\/Chromium$/, 'chrome-mac/headless_shell');
-    }
-    // Linux: .../chromium-1223/chrome-linux/chrome
-    //      → .../chromium_headless_shell-1223/chrome-linux/headless_shell
-    return chromiumPath
-      .replace(/chromium-(\d+)/, 'chromium_headless_shell-$1')
-      .replace(/chrome-linux\/chrome$/, 'chrome-linux/headless_shell');
+    return '';
   })();
   const headlessShellOk = headlessShellPath && existsSync(headlessShellPath);
 

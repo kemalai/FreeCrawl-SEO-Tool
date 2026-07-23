@@ -25,6 +25,8 @@ import type {
   SpellingResult,
   SpellingRow,
   SpellingMatch,
+  SpellingStatus,
+  SpellingEngine,
   GscRow,
   Ga4Row,
   AiProvider,
@@ -52,6 +54,31 @@ import type {
 } from '@freecrawl/shared-types';
 import { issueCategoriesBySeverity } from '@freecrawl/shared-types';
 import { runMigrations } from './migrations.js';
+
+const SPELLING_STATUSES: readonly SpellingStatus[] = [
+  'ok',
+  'skipped',
+  'unsupported',
+  'mismatch',
+  'error',
+];
+
+/**
+ * Narrow a stored `spelling_results.status` string. Anything unrecognised
+ * — a row written by an older build — reads as "never checked" so the page
+ * simply offers itself for a re-run.
+ */
+function parseSpellingStatus(value: unknown): SpellingStatus | null {
+  return typeof value === 'string' &&
+    (SPELLING_STATUSES as readonly string[]).includes(value)
+    ? (value as SpellingStatus)
+    : null;
+}
+
+/** Narrow a stored `spelling_results.engine` string. */
+function parseSpellingEngine(value: unknown): SpellingEngine | null {
+  return value === 'languagetool' || value === 'local' ? value : null;
+}
 
 /**
  * Best-effort `Content-Type` → {@link ContentKind} classifier. Used to
@@ -3676,22 +3703,29 @@ export class ProjectDb {
     this.db
       .prepare(
         `INSERT INTO spelling_results
-           (url, language, match_count, matches, status, error, fetched_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (url, language, detected_language, declared_language,
+            match_count, matches, status, engine, error, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(url) DO UPDATE SET
            language = excluded.language,
+           detected_language = excluded.detected_language,
+           declared_language = excluded.declared_language,
            match_count = excluded.match_count,
            matches = excluded.matches,
            status = excluded.status,
+           engine = excluded.engine,
            error = excluded.error,
            fetched_at = excluded.fetched_at`,
       )
       .run(
         url,
         r.language,
+        r.detectedLanguage,
+        r.declaredLanguage,
         r.matchCount,
         r.matches.length > 0 ? JSON.stringify(r.matches) : null,
         r.status,
+        r.engine,
         r.error,
         r.fetchedAt,
       );
@@ -3707,7 +3741,7 @@ export class ProjectDb {
     limit: number;
     offset: number;
     search?: string;
-    filter?: 'all' | 'checked' | 'unchecked' | 'errors';
+    filter?: 'all' | 'checked' | 'unchecked' | 'errors' | 'unsupported';
   }): { rows: SpellingRow[]; total: number } {
     const where: string[] = [
       "u.is_external = 0 AND u.content_kind = 'html'",
@@ -3722,6 +3756,7 @@ export class ProjectDb {
     if (filter === 'checked') where.push('s.url IS NOT NULL');
     else if (filter === 'unchecked') where.push('s.url IS NULL');
     else if (filter === 'errors') where.push('s.match_count > 0');
+    else if (filter === 'unsupported') where.push("s.status = 'unsupported'");
 
     const whereSql = `WHERE ${where.join(' AND ')}`;
     const joinSql = `
@@ -3735,8 +3770,11 @@ export class ProjectDb {
     const rowsDb = this.db
       .prepare(
         `SELECT u.url AS url, u.lang AS lang, u.word_count AS word_count,
-                s.language AS language, s.match_count AS match_count,
-                s.status AS status, s.error AS error, s.fetched_at AS fetched_at
+                s.language AS language,
+                s.detected_language AS detected_language,
+                s.match_count AS match_count,
+                s.status AS status, s.engine AS engine,
+                s.error AS error, s.fetched_at AS fetched_at
          ${joinSql}
          ${whereSql}
          ORDER BY s.match_count DESC, u.inlinks DESC, u.url ASC
@@ -3749,22 +3787,18 @@ export class ProjectDb {
 
     return {
       total: totalRow.c,
-      rows: rowsDb.map((r) => {
-        const status = r['status'];
-        return {
-          url: r['url'] as string,
-          lang: (r['lang'] as string | null) ?? null,
-          wordCount: (r['word_count'] as number | null) ?? null,
-          language: (r['language'] as string | null) ?? null,
-          matchCount: (r['match_count'] as number | null) ?? null,
-          status:
-            status === 'ok' || status === 'skipped' || status === 'error'
-              ? status
-              : null,
-          error: (r['error'] as string | null) ?? null,
-          fetchedAt: (r['fetched_at'] as string | null) ?? null,
-        };
-      }),
+      rows: rowsDb.map((r) => ({
+        url: r['url'] as string,
+        lang: (r['lang'] as string | null) ?? null,
+        wordCount: (r['word_count'] as number | null) ?? null,
+        language: (r['language'] as string | null) ?? null,
+        detectedLanguage: (r['detected_language'] as string | null) ?? null,
+        matchCount: (r['match_count'] as number | null) ?? null,
+        status: parseSpellingStatus(r['status']),
+        engine: parseSpellingEngine(r['engine']),
+        error: (r['error'] as string | null) ?? null,
+        fetchedAt: (r['fetched_at'] as string | null) ?? null,
+      })),
     };
   }
 
@@ -3777,22 +3811,29 @@ export class ProjectDb {
   getSpellingMatches(url: string): {
     url: string;
     language: string | null;
-    status: 'ok' | 'skipped' | 'error' | null;
+    detectedLanguage: string | null;
+    declaredLanguage: string | null;
+    status: SpellingStatus | null;
+    engine: SpellingEngine | null;
     error: string | null;
     fetchedAt: string | null;
     matches: SpellingMatch[];
   } | null {
     const row = this.db
       .prepare(
-        `SELECT url, language, matches, status, error, fetched_at
+        `SELECT url, language, detected_language, declared_language,
+                matches, status, engine, error, fetched_at
            FROM spelling_results WHERE url = ?`,
       )
       .get(url) as
       | {
           url: string;
           language: string | null;
+          detected_language: string | null;
+          declared_language: string | null;
           matches: string | null;
           status: string;
+          engine: string | null;
           error: string | null;
           fetched_at: string | null;
         }
@@ -3808,14 +3849,13 @@ export class ProjectDb {
         // Corrupt blob — surface the summary without the list.
       }
     }
-    const status = row.status;
     return {
       url: row.url,
       language: row.language,
-      status:
-        status === 'ok' || status === 'skipped' || status === 'error'
-          ? status
-          : null,
+      detectedLanguage: row.detected_language,
+      declaredLanguage: row.declared_language,
+      status: parseSpellingStatus(row.status),
+      engine: parseSpellingEngine(row.engine),
       error: row.error,
       fetchedAt: row.fetched_at,
       matches,
@@ -4780,10 +4820,14 @@ export class ProjectDb {
          )`,
       ),
       contentThin: countWhere(`${html} AND word_count IS NOT NULL AND word_count < 300`),
+      // Only a completed check yields a finding count — an unsupported or
+      // language-mismatched page stores zero because nothing was collected.
+      // Stating `status = 'ok'` keeps that explicit rather than leaning on
+      // the count happening to be zero.
       spellingGrammar: countWhere(
         `${html} AND EXISTS (
            SELECT 1 FROM spelling_results s
-            WHERE s.url = urls.url AND s.match_count > 0
+            WHERE s.url = urls.url AND s.status = 'ok' AND s.match_count > 0
          )`,
       ),
       responseSlow: countWhere(`${html} AND response_time_ms > 1000`),
@@ -8369,7 +8413,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     case 'issues:spelling-grammar':
       return `is_external = 0 AND content_kind = 'html' AND EXISTS (
                 SELECT 1 FROM spelling_results s
-                 WHERE s.url = urls.url AND s.match_count > 0
+                 WHERE s.url = urls.url AND s.status = 'ok' AND s.match_count > 0
               )`;
     case 'issues:response-slow':
       return "is_external = 0 AND content_kind = 'html' AND response_time_ms > 1000";

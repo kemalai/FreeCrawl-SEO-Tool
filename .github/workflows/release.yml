@@ -23,21 +23,48 @@ jobs:
         include:
           - os: windows-latest
             build_script: build:win
+            build_args: ''
             artifact_name: windows-installer
             artifact_paths: |
               apps/desktop/release/*.exe
               apps/desktop/release/*.exe.blockmap
               apps/desktop/release/latest.yml
+          # macOS is built once per architecture rather than both arches
+          # in one job. The bundled Playwright browsers are arch-specific
+          # (`chrome-mac-arm64` vs `chrome-mac-x64`), so a single job on
+          # an Apple-silicon runner used to ship arm64 binaries inside the
+          # Intel .dmg — where Playwright looked for `chrome-mac-x64`,
+          # found nothing, and every Intel user landed on the "browser
+          # missing" dialog. Each job now downloads the browsers for the
+          # architecture it is packaging.
           - os: macos-latest
             build_script: build:mac
-            artifact_name: macos-installer
+            build_args: '-- --arm64'
+            artifact_name: macos-installer-arm64
+            artifact_paths: |
+              apps/desktop/release/*arm64*.dmg
+              apps/desktop/release/*arm64*.dmg.blockmap
+              apps/desktop/release/*arm64*.zip
+              apps/desktop/release/latest-mac.yml
+          - os: macos-latest
+            build_script: build:mac
+            build_args: '-- --x64'
+            # Cross-download the Intel browsers on the arm64 runner.
+            # Playwright picks its download by host platform, so this
+            # override is what makes the x64 bundle actually x64.
+            playwright_host_platform: mac15
+            artifact_name: macos-installer-x64
+            # latest-mac.yml is published by the arm64 job only — both
+            # jobs would otherwise upload a same-named file describing
+            # just their own arch, and the winner would be whichever
+            # finished last.
             artifact_paths: |
               apps/desktop/release/*.dmg
               apps/desktop/release/*.dmg.blockmap
               apps/desktop/release/*.zip
-              apps/desktop/release/latest-mac.yml
           - os: ubuntu-latest
             build_script: build:linux
+            build_args: ''
             artifact_name: linux-installer
             artifact_paths: |
               apps/desktop/release/*.AppImage
@@ -55,6 +82,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        env:
+          # Skip the postinstall browser download on cross-arch jobs so
+          # the cache holds only the target architecture — otherwise the
+          # installer would carry both (~+180 MB of dead weight).
+          PLAYWRIGHT_SKIP_BROWSER_INSTALL: ${{ matrix.playwright_host_platform && '1' || '0' }}
 
       - name: Build shared packages
         run: npx tsc -b
@@ -66,9 +98,11 @@ jobs:
         # re-check if Playwright was upgraded since the lockfile was
         # written.
         run: npm run playwright:install
+        env:
+          PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ${{ matrix.playwright_host_platform }}
 
       - name: Build installer (with bundled Playwright browsers)
-        run: npm --workspace apps/desktop run ${{ matrix.build_script }}
+        run: npm --workspace apps/desktop run ${{ matrix.build_script }} ${{ matrix.build_args }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Disable mac code-signing — we don't have an Apple Developer
@@ -82,6 +116,11 @@ jobs:
           # apps/desktop/resources/playwright-browsers/ before
           # electron-builder packs the installer.
           BUNDLE_PLAYWRIGHT: '1'
+          # Also read by prepare-playwright-bundle.mjs, which refuses to
+          # package a browser cache that doesn't match the architecture
+          # being built — the exact mismatch that shipped an arm64
+          # Chromium inside the Intel .dmg.
+          PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: ${{ matrix.playwright_host_platform }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

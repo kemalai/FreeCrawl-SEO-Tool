@@ -16,9 +16,9 @@
  * Idempotent: safe to run multiple times.
  */
 
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir, platform } from 'node:os';
+import { cpus, homedir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -36,6 +36,61 @@ function sourceCacheDir() {
     return join(homedir(), 'Library', 'Caches', 'ms-playwright');
   }
   return join(homedir(), '.cache', 'ms-playwright');
+}
+
+/**
+ * Per-platform folder names Playwright looks for inside a
+ * `chromium-<rev>` / `chromium_headless_shell-<rev>` directory. These are
+ * arch-specific, which is the entire reason this check exists: bundling
+ * an `chrome-mac-arm64` build into the Intel .dmg produced an installer
+ * that shipped 250 MB of browser the app could never use.
+ *
+ * `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE` is how CI cross-downloads the
+ * Intel browsers on an Apple-silicon runner, so honour it here too.
+ */
+function expectedFolders() {
+  const override = process.env.PLAYWRIGHT_HOST_PLATFORM_OVERRIDE ?? '';
+  const isArm = override
+    ? override.endsWith('arm64')
+    : platform() === 'darwin'
+      ? cpus().some((c) => c.model.includes('Apple'))
+      : process.arch === 'arm64';
+  const os = override
+    ? override.startsWith('mac')
+      ? 'darwin'
+      : override.startsWith('win')
+        ? 'win32'
+        : 'linux'
+    : platform();
+
+  if (os === 'win32') {
+    return { chromium: 'chrome-win64', headlessShell: 'chrome-headless-shell-win64' };
+  }
+  if (os === 'darwin') {
+    const arch = isArm ? 'arm64' : 'x64';
+    return {
+      chromium: `chrome-mac-${arch}`,
+      headlessShell: `chrome-headless-shell-mac-${arch}`,
+    };
+  }
+  if (isArm) return { chromium: 'chrome-linux', headlessShell: 'chrome-linux' };
+  return { chromium: 'chrome-linux64', headlessShell: 'chrome-headless-shell-linux64' };
+}
+
+/** True when `dir` holds a Chromium build for the platform being packaged. */
+function hasUsableChromium(dir) {
+  const folders = expectedFolders();
+  if (!existsSync(dir)) return false;
+  const entries = readdirSync(dir);
+  const hasFull = entries.some(
+    (e) => e.startsWith('chromium-') && existsSync(join(dir, e, folders.chromium)),
+  );
+  const hasShell = entries.some(
+    (e) =>
+      e.startsWith('chromium_headless_shell-') &&
+      existsSync(join(dir, e, folders.headlessShell)),
+  );
+  return hasFull && hasShell;
 }
 
 if (process.env.BUNDLE_PLAYWRIGHT !== '1') {
@@ -62,6 +117,18 @@ if (!existsSync(src)) {
   process.exit(1);
 }
 
+const folders = expectedFolders();
+if (!hasUsableChromium(src)) {
+  console.error(
+    `[prepare-playwright-bundle] The cache at ${src} has no Chromium build for the ` +
+      `platform being packaged (expected ${folders.chromium} + ${folders.headlessShell}).\n` +
+      'Bundling it would ship an installer whose browser this machine cannot launch.\n' +
+      'Run "npm run playwright:install" for the target platform first — cross-arch ' +
+      'builds need PLAYWRIGHT_HOST_PLATFORM_OVERRIDE set to the target (e.g. mac15).',
+  );
+  process.exit(1);
+}
+
 console.log(`[prepare-playwright-bundle] Copying ${src} → ${targetDir} …`);
 rmSync(targetDir, { recursive: true, force: true });
 mkdirSync(targetDir, { recursive: true });
@@ -70,4 +137,14 @@ mkdirSync(targetDir, { recursive: true });
 // dereferenced, doubling the on-disk size and breaking the bundle's
 // Mach-O loader paths.
 cpSync(src, targetDir, { recursive: true, verbatimSymlinks: true });
-console.log('[prepare-playwright-bundle] Done.');
+
+if (!hasUsableChromium(targetDir)) {
+  console.error(
+    '[prepare-playwright-bundle] Copy finished but the bundled cache is not usable — aborting ' +
+      'rather than publishing an installer whose JS rendering is dead on arrival.',
+  );
+  process.exit(1);
+}
+console.log(
+  `[prepare-playwright-bundle] Done — bundled ${folders.chromium} + ${folders.headlessShell}.`,
+);

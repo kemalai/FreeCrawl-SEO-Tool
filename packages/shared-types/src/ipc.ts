@@ -24,7 +24,13 @@ import type {
   PagespeedRunStrategy,
 } from './pagespeed.js';
 import type { CruxRow, CruxRunFormFactor } from './crux.js';
-import type { SpellingMatch, SpellingRow } from './spelling.js';
+import type {
+  SpellingEngine,
+  SpellingLanguageOption,
+  SpellingMatch,
+  SpellingRow,
+  SpellingStatus,
+} from './spelling.js';
 import type { RecentProject } from './project.js';
 import type {
   GoogleAuthState,
@@ -64,6 +70,9 @@ export const IPC = {
   crawlClear: 'crawl:clear',
   crawlAddUrl: 'crawl:add-url',
   projectSaveAs: 'project:save-as',
+  /** Save to the currently bound `.seoproject`; falls back to Save As when
+   *  the project has never been saved. */
+  projectSave: 'project:save',
   projectOpen: 'project:open',
   projectCurrentPath: 'project:current-path',
   /** Per-project crawl config. `projectConfigGet` reads the active
@@ -92,6 +101,14 @@ export const IPC = {
   crawlProgress: 'crawl:progress',
   crawlDone: 'crawl:done',
   crawlError: 'crawl:error',
+  /** JS-rendering browser provisioning. `browserInstallState` is pushed
+   *  main→renderer whenever the download starts, advances or ends;
+   *  `browserInstallGet` returns the current state for a window that
+   *  mounted after the last push; `browserInstallStart` lets the user
+   *  retry a failed download from the UI. */
+  browserInstallState: 'browser:install-state',
+  browserInstallGet: 'browser:install-get',
+  browserInstallStart: 'browser:install-start',
   urlsQuery: 'urls:query',
   urlDetailGet: 'urls:detail',
   urlSourceGet: 'urls:source',
@@ -115,6 +132,10 @@ export const IPC = {
   /** New unified tabular export with column selection + multi-tab support
    * (CSV / XLSX). Backs the in-table "Export" button. */
   exportTabular: 'export:tabular',
+  /** Export one already-rendered grid (a URL Details sub-tab table) to
+   *  CSV or XLSX. Rows travel as literal cells because these tables are
+   *  built in the renderer, not streamed from the database. */
+  exportGrid: 'export:grid',
   /** GDPR-aligned per-domain delete. Wipes every row whose URL host
    * matches the given domain (and that domain's links/images/headers/
    * url_sources). Used by Settings → "Delete Domain Data". */
@@ -276,11 +297,15 @@ export const IPC = {
    *  `spellingQuery` lists crawled internal HTML pages joined with any
    *  stored check summary; `spellingRun` checks a user-selected set of
    *  URLs (emits `spellingProgress`); `spellingCancel` stops a run early;
-   *  `spellingMatches` loads the full match list for one URL. */
+   *  `spellingMatches` loads the full match list for one URL;
+   *  `spellingLanguages` reports which languages the configured endpoint
+   *  actually offers, so Settings can list them and the checker can refuse
+   *  pages written in one it does not cover. */
   spellingQuery: 'spelling:query',
   spellingRun: 'spelling:run',
   spellingCancel: 'spelling:cancel',
   spellingMatches: 'spelling:matches',
+  spellingLanguages: 'spelling:languages',
   /** main → renderer: live progress of an in-flight spelling run. */
   spellingProgress: 'spelling:progress',
   /** Faz 7 — Google OAuth keystone (shared by Search Console, GA4,
@@ -468,6 +493,7 @@ export type MenuEvent =
   | 'delete-domain-data'
   | 'clear-all-data'
   | 'compare-with-project'
+  | 'save-project'
   | 'save-project-as'
   | 'save-project-encrypted'
   | 'open-project-encrypted'
@@ -583,6 +609,24 @@ export interface ExportTabularInput {
   /** When true, CSV files are written with a UTF-8 BOM so Excel for Windows
    *  opens them in the correct charset. Ignored for non-CSV formats. */
   csvBom?: boolean;
+}
+
+/** One detail-panel sub-tab table, ready to write. */
+export interface ExportGridInput {
+  /** Suggested file name without extension (e.g. 'example.com-inlinks'). */
+  fileName: string;
+  /** Column headers, in display order. */
+  headers: string[];
+  /** Row cells aligned to `headers`. */
+  rows: (string | number | boolean | null)[][];
+  /** Worksheet name for xlsx; defaults to the file name. */
+  sheetName?: string;
+}
+
+export interface ExportGridResult {
+  /** Written file, or null when the user cancelled the save dialog. */
+  filePath: string | null;
+  rowsWritten: number;
 }
 
 export interface ExportTabularResult {
@@ -1321,8 +1365,11 @@ export interface SpellingQueryInput {
   offset: number;
   /** Substring match against the URL. */
   search?: string;
-  /** `all` (default), `checked`, `unchecked`, `errors` (matchCount > 0). */
-  filter?: 'all' | 'checked' | 'unchecked' | 'errors';
+  /**
+   * `all` (default), `checked`, `unchecked`, `errors` (matchCount > 0),
+   * `unsupported` (language LanguageTool has no rules for).
+   */
+  filter?: 'all' | 'checked' | 'unchecked' | 'errors' | 'unsupported';
 }
 
 export interface SpellingQueryResult {
@@ -1341,6 +1388,12 @@ export interface SpellingRunResult {
   completed: number;
   /** Pages that errored or were skipped for having no prose. */
   failed: number;
+  /**
+   * Pages left unchecked because LanguageTool ships no rules for their
+   * language. Counted separately from `failed`: nothing went wrong, the
+   * language is simply outside the tool's coverage.
+   */
+  unsupported: number;
   cancelled: boolean;
 }
 
@@ -1356,7 +1409,13 @@ export interface SpellingProgress {
 export interface SpellingMatchesResult {
   url: string;
   language: string | null;
-  status: 'ok' | 'skipped' | 'error' | null;
+  /** Language detected from the page's own prose. */
+  detectedLanguage: string | null;
+  /** Language the page declares via `html[lang]`. */
+  declaredLanguage: string | null;
+  status: SpellingStatus | null;
+  /** Which checker produced this result — `local` means spelling only. */
+  engine: SpellingEngine | null;
   error: string | null;
   fetchedAt: string | null;
   matches: SpellingMatch[];
@@ -1572,6 +1631,20 @@ export interface LogEntry {
   windowId?: number;
 }
 
+/**
+ * Provisioning state of the Chromium build JS rendering needs.
+ *
+ * `unknown` until the app has looked; `downloading` while the in-app
+ * installer is fetching it (no terminal involved); `failed` carries the
+ * reason so the status bar can show it on hover.
+ */
+export interface BrowserInstallState {
+  state: 'unknown' | 'ready' | 'downloading' | 'failed';
+  /** 0-100 while downloading, null when the step reports no percentage. */
+  percent: number | null;
+  error?: string;
+}
+
 export interface FreeCrawlApi {
   crawlStart(config: CrawlConfig): Promise<void>;
   crawlStop(): Promise<void>;
@@ -1580,6 +1653,8 @@ export interface FreeCrawlApi {
   crawlClear(): Promise<void>;
   crawlAddUrl(url: string): Promise<{ accepted: boolean }>;
   projectSaveAs(): Promise<{ filePath: string; bytesWritten: number } | null>;
+  /** Save to the bound project file; prompts for a location the first time. */
+  projectSave(): Promise<{ filePath: string; bytesWritten: number } | null>;
   projectOpen(filePath?: string): Promise<{ filePath: string } | null>;
   projectCurrentPath(): Promise<string | null>;
   /** Active project's saved crawl config, or null on the default scratch
@@ -1590,6 +1665,12 @@ export interface FreeCrawlApi {
   /** Fires when the active project changes; payload is the project's saved
    *  config, or null when it has none yet / is the scratch DB. */
   onProjectConfigChanged(cb: (config: CrawlConfig | null) => void): () => void;
+  /** Current JS-rendering browser provisioning state. */
+  browserInstallGet(): Promise<BrowserInstallState>;
+  /** Start (or retry) the in-app Chromium download. */
+  browserInstallStart(): Promise<BrowserInstallState>;
+  /** Fires on every provisioning state change (download progress included). */
+  onBrowserInstallState(cb: (state: BrowserInstallState) => void): () => void;
   /** Full recent-projects list including archived entries. */
   recentProjectsList(): Promise<RecentProject[]>;
   /** Archive / unarchive a recent project (hides it from Open Recent). */
@@ -1621,6 +1702,9 @@ export interface FreeCrawlApi {
   exportBrokenLinks(input: ExportBrokenLinksInput): Promise<ExportBrokenLinksResult>;
   exportImages(input: ExportImagesInput): Promise<ExportImagesResult>;
   exportTabular(input: ExportTabularInput): Promise<ExportTabularResult>;
+  /** Save a URL Details sub-tab table as CSV or XLSX (format follows the
+   *  extension picked in the save dialog). */
+  exportGrid(input: ExportGridInput): Promise<ExportGridResult>;
   dataDeleteByDomain(
     input: DataDeleteByDomainInput,
   ): Promise<DataDeleteByDomainResult>;
@@ -1753,6 +1837,9 @@ export interface FreeCrawlApi {
   onSpellingProgress(cb: (p: SpellingProgress) => void): () => void;
   /** Full stored match list for one URL. */
   spellingMatches(url: string): Promise<SpellingMatchesResult | null>;
+  /** Languages the configured LanguageTool endpoint offers, for the
+   *  Settings → Spelling language picker. Sorted by display name. */
+  spellingLanguages(): Promise<SpellingLanguageOption[]>;
   /** Faz 7 — start the interactive Google OAuth consent flow for one
    *  integration. Resolves once the user finishes (or cancels) in the
    *  browser. */

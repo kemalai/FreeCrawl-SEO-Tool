@@ -263,6 +263,51 @@ function sanitizeSheetName(label: string, used: Set<string>): string {
   return candidate;
 }
 
+/**
+ * Sheet XML from a plain cell matrix. Split out of the CrawlUrlRow
+ * variant below so the detail-panel grids — whose rows are already
+ * formatted strings, not database records — can reuse the same writer.
+ */
+function buildSheetXmlFromCells(
+  headers: readonly string[],
+  rows: readonly (readonly unknown[])[],
+): string {
+  const parts: string[] = [];
+  parts.push(
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<sheetData>',
+  );
+  parts.push('<row r="1">');
+  headers.forEach((h, i) => {
+    parts.push(
+      `<c r="${colLetter(i)}1" t="inlineStr"><is><t>${xmlEscape(h)}</t></is></c>`,
+    );
+  });
+  parts.push('</row>');
+  rows.forEach((row, rIdx) => {
+    const r = rIdx + 2;
+    parts.push(`<row r="${r}">`);
+    row.forEach((v, i) => {
+      if (v === null || v === undefined || v === '') return;
+      const cellRef = `${colLetter(i)}${r}`;
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        parts.push(`<c r="${cellRef}"><v>${v}</v></c>`);
+      } else if (typeof v === 'boolean') {
+        parts.push(`<c r="${cellRef}" t="b"><v>${v ? 1 : 0}</v></c>`);
+      } else {
+        const safe = sanitizeFormulaPrefix(String(v));
+        parts.push(
+          `<c r="${cellRef}" t="inlineStr"><is><t>${xmlEscape(safe)}</t></is></c>`,
+        );
+      }
+    });
+    parts.push('</row>');
+  });
+  parts.push('</sheetData></worksheet>');
+  return parts.join('');
+}
+
 function buildSheetXml(
   rows: CrawlUrlRow[],
   columns: string[],
@@ -578,4 +623,105 @@ export async function exportTabular(
     written.push(file);
   }
   return { filePath: outputPath, files: written, rowsWritten: total };
+}
+
+// ── Detail-panel grid export ────────────────────────────────────────
+//
+// The URL Details panel's sub-tabs (Inlinks, Images, HTTP Headers,
+// Cookies, …) each show a small table that is already formatted for
+// display — the rows are strings the renderer computed, not database
+// records. `exportTabular` above can't serve them: it streams straight
+// from `ProjectDb` over `CrawlUrlRow` columns. This writer takes the
+// literal cells instead, and reuses the same CSV escaping, formula-
+// injection guard and XLSX packaging so a detail-panel export is
+// indistinguishable from a main-table one.
+
+export interface GridExportOptions {
+  format: 'csv' | 'xlsx';
+  /** Column headers, in order. */
+  headers: readonly string[];
+  /** Row cells, aligned to `headers`. */
+  rows: readonly (readonly unknown[])[];
+  /** Worksheet name (xlsx only). Sanitised to Excel's 31-char rules. */
+  sheetName?: string;
+  /** Prefix CSV with a UTF-8 BOM so Excel-for-Windows picks UTF-8. */
+  csvBom?: boolean;
+}
+
+export interface GridExportResult {
+  filePath: string;
+  rowsWritten: number;
+}
+
+/** Write one in-memory grid to a CSV or XLSX file. */
+export async function exportGrid(
+  filePath: string,
+  options: GridExportOptions,
+): Promise<GridExportResult> {
+  const { format, headers, rows } = options;
+  mkdirSync(path.dirname(filePath), { recursive: true });
+
+  if (format === 'xlsx') {
+    const sheet = sanitizeSheetName(options.sheetName ?? 'Sheet1', new Set());
+    writeFileSync(
+      filePath,
+      buildZipForCells(sheet, headers, rows),
+    );
+    return { filePath, rowsWritten: rows.length };
+  }
+
+  const withBom = options.csvBom !== false;
+  const generator = async function* (): AsyncGenerator<string> {
+    const header = headers.map((h) => escapeCsv(h)).join(',') + '\n';
+    yield withBom ? '﻿' + header : header;
+    for (const row of rows) {
+      yield row.map((cell) => escapeCsv(cell)).join(',') + '\n';
+    }
+  };
+  await pipeline(
+    Readable.from(generator()),
+    createWriteStream(filePath, { encoding: 'utf8' }),
+  );
+  return { filePath, rowsWritten: rows.length };
+}
+
+/** Single-sheet workbook around {@link buildSheetXmlFromCells}. */
+function buildZipForCells(
+  sheetName: string,
+  headers: readonly string[],
+  rows: readonly (readonly unknown[])[],
+): Buffer {
+  const contentTypes =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+    '</Types>';
+  const rels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    '</Relationships>';
+  const workbook =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    `<sheets><sheet name="${xmlEscape(sheetName)}" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const workbookRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+    '</Relationships>';
+
+  return buildZip([
+    { name: '[Content_Types].xml', data: Buffer.from(contentTypes, 'utf8') },
+    { name: '_rels/.rels', data: Buffer.from(rels, 'utf8') },
+    { name: 'xl/workbook.xml', data: Buffer.from(workbook, 'utf8') },
+    { name: 'xl/_rels/workbook.xml.rels', data: Buffer.from(workbookRels, 'utf8') },
+    {
+      name: 'xl/worksheets/sheet1.xml',
+      data: Buffer.from(buildSheetXmlFromCells(headers, rows), 'utf8'),
+    },
+  ]);
 }

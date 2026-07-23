@@ -7,6 +7,21 @@ import {
   type OverviewCounts,
   type UrlCategory,
 } from '@freecrawl/shared-types';
+import type { SettingsSectionKey } from './components/SettingsDialog.js';
+
+/**
+ * Deep link into the Settings dialog. A banner that says "you need an API
+ * key" should drop the user on the field that fixes it, not on whichever
+ * panel happened to be open last.
+ *
+ * The import above is type-only, so it is erased at build time and no
+ * module cycle with SettingsDialog reaches the bundle.
+ */
+export interface SettingsTarget {
+  section: SettingsSectionKey;
+  /** Integration to scroll to and highlight — Integrations panel only. */
+  integration?: string;
+}
 
 export type TabKey =
   | 'internal'
@@ -341,6 +356,9 @@ interface AppState {
   sidebarOpen: boolean;
   detailPanelOpen: boolean;
   settingsOpen: boolean;
+  /** Where the Settings dialog should land when it opens. Null keeps
+   *  whichever section the user was last on. */
+  settingsTarget: SettingsTarget | null;
   recentUrls: string[];
   dataVersion: number;
   setConfig: (patch: Partial<CrawlConfig>) => void;
@@ -358,7 +376,7 @@ interface AppState {
   setSelectedUrlIds: (ids: number[]) => void;
   toggleSidebar: () => void;
   toggleDetailPanel: () => void;
-  setSettingsOpen: (open: boolean) => void;
+  setSettingsOpen: (open: boolean, target?: SettingsTarget) => void;
   addRecentUrl: (url: string) => void;
   bumpDataVersion: () => void;
   reset: () => void;
@@ -454,6 +472,7 @@ export const useAppStore = create<AppState>((set) => ({
   sidebarOpen: true,
   detailPanelOpen: true,
   settingsOpen: false,
+  settingsTarget: null,
   recentUrls: loadRecentUrls(),
   dataVersion: 0,
   setConfig: (patch) =>
@@ -487,7 +506,10 @@ export const useAppStore = create<AppState>((set) => ({
   setSelectedUrlIds: (ids) => set({ selectedUrlIds: ids }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   toggleDetailPanel: () => set((s) => ({ detailPanelOpen: !s.detailPanelOpen })),
-  setSettingsOpen: (open) => set({ settingsOpen: open }),
+  // Clearing the target on close matters: reopening from the menu should
+  // not re-run a deep link the user has already followed.
+  setSettingsOpen: (open, target) =>
+    set({ settingsOpen: open, settingsTarget: open ? (target ?? null) : null }),
   addRecentUrl: (url) =>
     set((state) => {
       const trimmed = url.trim();

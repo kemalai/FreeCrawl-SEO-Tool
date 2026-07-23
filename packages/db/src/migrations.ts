@@ -1892,6 +1892,56 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 79,
+    name: 'add_spelling_detected_language',
+    // The check language is now resolved locally from the page's prose
+    // instead of being handed to LanguageTool's `auto` mode, which can only
+    // answer with a language it supports and so mislabels everything else.
+    //
+    //   detected_language — primary code read out of the prose (`tr`)
+    //   declared_language — primary code from html[lang] (`en`)
+    //
+    // Keeping both makes a wrong `lang` attribute visible as its own
+    // finding. Existing rows predate the resolver and were produced by the
+    // old `auto` path, so their results are cleared: a stored match list
+    // graded against the wrong language is worse than no result at all,
+    // and the page simply shows as unchecked until it is re-run.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(spelling_results)')
+        .all() as unknown as { name: string }[];
+      for (const col of ['detected_language', 'declared_language']) {
+        if (!cols.some((c) => c.name === col)) {
+          db.exec(`ALTER TABLE spelling_results ADD COLUMN ${col} TEXT`);
+        }
+      }
+      db.exec('DELETE FROM spelling_results');
+    },
+  },
+  {
+    version: 80,
+    name: 'add_spelling_engine',
+    // Pages in a language LanguageTool has no rules for are now checked
+    // against a bundled Hunspell dictionary instead of being left blank.
+    // That checker finds spelling mistakes only, so which engine produced
+    // a row has to be stored: without it a clean result would read as
+    // "grammar checked, nothing wrong" when grammar was never examined.
+    //
+    // Rows written before this column exists came from LanguageTool by
+    // definition, so they are backfilled rather than cleared.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(spelling_results)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'engine')) {
+        db.exec('ALTER TABLE spelling_results ADD COLUMN engine TEXT');
+      }
+      db.exec(
+        "UPDATE spelling_results SET engine = 'languagetool' WHERE engine IS NULL",
+      );
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

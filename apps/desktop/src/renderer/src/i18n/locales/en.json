@@ -33,6 +33,7 @@
     "cancel": "Cancel",
     "close": "Close",
     "apply": "Apply",
+    "applied": "Applied",
     "ok": "OK",
     "remove": "Remove",
     "reset": "Reset",
@@ -92,6 +93,11 @@
       "desktop": "Desktop crawl",
       "mobile": "Mobile crawl — crawl the site’s mobile version (mobile User-Agent)"
     }
+  },
+  "browserInstall": {
+    "downloading": "Browser",
+    "downloadingTitle": "Downloading the Chromium browser used for JavaScript rendering. Crawling in text mode is unaffected.",
+    "failed": "Browser download failed — retry"
   },
   "stats": {
     "discovered": "Discovered",
@@ -392,6 +398,7 @@
   "settingsPanels": {
     "presets": {
       "intro": "One-click profiles for common crawl scenarios. Clicking a preset overwrites the affected fields only — your URL list, custom rules, filters, and extraction rules are preserved.",
+      "applied": "\"{{name}}\" preset applied — review the panels, then press Save to keep the changes.",
       "importExport": "Import / Export",
       "importExportIntro": "Save the current settings to a JSON file (e.g. for sharing with a teammate or version control), or load a previously-exported settings file. Importing replaces the current form with the file's contents — press Save at the bottom to persist.",
       "exportBtn": "Export…",
@@ -818,7 +825,8 @@
     "empty3": "or search terms in",
     "empty4": "then re-crawl.",
     "customExtraction": "Custom Extraction",
-    "customSearchHits": "Custom Search hits"
+    "customSearchHits": "Custom Search hits",
+    "colSource": "Source"
   },
   "extractionPreview": {
     "title": "Custom Extraction Preview",
@@ -850,7 +858,11 @@
     "parsedOk": "parsed OK",
     "parseFailed": "parse failed",
     "snapshotUnavailable1": "JSON-LD blocks were detected during crawl but the page body snapshot is unavailable. Re-crawl with",
-    "snapshotUnavailable2": "enabled to view the raw payload."
+    "snapshotUnavailable2": "enabled to view the raw payload.",
+    "colBlock": "Block",
+    "colValid": "Valid JSON",
+    "colTypes": "Types",
+    "colJson": "JSON"
   },
   "imagesView": {
     "loading": "Loading images…",
@@ -896,7 +908,10 @@
     "skipped": "Skipped: previous was h{{n}}",
     "skippedCount": "{{n}} skipped level(s)",
     "capped": "(capped at 200)",
-    "emptyHeading": "(empty heading)"
+    "emptyHeading": "(empty heading)",
+    "colLevel": "Level",
+    "colText": "Heading",
+    "colIssue": "Issue"
   },
   "viewSource": {
     "searchPlaceholder": "Search source…",
@@ -1123,11 +1138,20 @@
     "statusError": "ERR",
     "statusSkipped": "skipped",
     "statusSkippedTip": "Too little prose on the page to check.",
-    "summary": "{{shown}} pages · {{checked}} checked · {{errors}} with findings · {{selected}} selected",
+    "summary": "{{shown}} pages · {{checked}} checked · {{errors}} with findings · {{unsupported}} unsupported · {{selected}} selected",
     "firstN": "(first {{n}})",
     "checking": "Checking: {{url}}",
     "emptyNoData": "No internal HTML pages crawled yet — run a crawl, then select pages to check.",
-    "emptyNoMatch": "No pages match the current filter."
+    "emptyNoMatch": "No pages match the current filter.",
+    "filterUnsupported": "Unsupported language",
+    "statusUnsupported": "n/a",
+    "statusUnsupportedTip": "LanguageTool has no rules for this page’s language, so it was not checked.",
+    "statusMismatch": "lang?",
+    "statusMismatchTip": "The findings were discarded — the page does not read as the language it was checked in.",
+    "langConflict": "The page declares lang=\"{{declared}}\" but its text reads as {{detected}}. The check used {{used}}.",
+    "unsupportedBanner": "{{count}} page(s) left unchecked: LanguageTool has no rules for {{langs}}, and grading that text against a substitute language would report an error on nearly every word. Nothing here is misconfigured — no setting makes this engine check {{langs}}.",
+    "statusOkLocal": "ok*",
+    "statusOkLocalTip": "Checked with the offline dictionary: spelling only, no grammar. LanguageTool has no rules for this language."
   },
   "projects": {
     "title": "Projects",
@@ -1169,7 +1193,18 @@
     "clean": "No spelling or grammar issues found.",
     "summary": "{{n}} finding(s)",
     "language": "Language",
-    "suggestions": "Suggestions"
+    "suggestions": "Suggestions",
+    "colType": "Type",
+    "colCategory": "Category",
+    "colText": "Text",
+    "colSuggestions": "Suggestions",
+    "colMessage": "Message",
+    "colContext": "Context",
+    "unsupported": "Not checked — LanguageTool has no rules for this page’s language.",
+    "detectedAs": "(detected: {{lang}})",
+    "langConflict": "html[lang] says {{declared}}, the text reads as {{detected}}",
+    "cleanLocal": "No spelling mistakes found. Grammar was not checked — LanguageTool has no rules for this language, so an offline dictionary was used instead.",
+    "engineLocal": "offline dictionary — spelling only, no grammar"
   },
   "gscTab": {
     "title": "Search Console",
@@ -1301,7 +1336,10 @@
     "ga4Title": "Analytics 4",
     "ga4Empty": "No GA4 traffic data yet.",
     "inspectionTitle": "URL Inspection",
-    "inspectionEmpty": "No URL Inspection result yet — run it from the Search Console tab."
+    "inspectionEmpty": "No URL Inspection result yet — run it from the Search Console tab.",
+    "colSource": "Source",
+    "colMetric": "Metric",
+    "colValue": "Value"
   },
   "brokenTab": {
     "searchPlaceholder": "Search broken target URLs…",
@@ -1389,13 +1427,17 @@
     },
     "spelling": {
       "title": "Spelling",
-      "intro": "Spelling, grammar and style checks run through LanguageTool against pages you select in the Spelling tab. The page's own html[lang] picks the language; pages that don't declare one are auto-detected. Configure the endpoint (public API or self-hosted) under Integrations → LanguageTool.",
+      "intro": "Spelling, grammar and style checks run through LanguageTool against pages you select in the Spelling tab. Each page's language is detected from its own text and cross-checked against html[lang]; pages in a language LanguageTool has no rules for are reported as unsupported rather than graded against the wrong dictionary. Configure the endpoint (public API or self-hosted) under Integrations → LanguageTool.",
       "levelLabel": "Rule Level",
       "levelDefault": "Default — spelling and grammar errors only",
       "levelPicky": "Picky — also flags style, typography and wordiness",
       "dictionaryLabel": "Custom Dictionary",
       "dictionaryHint": "Words to never flag — brand names, product names, industry jargon. One per line, or separated by commas. Case-insensitive.",
-      "dictionaryCount": "{{n}} word(s) ignored"
+      "dictionaryCount": "{{n}} word(s) ignored",
+      "languageLabel": "Language",
+      "languageHint": "Leave on auto unless detection gets a site wrong. Pinning a language forces every page to be checked in it — useful for a single-language site whose html[lang] is wrong, and it also turns off the safety check that discards implausibly noisy results.",
+      "languageAuto": "Auto — detect from each page's text (recommended)",
+      "languageCount": "This endpoint offers {{n}} language variant(s). Languages outside that list — Turkish, Hungarian, Czech and others — cannot be checked by LanguageTool at all."
     },
     "storage": {
       "title": "Storage",
@@ -1501,5 +1543,10 @@
     "seedNoActive": "No active crawl — start a crawl first, then seed.",
     "seedNoOrigin": "No crawled URLs yet to derive a base origin from.",
     "seedNone": "Nothing new to seed."
+  },
+  "detailExport": {
+    "label": "Export",
+    "title": "Export this table to Excel or CSV",
+    "nothing": "Nothing to export"
   }
 }

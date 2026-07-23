@@ -127,7 +127,8 @@ export function App() {
         return;
       }
       setConfig({ mode: 'list', urlList: urls, startUrl: urls[0] ?? '' });
-      setSettingsOpen(true);
+      // Land on Mode so the just-loaded list is what the user sees.
+      setSettingsOpen(true, { section: 'mode' });
       setDropFlash(t('app.dropLoadedUrls', {
         defaultValue: 'Loaded {{count}} URLs from {{name}} into List mode.',
         count: urls.length,
@@ -411,6 +412,9 @@ export function App() {
           break;
         case 'manage-projects':
           setProjectsOpen(true);
+          break;
+        case 'save-project':
+          void window.freecrawl.projectSave();
           break;
         case 'save-project-as':
           void window.freecrawl.projectSaveAs();
