@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.2] — 2026-07-29
+
+### Added
+- A Crawl and Store switch for every link type — images, CSS, JavaScript, media, canonicals, pagination, hreflang, AMP, iframes — so you control exactly what is fetched and what is reported.
+- Right-click any table selection to copy cells, rows, or columns to the clipboard.
+- A Mobile Alternate column that surfaces separate-URL (m-dot) mobile pages, including the classic setup with no canonical pointing back.
+- A change marker on rows that differ from the previous crawl, so a re-crawl shows at a glance what moved.
+- An optional "Respect robots.txt Crawl-delay" setting for teams whose policy requires it.
+
+### Changed
+- robots.txt `Crawl-delay` is now ignored by default, matching Google and Screaming Frog — sites that publish it no longer turn a 40-second crawl into hours.
+- Pages are now crawled ahead of images, CSS, and JavaScript, so the table fills with real pages from the first seconds instead of assets.
+- Assets can no longer consume a whole Max URLs budget, so a capped crawl returns pages rather than one page and its images.
+- A robots.txt `Crawl-delay` is now reported in the log whether it is honoured or ignored, so a slow crawl is never unexplained.
+
+### Fixed
+- Fixed Clear taking around 17 seconds on a large project; it now finishes in under a second.
+
 ## [0.9.1] — 2026-07-23
 
 ### Added
