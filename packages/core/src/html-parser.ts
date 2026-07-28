@@ -331,6 +331,27 @@ export interface ParsedPage {
    * separately in `images`.
    */
   resources: DiscoveredResource[];
+  /**
+   * `<iframe src>` targets, normalised and deduped. Embedded documents,
+   * not subresources — crawling one means a full page fetch — so they
+   * are kept out of `resources` and out of the outlink count. Gated by
+   * the Spider → Crawl "iframes" row.
+   */
+  iframes: DiscoveredResource[];
+  /**
+   * Raw `<a href>` values that could not be parsed as an http(s) URL —
+   * malformed markup, not deliberate `mailto:` / `tel:` / `#` links.
+   * Capped at 200 per page. Surfaced only when `crawlInvalidLinks` is on.
+   */
+  invalidLinks: string[];
+  /**
+   * Separate-URL mobile version: `<link rel="alternate" media="only
+   * screen and (max-width: …)" href="…">`. Null on responsive sites.
+   * `media` must actually constrain width — a bare `rel="alternate"`
+   * without it is an RSS feed or an hreflang entry, both handled
+   * elsewhere.
+   */
+  mobileAlternate: string | null;
   hasNoindex: boolean;
   hasNofollow: boolean;
 }
@@ -719,6 +740,46 @@ export function parseHtml(
     const kind = rel === 'modulepreload' ? 'js' : PRELOAD_AS_TO_KIND[as];
     if (kind) addResource($el.attr('href'), kind);
   });
+  // Media — `<video>` / `<audio>` and the `<source>` children they own.
+  // Filed under `'other'`, which no other producer emits, so the crawler
+  // can key the Spider → Crawl "Media" row off the kind alone. `<source>`
+  // is matched through its parent because the same tag inside `<picture>`
+  // is an image and already went through `imageMap`.
+  $('video[src], audio[src]').each((_, el) => addResource($(el).attr('src'), 'other'));
+  $('video > source[src], audio > source[src]').each((_, el) =>
+    addResource($(el).attr('src'), 'other'),
+  );
+
+  // Iframes — embedded documents. Deduped separately from `resources` so
+  // that crawling media never drags in every embed, and so they can be
+  // stored as links rather than as subresources.
+  const iframeMap = new Map<string, DiscoveredResource>();
+  $('iframe[src]').each((_, el) => {
+    const raw = ($(el).attr('src') ?? '').trim();
+    if (!raw || raw.startsWith('data:') || raw.startsWith('about:')) return;
+    const normalized = normalizeUrl(raw, pageUrl, opts.urlRewrites);
+    if (!normalized || !/^https?:/.test(normalized)) return;
+    if (iframeMap.has(normalized)) return;
+    iframeMap.set(normalized, {
+      url: normalized,
+      kind: 'html',
+      isInternal: isSameHost(pageUrl, normalized, opts),
+    });
+  });
+
+  // Mobile alternate (m-dot). `rel="alternate"` alone is ambiguous — it
+  // also marks RSS feeds and hreflang entries — so the `media` attribute
+  // must actually express a width constraint before we claim it.
+  let mobileAlternate: string | null = null;
+  $('link[rel~="alternate"][media][href]').each((_, el) => {
+    if (mobileAlternate) return;
+    const $el = $(el);
+    if (($el.attr('hreflang') ?? '').trim()) return;
+    const media = ($el.attr('media') ?? '').toLowerCase();
+    if (!/max-(device-)?width/.test(media)) return;
+    const href = normalizeUrl(($el.attr('href') ?? '').trim(), pageUrl, opts.urlRewrites);
+    if (href && /^https?:/.test(href)) mobileAlternate = href;
+  });
 
   // Pagination — `<link rel="next">` / `<link rel="prev">`. Resolved to
   // absolute via normalizeUrl so the values are comparable to the URLs
@@ -1060,13 +1121,31 @@ export function parseHtml(
     }
   });
 
+  // Hrefs that survive being an `<a href>` but not being a URL: doubled
+  // schemes, stray whitespace inside the authority, bare `:::`. Kept raw
+  // and deduped so the crawler can surface them under the Spider → Crawl
+  // "Crawl Invalid Links" row instead of dropping them silently. Schemes
+  // that are *meant* to be non-navigable (mailto/tel/javascript/#) are
+  // not malformed and never land here.
+  const NON_NAVIGABLE_SCHEME = /^(mailto|tel|sms|callto|javascript|data|blob|about|file|ftp|news|whatsapp|skype|viber|intent|market|itms-apps|geo|magnet|bitcoin|webcal|feed|irc|ssh|slack|tg|zoommtg|msteams):/i;
+  const invalidLinkSet = new Set<string>();
   const linkMap = new Map<string, DiscoveredLink>();
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href');
     if (!href) return;
     const normalized = normalizeUrl(href, pageUrl, opts.urlRewrites);
-    if (!normalized) return;
-    if (!/^https?:/.test(normalized)) return;
+    if (!normalized || !/^https?:/.test(normalized)) {
+      const raw = href.trim();
+      if (
+        raw &&
+        !raw.startsWith('#') &&
+        !NON_NAVIGABLE_SCHEME.test(raw) &&
+        invalidLinkSet.size < 200
+      ) {
+        invalidLinkSet.add(raw.slice(0, 2000));
+      }
+      return;
+    }
     if (linkMap.has(normalized)) return;
 
     const $el = $(el);
@@ -1471,6 +1550,9 @@ export function parseHtml(
     links: [...linkMap.values()],
     images: [...imageMap.values()],
     resources: [...resourceMap.values()],
+    iframes: [...iframeMap.values()],
+    invalidLinks: [...invalidLinkSet],
+    mobileAlternate,
     hasNoindex,
     hasNofollow,
   };

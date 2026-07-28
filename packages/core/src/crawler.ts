@@ -69,6 +69,30 @@ interface QueueItem {
   depth: number;
   /** How many redirect hops led here (0 for items from link extraction). */
   redirectHopCount?: number;
+  /**
+   * Set only by `enqueueResources`, naming the Spider → Crawl row whose
+   * "Crawl" box put this URL in the queue. The matching "Store" box then
+   * decides whether the fetched resource keeps its URL row.
+   *
+   * Carried on the queue item rather than re-derived from the response's
+   * content type at write time, because the two disagree exactly where it
+   * matters: a `.zip` reached through an ordinary hyperlink and a `.mp4`
+   * reached through `<video src>` both detect as `'other'`, and only the
+   * second one is governed by "Store Media".
+   *
+   * Absent for links, sitemap entries, redirect hops, and the resources
+   * mined out of stylesheets — none of those are gated on storage.
+   */
+  resourceRow?: 'image' | 'css' | 'js' | 'media';
+  /**
+   * Fetch this URL and record it, but do not follow anything it links to.
+   * Set by "Check Links Outside of Start Folder": the point of that
+   * option is to learn a status code, not to leave the start folder.
+   *
+   * A leaf flag rather than an inflated depth, so the URL's reported
+   * crawl depth stays the number of hops it actually took to reach.
+   */
+  checkOnly?: boolean;
 }
 
 const EXT_TO_KIND: Record<string, ContentKind> = {
@@ -333,6 +357,16 @@ export class Crawler extends EventEmitter {
   private readonly dbCall: <T>(method: string, args: unknown[]) => Promise<T>;
 
   /**
+   * Explicit re-fetch list for a targeted Re-Spider run, or null for a
+   * normal crawl. Non-null also implies "never wipe the project" — a
+   * re-spider updates rows in place, it does not start a new data set.
+   */
+  private readonly respiderSeeds: string[] | null;
+
+  /** True when this run resumes an interrupted crawl from a checkpoint. */
+  private readonly resumeOnly: boolean;
+
+  /**
    * V2 — Optional Playwright renderer. Returns the post-JS DOM dump for
    * a URL when `renderingMode === 'js'`. Defaults to undefined so the
    * crawler silently skips the render pass when no pool is wired.
@@ -432,9 +466,31 @@ export class Crawler extends EventEmitter {
           tapTargetsSampled: number;
         } | null;
       }>;
+      /**
+       * Re-fetch exactly these URLs instead of walking the site from the
+       * seed — the "Re-Spider" affordance when no crawl is running.
+       *
+       * Everything already in the project is pre-marked as seen, so a
+       * re-spider costs one request per listed URL. Links found on those
+       * pages that the project has never seen ARE followed, which is the
+       * point: a page that gained a link should bring the new target into
+       * the report rather than leaving a gap.
+       */
+      respiderSeeds?: string[];
+      /**
+       * This run continues an interrupted crawl (crash recovery) rather
+       * than starting one. Suppresses the re-fetch-everything behaviour a
+       * repeat Start normally triggers: the caller has already restored
+       * the exact queue that was in flight, and re-reading the pages that
+       * did complete would turn "carry on where you left off" into "crawl
+       * the whole site again".
+       */
+      resumeOnly?: boolean;
     } = {},
   ) {
     super();
+    this.respiderSeeds = opts.respiderSeeds ?? null;
+    this.resumeOnly = opts.resumeOnly === true;
     this.setOp = opts.setOp ?? ((): void => undefined);
     this.parsePage =
       opts.parseHtml ??
@@ -628,7 +684,7 @@ export class Crawler extends EventEmitter {
         `Invalid start URL: ${this.config.startUrl} — neither https:// nor http:// responded within 5s. Check that the host is reachable from this machine (try opening it in a browser).`,
       );
       this.running = false;
-      this.emitProgress();
+      this.emitProgressFinal();
       // Without this the UI hangs in "Running" forever after a bad start URL.
       if (!this.stopped) {
       // Wave 6 — Clean completion clears the checkpoint so the next
@@ -654,14 +710,39 @@ export class Crawler extends EventEmitter {
     this.applyProcessPriority();
     this.startMemoryMonitor();
 
-    // Fresh-start vs. resume decision. If the start URL matches the one
-    // recorded from the previous crawl, we keep existing rows and resume.
-    // If it differs (or there is no previous crawl), we wipe the tables.
+    // Fresh-start vs. refresh decision. A different start URL means a
+    // different site, so the tables are wiped. The same start URL means
+    // the user wants this site looked at again — existing rows are kept
+    // and every one of them is re-fetched (see `hydrateFromDb`), because
+    // a site that was fully crawled has no pending work left and would
+    // otherwise finish instantly without touching a single page.
+    //
+    // A Re-Spider is exempt from both halves: it updates the rows the
+    // user picked and must never wipe the project or re-point it at a
+    // different seed, even if the start URL happens to resolve somewhere
+    // new (a changed redirect would otherwise destroy the whole crawl
+    // the user was looking at).
+    // A crash-recovery resume is exempt from the re-fetch half only — it
+    // is the same site, so the tables must survive.
     const previousStart = this.db.getMeta('startUrl');
-    if (previousStart !== start) {
+    const isRespider = this.respiderSeeds !== null;
+    const isSameSite = previousStart === start;
+    // Wipe ONLY when this is genuinely a different site. Keep this
+    // condition keyed on `isSameSite` rather than on `isRefresh` — a
+    // resume or a re-spider is also "not a refresh", and resetting on
+    // either would destroy the crawl the user is trying to continue.
+    if (!isSameSite && !isRespider) {
       this.db.reset();
+      this.db.setMeta('startUrl', start);
     }
-    this.db.setMeta('startUrl', start);
+    const isRefresh = isSameSite && !isRespider && !this.resumeOnly;
+    // Change markers describe the run that is starting now, so anything
+    // a previous refresh flagged is cleared first. A wiped project has
+    // nothing to clear, and a targeted re-spider clears only its own
+    // seeds (done by the caller) so unrelated markers survive.
+    if (isRefresh) {
+      this.db.clearChangedFlags();
+    }
 
     const origin = new URL(start).origin;
     // robots.txt + sitemap discovery used to block the crawl start
@@ -675,15 +756,32 @@ export class Crawler extends EventEmitter {
       ? loadRobots(origin, this.config.userAgent).then((r) => {
           if (!this.stopped) {
             this.robots = r;
-            // Honour a robots.txt `Crawl-delay` (seconds) by folding it into
-            // the per-worker politeness delay. Cached once — the start
+            // robots.txt `Crawl-delay` (seconds). Cached once — the start
             // origin's directive applies for the crawl, matching the single
             // robots checker used for allow/deny.
+            //
+            // Opt-in (`respectCrawlDelay`, default off). The directive is not
+            // part of RFC 9309; Google ignores it and Screaming Frog does not
+            // implement it. Published values are usually stale copy-paste
+            // (`Crawl-delay: 30` is common) and honouring them literally costs
+            // hours per crawl. Either way we surface the directive so a slow
+            // crawl is never unexplained — silently sleeping for 30 s per URL
+            // with no feedback is the actual bug this replaces.
             const rd = r.getCrawlDelay();
-            this.robotsCrawlDelayMs =
+            const declaredMs =
               typeof rd === 'number' && Number.isFinite(rd) && rd > 0
                 ? Math.round(rd * 1000)
                 : 0;
+            this.robotsCrawlDelayMs = this.config.respectCrawlDelay ? declaredMs : 0;
+            if (declaredMs > 0) {
+              const secs = (declaredMs / 1000).toFixed(declaredMs % 1000 === 0 ? 0 : 1);
+              this.emit(
+                'warn',
+                this.config.respectCrawlDelay
+                  ? `robots.txt declares Crawl-delay: ${secs}s — honouring it caps this crawl at one request every ${secs}s. Turn off "Respect robots.txt Crawl-delay" in Settings to crawl at full speed.`
+                  : `robots.txt declares Crawl-delay: ${secs}s — ignored (matches Google / Screaming Frog; not part of RFC 9309). Enable "Respect robots.txt Crawl-delay" in Settings to honour it.`,
+              );
+            }
           }
         })
       : Promise.resolve();
@@ -691,8 +789,14 @@ export class Crawler extends EventEmitter {
     // seed URLs — both are handled inside `discoverAndIngestSitemaps`, which
     // writes `sitemap_urls` exactly once (merged) to avoid the replace-all
     // race, and additionally enqueues the seed entries as crawl seeds.
+    // Skipped for a targeted Re-Spider: the user asked for specific URLs
+    // to be re-read, and every sitemap entry is already `seen`, so a
+    // rediscovery pass would spend a second or two fetching XML that
+    // cannot add a single fetch. The stored `sitemap_urls` rows survive
+    // (nothing was reset), so sitemap-derived issue counts stay intact.
     const sitemapPromise =
-      this.config.discoverSitemaps || this.config.seedSitemapUrls.length > 0
+      this.respiderSeeds === null &&
+      (this.config.discoverSitemaps || this.config.seedSitemapUrls.length > 0)
         ? this.discoverAndIngestSitemaps(origin)
         : Promise.resolve();
 
@@ -744,7 +848,7 @@ export class Crawler extends EventEmitter {
 
     // Hydrate in-memory state from the DB so resume starts from the right
     // point; then queue whatever work is still pending.
-    this.hydrateFromDb();
+    this.hydrateFromDb({ refresh: isRefresh });
 
     try {
       // Wait for internal crawl first, then drain any external probes still
@@ -758,6 +862,9 @@ export class Crawler extends EventEmitter {
       while (!this.stopped) {
         await this.queue.onIdle();
         await new Promise<void>((r) => setTimeout(r, 50));
+        // Top up a refresh run's backlog as the queue frees up. No-op for
+        // a normal crawl.
+        this.feedRefreshBacklog();
         if (this.queue.size + this.queue.pending === 0) break;
       }
       await this.externalQueue.onIdle();
@@ -824,7 +931,7 @@ export class Crawler extends EventEmitter {
     // heap that's no longer needed once the queue is drained.
     this.seen.clear();
     this.externalSeen.clear();
-    this.emitProgress();
+    this.emitProgressFinal();
     this.setOp('idle');
     // Suppress 'done' if a stop() ran during teardown — otherwise the
     // zombie crawler's done-event clobbers the new crawl's UI state.
@@ -1608,7 +1715,7 @@ export class Crawler extends EventEmitter {
    *  with nothing to fetch): stop, clear the resume checkpoint, emit done. */
   private finishEmptyFixedCrawl(): void {
     this.running = false;
-    this.emitProgress();
+    this.emitProgressFinal();
     if (!this.stopped) {
       try {
         this.db.clearQueueCheckpoint();
@@ -1680,7 +1787,7 @@ export class Crawler extends EventEmitter {
     this.stopMemoryMonitor();
     this.seen.clear();
     this.externalSeen.clear();
-    this.emitProgress();
+    this.emitProgressFinal();
     if (!this.stopped) {
       // Wave 6 — Clean completion clears the checkpoint so the next
       // app launch doesn't offer to "resume" a crawl that already
@@ -1753,6 +1860,22 @@ export class Crawler extends EventEmitter {
               `Sitemap: parsed ${res.sitemapsParsed.length}/${res.sitemapsTried.length}, ${res.entries.length} URLs${res.truncated ? ` (truncated at ${sitemapMaxUrls.toLocaleString()})` : ''}`,
             );
           }
+          // Spider → Crawl "Crawl Linked XML Sitemaps". Auto-discovery on
+          // its own only records entries, which is what the sitemap issue
+          // filters compare against. Crawling them as well is what finds
+          // orphans — pages the sitemap declares but nothing links to.
+          if (this.config.crawlLinkedSitemaps) {
+            let seeded = 0;
+            for (const e of res.entries) {
+              const norm = normalizeUrl(e.url, undefined, this.urlRewrites);
+              if (!norm) continue;
+              this.enqueue({ url: norm, depth: 0 });
+              seeded++;
+            }
+            if (seeded > 0) {
+              this.emit('info', `Sitemap: ${seeded} discovered URL(s) queued as crawl seeds`);
+            }
+          }
         }
 
         // (2) User-supplied seed sitemaps — recorded AND enqueued.
@@ -1792,12 +1915,93 @@ export class Crawler extends EventEmitter {
     }
   }
 
-  private hydrateFromDb(): void {
+  /** Known URLs a refresh run still has to re-fetch, and how far into it
+   *  we are. Fed to the queue in slices rather than all at once — see
+   *  `feedRefreshBacklog`. */
+  private refreshBacklog: { url: string; depth: number }[] = [];
+  private refreshBacklogIndex = 0;
+
+  /** How many backlog URLs to queue per top-up. */
+  private static readonly REFRESH_FEED_CHUNK = 5000;
+
+  /**
+   * Queue the next slice of a refresh run's backlog.
+   *
+   * Dumping a whole site onto the queue in one go would materialise a
+   * queue task per URL up front (a real memory spike past ~100 K pages)
+   * and, worse, silently lose the tail on any project with a
+   * `maxQueueSize`: `enqueue` drops anything arriving above the cap, so
+   * those pages would never be re-crawled and the run would report
+   * success having skipped them. Feeding in slices and topping up as the
+   * queue drains keeps coverage complete at any site size.
+   */
+  private feedRefreshBacklog(): void {
+    if (this.stopped) return;
+    if (this.refreshBacklogIndex >= this.refreshBacklog.length) return;
+    const cap = this.config.maxQueueSize;
+    const room =
+      cap > 0
+        ? Math.max(0, cap - (this.queue.size + this.queue.pending))
+        : Crawler.REFRESH_FEED_CHUNK;
+    const take = Math.min(Crawler.REFRESH_FEED_CHUNK, room);
+    if (take <= 0) return;
+    const end = Math.min(
+      this.refreshBacklog.length,
+      this.refreshBacklogIndex + take,
+    );
+    for (; this.refreshBacklogIndex < end; this.refreshBacklogIndex++) {
+      const row = this.refreshBacklog[this.refreshBacklogIndex]!;
+      // Already known, so `seen` holds it from the hydrate sweep above —
+      // drop it so enqueue accepts the re-fetch. Anything the live
+      // link-follow path reaches first stays deduped: enqueue re-adds it
+      // to `seen`, and the backlog's own enqueue then no-ops.
+      this.seen.delete(row.url);
+      this.enqueue({ url: row.url, depth: row.depth });
+    }
+  }
+
+  private hydrateFromDb(opts: { refresh: boolean } = { refresh: false }): void {
     // Mark every already-known URL as "seen" so enqueue can skip them.
     for (const url of this.db.getAllUrls()) {
       this.seen.add(url);
     }
-    this.crawled = this.db.countCrawledUrls();
+    // A refresh counts its own work from zero — the progress bar should
+    // read "0 of 122 re-crawled", not start at 122 and never move.
+    this.crawled = opts.refresh ? 0 : this.db.countCrawledUrls();
+    // Same reasoning for the subresource quota: a resumed crawl continues
+    // spending the original allowance. A refresh re-crawls the known set, so
+    // it starts over alongside `crawled`.
+    this.resourceAdmitted = opts.refresh ? 0 : this.db.countSubresourceUrls();
+
+    // Targeted Re-Spider: fetch only the listed URLs. They are dropped
+    // from `seen` so enqueue accepts them despite already having rows;
+    // everything else stays seen, so the run costs one request per seed
+    // plus whatever genuinely new links those pages turn up.
+    if (this.respiderSeeds !== null) {
+      for (const url of this.respiderSeeds) {
+        this.seen.delete(url);
+        this.enqueue({ url, depth: this.db.getUrlDepth(url) ?? 0 });
+      }
+      return;
+    }
+
+    // Refresh run — Start pressed again on a site that is already in the
+    // project. Re-fetch every page we hold, so a site the user has since
+    // edited shows its current state and the reports are rebuilt from
+    // fresh responses. Links discovered along the way that the project
+    // has never seen are followed as usual, which is how pages added
+    // since the last crawl get picked up.
+    if (opts.refresh) {
+      this.refreshBacklog = this.db.getCrawledInternalUrls();
+      this.refreshBacklogIndex = 0;
+      if (this.refreshBacklog.length > 0) {
+        this.emit(
+          'info',
+          `Refresh: re-crawling ${this.refreshBacklog.length} known URL(s)…`,
+        );
+      }
+      this.feedRefreshBacklog();
+    }
 
     // If the start URL isn't in the DB yet, kick off a brand-new crawl from it.
     if (!this.db.hasUrl(this.config.startUrl)) {
@@ -2042,7 +2246,9 @@ export class Crawler extends EventEmitter {
       }
     }
     this.setOp('paused');
-    this.emitProgress();
+    // User-initiated state change — never throttle it, the button must
+    // flip on the next frame rather than up to 200 ms later.
+    this.emitProgressFinal();
   }
 
   resume(): void {
@@ -2051,7 +2257,7 @@ export class Crawler extends EventEmitter {
     this.queue.start();
     this.externalQueue.start();
     this.setOp('idle');
-    this.emitProgress();
+    this.emitProgressFinal();
   }
 
   get isRunning(): boolean {
@@ -2281,10 +2487,68 @@ export class Crawler extends EventEmitter {
     return this.seen.size > before;
   }
 
+  /**
+   * Dispatch priority. Documents outrank subresources; p-queue runs the
+   * highest number first and keeps FIFO order within a tier, so pages
+   * still traverse breadth-first and resources still fetch in discovery
+   * order — only the interleaving changes.
+   *
+   * `resourceRow` is exactly the right discriminator: `enqueueResources`
+   * sets it for images / CSS / JS / media and nothing else does. Links,
+   * sitemap entries, redirect hops, manual additions, and iframes (which
+   * are documents that get parsed for their own links) all land in the
+   * document tier.
+   *
+   * Why this matters: resources are enqueued before the link-follow loop
+   * in `fetchAndProcess`, so under a flat FIFO queue a page's entire
+   * asset set lands ahead of every link it found. On an image-heavy home
+   * page that is ~90 fetches of images before the first category page —
+   * the crawl looks stalled to anyone watching the (HTML-filtered) URL
+   * table, and a `maxUrls` budget gets spent on assets instead of pages.
+   * Nothing is skipped either way; assets are fetched as slots free up.
+   */
+  private static priorityFor(item: QueueItem): number {
+    return item.resourceRow ? 0 : 1;
+  }
+
+  /**
+   * Share of `maxUrls` that subresources may claim. `priorityFor` decides the
+   * order pages and assets are *fetched* in; this decides how much of a
+   * limited budget they are *allowed* in the queue for at all — the admission
+   * cap in `enqueue` is first-come-first-served, and resources are enqueued
+   * before the link-follow loop runs, so without a rail one image-heavy page
+   * can spend the whole allowance before a single link is considered. On a
+   * 90-URL budget that produced 83 images and exactly one page.
+   *
+   * A rail, not a redesign: it only binds on small budgets. Measured on a
+   * 500-URL budget the mix moves 323→343 pages and 172→152 images, while a
+   * 90-URL budget goes from 1 page to 55. Deliberately not a setting — the
+   * failure it prevents is one users hit without knowing to look for it, and
+   * an unlimited `maxUrls` (the default) never reaches the cap at all.
+   */
+  private static readonly SUBRESOURCE_BUDGET_SHARE = 0.4;
+
+  /**
+   * Subresources admitted against `maxUrls`. Seeded from the project on
+   * resume so a continued crawl shares one allowance with the run that
+   * created it rather than starting a fresh one.
+   */
+  private resourceAdmitted = 0;
+
   private enqueue(item: QueueItem): void {
     if (this.stopped) return;
     if (this.seen.has(item.url)) return;
     if (this.seen.size >= this.config.maxUrls) return;
+    // Subresource share of the budget (see SUBRESOURCE_BUDGET_SHARE). Checked
+    // after the overall cap so the budget total is unchanged — this only
+    // decides who gets to claim the remaining slots.
+    if (
+      item.resourceRow &&
+      this.resourceAdmitted >=
+        Math.round(this.config.maxUrls * Crawler.SUBRESOURCE_BUDGET_SHARE)
+    ) {
+      return;
+    }
     if (item.depth > this.config.maxDepth) return;
     if (this.robots && !this.robots.isAllowed(item.url)) return;
     if (!this.passesUrlFilter(item.url)) return;
@@ -2301,10 +2565,11 @@ export class Crawler extends EventEmitter {
     }
 
     this.seen.add(item.url);
+    if (item.resourceRow) this.resourceAdmitted++;
     this.pending++;
     this.pendingItems.set(item.url, item.depth);
     this.queue
-      .add(() => this.fetchAndProcess(item))
+      .add(() => this.fetchAndProcess(item), { priority: Crawler.priorityFor(item) })
       .catch((err: unknown) => {
         this.emit(
           'error',
@@ -2331,34 +2596,62 @@ export class Crawler extends EventEmitter {
    * include/exclude filters, dedupe) still apply. Non-HTML responses never
    * reach the link-follow path, so resources stay leaf nodes.
    */
+  /**
+   * The "Store" half of a Spider → Crawl resource row. Split out because
+   * the decision is needed on the write path, far from `enqueueResources`
+   * where the row was chosen.
+   */
+  private storesResourceRow(row: NonNullable<QueueItem['resourceRow']>): boolean {
+    if (row === 'css') return this.config.storeCss;
+    if (row === 'js') return this.config.storeJs;
+    if (row === 'image') return this.config.storeImages;
+    return this.config.storeMedia;
+  }
+
   private enqueueResources(parsed: ParsedPage, depth: number): void {
     if (this.config.checkImages) {
       for (const img of parsed.images) {
-        if (img.isInternal) this.enqueue({ url: img.src, depth });
+        if (img.isInternal) this.enqueue({ url: img.src, depth, resourceRow: 'image' });
         // External images: status/size are filled by the post-crawl image
         // probe (images table), which now covers external images too — so
         // a dead external/CDN image still trips "Broken Image src".
       }
     }
-    // Whether a resource kind should be crawled at all. Fonts ride with the
-    // CSS toggle (they're declared by CSS / font preloads); images obey the
-    // image toggle so `<link rel=preload as=image>` matches `<img>` behaviour.
-    const shouldFollow = (kind: ContentKind): boolean => {
-      if (kind === 'css') return this.config.checkCss;
-      if (kind === 'js') return this.config.checkJs;
-      if (kind === 'image') return this.config.checkImages;
-      if (kind === 'font') return this.config.checkCss;
-      return false;
+    // Which Spider → Crawl row governs each resource kind. Fonts ride with
+    // CSS (they're declared by stylesheets and font preloads); `'other'` is
+    // only ever produced by the media extractor, so it maps to Media.
+    const rowFor = (kind: ContentKind): QueueItem['resourceRow'] | null => {
+      if (kind === 'css' || kind === 'font') return 'css';
+      if (kind === 'js') return 'js';
+      if (kind === 'image') return 'image';
+      if (kind === 'other') return 'media';
+      return null;
+    };
+    const shouldFollow = (row: NonNullable<QueueItem['resourceRow']>): boolean => {
+      if (row === 'css') return this.config.checkCss;
+      if (row === 'js') return this.config.checkJs;
+      if (row === 'image') return this.config.checkImages;
+      return this.config.crawlMedia;
     };
     for (const r of parsed.resources) {
-      if (!shouldFollow(r.kind)) continue;
+      const row = rowFor(r.kind);
+      if (!row || !shouldFollow(row)) continue;
       if (r.isInternal) {
-        this.enqueue({ url: r.url, depth });
+        this.enqueue({ url: r.url, depth, resourceRow: row });
       } else {
         // External CSS/JS/font resources have no dedicated probe, so route
         // them through the external-stub probe to surface their status
         // (broken third-party scripts/styles show up in Broken Links).
         this.enqueueExternal(r.url);
+      }
+    }
+    // Iframes are documents, not subresources: crawling one is a full page
+    // fetch that extracts its own links, so it goes through the ordinary
+    // queue at the next depth rather than the leaf-node resource path.
+    if (this.config.crawlIframes) {
+      for (const f of parsed.iframes) {
+        if (f.isInternal) this.enqueue({ url: f.url, depth: depth + 1 });
+        else this.enqueueExternal(f.url);
       }
     }
   }
@@ -2414,8 +2707,16 @@ export class Crawler extends EventEmitter {
    * evenly-spaced slots. `maxRps <= 0` disables the gate (unlimited).
    */
   private async acquireRateSlot(): Promise<void> {
-    if (this.config.maxRps <= 0) return;
-    const minInterval = 1000 / this.config.maxRps;
+    // A robots.txt `Crawl-delay` means "one request every N seconds to this
+    // origin" — a *global* spacing, not a per-worker one. Applying it as a
+    // per-worker post-request sleep (as this used to) both violated the
+    // directive (20 workers → 20 requests per window) and multiplied crawl
+    // time by the worker count. Folding it into the dispatch gate honours it
+    // literally when the user opts in. Only reached when `respectCrawlDelay`
+    // is on — `robotsCrawlDelayMs` stays 0 otherwise.
+    const rpsInterval = this.config.maxRps > 0 ? 1000 / this.config.maxRps : 0;
+    const minInterval = Math.max(rpsInterval, this.robotsCrawlDelayMs);
+    if (minInterval <= 0) return;
     const now = Date.now();
     const scheduled = Math.max(now, this.nextDispatchAt);
     this.nextDispatchAt = scheduled + minInterval;
@@ -2781,6 +3082,19 @@ export class Crawler extends EventEmitter {
             : statusCode >= 400
               ? 'non-indexable:client-error'
               : 'indexable';
+        // Spider → Crawl "Store" for the row that queued this resource.
+        // Turning it off keeps the fetch — which is what validates the
+        // resource loads and what lets a stylesheet be mined for its
+        // `@font-face` targets — but drops the URL row, so the Internal
+        // tab isn't buried under a few hundred assets. Anything not
+        // enqueued as a resource has no `resourceRow` and is unaffected.
+        if (item.resourceRow && !this.storesResourceRow(item.resourceRow)) {
+          this.crawled++;
+          if (needsCssParse && nonHtmlBody) {
+            this.enqueueCssResources(nonHtmlBody, item.url, item.depth);
+          }
+          return;
+        }
         const nonHtmlUrlId = await this.dbCall<number>('upsertUrl', [
           {
             url: item.url,
@@ -2985,6 +3299,63 @@ export class Crawler extends EventEmitter {
         ? parsed.links
         : parsed.links.filter((l) => !l.rel?.includes('nofollow'));
 
+      // Spider → Crawl "Store" for the two hyperlink rows. `storableLinks`
+      // itself stays whole: traversal below and the page's outlink count
+      // both describe what the page declared, which doesn't change just
+      // because the user stopped recording one side of the graph.
+      const persistedLinks: DiscoveredLink[] = [];
+      if (this.config.storeInternalLinks || this.config.storeExternalLinks) {
+        for (const l of storableLinks) {
+          const keep = l.isInternal
+            ? this.config.storeInternalLinks
+            : this.config.storeExternalLinks;
+          if (keep) persistedLinks.push(l);
+        }
+      }
+      // Iframes join the link graph as `other`, so they show up in the
+      // page's Outlinks and a dead embed surfaces in Broken Links. They
+      // are excluded from `outlinks` above — an embed is not a hyperlink,
+      // and counting it would move every "Too Many Links" verdict.
+      if (this.config.storeIframes) {
+        for (const f of parsed.iframes) {
+          persistedLinks.push({
+            fromUrl: item.url,
+            toUrl: f.url,
+            type: 'other',
+            anchor: null,
+            altText: null,
+            rel: null,
+            target: null,
+            pathType: 'absolute',
+            linkPath: null,
+            linkPosition: 'content',
+            linkOrigin: 'html',
+            isInternal: f.isInternal,
+          });
+        }
+      }
+      // Malformed hrefs recorded verbatim. They can never resolve to a
+      // crawled URL, so the broken-link join reports every one of them —
+      // which is the whole point of asking for them.
+      if (this.config.crawlInvalidLinks) {
+        for (const raw of parsed.invalidLinks) {
+          persistedLinks.push({
+            fromUrl: item.url,
+            toUrl: raw,
+            type: 'other',
+            anchor: null,
+            altText: null,
+            rel: null,
+            target: null,
+            pathType: 'absolute',
+            linkPath: null,
+            linkPosition: 'content',
+            linkOrigin: 'html',
+            isInternal: true,
+          });
+        }
+      }
+
       const imagesMissingAlt = parsed.images.filter((img) => img.alt === null).length;
       // Phase 1b — Build the entire per-URL write payload up front and
       // ship it across the writer-worker boundary in one shot. The
@@ -3014,9 +3385,13 @@ export class Crawler extends EventEmitter {
           h5Count: parsed.h5Count,
           h6Count: parsed.h6Count,
           wordCount: parsed.wordCount,
-          canonical: parsed.canonical,
-          canonicalCount: parsed.canonicalCount,
-          canonicalHttp,
+          // Spider → Crawl "Store" columns. Indexability was already
+          // decided above from the live values, so switching a row off
+          // empties its tab without silently re-labelling pages as
+          // indexable — the verdict and the evidence stay in agreement.
+          canonical: this.config.storeCanonicals ? parsed.canonical : null,
+          canonicalCount: this.config.storeCanonicals ? parsed.canonicalCount : 0,
+          canonicalHttp: this.config.storeCanonicals ? canonicalHttp : null,
           metaRobots: parsed.metaRobots,
           xRobotsTag,
           contentType,
@@ -3058,15 +3433,22 @@ export class Crawler extends EventEmitter {
           schemaTypes: parsed.schemaTypes.length > 0 ? parsed.schemaTypes.join(', ') : null,
           schemaBlockCount: parsed.schemaBlockCount,
           schemaInvalidCount: parsed.schemaInvalidCount,
-          paginationNext: parsed.paginationNext,
-          paginationPrev: parsed.paginationPrev,
-          hreflangs: parsed.hreflangs.length > 0 ? JSON.stringify(parsed.hreflangs) : null,
-          hreflangCount: parsed.hreflangs.length,
+          paginationNext: this.config.storePagination ? parsed.paginationNext : null,
+          paginationPrev: this.config.storePagination ? parsed.paginationPrev : null,
+          hreflangs:
+            this.config.storeHreflang && parsed.hreflangs.length > 0
+              ? JSON.stringify(parsed.hreflangs)
+              : null,
+          hreflangCount: this.config.storeHreflang ? parsed.hreflangs.length : 0,
           videos: parsed.videos.length > 0 ? JSON.stringify(parsed.videos) : null,
-          amphtml: parsed.amphtml,
-          ampPage: parsed.ampPage,
-          ampValidationErrors: parsed.ampValidationErrors.length > 0
-            ? JSON.stringify(parsed.ampValidationErrors)
+          amphtml: this.config.storeAmp ? parsed.amphtml : null,
+          ampPage: this.config.storeAmp ? parsed.ampPage : false,
+          ampValidationErrors:
+            this.config.storeAmp && parsed.ampValidationErrors.length > 0
+              ? JSON.stringify(parsed.ampValidationErrors)
+              : null,
+          mobileAlternate: this.config.storeMobileAlternate
+            ? parsed.mobileAlternate
             : null,
           favicon: parsed.favicon,
           appleTouchIcon: parsed.appleTouchIcon,
@@ -3076,8 +3458,8 @@ export class Crawler extends EventEmitter {
           mixedContentCount: parsed.mixedContentCount,
           mixedContentActive: parsed.mixedContentActive,
           mixedContentPassive: parsed.mixedContentPassive,
-          metaRefresh: parsed.metaRefresh,
-          metaRefreshUrl: parsed.metaRefreshUrl,
+          metaRefresh: this.config.storeMetaRefresh ? parsed.metaRefresh : null,
+          metaRefreshUrl: this.config.storeMetaRefresh ? parsed.metaRefreshUrl : null,
           charset,
           extractionResults: parsed.extractionResults
             ? JSON.stringify(parsed.extractionResults)
@@ -3122,7 +3504,9 @@ export class Crawler extends EventEmitter {
           headings:
             parsed.headings.length > 0 ? JSON.stringify(parsed.headings) : null,
           serverHeader,
-          jsOnlyLinksCount: parsed.jsOnlyLinksCount,
+          jsOnlyLinksCount: this.config.storeUncrawlableLinks
+            ? parsed.jsOnlyLinksCount
+            : 0,
           textCodeRatio: parsed.textCodeRatio,
           fleschReadingEase: parsed.fleschReadingEase,
           fleschKincaidGrade: parsed.fleschKincaidGrade,
@@ -3140,8 +3524,8 @@ export class Crawler extends EventEmitter {
                   : 1_048_576,
             }
           : null,
-        links: storableLinks,
-        images: parsed.images,
+        links: persistedLinks,
+        images: this.config.storeImages ? parsed.images : [],
         fromDepth: item.depth,
       });
       // V2 Faz 1 — Persist render artefacts inline so they finish before
@@ -3210,20 +3594,43 @@ export class Crawler extends EventEmitter {
         return;
       }
 
-      if (this.config.scope === 'exact-url') {
-        // exact-url / single-page mode: do not follow any links.
+      if (this.config.scope === 'exact-url' || item.checkOnly) {
+        // exact-url / single-page mode: do not follow any links. Same for
+        // a URL pulled in only to check its status (see `checkOnly`).
       } else {
         const nextDepth = item.depth + 1;
-        for (const link of storableLinks) {
-          const inScope = isInScope(this.config.startUrl, link.toUrl, this.config.scope);
-          if (!inScope && !this.config.crawlExternal) continue;
-          // Wave 3 — nofollow follow toggle. By default nofollow links
-          // are stored (when `storeNofollowLinks` is on) but never
-          // recursed into. `followNofollow=true` opts out of the
-          // "respect nofollow" behaviour and treats them like any
-          // other link for the follow decision.
-          if (link.rel?.includes('nofollow') && !this.config.followNofollow) continue;
-          this.enqueue({ url: link.toUrl, depth: nextDepth });
+        // Spider → Crawl "Internal Hyperlinks / Crawl". Off leaves every
+        // other discovery route (sitemaps, canonicals, pagination) intact,
+        // so it audits a fixed set of pages without spidering outward.
+        if (this.config.crawlInternalLinks) {
+          for (const link of storableLinks) {
+            const inScope = isInScope(this.config.startUrl, link.toUrl, this.config.scope);
+            // With `scope: 'subfolder'`, "Check Links Outside of Start
+            // Folder" fetches out-of-folder targets once so their status
+            // is known, then stops — Screaming Frog draws the same line
+            // between checking a link and crawling through it.
+            const checkOnly =
+              !inScope &&
+              this.config.scope === 'subfolder' &&
+              this.config.checkLinksOutsideStartFolder &&
+              isInScope(this.config.startUrl, link.toUrl, 'subdomain');
+            if (!inScope && !checkOnly && !this.config.crawlExternal) continue;
+            // Wave 3 — nofollow follow toggle. By default nofollow links
+            // are stored (when `storeNofollowLinks` is on) but never
+            // recursed into. Turning the matching row on opts out of the
+            // "respect nofollow" behaviour and treats them like any other
+            // link for the follow decision — internal and external are
+            // separate switches because sites nofollow them for opposite
+            // reasons (crawl-budget shaping vs. not vouching for a third
+            // party).
+            if (link.rel?.includes('nofollow')) {
+              const followThis = link.isInternal
+                ? this.config.followNofollow
+                : this.config.followExternalNofollow;
+              if (!followThis) continue;
+            }
+            this.enqueue({ url: link.toUrl, depth: nextDepth, checkOnly });
+          }
         }
         // Wave 3 — Pagination follow toggle. rel=next/prev are part of
         // the standard discovery graph; the toggle exists to debug
@@ -3268,6 +3675,21 @@ export class Crawler extends EventEmitter {
             this.enqueue({ url: parsed.metaRefreshUrl, depth: nextDepth });
           }
         }
+        // Spider → Crawl rows that only add discovery. Each one enqueues a
+        // declared alternate — a translated page, an AMP variant, an m-dot
+        // URL — that an ordinary hyperlink often never points at, which is
+        // exactly why they go uncrawled without an explicit opt-in.
+        const followDeclared = (target: string | null): void => {
+          if (!target || target === item.url) return;
+          const inScope = isInScope(this.config.startUrl, target, this.config.scope);
+          if (!inScope && !this.config.crawlExternal) return;
+          this.enqueue({ url: target, depth: nextDepth });
+        };
+        if (this.config.crawlHreflang) {
+          for (const h of parsed.hreflangs) followDeclared(h.href);
+        }
+        if (this.config.crawlAmp) followDeclared(parsed.amphtml);
+        if (this.config.crawlMobileAlternate) followDeclared(parsed.mobileAlternate);
       }
     } catch (err) {
       // Stop / Clear: abandon silently. No row is written, no failure
@@ -3286,7 +3708,9 @@ export class Crawler extends EventEmitter {
       // and surface them as errors in the URL table. Re-enqueue lands
       // in a paused queue → resume() picks them up cleanly.
       if (this.paused && controller.signal.aborted) {
-        this.queue.add(() => this.fetchAndProcess(item)).catch(() => undefined);
+        this.queue
+          .add(() => this.fetchAndProcess(item), { priority: Crawler.priorityFor(item) })
+          .catch(() => undefined);
         return;
       }
       this.failed++;
@@ -3319,12 +3743,11 @@ export class Crawler extends EventEmitter {
       if (respTimeTimer) clearTimeout(respTimeTimer);
       // Politeness delay — applied per worker *after* each request so a
       // higher concurrency still honours a "one request every N ms per slot"
-      // contract on top of the global RPS cap. Takes the larger of the
-      // configured delay and any robots.txt Crawl-delay for the origin.
-      const politenessMs = Math.max(
-        this.config.crawlDelayMs,
-        this.config.respectRobotsTxt ? this.robotsCrawlDelayMs : 0,
-      );
+      // contract on top of the global RPS cap. This is the user's own
+      // `crawlDelayMs` setting only; a robots.txt Crawl-delay is enforced
+      // globally in `acquireRateSlot` instead, which is what the directive
+      // actually means (see there).
+      const politenessMs = this.config.crawlDelayMs;
       if (politenessMs > 0 && !this.stopped) {
         await sleep(politenessMs);
       }
@@ -3870,6 +4293,27 @@ export class Crawler extends EventEmitter {
       }
       return;
     }
+    this.emitProgressNow();
+  }
+
+  /**
+   * Emit a progress frame immediately, bypassing the 5 Hz throttle.
+   *
+   * Every terminal state transition (crawl finished, paused, resumed)
+   * MUST use this instead of `emitProgress()`. The throttle defers a
+   * too-soon call by up to 200 ms via `progressTrailingTimer`, and the
+   * `'done'` event that follows is emitted synchronously — so the host
+   * processes 'done' first, unbinds this crawler as the session's
+   * active one, and then DROPS the trailing `running: false` frame as
+   * if it came from a superseded crawler. The renderer never learns the
+   * crawl ended: the UI stays pinned to "Running" and Stop/Pause become
+   * no-ops because the crawler they target is already detached.
+   *
+   * The gap only opens when the final frame lands within 200 ms of the
+   * previous one — i.e. when post-crawl passes finish almost instantly,
+   * which is exactly what a re-Start on an already-complete crawl does.
+   */
+  private emitProgressFinal(): void {
     this.emitProgressNow();
   }
 

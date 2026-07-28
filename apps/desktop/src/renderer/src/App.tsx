@@ -39,6 +39,7 @@ export function App() {
   const toggleDetailPanel = useAppStore((s) => s.toggleDetailPanel);
   const setProgress = useAppStore((s) => s.setProgress);
   const setSummary = useAppStore((s) => s.setSummary);
+  const markCrawlFinished = useAppStore((s) => s.markCrawlFinished);
   const setError = useAppStore((s) => s.setError);
   const bumpDataVersion = useAppStore((s) => s.bumpDataVersion);
   const reset = useAppStore((s) => s.reset);
@@ -219,7 +220,22 @@ export function App() {
         }
       });
     });
-    const off2 = window.freecrawl.onDone((s) => setSummary(s));
+    const off2 = window.freecrawl.onDone((s) => {
+      setSummary(s);
+      // 'done' is terminal. Flush any frame still buffered for the next
+      // animation frame — dropping it would lose the final counters,
+      // keeping it as-is would re-assert `running: true` one frame after
+      // we clear it — then make sure the toolbar leaves the Running
+      // state even when no frame arrives at all. A crawl that ends
+      // within one throttle window of its last progress emit used to
+      // leave the UI pinned to "Running" with Stop/Pause wired to an
+      // already-detached crawler.
+      if (pendingProgress) {
+        setProgress({ ...pendingProgress, running: false, paused: false });
+        pendingProgress = null;
+      }
+      markCrawlFinished();
+    });
     const off3 = window.freecrawl.onError(setError);
     const offData = window.freecrawl.onDataChanged(() => bumpDataVersion());
     // Per-project settings — when a project opens, swap the UI to its saved
@@ -233,10 +249,12 @@ export function App() {
           // macOS-only round-trip (see menu.ts): the native menu eats
           // Cmd+C before the page sees a keydown, so the Copy item
           // forwards here instead. Re-dispatch a synthetic keydown so
-          // the existing document-level Ctrl/Cmd+C table-copy handlers
-          // (detail panel cells, broken-links cells) run unchanged; if
-          // none of them preventDefault'ed — no table selection — fall
-          // back to the stock native copy for text selections/inputs.
+          // the document-level Ctrl/Cmd+C grid-copy handlers run
+          // unchanged — the URL table, the Broken Links table and the
+          // detail panel's links table all listen for it, and arbitrate
+          // between themselves via `ownsGridCopy`. If none of them
+          // preventDefault'ed — no grid selection — fall back to the
+          // stock native copy for text selections/inputs.
           const ae = document.activeElement as HTMLElement | null;
           const editable =
             ae !== null &&
@@ -449,6 +467,7 @@ export function App() {
     t,
     setProgress,
     setSummary,
+    markCrawlFinished,
     setError,
     toggleSidebar,
     toggleDetailPanel,

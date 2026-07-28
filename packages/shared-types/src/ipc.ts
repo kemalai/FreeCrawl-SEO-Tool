@@ -116,6 +116,8 @@ export const IPC = {
   urlCertInfo: 'urls:cert-info',
   urlContextMenu: 'url:context-menu',
   urlBulkContextMenu: 'url:bulk-context-menu',
+  urlGridContextMenu: 'url:grid-context-menu',
+  urlGridCopy: 'url:grid-copy',
   imagesQuery: 'images:query',
   brokenLinksQuery: 'broken-links:query',
   overviewGet: 'overview:get',
@@ -935,6 +937,35 @@ export interface UrlBulkContextMenuInput {
   urlIds: number[];
 }
 
+/**
+ * Which of the URL grid's three selection layers the right-click landed
+ * in. Decides the menu's copy item and what the row-semantic actions
+ * (Re-Spider / Remove / Export) apply to.
+ */
+export type UrlGridMenuScope = 'row' | 'rows' | 'cells' | 'columns';
+
+export interface UrlGridContextMenuInput {
+  scope: UrlGridMenuScope;
+  /** Rows the row-semantic actions apply to, in display order. */
+  urlIds: number[];
+  /** The right-clicked row's URL — used by the single-URL actions. */
+  url: string;
+  /** Selected cell count, for the 'cells' scope menu label. */
+  cellCount: number;
+  /** Selected column count, for the 'columns' scope menu label. */
+  columnCount: number;
+}
+
+/**
+ * Pushed back to the renderer when the grid context menu's Copy item is
+ * clicked. The copy can't run in main — only the renderer knows what a
+ * cell says — and it's pushed rather than returned from the popup call
+ * because Electron documents no ordering between an item's `click` and
+ * `popup()`'s close callback, so a request/response shape would drop the
+ * copy whenever close won the race.
+ */
+export type UrlGridCopyEvent = 'copy-selection';
+
 export interface ConfirmClearResult {
   confirmed: boolean;
   skipNext: boolean;
@@ -1692,6 +1723,8 @@ export interface FreeCrawlApi {
   urlCertInfo(input: UrlCertInfoInput): Promise<UrlCertInfoResult>;
   urlContextMenu(input: UrlContextMenuInput): Promise<void>;
   urlBulkContextMenu(input: UrlBulkContextMenuInput): Promise<void>;
+  urlGridContextMenu(input: UrlGridContextMenuInput): Promise<void>;
+  onUrlGridCopy(cb: (event: UrlGridCopyEvent) => void): () => void;
   imagesQuery(input: ImagesQueryInput): Promise<ImagesQueryResult>;
   brokenLinksQuery(input: BrokenLinksQueryInput): Promise<BrokenLinksQueryResult>;
   overviewGet(): Promise<OverviewCounts>;

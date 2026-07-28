@@ -170,6 +170,8 @@ interface UrlRowDb {
   hreflang_count: number;
   videos: string | null;
   amphtml: string | null;
+  /** Separate-URL mobile version from `<link rel="alternate" media=…>`. */
+  mobile_alternate: string | null;
   /** 1 when the page declares `<html ⚡>` / `<html amp>`, else 0. */
   amp_page: number;
   /** JSON string array of AMP smoke-validator error codes. Empty when
@@ -282,6 +284,7 @@ interface UrlRowDb {
   schema_missing_recommended: number;
   heading_order_violations: number;
   subresource_request_count: number;
+  changed: number;
 }
 
 interface ImageRowDb {
@@ -360,6 +363,8 @@ export interface UpsertUrlInput {
   /** JSON-stringified array of `VideoEntry` objects, or null. */
   videos?: string | null;
   amphtml?: string | null;
+  /** Separate-URL mobile version from `<link rel="alternate" media=…>`. */
+  mobileAlternate?: string | null;
   ampPage?: boolean;
   /** JSON-stringified array of AMP validator error codes. */
   ampValidationErrors?: string | null;
@@ -447,6 +452,49 @@ export interface UpsertUrlInput {
   corsAllowHeaders?: string | null;
 }
 
+/**
+ * "Did this page actually move since the last time we fetched it?", as an
+ * expression for the urls upsert's ON CONFLICT clause. `urls.x` is the
+ * stored row, `excluded.x` the incoming one.
+ *
+ * Only fields a user would call a change are compared — response time,
+ * depth and crawl timestamps drift on every fetch and would make the flag
+ * meaningless. `IS NOT` (not `<>`) so NULL→value and value→NULL count as
+ * changes instead of evaluating to NULL.
+ *
+ * A stored row with no `status_code` is a stub — a link target discovered
+ * but never fetched, or the seed row written before the first request goes
+ * out. There is no previous fetch to compare against, so it can never be
+ * "changed"; this is also what keeps a first crawl from flagging every row.
+ *
+ * `content_hash` covers HTML body drift on its own (it hashes the
+ * normalised token stream, so reformatting alone doesn't trip it). Assets
+ * never get one, so they fall back to Content-Length.
+ */
+const CHANGED_FLAG_SQL = `CASE
+      WHEN urls.status_code IS NULL THEN 0
+      WHEN urls.status_code IS NOT excluded.status_code
+        OR urls.content_hash IS NOT excluded.content_hash
+        OR (urls.content_hash IS NULL AND excluded.content_hash IS NULL
+            AND urls.content_length IS NOT excluded.content_length)
+        OR urls.title IS NOT excluded.title
+        OR urls.meta_description IS NOT excluded.meta_description
+        OR urls.h1 IS NOT excluded.h1
+        OR urls.word_count IS NOT excluded.word_count
+        OR urls.canonical IS NOT excluded.canonical
+        OR urls.meta_robots IS NOT excluded.meta_robots
+        OR urls.x_robots_tag IS NOT excluded.x_robots_tag
+        OR urls.indexability IS NOT excluded.indexability
+        OR urls.redirect_target IS NOT excluded.redirect_target
+        OR urls.content_type IS NOT excluded.content_type
+        OR urls.outlinks IS NOT excluded.outlinks
+        OR urls.images_count IS NOT excluded.images_count
+        OR urls.hreflangs IS NOT excluded.hreflangs
+        OR urls.schema_types IS NOT excluded.schema_types
+      THEN 1
+      ELSE 0
+    END`;
+
 const UPSERT_URL_SQL = `
   INSERT INTO urls (
     url, content_kind, status_code, status_text, indexability, indexability_reason,
@@ -488,7 +536,7 @@ const UPSERT_URL_SQL = `
     schema_duplicate_ids, schema_unknown_types, schema_missing_required,
     schema_missing_recommended,
     heading_order_violations, subresource_request_count,
-    amp_page, amp_validation_errors
+    amp_page, amp_validation_errors, mobile_alternate
   ) VALUES (
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
@@ -529,7 +577,7 @@ const UPSERT_URL_SQL = `
     :schema_duplicate_ids, :schema_unknown_types, :schema_missing_required,
     :schema_missing_recommended,
     :heading_order_violations, :subresource_request_count,
-    :amp_page, :amp_validation_errors
+    :amp_page, :amp_validation_errors, :mobile_alternate
   )
   ON CONFLICT(url) DO UPDATE SET
     content_kind = excluded.content_kind,
@@ -662,6 +710,8 @@ const UPSERT_URL_SQL = `
     subresource_request_count = excluded.subresource_request_count,
     amp_page = excluded.amp_page,
     amp_validation_errors = excluded.amp_validation_errors,
+    mobile_alternate = excluded.mobile_alternate,
+    changed = ${CHANGED_FLAG_SQL},
     crawled_at = CURRENT_TIMESTAMP
   RETURNING id
 `;
@@ -804,28 +854,47 @@ export class ProjectDb {
   }
 
   reset(): void {
-    // All deletes wrapped in a single transaction so the writer's
-    // WAL only fsyncs once at the end instead of after each
-    // statement. On a 100K-URL project this drops Clear time from
-    // ~2-3 s to ~300-500 ms because the per-statement fsync is the
-    // dominant cost in autocommit mode (10 statements × ~150-300 ms
-    // each on Windows NTFS with WAL).
+    // Foreign-key enforcement is suspended for the wipe. It is the single
+    // dominant cost here — measured on a 6.6K-URL / 820K-link project,
+    // Clear runs in 17.3 s with FKs on and 0.31 s with them off. Every
+    // table in an FK relationship is emptied in the same transaction, so
+    // there is no constraint left to violate when it commits; paying for
+    // per-row parent/child checks on the way to an empty database buys
+    // nothing.
     //
-    // Trade-off: SQLite's "DELETE FROM table" truncate optimisation
-    // (which skips per-row work and just frees the b-tree pages)
-    // only fires in autocommit mode. Inside a transaction it
-    // degrades to a row-by-row delete. For tables in the millions
-    // that would be slower, but for the tables touched here the
-    // fsync dominance still makes the transaction-wrapped variant
-    // faster overall.
+    // A previous revision blamed per-statement fsync and wrapped the
+    // deletes in a transaction to amortise it, accepting the loss of
+    // SQLite's truncate optimisation as the price. That reasoning was
+    // chasing the wrong variable: with FKs off, autocommit (318 ms) and
+    // transaction (311 ms) are indistinguishable. The transaction is kept
+    // anyway — it costs nothing and makes Clear atomic, so an interrupted
+    // wipe can't leave a half-cleared project behind.
+    //
+    // `PRAGMA foreign_keys` is a no-op inside a transaction, so it has to
+    // be toggled outside one; the restore is in a `finally` so a failed
+    // wipe can't leave this connection without FK enforcement. Only the
+    // writer connection is affected (Clear is dispatched to the writer
+    // worker), and the crawler is already stopped by the time it runs.
+    //
+    // This depends on `reset()` being entered with `txDepth === 0`. Every
+    // caller is top-level today. If one is ever wrapped in
+    // `runInTransaction`, the pragma below silently does nothing and Clear
+    // quietly returns to its 17 s behaviour — still correct, just slow
+    // again, which is exactly the kind of regression that is expensive to
+    // rediscover. Dropping FK enforcement stays safe only because all four
+    // tables carrying a foreign key (links, headers, image_usages,
+    // url_sources) are deleted explicitly below, so nothing relies on
+    // ON DELETE CASCADE to be reached.
     //
     // `host_certs` is included so a Clear after a TLS-probe pass
     // doesn't leave stale certificate rows that the next crawl
     // would skip re-probing for (the unprobedHttpsHosts() filter
     // excludes hosts with an existing row).
-    this.runInTransaction(() => {
-      this.db.exec(
-        `DELETE FROM image_usages;
+    this.db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      this.runInTransaction(() => {
+        this.db.exec(
+          `DELETE FROM image_usages;
          DELETE FROM images;
          DELETE FROM links;
          DELETE FROM headers;
@@ -844,8 +913,11 @@ export class ProjectDb {
          DELETE FROM ai_results;
          DELETE FROM seo_results;
          DELETE FROM gsc_inspection_results;`,
-      );
-    });
+        );
+      });
+    } finally {
+      this.db.exec('PRAGMA foreign_keys = ON');
+    }
     // Reclaim freed pages back to the OS so the project file size
     // doesn't keep ballooning across crawl + clear cycles. Cheap
     // (single passive checkpoint) compared to a full VACUUM, but
@@ -1150,6 +1222,27 @@ export class ProjectDb {
     ).map((r) => r.url);
   }
 
+  /**
+   * Internal non-HTML rows — images, CSS, JS, fonts, media. Used to seed the
+   * crawler's subresource budget quota when resuming, so a resumed crawl
+   * doesn't hand out a fresh allowance on top of what it already spent.
+   *
+   * Approximate by design: a `.pdf` reached through an ordinary hyperlink
+   * counts here too even though it was never admitted as a subresource. That
+   * only makes the quota slightly more conservative after a resume, which is
+   * the safe direction for a rail whose job is to stop assets from crowding
+   * out pages.
+   */
+  countSubresourceUrls(): number {
+    return (
+      this.db
+        .prepare(
+          "SELECT COUNT(*) AS c FROM urls WHERE is_external = 0 AND content_kind <> 'html'",
+        )
+        .get() as { c: number }
+    ).c;
+  }
+
   countCrawledUrls(): number {
     return (
       this.db
@@ -1197,16 +1290,24 @@ export class ProjectDb {
     });
   }
 
+  /**
+   * Flag a URL as about to be re-fetched.
+   *
+   * This deliberately leaves the stored response in place. It used to
+   * blank `status_code` / `indexability` so the row read as "fetching",
+   * but that threw away the only baseline the change detector has: the
+   * upsert decides `changed` by diffing the incoming row against the
+   * stored one, and a blanked row looks like a never-fetched stub, so
+   * every Re-Spider came back unflagged. Keeping the old values also
+   * means a re-fetch that fails outright no longer wipes good data off
+   * the row — it stays visible until a real response replaces it.
+   *
+   * The `changed` reset is what makes the flag describe THIS re-spider
+   * rather than whatever an earlier one found.
+   */
   markUrlForRecrawl(id: number): void {
     this.db
-      .prepare(
-        `UPDATE urls SET
-           status_code = NULL,
-           status_text = NULL,
-           indexability = 'indexable',
-           indexability_reason = NULL
-         WHERE id = ? AND is_external = 0`,
-      )
+      .prepare('UPDATE urls SET changed = 0 WHERE id = ? AND is_external = 0')
       .run(id);
   }
 
@@ -1221,15 +1322,70 @@ export class ProjectDb {
       const placeholders = slice.map(() => '?').join(',');
       this.db
         .prepare(
-          `UPDATE urls SET
-             status_code = NULL,
-             status_text = NULL,
-             indexability = 'indexable',
-             indexability_reason = NULL
+          `UPDATE urls SET changed = 0
            WHERE id IN (${placeholders}) AND is_external = 0`,
         )
         .run(...slice);
     }
+  }
+
+  /** Crawl depth recorded for a URL, or null if it isn't in the project.
+   *  Lets a Re-Spider re-queue a page at the depth it was found at
+   *  instead of pretending every re-fetched URL is a root-level seed. */
+  getUrlDepth(url: string): number | null {
+    const row = this.db.prepare('SELECT depth FROM urls WHERE url = ?').get(url) as
+      | { depth: number | null }
+      | undefined;
+    return row?.depth ?? null;
+  }
+
+  /** Clear every change flag. Runs at the start of a refresh crawl so the
+   *  green markers describe that run and not a previous one. */
+  clearChangedFlags(): void {
+    this.db.exec('UPDATE urls SET changed = 0 WHERE changed != 0');
+  }
+
+  /** Same, restricted to the URLs a targeted Re-Spider is about to
+   *  re-fetch — markers on pages it won't touch stay as they were. */
+  clearChangedFlagsForUrls(urls: string[]): void {
+    if (urls.length === 0) return;
+    const CHUNK = 500;
+    for (let i = 0; i < urls.length; i += CHUNK) {
+      const slice = urls.slice(i, i + CHUNK);
+      const placeholders = slice.map(() => '?').join(',');
+      this.db
+        .prepare(`UPDATE urls SET changed = 0 WHERE url IN (${placeholders})`)
+        .run(...slice);
+    }
+  }
+
+  /** How many URLs the last refresh crawl found different. Drives the
+   *  "N changed" summary the status bar shows after a re-spider. */
+  countChangedUrls(): number {
+    return (
+      this.db.prepare('SELECT COUNT(*) AS c FROM urls WHERE changed = 1').get() as {
+        c: number;
+      }
+    ).c;
+  }
+
+  /**
+   * Every internal URL that already holds a response, as re-crawl seeds.
+   *
+   * Used when the user presses Start again on a site that is already
+   * crawled: rather than resuming a finished crawl (which has nothing
+   * left to do), every known page is re-fetched so the report reflects
+   * the site as it stands now. Ordered by depth so the re-crawl walks
+   * the site top-down, same as a first crawl.
+   */
+  getCrawledInternalUrls(): { url: string; depth: number }[] {
+    return this.db
+      .prepare(
+        `SELECT url, depth FROM urls
+         WHERE is_external = 0 AND status_code IS NOT NULL
+         ORDER BY depth ASC, id ASC`,
+      )
+      .all() as unknown as { url: string; depth: number }[];
   }
 
   deleteUrls(ids: number[]): void {
@@ -1280,6 +1436,38 @@ export class ProjectDb {
         )
         .all(...slice) as unknown as { url: string }[];
       for (const r of rows) out.push(r.url);
+    }
+    return out;
+  }
+
+  /**
+   * Look up URL strings for a batch of ids, preserving the caller's id
+   * order rather than the table's.
+   *
+   * The grid's context menu passes ids in the order the rows appear on
+   * screen — which, once the user has sorted or filtered, has nothing to
+   * do with ascending id. Copying "8 URLs" in a different order than the
+   * eight rows the user is looking at is a small betrayal, so callers
+   * that care about display order use this instead of
+   * {@link getUrlsByIds}. Ids with no matching row are skipped.
+   */
+  getUrlsByIdsInOrder(ids: number[]): string[] {
+    if (ids.length === 0) return [];
+    const CHUNK = 500;
+    const byId = new Map<number, string>();
+    const unique = [...new Set(ids)];
+    for (let i = 0; i < unique.length; i += CHUNK) {
+      const slice = unique.slice(i, i + CHUNK);
+      const placeholders = slice.map(() => '?').join(',');
+      const rows = this.db
+        .prepare(`SELECT id, url FROM urls WHERE id IN (${placeholders})`)
+        .all(...slice) as unknown as { id: number; url: string }[];
+      for (const r of rows) byId.set(r.id, r.url);
+    }
+    const out: string[] = [];
+    for (const id of ids) {
+      const url = byId.get(id);
+      if (url !== undefined) out.push(url);
     }
     return out;
   }
@@ -1388,10 +1576,17 @@ export class ProjectDb {
       : '';
     const discovered = this.db
       .prepare(
+        // Hyperlinks only. The drain exists to catch pages a depth or
+        // robots race skipped, and the non-hyperlink rows the Spider →
+        // Crawl matrix can add — stored iframes, recorded malformed hrefs
+        // — are declarations the user chose to record, not pages awaiting
+        // a crawl. Every row predating that matrix is a hyperlink, so the
+        // filter changes nothing for existing projects.
         `SELECT l.to_url AS url, MIN(u.depth) + 1 AS depth
          FROM links l
          JOIN urls u ON l.from_url_id = u.id
          WHERE l.is_internal = 1
+           AND l.type = 'hyperlink'
            AND l.to_url NOT IN (SELECT url FROM urls)
            ${followFilter}
          GROUP BY l.to_url`,
@@ -1478,6 +1673,7 @@ export class ProjectDb {
       amphtml: input.amphtml ?? null,
       amp_page: input.ampPage ? 1 : 0,
       amp_validation_errors: input.ampValidationErrors ?? null,
+      mobile_alternate: input.mobileAlternate ?? null,
       favicon: input.favicon ?? null,
       mixed_content_count: input.mixedContentCount ?? 0,
       mixed_content_active: input.mixedContentActive ?? 0,
@@ -7776,6 +7972,7 @@ export class ProjectDb {
     hreflangCount: r.hreflang_count,
     videos: r.videos ?? null,
     amphtml: r.amphtml,
+    mobileAlternate: r.mobile_alternate ?? null,
     ampPage: r.amp_page === 1,
     ampValidationErrors: r.amp_validation_errors,
     boilerplateCoverage: r.boilerplate_coverage,
@@ -7875,6 +8072,7 @@ export class ProjectDb {
     schemaMissingRecommended: r.schema_missing_recommended ?? 0,
     headingOrderViolations: r.heading_order_violations ?? 0,
     subresourceRequestCount: r.subresource_request_count ?? 0,
+    changed: r.changed === 1,
     crawledAt: r.crawled_at,
   });
 

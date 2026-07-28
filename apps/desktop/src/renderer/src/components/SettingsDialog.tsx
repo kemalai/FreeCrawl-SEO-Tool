@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import {
   SUPPORTED_LANGUAGES,
@@ -41,6 +41,7 @@ import {
   Chrome,
   Target,
   Check,
+  Workflow,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -48,6 +49,7 @@ import type {
   BrowserLoginConfig,
   CrawlConfig,
   CrawlMode,
+  CrawlScope,
   CustomExtractionRule,
   FormLoginStep,
   HttpAuth,
@@ -88,12 +90,39 @@ interface FormState {
   retryInitialDelayMs: string;
   followRedirects: boolean;
   respectRobotsTxt: boolean;
+  respectCrawlDelay: boolean;
   crawlExternal: boolean;
   checkImages: boolean;
   checkCss: boolean;
   checkJs: boolean;
   storeNofollowLinks: boolean;
   discoverSitemaps: boolean;
+  // spider → crawl matrix
+  scope: CrawlScope;
+  storeImages: boolean;
+  crawlMedia: boolean;
+  storeMedia: boolean;
+  storeCss: boolean;
+  storeJs: boolean;
+  crawlInternalLinks: boolean;
+  storeInternalLinks: boolean;
+  storeExternalLinks: boolean;
+  storeCanonicals: boolean;
+  storePagination: boolean;
+  crawlHreflang: boolean;
+  storeHreflang: boolean;
+  crawlAmp: boolean;
+  storeAmp: boolean;
+  storeMetaRefresh: boolean;
+  crawlIframes: boolean;
+  storeIframes: boolean;
+  crawlMobileAlternate: boolean;
+  storeMobileAlternate: boolean;
+  storeUncrawlableLinks: boolean;
+  checkLinksOutsideStartFolder: boolean;
+  followExternalNofollow: boolean;
+  crawlInvalidLinks: boolean;
+  crawlLinkedSitemaps: boolean;
   // requests
   userAgent: string;
   acceptLanguage: string;
@@ -199,6 +228,7 @@ export type SettingsSectionKey =
   | 'presets'
   | 'mode'
   | 'crawler'
+  | 'spider-crawl'
   | 'speed'
   | 'requests'
   | 'filters'
@@ -254,6 +284,13 @@ const SECTIONS: SectionDef[] = [
     icon: Bug,
     keywords:
       'depth max urls concurrency rps timeout delay retry follow redirects robots external nofollow sitemap',
+  },
+  {
+    key: 'spider-crawl',
+    label: 'Spider Crawl',
+    icon: Workflow,
+    keywords:
+      'spider crawl store link types resource links page links images media css javascript internal hyperlinks external canonicals pagination hreflang amp meta refresh iframes mobile alternate uncrawlable start folder subdomains nofollow invalid xml sitemaps',
   },
   {
     key: 'speed',
@@ -424,12 +461,38 @@ function configToForm(c: CrawlConfig): FormState {
     retryInitialDelayMs: String(c.retryInitialDelayMs),
     followRedirects: c.followRedirects,
     respectRobotsTxt: c.respectRobotsTxt,
+    respectCrawlDelay: c.respectCrawlDelay,
     crawlExternal: c.crawlExternal,
     checkImages: c.checkImages,
     checkCss: c.checkCss,
     checkJs: c.checkJs,
     storeNofollowLinks: c.storeNofollowLinks,
     discoverSitemaps: c.discoverSitemaps,
+    scope: c.scope,
+    storeImages: c.storeImages ?? true,
+    crawlMedia: c.crawlMedia ?? false,
+    storeMedia: c.storeMedia ?? false,
+    storeCss: c.storeCss ?? true,
+    storeJs: c.storeJs ?? true,
+    crawlInternalLinks: c.crawlInternalLinks ?? true,
+    storeInternalLinks: c.storeInternalLinks ?? true,
+    storeExternalLinks: c.storeExternalLinks ?? true,
+    storeCanonicals: c.storeCanonicals ?? true,
+    storePagination: c.storePagination ?? true,
+    crawlHreflang: c.crawlHreflang ?? false,
+    storeHreflang: c.storeHreflang ?? true,
+    crawlAmp: c.crawlAmp ?? false,
+    storeAmp: c.storeAmp ?? true,
+    storeMetaRefresh: c.storeMetaRefresh ?? true,
+    crawlIframes: c.crawlIframes ?? false,
+    storeIframes: c.storeIframes ?? false,
+    crawlMobileAlternate: c.crawlMobileAlternate ?? false,
+    storeMobileAlternate: c.storeMobileAlternate ?? true,
+    storeUncrawlableLinks: c.storeUncrawlableLinks ?? true,
+    checkLinksOutsideStartFolder: c.checkLinksOutsideStartFolder ?? true,
+    followExternalNofollow: c.followExternalNofollow ?? false,
+    crawlInvalidLinks: c.crawlInvalidLinks ?? false,
+    crawlLinkedSitemaps: c.crawlLinkedSitemaps ?? false,
     userAgent: c.userAgent,
     acceptLanguage: c.acceptLanguage,
     customHeadersText: Object.entries(c.customHeaders ?? {})
@@ -646,12 +709,38 @@ export function SettingsDialog({ open, onClose }: Props) {
       retryInitialDelayMs: Math.max(0, num(form.retryInitialDelayMs, config.retryInitialDelayMs)),
       followRedirects: form.followRedirects,
       respectRobotsTxt: form.respectRobotsTxt,
+      respectCrawlDelay: form.respectCrawlDelay,
       crawlExternal: form.crawlExternal,
       checkImages: form.checkImages,
       checkCss: form.checkCss,
       checkJs: form.checkJs,
       storeNofollowLinks: form.storeNofollowLinks,
       discoverSitemaps: form.discoverSitemaps,
+      scope: form.scope,
+      storeImages: form.storeImages,
+      crawlMedia: form.crawlMedia,
+      storeMedia: form.storeMedia,
+      storeCss: form.storeCss,
+      storeJs: form.storeJs,
+      crawlInternalLinks: form.crawlInternalLinks,
+      storeInternalLinks: form.storeInternalLinks,
+      storeExternalLinks: form.storeExternalLinks,
+      storeCanonicals: form.storeCanonicals,
+      storePagination: form.storePagination,
+      crawlHreflang: form.crawlHreflang,
+      storeHreflang: form.storeHreflang,
+      crawlAmp: form.crawlAmp,
+      storeAmp: form.storeAmp,
+      storeMetaRefresh: form.storeMetaRefresh,
+      crawlIframes: form.crawlIframes,
+      storeIframes: form.storeIframes,
+      crawlMobileAlternate: form.crawlMobileAlternate,
+      storeMobileAlternate: form.storeMobileAlternate,
+      storeUncrawlableLinks: form.storeUncrawlableLinks,
+      checkLinksOutsideStartFolder: form.checkLinksOutsideStartFolder,
+      followExternalNofollow: form.followExternalNofollow,
+      crawlInvalidLinks: form.crawlInvalidLinks,
+      crawlLinkedSitemaps: form.crawlLinkedSitemaps,
       userAgent: form.userAgent.trim() || config.userAgent,
       acceptLanguage: form.acceptLanguage.trim() || config.acceptLanguage,
       customHeaders: parseHeaders(form.customHeadersText),
@@ -914,6 +1003,9 @@ export function SettingsDialog({ open, onClose }: Props) {
               )}
               {active === 'crawler' && (
                 <CrawlerPanel form={form} update={update} />
+              )}
+              {active === 'spider-crawl' && (
+                <SpiderCrawlPanel form={form} update={update} />
               )}
               {active === 'speed' && (
                 <SpeedPanel form={form} update={update} />
@@ -1397,8 +1489,18 @@ function CrawlerPanel({ form, update }: PanelProps) {
           label={t('settingsPanels.crawler.respectRobotsTxt', { defaultValue: 'Respect robots.txt' })}
           checked={form.respectRobotsTxt}
           onChange={(v) => update('respectRobotsTxt', v)}
-          info="Honor Disallow rules + crawl-delay declared in /robots.txt for the configured User-Agent. Screaming Frog: 'Respect robots.txt' (Configuration → robots.txt)."
+          info="Honor Allow / Disallow rules declared in /robots.txt for the configured User-Agent. Screaming Frog: 'Respect robots.txt' (Configuration → robots.txt)."
           example="On (default). Off only when crawling sites you own and need to bypass."
+        />
+        <Bool
+          label={t('settingsPanels.crawler.respectCrawlDelay', {
+            defaultValue: 'Respect robots.txt Crawl-delay',
+          })}
+          checked={form.respectCrawlDelay}
+          onChange={(v) => update('respectCrawlDelay', v)}
+          disabled={!form.respectRobotsTxt}
+          info="Honor a Crawl-delay directive as a global rate limit (one request every N seconds). Crawl-delay is not part of RFC 9309 — Google ignores it and Screaming Frog does not implement it — and published values are often stale: 'Crawl-delay: 30' turns a 500-URL crawl into hours. Ignored by default; the directive is still reported in the log when found."
+          example="Off (default) for normal audits. On when an ops policy requires it — expect the crawl to take Crawl-delay seconds per URL."
         />
         <Bool
           label={t('settingsPanels.crawler.crawlExternal', { defaultValue: 'Check External Links' })}
@@ -1479,6 +1581,408 @@ function CrawlerPanel({ form, update }: PanelProps) {
             </p>
           ) : null}
         </label>
+      </div>
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Spider → Crawl — the per-link-type crawl/store matrix, laid out like
+ * Screaming Frog's Configuration → Spider → Crawl tab.
+ *
+ * Two switches per row, and they are genuinely independent: "store but
+ * don't crawl" lists a declaration without spending a request on it,
+ * "crawl but don't store" fetches a resource for its side effects
+ * (proving it loads, mining a stylesheet for its font targets) without
+ * burying the Internal tab under it.
+ *
+ * Screaming Frog's SWF row has no counterpart here — Flash reached
+ * end-of-life in 2020.
+ * ------------------------------------------------------------------ */
+
+/** One bordered group with a legend, mirroring SF's fieldset boxes. */
+function CrawlGroup({
+  title,
+  columns,
+  children,
+}: {
+  title: string;
+  /** Render the Crawl / Store column captions above the first row. */
+  columns?: { crawl: string; store: string };
+  children: ReactNode;
+}) {
+  return (
+    <fieldset className="rounded border border-surface-800 bg-surface-950/40 px-3 pb-3 pt-2">
+      <legend className="px-1 text-[11px] font-medium text-surface-300">{title}</legend>
+      {columns ? (
+        <div className="mb-1 flex items-center gap-2 border-b border-surface-800/70 pb-1">
+          <span className="flex-1" />
+          <span className="w-[58px] text-center text-[10px] uppercase tracking-wide text-surface-500">
+            {columns.crawl}
+          </span>
+          <span className="w-[58px] text-center text-[10px] uppercase tracking-wide text-surface-500">
+            {columns.store}
+          </span>
+        </div>
+      ) : null}
+      <div className="flex flex-col gap-1">{children}</div>
+    </fieldset>
+  );
+}
+
+/**
+ * One matrix row: a label plus up to two checkboxes in fixed columns.
+ * A `null` switch renders an empty cell — Uncrawlable Links has no
+ * crawl side, because an uncrawlable link is by definition not fetched.
+ */
+function CrawlRow({
+  label,
+  info,
+  example,
+  crawl,
+  store,
+}: {
+  label: string;
+  crawl: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; title?: string } | null;
+  store: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; title?: string } | null;
+} & FieldInfo) {
+  const { i18n } = useTranslation();
+  const cell = (
+    box: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean; title?: string } | null,
+  ) => (
+    <span className="flex w-[58px] justify-center">
+      {box ? (
+        <input
+          type="checkbox"
+          checked={box.checked}
+          disabled={box.disabled}
+          title={box.title}
+          onChange={(e) => box.onChange(e.target.checked)}
+          className={clsx(box.disabled && 'cursor-not-allowed opacity-40')}
+        />
+      ) : null}
+    </span>
+  );
+  return (
+    <div className="flex items-center gap-2 py-[1px]">
+      <span className="flex flex-1 items-center gap-1">
+        <span className="text-[12px] text-surface-100">
+          {translateLabel(label, i18n.language)}
+        </span>
+        <InfoTip info={info} example={example} />
+      </span>
+      {cell(crawl)}
+      {cell(store)}
+    </div>
+  );
+}
+
+function SpiderCrawlPanel({ form, update }: PanelProps) {
+  const { t } = useTranslation();
+  const cols = {
+    crawl: t('spiderCrawl.colCrawl', { defaultValue: 'Crawl' }),
+    store: t('spiderCrawl.colStore', { defaultValue: 'Store' }),
+  };
+  // Resource rows have nothing to keep unless they were fetched, so their
+  // Store box follows the Crawl box instead of pretending otherwise. The
+  // image row is the exception: `<img>` declarations land in the images
+  // table whether or not the bytes were ever requested.
+  const storeNeedsCrawl = t('spiderCrawl.storeNeedsCrawl', {
+    defaultValue: 'Requires Crawl — an un-fetched resource has no row to store.',
+  });
+
+  // "Crawl Outside of Start Folder" and "Crawl All Subdomains" are two
+  // views of the one scope setting rather than fields of their own, so
+  // they can never contradict it or each other. `exact-url` is a
+  // single-page crawl where neither applies.
+  const scope = form.scope;
+  const scopeLocked = scope === 'exact-url';
+  const outsideStartFolder = scope !== 'subfolder';
+  const allSubdomains = scope === 'all-subdomains';
+
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('spiderCrawl.intro', {
+          defaultValue:
+            'Choose which link types to crawl and store. Crawl fetches the target so it gets its own row; Store keeps what the page declared so the matching tab has data. These settings shape how many URLs are discovered, crawled, and reported.',
+        })}
+      </p>
+
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+        <div className="flex flex-col gap-3">
+          <CrawlGroup
+            title={t('spiderCrawl.resourceLinks', { defaultValue: 'Resource Links' })}
+            columns={cols}
+          >
+            <CrawlRow
+              label="Images"
+              info="Crawl fetches internal <img> targets (incl. srcset / <picture> sources) so each appears in the Internal tab with status, content type, and size — every one counts toward Max URLs. Store keeps the <img> declarations in the Images tab, which works even with Crawl off: you get the full image inventory with alt text for the cost of zero extra requests."
+              example="Store on, Crawl off is the cheap alt-text audit. Both on for a full image health check."
+              crawl={{ checked: form.checkImages, onChange: (v) => update('checkImages', v) }}
+              store={{ checked: form.storeImages, onChange: (v) => update('storeImages', v) }}
+            />
+            <CrawlRow
+              label="Media"
+              info="<video> / <audio> and the <source> children they own. Off by default — media files are large and rarely what an SEO crawl is looking for."
+              example="On when auditing a video-heavy site for dead media URLs."
+              crawl={{ checked: form.crawlMedia, onChange: (v) => update('crawlMedia', v) }}
+              store={{
+                checked: form.storeMedia,
+                onChange: (v) => update('storeMedia', v),
+                disabled: !form.crawlMedia,
+                title: form.crawlMedia ? undefined : storeNeedsCrawl,
+              }}
+            />
+            <CrawlRow
+              label="CSS"
+              info="<link rel=stylesheet> targets. Crawling a stylesheet is also what discovers the web fonts and background images declared inside it via @font-face / url() — so Crawl on with Store off still populates the Internal tab's Font filter without listing every stylesheet."
+              example="Crawl on, Store off when you want fonts discovered but not hundreds of CSS rows."
+              crawl={{ checked: form.checkCss, onChange: (v) => update('checkCss', v) }}
+              store={{
+                checked: form.storeCss,
+                onChange: (v) => update('storeCss', v),
+                disabled: !form.checkCss,
+                title: form.checkCss ? undefined : storeNeedsCrawl,
+              }}
+            />
+            <CrawlRow
+              label="JavaScript"
+              info="<script src> targets, fetched so each gets its own row with status code, content type, and size. Headers only — the body is discarded, never executed."
+              example="Both on to catch 404ing bundles; both off for HTML-only crawls."
+              crawl={{ checked: form.checkJs, onChange: (v) => update('checkJs', v) }}
+              store={{
+                checked: form.storeJs,
+                onChange: (v) => update('storeJs', v),
+                disabled: !form.checkJs,
+                title: form.checkJs ? undefined : storeNeedsCrawl,
+              }}
+            />
+          </CrawlGroup>
+
+          <CrawlGroup
+            title={t('spiderCrawl.pageLinks', { defaultValue: 'Page Links' })}
+            columns={cols}
+          >
+            <CrawlRow
+              label="Internal Hyperlinks"
+              info="<a href> targets on the same site. Crawl off turns the run into an audit of a fixed set of pages — sitemaps, canonicals, and the other declared alternates below still feed discovery. Store off empties the link graph: inlinks, outlinks, anchor-text reports, and link score all go with it."
+              example="Leave both on. Crawl off only when a sitemap or URL list already defines the exact set you want."
+              crawl={{
+                checked: form.crawlInternalLinks,
+                onChange: (v) => update('crawlInternalLinks', v),
+              }}
+              store={{
+                checked: form.storeInternalLinks,
+                onChange: (v) => update('storeInternalLinks', v),
+              }}
+            />
+            <CrawlRow
+              label="External Links"
+              info="Outbound links to other hosts are always status-checked (one HEAD each) so Broken Links catches dead externals — that does not depend on this row. Crawl here means fully crawling those pages, following their links onward too. Store keeps outbound links in the link graph."
+              example="Crawl off (default) — status-check externals without spidering the whole web."
+              crawl={{ checked: form.crawlExternal, onChange: (v) => update('crawlExternal', v) }}
+              store={{
+                checked: form.storeExternalLinks,
+                onChange: (v) => update('storeExternalLinks', v),
+              }}
+            />
+            <CrawlRow
+              label="Canonicals"
+              info="<link rel=canonical> and its HTTP Link: header form. Crawl also enqueues the canonical target, treating it as a navigation hint. Store feeds the Canonicals tab and every canonical issue filter."
+              example="Crawl off (default) — canonicals are a signal, not a route. Store on."
+              crawl={{ checked: form.followCanonicals, onChange: (v) => update('followCanonicals', v) }}
+              store={{ checked: form.storeCanonicals, onChange: (v) => update('storeCanonicals', v) }}
+            />
+            <CrawlRow
+              label="Pagination (Rel Next/Prev)"
+              info="<link rel=next> / <link rel=prev>. Part of the standard discovery graph; turn Crawl off to isolate a pagination loop without disabling link-following everywhere."
+              example="Both on unless you are debugging an infinite paginated series."
+              crawl={{
+                checked: form.followPaginationLinks,
+                onChange: (v) => update('followPaginationLinks', v),
+              }}
+              store={{ checked: form.storePagination, onChange: (v) => update('storePagination', v) }}
+            />
+            <CrawlRow
+              label="Hreflang"
+              info="<link rel=alternate hreflang>. Crawl enqueues every declared alternate, which is how you reach language versions nothing links to. Store feeds the Hreflang tab and the reciprocity / invalid-code audits."
+              example="Crawl on for a multi-language audit — otherwise unlinked locales stay invisible."
+              crawl={{ checked: form.crawlHreflang, onChange: (v) => update('crawlHreflang', v) }}
+              store={{ checked: form.storeHreflang, onChange: (v) => update('storeHreflang', v) }}
+            />
+            <CrawlRow
+              label="AMP"
+              info="<link rel=amphtml>. Crawl fetches the AMP variant as its own URL; Store keeps the declaration plus the AMP smoke-validator findings."
+              example="Crawl on only if the site still ships AMP pages."
+              crawl={{ checked: form.crawlAmp, onChange: (v) => update('crawlAmp', v) }}
+              store={{ checked: form.storeAmp, onChange: (v) => update('storeAmp', v) }}
+            />
+            <CrawlRow
+              label="Meta Refresh"
+              info='<meta http-equiv="refresh">. Crawl enqueues the parsed target like a redirect; Store keeps the raw directive and its URL for the Meta Refresh tab.'
+              example="Crawl on when auditing a legacy site that still redirects this way."
+              crawl={{ checked: form.followJsRedirects, onChange: (v) => update('followJsRedirects', v) }}
+              store={{ checked: form.storeMetaRefresh, onChange: (v) => update('storeMetaRefresh', v) }}
+            />
+            <CrawlRow
+              label="iframes"
+              info="<iframe src> documents. Crawl fetches each embedded page as its own URL, which can pull in a lot of third-party surface. Store records them in the link graph so a dead embed shows up in Outlinks and Broken Links — without counting toward the page's outlink total, since an embed is not a hyperlink."
+              example="Store on, Crawl off is usually the right pair."
+              crawl={{ checked: form.crawlIframes, onChange: (v) => update('crawlIframes', v) }}
+              store={{ checked: form.storeIframes, onChange: (v) => update('storeIframes', v) }}
+            />
+            <CrawlRow
+              label="Mobile Alternate"
+              info='The separate-URL (m-dot) mobile version: <link rel="alternate" media="only screen and (max-width: …)">. Null on responsive sites, which is most of them — a value here with no reciprocal canonical back is the classic broken m-dot setup.'
+              example="Crawl on only when the site really does serve a separate mobile host."
+              crawl={{
+                checked: form.crawlMobileAlternate,
+                onChange: (v) => update('crawlMobileAlternate', v),
+              }}
+              store={{
+                checked: form.storeMobileAlternate,
+                onChange: (v) => update('storeMobileAlternate', v),
+              }}
+            />
+            <CrawlRow
+              label="Uncrawlable Links"
+              info={'Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", and href="#" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter.'}
+              example="On — it is a count, so it costs nothing."
+              crawl={null}
+              store={{
+                checked: form.storeUncrawlableLinks,
+                onChange: (v) => update('storeUncrawlableLinks', v),
+              }}
+            />
+          </CrawlGroup>
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <CrawlGroup title={t('spiderCrawl.behaviour', { defaultValue: 'Crawl Behaviour' })}>
+            <Bool
+              label={t('spiderCrawl.checkOutsideFolder', {
+                defaultValue: 'Check Links Outside of Start Folder',
+              })}
+              checked={form.checkLinksOutsideStartFolder}
+              onChange={(v) => update('checkLinksOutsideStartFolder', v)}
+              disabled={scope !== 'subfolder'}
+              hint={
+                scope === 'subfolder'
+                  ? undefined
+                  : t('spiderCrawl.subfolderOnly', {
+                      defaultValue: 'Only applies while Crawl Scope is Subfolder',
+                    })
+              }
+              info="With a Subfolder-scoped crawl, links pointing outside the start folder are fetched once so their status code is known, then stopped — they are checked, not crawled through. Off leaves them undiscovered entirely."
+              example="On — knowing a link out of /blog/ is a 404 costs one request."
+            />
+            <Bool
+              label={t('spiderCrawl.crawlOutsideFolder', {
+                defaultValue: 'Crawl Outside of Start Folder',
+              })}
+              checked={outsideStartFolder}
+              disabled={scopeLocked}
+              onChange={(v) => update('scope', v ? 'subdomain' : 'subfolder')}
+              hint={
+                scopeLocked
+                  ? t('spiderCrawl.scopeExactUrl', {
+                      defaultValue: 'Disabled — Crawl Scope is Exact URL (single page)',
+                    })
+                  : t('spiderCrawl.scopeBound', {
+                      defaultValue: 'Same setting as Crawl Scope — changing either updates both',
+                    })
+              }
+              info="Off restricts the crawl to URLs under the start URL's path (Crawl Scope = Subfolder). On lets it cover the whole host. This is a view of the Crawl Scope setting, not a separate switch, so the two can never disagree."
+              example="Off to audit just /blog/; on for the whole site."
+            />
+            <Bool
+              label={t('spiderCrawl.crawlAllSubdomains', {
+                defaultValue: 'Crawl All Subdomains',
+              })}
+              checked={allSubdomains}
+              disabled={scopeLocked}
+              onChange={(v) => update('scope', v ? 'all-subdomains' : 'subdomain')}
+              hint={
+                scopeLocked
+                  ? t('spiderCrawl.scopeExactUrl', {
+                      defaultValue: 'Disabled — Crawl Scope is Exact URL (single page)',
+                    })
+                  : t('spiderCrawl.scopeBound', {
+                      defaultValue: 'Same setting as Crawl Scope — changing either updates both',
+                    })
+              }
+              info="Treats every host sharing the registrable domain as internal — shop.example.com and blog.example.com crawl alongside example.com instead of counting as external. Another view of the Crawl Scope setting."
+              example="On when subdomains are part of the same property."
+            />
+            <Bool
+              label={t('spiderCrawl.followInternalNofollow', {
+                defaultValue: 'Follow Internal "nofollow"',
+              })}
+              checked={form.followNofollow}
+              onChange={(v) => update('followNofollow', v)}
+              info='Crawl through rel="nofollow" links pointing at the same site. Off (default) is Screaming Frog "Respect Nofollow" behaviour. Internal and external are separate switches because sites nofollow them for opposite reasons — crawl-budget shaping vs. not vouching for a third party.'
+              example="On when a site nofollows its own faceted navigation and you need behind it."
+            />
+            <Bool
+              label={t('spiderCrawl.followExternalNofollow', {
+                defaultValue: 'Follow External "nofollow"',
+              })}
+              checked={form.followExternalNofollow}
+              onChange={(v) => update('followExternalNofollow', v)}
+              info='Crawl through rel="nofollow" links pointing at other hosts. Only has an effect while External Links → Crawl is on.'
+              example="Off — nofollowed externals are exactly the ones you did not vouch for."
+            />
+            <Bool
+              label={t('spiderCrawl.crawlInvalidLinks', { defaultValue: 'Crawl Invalid Links' })}
+              checked={form.crawlInvalidLinks}
+              onChange={(v) => update('crawlInvalidLinks', v)}
+              info="Record hrefs that cannot be parsed as a URL — unencoded whitespace inside the authority, doubled schemes, stray delimiters. They can never resolve to a crawled page, so every one is reported in Broken Links, which is the point. Deliberate non-navigable schemes (mailto:, tel:, #) are not malformed and never appear."
+              example="On when hunting hand-written markup errors; off keeps Broken Links focused on real 404s."
+            />
+          </CrawlGroup>
+
+          <CrawlGroup title={t('spiderCrawl.xmlSitemaps', { defaultValue: 'XML Sitemaps' })}>
+            <Bool
+              label={t('spiderCrawl.crawlLinkedSitemaps', {
+                defaultValue: 'Crawl Linked XML Sitemaps',
+              })}
+              checked={form.crawlLinkedSitemaps}
+              onChange={(v) => update('crawlLinkedSitemaps', v)}
+              hint={
+                form.discoverSitemaps
+                  ? undefined
+                  : t('spiderCrawl.needsDiscovery', {
+                      defaultValue: 'Needs Auto-Discover or an explicit sitemap below',
+                    })
+              }
+              info="Auto-discovery on its own only records sitemap entries, which is what the sitemap issue filters compare the crawl against. Turning this on crawls them too — and that is what surfaces orphans: pages the sitemap declares but nothing on the site links to."
+              example="On for an orphan-page audit."
+            />
+            <Bool
+              label={t('spiderCrawl.autoDiscover', {
+                defaultValue: 'Auto Discover XML Sitemaps via robots.txt',
+              })}
+              checked={form.discoverSitemaps}
+              onChange={(v) => update('discoverSitemaps', v)}
+              info="Reads Sitemap: directives from /robots.txt plus the conventional /sitemap.xml fallbacks at crawl start. Cheap I/O, and it powers every sitemap issue filter."
+              example="On (default)."
+            />
+            <div className="mt-1">
+              <Area
+                label={t('spiderCrawl.crawlTheseSitemaps', {
+                  defaultValue: 'Crawl These Sitemaps',
+                })}
+                value={form.seedSitemapText}
+                onChange={(v) => update('seedSitemapText', v)}
+                rows={6}
+                placeholder={'https://example.com/sitemap_index.xml\nhttps://example.com/news-sitemap.xml'}
+                info="Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions."
+                example="https://example.com/sitemap_index.xml"
+              />
+            </div>
+          </CrawlGroup>
+        </div>
       </div>
     </>
   );
@@ -3356,19 +3860,25 @@ function Bool({
   hint,
   info,
   example,
+  disabled,
 }: {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   hint?: string;
+  /** Greys the row out when the setting cannot apply in the current
+   *  configuration, rather than letting a click silently override the
+   *  setting that is actually in charge. */
+  disabled?: boolean;
 } & FieldInfo) {
   return (
-    <label className="flex items-start gap-2">
+    <label className={clsx('flex items-start gap-2', disabled && 'opacity-50')}>
       <input
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
-        className="mt-0.5"
+        className={clsx('mt-0.5', disabled && 'cursor-not-allowed')}
       />
       <BoolLabel label={label} info={info} example={example} hint={hint} />
     </label>

@@ -500,6 +500,15 @@ export interface CrawlUrlRow {
    *  objects for the video-sitemap variant, or null. */
   videos: string | null;
   amphtml: string | null;
+  /**
+   * Separate-URL mobile version declared by
+   * `<link rel="alternate" media="only screen and (max-width: …)">`.
+   * The m-dot pattern: desktop page points here, the mobile page points
+   * back with a canonical. Null on responsive sites, which is most of
+   * them — a non-null value without a reciprocal canonical is the
+   * classic broken m-dot setup.
+   */
+  mobileAlternate: string | null;
   /** True when the page declares `<html ⚡>` / `<html amp>`. AMP-for-Ads
    *  / AMP-for-Email variants (`⚡4ads`, `⚡4email`) count too. */
   ampPage: boolean;
@@ -614,6 +623,17 @@ export interface CrawlUrlRow {
   clusterId: number;
   /** Number of pages in this URL's near-duplicate cluster (1 = singleton). */
   clusterSize: number;
+  /**
+   * True when the most recent fetch returned different data than the one
+   * before it — status, body content, title, description, H1, canonical,
+   * robots directives, indexability, word/outlink/image counts, hreflang
+   * or schema types. Set only on a re-crawl of a URL that already had a
+   * response (Re-Spider, or Start pressed again on a crawled site); a
+   * first crawl leaves every row false because there is no baseline.
+   * Reset for the whole table when a refresh crawl begins, so it always
+   * describes the latest run.
+   */
+  changed: boolean;
   crawledAt: string;
 }
 
@@ -689,6 +709,24 @@ export interface CrawlConfig {
   deviceMode: 'desktop' | 'mobile';
   followRedirects: boolean;
   respectRobotsTxt: boolean;
+  /**
+   * Honour a robots.txt `Crawl-delay` directive. Default `false`.
+   *
+   * `Crawl-delay` is not part of the Robots Exclusion Protocol (RFC 9309);
+   * Google ignores it outright and Screaming Frog does not implement it.
+   * Sites routinely publish values tuned for 2005-era bulk scrapers —
+   * `Crawl-delay: 30` is common — which, honoured literally, turns a
+   * 500-URL crawl from ~40 s into ~4 hours. Because the value is almost
+   * never calibrated to the site's actual capacity, obeying it by default
+   * costs the user enormously and buys the server nothing it asked for in
+   * a standardised way.
+   *
+   * Off by default; users who need it (own-site audits under a strict
+   * ops policy, shared hosting) can switch it on. `Allow` / `Disallow`
+   * are unaffected — those are the actual standard and are always
+   * honoured when `respectRobotsTxt` is on.
+   */
+  respectCrawlDelay: boolean;
   crawlExternal: boolean;
   /**
    * Crawl internal page subresources so they appear in the Internal tab as
@@ -1048,6 +1086,110 @@ export interface CrawlConfig {
    * the meta-refresh URL is also enqueued like a redirect target.
    */
   followJsRedirects: boolean;
+
+  /* ------------------------------------------------------------------ *
+   * Spider → Crawl matrix (Screaming Frog "Configuration → Spider →
+   * Crawl"). Every link type the parser can discover gets two
+   * independent switches:
+   *
+   *   • CRAWL — enqueue the target so it is fetched and gets its own row.
+   *   • STORE — persist what the page declared, so the corresponding tab
+   *             / column / table is populated.
+   *
+   * The two are orthogonal: "store but don't crawl" lists a declaration
+   * without spending a request on it (the classic image-inventory case),
+   * while "crawl but don't store" fetches a resource for its side effects
+   * — validating that it loads, mining a stylesheet for its `@font-face`
+   * targets — without cluttering the Internal tab with hundreds of rows.
+   *
+   * The crawl side of Images / CSS / JavaScript / External Links /
+   * Canonicals / Pagination / Meta Refresh is carried by the pre-existing
+   * `checkImages`, `checkCss`, `checkJs`, `crawlExternal`,
+   * `followCanonicals`, `followPaginationLinks` and `followJsRedirects`
+   * fields — the panel binds to those rather than shadowing them, so
+   * there is exactly one source of truth per switch.
+   *
+   * Every default below reproduces the behaviour FreeCrawl had before the
+   * matrix existed, so opening an older project changes nothing.
+   *
+   * Screaming Frog's SWF row is deliberately absent: Flash reached
+   * end-of-life in 2020 and no live site still ships `.swf` objects.
+   * ------------------------------------------------------------------ */
+
+  /** Persist `<img>` declarations into the images table (and the Images
+   *  tab). Independent of `checkImages`, which decides whether the image
+   *  bytes are actually requested. */
+  storeImages: boolean;
+  /** Fetch internal `<video>` / `<audio>` / their `<source>` targets so
+   *  they land in the Internal tab with status + size. Off by default —
+   *  media files are large and rarely the point of an SEO crawl. */
+  crawlMedia: boolean;
+  /** Keep the crawled media resource's URL row. Only has an effect while
+   *  `crawlMedia` is on — an un-fetched media file has no row to keep. */
+  storeMedia: boolean;
+  /** Keep the crawled stylesheet's URL row. Turn off to mine CSS for
+   *  `@font-face` / `url()` targets without listing every stylesheet. */
+  storeCss: boolean;
+  /** Keep the crawled script's URL row. */
+  storeJs: boolean;
+  /** Follow internal `<a href>` hyperlinks. Off turns the crawl into a
+   *  single-page fetch that still records everything the page declares. */
+  crawlInternalLinks: boolean;
+  /** Persist internal hyperlinks in the link graph — inlinks / outlinks,
+   *  anchor-text reports, link score, internal broken links. */
+  storeInternalLinks: boolean;
+  /** Persist outbound hyperlinks in the link graph. */
+  storeExternalLinks: boolean;
+  /** Persist `<link rel="canonical">` (and its HTTP-header form) so the
+   *  Canonicals tab and the canonical issue filters have data. */
+  storeCanonicals: boolean;
+  /** Persist `<link rel="next">` / `<link rel="prev">`. */
+  storePagination: boolean;
+  /** Enqueue every `<link rel="alternate" hreflang>` target. Off by
+   *  default: hreflang alternates are usually in scope anyway and get
+   *  discovered through ordinary links. */
+  crawlHreflang: boolean;
+  /** Persist hreflang declarations (Hreflang tab + reciprocity audit). */
+  storeHreflang: boolean;
+  /** Enqueue the `<link rel="amphtml">` target so the AMP page is crawled
+   *  as its own URL. */
+  crawlAmp: boolean;
+  /** Persist AMP declarations and the smoke-validator findings. */
+  storeAmp: boolean;
+  /** Persist `<meta http-equiv="refresh">` and its parsed target. */
+  storeMetaRefresh: boolean;
+  /** Enqueue internal `<iframe src>` documents as their own URLs. */
+  crawlIframes: boolean;
+  /** Record `<iframe src>` targets in the link graph so they show up in
+   *  the page's outlinks. Excluded from the outlink *count* — an embed is
+   *  not a hyperlink. */
+  storeIframes: boolean;
+  /** Enqueue the mobile-alternate target — the `<link rel="alternate"
+   *  media="only screen and (max-width: …)">` that separate-URL (m-dot)
+   *  sites use to point at their mobile version. */
+  crawlMobileAlternate: boolean;
+  /** Persist the mobile-alternate URL on the page row. */
+  storeMobileAlternate: boolean;
+  /** Persist the count of links a search engine cannot follow —
+   *  `<a>` with no href but an onclick, `href="javascript:…"`, and
+   *  `href="#"` placeholders wired to a handler. */
+  storeUncrawlableLinks: boolean;
+  /** With `scope: 'subfolder'`, still request links that point outside
+   *  the start folder (one hop, no recursion) so their status code is
+   *  known. Off leaves them undiscovered entirely. */
+  checkLinksOutsideStartFolder: boolean;
+  /** Follow `rel="nofollow"` on links pointing to another host. Split
+   *  from `followNofollow`, which now governs internal links only. */
+  followExternalNofollow: boolean;
+  /** Record links whose href cannot be parsed as a URL — unencoded
+   *  spaces, stray angle brackets, doubled schemes. Off drops them
+   *  silently; on surfaces them in the link graph as broken. */
+  crawlInvalidLinks: boolean;
+  /** Crawl the URLs listed inside discovered XML sitemaps, not just
+   *  record them. Turns `discoverSitemaps` from a reporting aid into a
+   *  discovery source, which is what finds orphan pages. */
+  crawlLinkedSitemaps: boolean;
+
   /**
    * Wave 6 — Per-pass crawl-analysis toggles. Each post-crawl pass
    * can be independently disabled when the user knows the data isn't
@@ -1987,6 +2129,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   deviceMode: 'desktop',
   followRedirects: true,
   respectRobotsTxt: true,
+  respectCrawlDelay: false,
   crawlExternal: false,
   checkImages: true,
   checkCss: true,
@@ -2040,6 +2183,32 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   followPaginationLinks: true,
   followNofollow: false,
   followJsRedirects: false,
+  // Spider → Crawl matrix. Each value reproduces the behaviour that was
+  // hardcoded before the matrix existed, so the defaults are a no-op.
+  storeImages: true,
+  crawlMedia: false,
+  storeMedia: false,
+  storeCss: true,
+  storeJs: true,
+  crawlInternalLinks: true,
+  storeInternalLinks: true,
+  storeExternalLinks: true,
+  storeCanonicals: true,
+  storePagination: true,
+  crawlHreflang: false,
+  storeHreflang: true,
+  crawlAmp: false,
+  storeAmp: true,
+  storeMetaRefresh: true,
+  crawlIframes: false,
+  storeIframes: false,
+  crawlMobileAlternate: false,
+  storeMobileAlternate: true,
+  storeUncrawlableLinks: true,
+  checkLinksOutsideStartFolder: true,
+  followExternalNofollow: false,
+  crawlInvalidLinks: false,
+  crawlLinkedSitemaps: false,
   analyseInlinks: true,
   analyseLinkScore: true,
   analyseRedirectChains: true,

@@ -37,6 +37,10 @@ Options:
   --rps <n>           Max requests per second (default: ${DEFAULT_CRAWL_CONFIG.maxRps})
   --user-agent <str>  Custom User-Agent string
   --no-robots         Ignore robots.txt
+  --respect-crawl-delay
+                      Honour a robots.txt Crawl-delay directive as a global rate limit
+                        (one request every N seconds). Off by default — the directive is
+                        not part of RFC 9309 and published values are often crippling.
   --external          Follow external links
   --header <K: V>     Extra request header; repeatable (e.g. --header "Authorization: Bearer X")
   --include <regex>   Only crawl URLs matching this regex; repeatable
@@ -71,6 +75,7 @@ async function main(): Promise<void> {
       rps: { type: 'string' },
       'user-agent': { type: 'string' },
       'no-robots': { type: 'boolean' },
+      'respect-crawl-delay': { type: 'boolean' },
       external: { type: 'boolean' },
       header: { type: 'string', multiple: true },
       include: { type: 'string', multiple: true },
@@ -220,6 +225,7 @@ async function main(): Promise<void> {
     // `--no-robots` / `--external` only flip the flag ON in their direction;
     // absent, the file value (or default) stands.
     ...(values['no-robots'] ? { respectRobotsTxt: false } : {}),
+    ...(values['respect-crawl-delay'] ? { respectCrawlDelay: true } : {}),
     ...(values.external ? { crawlExternal: true } : {}),
     ...(values.header !== undefined ? { customHeaders: parseHeaders(values.header) } : {}),
     ...(values.include !== undefined ? { includePatterns: values.include } : {}),

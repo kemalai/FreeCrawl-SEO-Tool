@@ -96,6 +96,7 @@ const XML_COLUMNS: (keyof CrawlUrlRow)[] = [
   'paginationPrev',
   'paginationSequenceBreak',
   'amphtml',
+  'mobileAlternate',
   'favicon',
   'appleTouchIcon',
   'androidIcon',

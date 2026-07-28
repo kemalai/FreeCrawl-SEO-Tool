@@ -106,6 +106,13 @@ export interface MenuLabels {
   ctxRespiderNUrls: string;
   ctxRemoveNUrls: string;
   ctxExportNUrlsAsCsv: string;
+  /** Selection-scoped copy items. `{n}` → cell / row / column count. */
+  ctxCopyCell: string;
+  ctxCopyNCells: string;
+  ctxCopyRow: string;
+  ctxCopyNRows: string;
+  ctxCopyColumn: string;
+  ctxCopyNColumns: string;
 
   // ── Recurring dialog buttons ──
   btnOk: string;
@@ -257,6 +264,12 @@ const MENU_EN: MenuLabels = {
   ctxRespiderNUrls: 'Re-Spider {n} URLs',
   ctxRemoveNUrls: 'Remove {n} URLs',
   ctxExportNUrlsAsCsv: 'Export {n} URLs as CSV…',
+  ctxCopyCell: 'Copy Cell',
+  ctxCopyNCells: 'Copy {n} Cells',
+  ctxCopyRow: 'Copy Row',
+  ctxCopyNRows: 'Copy {n} Rows',
+  ctxCopyColumn: 'Copy Column',
+  ctxCopyNColumns: 'Copy {n} Columns',
 
   btnOk: 'OK',
   btnCancel: 'Cancel',
@@ -408,6 +421,12 @@ const MENU_TR: MenuLabels = {
   ctxRespiderNUrls: '{n} URL\'yi Yeniden Tara',
   ctxRemoveNUrls: '{n} URL\'yi Kaldır',
   ctxExportNUrlsAsCsv: '{n} URL\'yi CSV Olarak Dışa Aktar…',
+  ctxCopyCell: 'Hücreyi Kopyala',
+  ctxCopyNCells: '{n} Hücreyi Kopyala',
+  ctxCopyRow: 'Satırı Kopyala',
+  ctxCopyNRows: '{n} Satırı Kopyala',
+  ctxCopyColumn: 'Sütunu Kopyala',
+  ctxCopyNColumns: '{n} Sütunu Kopyala',
 
   btnOk: 'Tamam',
   btnCancel: 'İptal',

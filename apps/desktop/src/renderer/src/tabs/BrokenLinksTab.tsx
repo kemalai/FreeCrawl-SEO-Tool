@@ -7,11 +7,22 @@ import type { BrokenLinkRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip } from '../components/InfoTip.js';
 import { translateLabel } from '../i18n/labels.js';
+import {
+  copySelection,
+  isAdditiveClick,
+  isGridCopyShortcut,
+  isMacSecondaryClick,
+  markGridActive,
+  ownsGridCopy,
+  writeTextToClipboard,
+} from '../utils/clipboard.js';
 
 const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
 const ROW_NUM_WIDTH = 56;
 const STATUS_BAR_HEIGHT = 22;
+/** Identifies this grid to the copy-shortcut arbitration in `clipboard.ts`. */
+const GRID_ID = 'broken-links';
 // I-4 — Crawl-aware polling cadence. Live during a crawl, idle when
 // just viewing existing project data. The 30 s idle poll exists only
 // to catch external invalidations (Open Project, Bulk Export); the
@@ -216,15 +227,10 @@ export function BrokenLinksTab() {
   // Ctrl/Cmd+C copies the selected cells as TSV.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
-      if (e.key !== 'c' && e.key !== 'C') return;
+      if (!isGridCopyShortcut(e)) return;
+      if (!ownsGridCopy(GRID_ID)) return;
       const sel = selectedRef.current;
       if (sel.size === 0) return;
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) {
-        return;
-      }
       e.preventDefault();
       void copySelectedCells(sel, rowsRef.current);
     };
@@ -278,13 +284,17 @@ export function BrokenLinksTab() {
   // --- selection handlers --------------------------------------------------
   const cellMouseDown = (r: number, c: number, e: React.MouseEvent) => {
     if (e.button !== 0) return; // left button only
+    // macOS Ctrl+click is the OS secondary click: it fires mousedown *and*
+    // contextmenu. Starting a drag here would grow the selection at the
+    // exact moment the menu is about to act on it.
+    if (isMacSecondaryClick(e)) return;
     if (e.shiftKey && anchorRef.current) {
       // Extend a rectangle from the existing anchor.
       setSelected(rangeKeys(anchorRef.current.r, anchorRef.current.c, r, c));
       dragRef.current = { aR: anchorRef.current.r, aC: anchorRef.current.c, additive: false, base: new Set() };
       return;
     }
-    if (e.ctrlKey || e.metaKey) {
+    if (isAdditiveClick(e)) {
       // Toggle this cell, keep the rest.
       setSelected((prev) => {
         const next = new Set(prev);
@@ -368,7 +378,11 @@ export function BrokenLinksTab() {
         </button>
       </div>
 
-      <div ref={scrollRef} className="relative flex-1 select-none overflow-auto">
+      <div
+        ref={scrollRef}
+        className="relative flex-1 select-none overflow-auto"
+        onMouseDown={() => markGridActive(GRID_ID)}
+      >
         <div style={{ minWidth: totalWidth, width: '100%' }}>
           <div
             className="sticky top-0 z-10 flex bg-surface-900 text-[11px]"
@@ -610,52 +624,20 @@ function rangeKeys(aR: number, aC: number, r: number, c: number): Set<string> {
 }
 
 /**
- * Copy the selected cells to the clipboard as TSV — grouped by row,
- * columns ascending, so a paste into a spreadsheet lands in matching
- * grid positions.
+ * Copy the selected cells to the clipboard as TSV. Rows here live in a
+ * plain array, so the selection's row key is already the display index.
  */
 async function copySelectedCells(
   selected: Set<string>,
   rows: BrokenLinkRow[],
 ): Promise<void> {
-  if (selected.size === 0) return;
-  const byRow = new Map<number, number[]>();
-  for (const k of selected) {
-    const [rs, cs] = k.split(':');
-    const r = Number(rs);
-    const c = Number(cs);
-    if (!Number.isFinite(r) || !Number.isFinite(c)) continue;
-    const list = byRow.get(r);
-    if (list) list.push(c);
-    else byRow.set(r, [c]);
-  }
-  const lines: string[] = [];
-  for (const r of [...byRow.keys()].sort((a, b) => a - b)) {
-    const row = rows[r];
-    if (!row) continue;
-    const cols = (byRow.get(r) ?? []).sort((a, b) => a - b);
-    lines.push(cols.map((c) => cellValue(row, c)).join('\t'));
-  }
-  await writeTextToClipboard(lines.join('\n'));
-}
-
-/** Clipboard write with a hidden-textarea fallback for unfocused windows. */
-async function writeTextToClipboard(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try {
-      document.execCommand('copy');
-    } finally {
-      document.body.removeChild(ta);
-    }
-  }
+  await copySelection(selected, {
+    order: (r) => r,
+    text: (r, c) => {
+      const row = rows[r];
+      return row ? cellValue(row, c) : null;
+    },
+  });
 }
 
 function statusClasses(code: number | null): string {

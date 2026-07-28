@@ -435,6 +435,14 @@ const COL = {
     info: '`<link rel="amphtml" href="…">` value — the AMP version of this page. Empty when the page does not declare an AMP alternate.',
     example: 'https://example.com/amp/post-1',
   } as ColumnSpec,
+  mobileAlternate: {
+    key: 'mobileAlternate',
+    header: 'Mobile Alternate',
+    size: 360,
+    kind: 'mono',
+    info: '`<link rel="alternate" media="only screen and (max-width: …)" href="…">` value — the separate-URL (m-dot) mobile version of this page. Empty on responsive sites, which is most of them. A value here with no reciprocal canonical pointing back is the classic broken m-dot setup.',
+    example: 'https://m.example.com/post-1',
+  } as ColumnSpec,
   schemaTypes: {
     key: 'schemaTypes',
     header: 'Schema Types',
@@ -675,6 +683,7 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
     COL.status,
     COL.indexability,
     COL.amphtml,
+    COL.mobileAlternate,
     COL.title,
     COL.inlinks,
   ],

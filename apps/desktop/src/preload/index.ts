@@ -87,6 +87,8 @@ import {
   type SitemapGenerateInput,
   type SitemapGenerateResult,
   type UrlBulkContextMenuInput,
+  type UrlGridContextMenuInput,
+  type UrlGridCopyEvent,
   type UrlContextMenuInput,
   type UrlDetail,
   type UrlDetailInput,
@@ -233,6 +235,8 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.urlContextMenu, input),
   urlBulkContextMenu: (input: UrlBulkContextMenuInput): Promise<void> =>
     ipcRenderer.invoke(IPC.urlBulkContextMenu, input),
+  urlGridContextMenu: (input: UrlGridContextMenuInput): Promise<void> =>
+    ipcRenderer.invoke(IPC.urlGridContextMenu, input),
   imagesQuery: (input: ImagesQueryInput): Promise<ImagesQueryResult> =>
     ipcRenderer.invoke(IPC.imagesQuery, input),
   brokenLinksQuery: (input: BrokenLinksQueryInput): Promise<BrokenLinksQueryResult> =>
@@ -487,6 +491,7 @@ const api: FreeCrawlApi = {
   onDone: (cb) => subscribe<CrawlSummary>(IPC.crawlDone, cb),
   onError: (cb) => subscribe<string>(IPC.crawlError, cb),
   onMenuEvent: (cb) => subscribe<MenuEvent>(IPC.menuEvent, cb),
+  onUrlGridCopy: (cb) => subscribe<UrlGridCopyEvent>(IPC.urlGridCopy, cb),
   editCopyNative: (): Promise<void> => ipcRenderer.invoke(IPC.editCopyNative),
   onDataChanged: (cb) => {
     const listener = (): void => cb();

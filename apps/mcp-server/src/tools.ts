@@ -286,6 +286,7 @@ export function buildTools(): Tool[] {
               crawlDelayMs: { type: 'integer', minimum: 0 },
               requestTimeoutMs: { type: 'integer', minimum: 1000 },
               respectRobotsTxt: { type: 'boolean' },
+              respectCrawlDelay: { type: 'boolean' },
               followRedirects: { type: 'boolean' },
               crawlExternal: { type: 'boolean' },
               userAgent: { type: 'string' },

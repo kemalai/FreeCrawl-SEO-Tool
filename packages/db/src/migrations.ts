@@ -1942,6 +1942,48 @@ const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 81,
+    name: 'add_url_changed_flag',
+    // Re-crawling a URL that already has data (Re-Spider, or a second
+    // Start on the same site) now records whether the page actually
+    // moved since the previous fetch, so the URL table can flag it.
+    //
+    // Set by the urls upsert itself — comparing `excluded.*` against the
+    // stored row inside the ON CONFLICT clause costs nothing, whereas a
+    // read-then-compare in JS would add a SELECT per fetched URL.
+    //
+    // Rows written before this column existed have no baseline to be
+    // measured against, so the default of 0 (unchanged) is correct.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'changed')) {
+        db.exec('ALTER TABLE urls ADD COLUMN changed INTEGER NOT NULL DEFAULT 0');
+      }
+    },
+  },
+  {
+    version: 82,
+    name: 'add_mobile_alternate',
+    // Separate-URL (m-dot) sites declare their mobile version with
+    // `<link rel="alternate" media="only screen and (max-width: …)">`.
+    // The Spider → Crawl matrix can now both follow and store it, so the
+    // target needs somewhere to live.
+    //
+    // Left NULL for rows crawled before this column existed: absent and
+    // "declared nothing" are the same thing for every consumer, and a
+    // backfill would need the page bodies we no longer parse.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'mobile_alternate')) {
+        db.exec('ALTER TABLE urls ADD COLUMN mobile_alternate TEXT');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

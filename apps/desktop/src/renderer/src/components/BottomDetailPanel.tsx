@@ -21,6 +21,20 @@ import type {
 import { GridExportButton } from './GridExportButton.js';
 import { useAppStore } from '../store.js';
 import { diagnoseStatus, type StatusDiagnosis } from '../utils/statusDiagnosis.js';
+import {
+  copySelection,
+  isAdditiveClick,
+  isGridCopyShortcut,
+  isMacSecondaryClick,
+  markGridActive,
+  ownsGridCopy,
+  writeTextToClipboard,
+} from '../utils/clipboard.js';
+
+/** Identifies the detail panel's links grid to the copy-shortcut
+ *  arbitration in `clipboard.ts`. Only one LinksView is mounted at a
+ *  time (the sub-tabs are mutually exclusive), so one id is enough. */
+const GRID_ID = 'detail-links';
 
 type SubTab =
   | 'url-details'
@@ -2078,6 +2092,7 @@ function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: stri
     ['Hreflang Count', row.hreflangCount > 0 ? row.hreflangCount : null],
     ['Hreflangs', summarizeHreflangs(row.hreflangs)],
     ['AMP HTML', row.amphtml],
+    ['Mobile Alternate', row.mobileAlternate],
     ['AMP Page', row.ampPage ? 'Yes' : null],
     [
       'AMP Validation Errors',
@@ -2427,17 +2442,10 @@ function LinksView({
   // selected cell in this LinksView is enough.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
-      if (e.key !== 'c' && e.key !== 'C') return;
+      if (!isGridCopyShortcut(e)) return;
+      if (!ownsGridCopy(GRID_ID)) return;
       const sel = selectedRef.current;
       if (sel.size === 0) return;
-      // Don't override copy when the user is in an input/textarea — they
-      // probably want the input's selection, not ours.
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) {
-        return;
-      }
       e.preventDefault();
       void copyCellsToClipboard(sel, rowsRef.current);
     };
@@ -2525,7 +2533,7 @@ function LinksView({
       return;
     }
     // Ctrl/Cmd+Click: toggle the single cell in the current selection.
-    if (e.ctrlKey || e.metaKey) {
+    if (isAdditiveClick(e)) {
       const next = new Set(selected);
       const k = cellKey(r, c);
       if (next.has(k)) next.delete(k);
@@ -2548,7 +2556,7 @@ function LinksView({
 
   const handleHeaderClick = (c: number, e: React.MouseEvent) => {
     const keys = rows.map((_, r) => cellKey(r, c));
-    if (e.ctrlKey || e.metaKey) {
+    if (isAdditiveClick(e)) {
       const next = new Set(selected);
       const allSelected = keys.every((k) => next.has(k));
       if (allSelected) {
@@ -2599,12 +2607,16 @@ function LinksView({
 
   const beginCellDrag = (r: number, c: number, e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    // macOS Ctrl+click is the OS secondary click: it fires mousedown *and*
+    // contextmenu. Starting a drag here would grow the selection at the
+    // exact moment the menu is about to act on it.
+    if (isMacSecondaryClick(e)) return;
     if (e.shiftKey) {
       handleCellClick(r, c, e);
       return;
     }
     e.preventDefault();
-    const additive = e.ctrlKey || e.metaKey;
+    const additive = isAdditiveClick(e);
     dragRef.current = {
       kind: 'cell',
       aR: r,
@@ -2620,12 +2632,16 @@ function LinksView({
 
   const beginColumnDrag = (c: number, e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    // macOS Ctrl+click is the OS secondary click: it fires mousedown *and*
+    // contextmenu. Starting a drag here would grow the selection at the
+    // exact moment the menu is about to act on it.
+    if (isMacSecondaryClick(e)) return;
     if (e.shiftKey) {
       handleHeaderClick(c, e);
       return;
     }
     e.preventDefault();
-    const additive = e.ctrlKey || e.metaKey;
+    const additive = isAdditiveClick(e);
     dragRef.current = {
       kind: 'column',
       aC: c,
@@ -2642,7 +2658,11 @@ function LinksView({
   const menuClickedIsUrl = isUrlLike(menuClickedCell);
 
   return (
-    <div ref={rootRef} className="relative flex h-full select-none flex-col">
+    <div
+      ref={rootRef}
+      className="relative flex h-full select-none flex-col"
+      onMouseDown={() => markGridActive(GRID_ID)}
+    >
       <div className="flex shrink-0 items-center gap-3 px-3 pt-2 text-[11px] text-surface-500">
         <span>
           {t('links.showing', { defaultValue: 'Showing' })}{' '}
@@ -2936,77 +2956,21 @@ function collectUrlsFromSelection(
 }
 
 /**
- * Write `text` to the OS clipboard with the same fallback chain as
- * `copyCellsToClipboard` — async API first, hidden textarea +
- * execCommand if the API is unavailable or permission-denied.
- */
-async function writeTextToClipboard(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try {
-      document.execCommand('copy');
-    } finally {
-      document.body.removeChild(ta);
-    }
-  }
-}
-
-/**
- * Build a TSV string from the selected cells of a 2-D table and write it
- * to the OS clipboard. Cells are grouped by row (preserving the row
- * order shown in the UI) and within a row by ascending column index, so
- * paste-ing into a spreadsheet drops cells into matching grid positions.
+ * Copy the selected cells of a 2-D table to the clipboard as TSV. Rows
+ * are a plain array here, so the selection's row key is already the
+ * display index.
  */
 async function copyCellsToClipboard(
   selected: Set<string>,
   rows: string[][],
 ): Promise<void> {
-  if (selected.size === 0) return;
-  // Group selected cells by row index → list of column indexes.
-  const byRow = new Map<number, number[]>();
-  for (const k of selected) {
-    const [rs, cs] = k.split(':');
-    const r = Number(rs);
-    const c = Number(cs);
-    if (!Number.isFinite(r) || !Number.isFinite(c)) continue;
-    const list = byRow.get(r);
-    if (list) list.push(c);
-    else byRow.set(r, [c]);
-  }
-  const sortedRows = [...byRow.keys()].sort((a, b) => a - b);
-  const lines: string[] = [];
-  for (const r of sortedRows) {
-    const row = rows[r];
-    if (!row) continue;
-    const cols = (byRow.get(r) ?? []).sort((a, b) => a - b);
-    lines.push(cols.map((c) => row[c] ?? '').join('\t'));
-  }
-  const text = lines.join('\n');
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    // Clipboard API can fail (e.g. when window not focused); fall back
-    // to a hidden textarea + execCommand which works in Electron even
-    // when the clipboard permission is unset.
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try {
-      document.execCommand('copy');
-    } finally {
-      document.body.removeChild(ta);
-    }
-  }
+  await copySelection(selected, {
+    order: (r) => r,
+    text: (r, c) => {
+      const row = rows[r];
+      return row ? (row[c] ?? '') : null;
+    },
+  });
 }
 
 function SerpSnippet({ row }: { row: CrawlUrlRow }) {

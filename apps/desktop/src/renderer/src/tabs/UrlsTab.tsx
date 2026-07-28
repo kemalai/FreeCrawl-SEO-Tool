@@ -33,6 +33,7 @@ import type {
   AdvancedFilter,
   CrawlUrlRow,
   UrlCategory,
+  UrlGridMenuScope,
 } from '@freecrawl/shared-types';
 import { useAppStore, TAB_QUICK_FILTERS, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId, type ColumnSpec } from './columns.js';
@@ -44,6 +45,17 @@ import { ErrorBoundary } from '../components/ErrorBoundary.js';
 import { ExportDialog } from '../components/ExportDialog.js';
 import { InfoTip } from '../components/InfoTip.js';
 import { translateLabel } from '../i18n/labels.js';
+import {
+  copySelection,
+  isAdditiveClick,
+  isGridCopyShortcut,
+  isMacSecondaryClick,
+  markGridActive,
+  ownsGridCopy,
+  toTsvLine,
+  writeTextToClipboard,
+  type CellSource,
+} from '../utils/clipboard.js';
 
 const ROW_HEIGHT = 24;
 const HEADER_HEIGHT = 28;
@@ -51,6 +63,14 @@ const MIN_COL_WIDTH = 48;
 const ROW_NUM_DEFAULT_WIDTH = 56;
 const ROW_NUM_KEY = '__row_num__';
 const STATUS_BAR_HEIGHT = 22;
+/** Identifies this grid to the copy-shortcut arbitration in `clipboard.ts`. */
+const GRID_ID = 'urls';
+// Rows pulled per query when copying whole columns. Big enough that a
+// 100k-row table is ~50 round-trips, small enough that each one stays a
+// short job on the reader worker instead of a multi-second stall.
+const COPY_FETCH_CHUNK = 2000;
+// How long the "copied N cells" acknowledgement stays up.
+const COPY_ACK_MS = 2500;
 const PREFS_PREFIX = 'col-widths:';
 const PREFS_HIDDEN_PREFIX = 'col-hidden:';
 const PREFS_PINNED_LEFT_PREFIX = 'col-pinned-left:';
@@ -192,6 +212,21 @@ export function UrlsTab() {
       }
     | null
   >(null);
+  /** Row data captured the moment a row is pulled into a selection.
+   *
+   *  The selection sets deliberately store url ids, not row indexes, so
+   *  they survive the re-sorts a running crawl causes. A copy, though,
+   *  needs two things ids alone can't give: the row's values and its
+   *  position in the table. The lazy loader holds at most ~8k rows and
+   *  evicts by LRU, so rows the user selected can be gone from its cache
+   *  by the time Ctrl+C is pressed — capturing them here is what keeps a
+   *  large drag-selection copyable in full instead of silently
+   *  truncated. Fresh data still wins: the copy re-reads the live row
+   *  whenever the loader still has it and only then falls back here. */
+  const rowSnapshots = useRef(new Map<number, { index: number; row: CrawlUrlRow }>());
+  const rememberRow = useCallback((index: number, row: CrawlUrlRow) => {
+    rowSnapshots.current.set(row.id, { index, row });
+  }, []);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() =>
     loadStoredWidths(activeTab),
   );
@@ -366,7 +401,20 @@ export function UrlsTab() {
     selectionAnchor.current = null;
     cellAnchor.current = null;
     dragRef.current = null;
+    rowSnapshots.current.clear();
   }, [activeCategory, activeTab, search, sortBy, sortDir, hiddenColumns]);
+
+  // Cell and column selections are keyed by column *index*, so any
+  // reshuffle of the column layout silently re-points them at a
+  // different column — the highlight jumps and a copy would hand over
+  // the wrong values. Show/hide is covered by the reset above (it keys
+  // on `hiddenColumns`); reorder and pin need their own clear. Row
+  // selection is index-free, so it survives.
+  useEffect(() => {
+    setSelectedCells(new Set());
+    setSelectedColumns(new Set());
+    cellAnchor.current = null;
+  }, [columnOrder, pinnedLeftOrder]);
 
   // Clear the drag flag on any mouseup anywhere — without this, releasing
   // the button outside a cell would leave `dragRef` dangling and the next
@@ -544,19 +592,24 @@ export function UrlsTab() {
     // selection because row and cell selections are mutually exclusive
     // semantically (row → "this URL as a record", cell → "this value").
     clearCellAndColumn();
+    const clicked = lazy.rowAt(rowIndex);
+    if (clicked) rememberRow(rowIndex, clicked);
     if (e.shiftKey && selectionAnchor.current !== null) {
       const anchorIdx = selectionAnchor.current;
       const [lo, hi] = anchorIdx < rowIndex ? [anchorIdx, rowIndex] : [rowIndex, anchorIdx];
       const next = new Set(selectedIds);
       for (let i = lo; i <= hi; i++) {
         const r = lazy.rowAt(i);
-        if (r) next.add(r.id);
+        if (r) {
+          next.add(r.id);
+          rememberRow(i, r);
+        }
       }
       setSelectedIds(next);
       setSelectedUrlId(rowId);
       return;
     }
-    if (e.ctrlKey || e.metaKey) {
+    if (isAdditiveClick(e)) {
       const next = new Set(selectedIds);
       if (next.has(rowId)) next.delete(rowId);
       else next.add(rowId);
@@ -589,6 +642,8 @@ export function UrlsTab() {
     setSelectedColumns(new Set());
 
     const k = `${rowId}:${colIdx}`;
+    const clicked = lazy.rowAt(rowIndex);
+    if (clicked) rememberRow(rowIndex, clicked);
 
     // Shift+Click within the same column extends the vertical range from
     // the anchor. Cross-column shift-click falls back to single-pick
@@ -600,13 +655,16 @@ export function UrlsTab() {
       const next = new Set(selectedCells);
       for (let i = lo; i <= hi; i++) {
         const r = lazy.rowAt(i);
-        if (r) next.add(`${r.id}:${colIdx}`);
+        if (r) {
+          next.add(`${r.id}:${colIdx}`);
+          rememberRow(i, r);
+        }
       }
       setSelectedCells(next);
       setSelectedUrlId(rowId);
       return;
     }
-    if (e.ctrlKey || e.metaKey) {
+    if (isAdditiveClick(e)) {
       const next = new Set(selectedCells);
       if (next.has(k)) next.delete(k);
       else next.add(k);
@@ -632,7 +690,7 @@ export function UrlsTab() {
     // Column selection — mutually exclusive with row selection, lives
     // alongside per-cell selection but replaces it on plain clicks.
     clearRow();
-    if (e.ctrlKey || e.metaKey) {
+    if (isAdditiveClick(e)) {
       const next = new Set(selectedColumns);
       if (next.has(colIdx)) next.delete(colIdx);
       else next.add(colIdx);
@@ -666,6 +724,7 @@ export function UrlsTab() {
       for (let i = loR; i <= hiR; i++) {
         const r = lazy.rowAt(i);
         if (!r) continue;
+        rememberRow(i, r);
         for (let c = loC; c <= hiC; c++) {
           next.add(`${r.id}:${c}`);
         }
@@ -674,7 +733,7 @@ export function UrlsTab() {
       const endRow = lazy.rowAt(toIdx);
       if (endRow) setSelectedUrlId(endRow.id);
     },
-    [lazy, setSelectedUrlId],
+    [lazy, rememberRow, setSelectedUrlId],
   );
 
   const applyRowDrag = useCallback(
@@ -687,13 +746,16 @@ export function UrlsTab() {
       const next = new Set(d.baseIds);
       for (let i = lo; i <= hi; i++) {
         const r = lazy.rowAt(i);
-        if (r) next.add(r.id);
+        if (r) {
+          next.add(r.id);
+          rememberRow(i, r);
+        }
       }
       setSelectedIds(next);
       const endRow = lazy.rowAt(toIdx);
       if (endRow) setSelectedUrlId(endRow.id);
     },
-    [lazy, setSelectedUrlId],
+    [lazy, rememberRow, setSelectedUrlId],
   );
 
   const applyColumnDrag = useCallback((toCol: number) => {
@@ -714,13 +776,17 @@ export function UrlsTab() {
     e: React.MouseEvent,
   ) => {
     if (e.button !== 0) return;
+    // macOS Ctrl+click is the OS secondary click: it fires mousedown *and*
+    // contextmenu. Starting a drag here would grow the selection at the
+    // exact moment the menu is about to act on it.
+    if (isMacSecondaryClick(e)) return;
     // Shift extends from the existing anchor using click semantics — no drag.
     if (e.shiftKey) {
       handleCellClick(rowId, colIdx, idx, e);
       return;
     }
     e.preventDefault();
-    const additive = e.ctrlKey || e.metaKey;
+    const additive = isAdditiveClick(e);
     clearRow();
     setSelectedColumns(new Set());
     dragRef.current = {
@@ -739,12 +805,16 @@ export function UrlsTab() {
 
   const beginRowDrag = (rowId: number, idx: number, e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    // macOS Ctrl+click is the OS secondary click: it fires mousedown *and*
+    // contextmenu. Starting a drag here would grow the selection at the
+    // exact moment the menu is about to act on it.
+    if (isMacSecondaryClick(e)) return;
     if (e.shiftKey) {
       handleRowClick(rowId, idx, e);
       return;
     }
     e.preventDefault();
-    const additive = e.ctrlKey || e.metaKey;
+    const additive = isAdditiveClick(e);
     setSelectedCells(new Set());
     setSelectedColumns(new Set());
     dragRef.current = {
@@ -761,12 +831,16 @@ export function UrlsTab() {
 
   const beginColumnDrag = (colIdx: number, e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    // macOS Ctrl+click is the OS secondary click: it fires mousedown *and*
+    // contextmenu. Starting a drag here would grow the selection at the
+    // exact moment the menu is about to act on it.
+    if (isMacSecondaryClick(e)) return;
     if (e.shiftKey) {
       handleHeaderClick(colIdx, e);
       return;
     }
     e.preventDefault();
-    const additive = e.ctrlKey || e.metaKey;
+    const additive = isAdditiveClick(e);
     clearRow();
     setSelectedCells(new Set());
     dragRef.current = {
@@ -777,6 +851,260 @@ export function UrlsTab() {
       baseCols: additive ? new Set(selectedColumns) : new Set(),
     };
     applyColumnDrag(colIdx);
+  };
+
+  // ──────── Clipboard ────────
+
+  const [copyState, setCopyState] = useState<
+    { phase: 'copying' } | { phase: 'done'; cells: number } | null
+  >(null);
+  const copyInFlight = useRef(false);
+
+  /** Everything the document-level Ctrl+C listener needs, refreshed on
+   *  every render. A ref rather than effect deps so the listener is
+   *  registered once instead of being torn down and re-added on every
+   *  mouseenter of a drag-select. */
+  const copyContext: CopyContext = {
+    columns,
+    lang,
+    rowAt: lazy.rowAt,
+    selectedCells,
+    selectedIds,
+    selectedColumns,
+    snapshots: rowSnapshots.current,
+    total: lazy.total,
+    query: {
+      category: activeCategory,
+      search: search || undefined,
+      sortBy,
+      sortDir,
+      filter: filter ?? undefined,
+    },
+  };
+  const copyCtx = useRef(copyContext);
+  copyCtx.current = copyContext;
+
+  /**
+   * Copy the current selection to the clipboard as TSV.
+   *
+   * The three selection layers are three different asks: a column pick
+   * means "the whole column", a cell pick means "these values", a row
+   * pick means "these records" (every visible column of each). Cells and
+   * rows resolve locally from the snapshot map; a column has to go back
+   * to SQLite, because it extends far past anything the lazy loader is
+   * holding.
+   *
+   * `scope` is passed by the context menu, which already decided which
+   * layer the right-click landed in — the layers can overlap (Ctrl+click
+   * a header while cells are picked), and the menu's label has to match
+   * what actually gets copied. Ctrl+C omits it and takes the default
+   * precedence instead.
+   */
+  const copySelectionToClipboard = useCallback(
+    async (scope?: CopyScope): Promise<void> => {
+      if (copyInFlight.current) return;
+      const ctx = copyCtx.current;
+      const effective =
+        scope ??
+        (ctx.selectedColumns.size > 0
+          ? 'columns'
+          : ctx.selectedCells.size > 0
+            ? 'cells'
+            : ctx.selectedIds.size > 0
+              ? 'rows'
+              : null);
+      if (effective === null) return;
+      copyInFlight.current = true;
+      try {
+        if (effective === 'columns') {
+          setCopyState({ phase: 'copying' });
+          setCopyState({ phase: 'done', cells: await copyWholeColumns(ctx) });
+          return;
+        }
+        backfillSnapshots(
+          ctx,
+          effective === 'cells' ? rowIdsInKeys(ctx.selectedCells) : ctx.selectedIds,
+        );
+        const source = cellSource(ctx);
+        if (effective === 'cells') {
+          setCopyState({
+            phase: 'done',
+            cells: await copySelection(ctx.selectedCells, source),
+          });
+          return;
+        }
+        // Rows: "these records" — every visible column of each.
+        const keys = new Set<string>();
+        for (const id of ctx.selectedIds) {
+          for (let c = 0; c < ctx.columns.length; c++) keys.add(`${id}:${c}`);
+        }
+        setCopyState({ phase: 'done', cells: await copySelection(keys, source) });
+      } catch {
+        // A failed copy leaves the clipboard untouched; drop the pending
+        // "Copying…" so the status bar doesn't hang on it forever.
+        setCopyState(null);
+      } finally {
+        copyInFlight.current = false;
+      }
+    },
+    [],
+  );
+
+  // Ctrl/Cmd+C copies the selection. Document-level, so having a
+  // selection is the only precondition — the user doesn't have to focus
+  // the table first. preventDefault does more than suppress the native
+  // copy here: on macOS the Edit ▸ Copy item re-dispatches a synthetic
+  // keydown and reads `defaultPrevented` to decide whether to fall
+  // through to the native copy (see menu.ts / App.tsx).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isGridCopyShortcut(e)) return;
+      // Tree and cluster views render their own bodies — the table's
+      // selection isn't on screen, so Ctrl+C isn't ours to claim.
+      if (viewMode !== 'list') return;
+      // Nor is it when the user's last click was in the detail panel's
+      // links table, which keeps its own selection and its own listener.
+      if (!ownsGridCopy(GRID_ID)) return;
+      const ctx = copyCtx.current;
+      if (
+        ctx.selectedCells.size === 0 &&
+        ctx.selectedIds.size === 0 &&
+        ctx.selectedColumns.size === 0
+      ) {
+        return;
+      }
+      e.preventDefault();
+      void copySelectionToClipboard();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [copySelectionToClipboard, viewMode]);
+
+  // The acknowledgement fades on its own — it confirms an action, it
+  // isn't a state the user has to dismiss.
+  useEffect(() => {
+    if (copyState?.phase !== 'done') return;
+    const id = setTimeout(() => setCopyState(null), COPY_ACK_MS);
+    return () => clearTimeout(id);
+  }, [copyState]);
+
+  // Release the snapshots once nothing is selected. Without this, a long
+  // session of drag-selecting across a 100k-row table would keep every
+  // row it ever touched alive on the heap.
+  useEffect(() => {
+    if (selectedCells.size === 0 && selectedIds.size === 0) {
+      rowSnapshots.current.clear();
+    }
+  }, [selectedCells, selectedIds]);
+
+  // ──────── Context menu ────────
+
+  /** Scope of the menu currently open, for the pushed-back Copy item. */
+  const pendingCopyScope = useRef<CopyScope | null>(null);
+
+  // The context menu's Copy item is executed here, not in main — main
+  // has no idea what a cell says. Scope comes from the click that opened
+  // the menu so the copy matches the item's label.
+  useEffect(() => {
+    const off = window.freecrawl.onUrlGridCopy(() => {
+      const scope = pendingCopyScope.current;
+      if (scope === null) return;
+      pendingCopyScope.current = null;
+      void copySelectionToClipboard(scope);
+    });
+    return off;
+  }, [copySelectionToClipboard]);
+
+  /** Url ids in the order their rows appear in the table. */
+  const inDisplayOrder = (ids: Iterable<number>): number[] =>
+    [...new Set(ids)].sort(
+      (a, b) =>
+        (rowSnapshots.current.get(a)?.index ?? Number.MAX_SAFE_INTEGER) -
+        (rowSnapshots.current.get(b)?.index ?? Number.MAX_SAFE_INTEGER),
+    );
+
+  /** Distinct rows touched by the current cell selection, in display order. */
+  const rowIdsFromCells = (): number[] => inDisplayOrder(rowIdsInKeys(selectedCells));
+
+  /** Whether any cell of this row is in the cell selection. Linear, but
+   *  it only runs on right-click and the selection bounds it. */
+  const rowHasSelectedCell = (id: number): boolean => {
+    const prefix = `${id}:`;
+    for (const k of selectedCells) if (k.startsWith(prefix)) return true;
+    return false;
+  };
+
+  /**
+   * Right-click inside the grid.
+   *
+   * This used to collapse everything to the clicked row before showing a
+   * menu, which threw away whatever the user had just selected — pick
+   * eight cells, right-click one of them, and you were left with one row
+   * and a menu that could only act on it. A click *inside* any of the
+   * three selection layers now keeps that selection and scopes the menu
+   * to it; only a click outside every layer replaces the selection,
+   * which is what a grid is expected to do.
+   *
+   * `colIdx` is null for the row-number cell, where a click is
+   * row-semantic by definition.
+   */
+  const handleContextMenu = (
+    row: CrawlUrlRow,
+    rowIndex: number,
+    colIdx: number | null,
+    e: React.MouseEvent,
+  ): void => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // On a data cell, "inside the selection" means that exact cell. On
+    // the row-number cell there is no column to match, so any selected
+    // cell in the row counts — right-clicking the row number of a row
+    // you just drag-selected shouldn't throw the selection away either.
+    const inCells =
+      selectedCells.size > 0 &&
+      (colIdx !== null
+        ? selectedCells.has(`${row.id}:${colIdx}`)
+        : rowHasSelectedCell(row.id));
+    const inColumns = colIdx !== null && selectedColumns.has(colIdx);
+    const inRows = selectedIds.has(row.id);
+
+    let scope: UrlGridMenuScope;
+    let urlIds: number[];
+    if (inCells) {
+      scope = 'cells';
+      urlIds = rowIdsFromCells();
+    } else if (inColumns) {
+      // A column selection spans the whole table, so Re-Spider / Remove
+      // at that scale would be a footgun — they stay on the clicked row.
+      // Only the copy item honours the full column.
+      scope = 'columns';
+      urlIds = [row.id];
+    } else if (inRows) {
+      scope = selectedIds.size > 1 ? 'rows' : 'row';
+      urlIds = inDisplayOrder(selectedIds);
+    } else {
+      clearCellAndColumn();
+      setSelectedIds(new Set([row.id]));
+      setSelectedUrlId(row.id);
+      selectionAnchor.current = rowIndex;
+      rememberRow(rowIndex, row);
+      scope = 'row';
+      urlIds = [row.id];
+    }
+
+    // Remembered for the Copy item, which main pushes back rather than
+    // returning (see the `urlGridCopy` channel). Only one context menu
+    // can be open at a time, so a single slot is enough.
+    pendingCopyScope.current =
+      scope === 'cells' ? 'cells' : scope === 'columns' ? 'columns' : 'rows';
+    void window.freecrawl.urlGridContextMenu({
+      scope,
+      urlIds,
+      url: row.url,
+      cellCount: selectedCells.size,
+      columnCount: selectedColumns.size,
+    });
   };
 
   const startResize = (colKey: string, startWidth: number, clientX: number) => {
@@ -1008,7 +1336,11 @@ export function UrlsTab() {
       ) : viewMode === 'cluster' ? (
         <DuplicatesGroupedView />
       ) : (
-      <div ref={scrollRef} className="relative flex-1 select-none overflow-auto">
+      <div
+        ref={scrollRef}
+        className="relative flex-1 select-none overflow-auto"
+        onMouseDown={() => markGridActive(GRID_ID)}
+      >
         <div style={{ minWidth: totalWidth, width: '100%' }}>
           {/* Header row */}
           <div
@@ -1113,35 +1445,11 @@ export function UrlsTab() {
                   key={vi.key}
                   data-index={vi.index}
                   ref={virtualizer.measureElement}
+                  // Row-level fallback: the row-number cell and the
+                  // trailing filler. Data cells handle it themselves so
+                  // the menu knows which column was clicked.
                   onContextMenu={(e) => {
-                    e.preventDefault();
-                    if (!row) return;
-                    // Right-click is always row-semantic. If the clicked
-                    // row isn't in the bulk selection, replace it (and
-                    // drop any cell/column picks so the menu scope is
-                    // unambiguous).
-                    if (!selectedIds.has(row.id)) {
-                      setSelectedIds(new Set([row.id]));
-                      setSelectedUrlId(row.id);
-                      selectionAnchor.current = vi.index;
-                      setSelectedCells(new Set());
-                      setSelectedColumns(new Set());
-                      void window.freecrawl.urlContextMenu({
-                        url: row.url,
-                        urlId: row.id,
-                      });
-                      return;
-                    }
-                    if (selectedIds.size > 1) {
-                      void window.freecrawl.urlBulkContextMenu({
-                        urlIds: [...selectedIds],
-                      });
-                    } else {
-                      void window.freecrawl.urlContextMenu({
-                        url: row.url,
-                        urlId: row.id,
-                      });
-                    }
+                    if (row) handleContextMenu(row, vi.index, null, e);
                   }}
                   className={clsx(
                     'absolute left-0 top-0 flex items-center border-b border-surface-900 text-[11px]',
@@ -1239,6 +1547,9 @@ export function UrlsTab() {
                             applyCellDrag(vi.index, colIdx);
                           }
                         }}
+                        onContextMenu={(e) => {
+                          if (row) handleContextMenu(row, vi.index, colIdx, e);
+                        }}
                       >
                         <Cell row={row} spec={c} lang={lang} />
                       </div>
@@ -1277,9 +1588,20 @@ export function UrlsTab() {
       </div>
       )}
       <div
-        className="flex shrink-0 items-center justify-end gap-4 border-t border-surface-800 bg-surface-900/60 px-3 text-[11px] text-surface-400"
+        className="flex shrink-0 items-center gap-4 border-t border-surface-800 bg-surface-900/60 px-3 text-[11px] text-surface-400"
         style={{ height: STATUS_BAR_HEIGHT }}
       >
+        <span className="flex-1 truncate text-surface-500">
+          {copyState?.phase === 'copying' &&
+            t('urlsTab.copying', { defaultValue: 'Copying…' })}
+          {copyState?.phase === 'done' &&
+            (copyState.cells > 0
+              ? t('urlsTab.copiedCells', {
+                  defaultValue: '{{n}} cell(s) copied',
+                  n: copyState.cells.toLocaleString(),
+                })
+              : t('urlsTab.copiedNothing', { defaultValue: 'Nothing to copy' }))}
+        </span>
         <span>
           {t('urlsTab.statusUrls', { defaultValue: 'URLs:' })}{' '}
           <span className="font-mono tabular-nums text-surface-200">
@@ -1704,6 +2026,11 @@ function ColumnPickerPopover({
   );
 }
 
+/** Hover text for the green `*`. Kept as a constant because `Cell` runs
+ *  for every visible cell and looking the string up through the shared
+ *  label dictionary avoids a `useTranslation` hook on that path. */
+const CHANGED_MARKER_TITLE = 'Changed since the previous crawl';
+
 function Cell({
   row,
   spec,
@@ -1717,15 +2044,6 @@ function Cell({
     return <span className="text-surface-700">…</span>;
   }
   const raw = row[spec.key];
-  // Booleans render as "Y" / "—" rather than the JS-default "true"/"false".
-  // Matches Screaming Frog's compact convention for flag columns
-  // (Loop, Sequence Break, Self-Ref Missing, …).
-  const value =
-    raw === null || raw === undefined
-      ? ''
-      : typeof raw === 'boolean'
-        ? raw ? 'Y' : ''
-        : String(raw);
 
   if (spec.kind === 'status') {
     const code = row.statusCode;
@@ -1787,7 +2105,32 @@ function Cell({
     );
   }
 
+  // Shared with the clipboard path so what you copy is what you read —
+  // booleans as "Y"/blank, nulls as empty (the "—" below is presentation
+  // only). Derived here rather than at the top of the function so the
+  // branches above, which format their own values, don't pay for it.
+  const value = cellText(row, spec, lang);
+
   if (spec.kind === 'mono') {
+    // Re-crawl change marker. Sits outside the truncating span so it
+    // survives a URL too long for the column — the whole point is that
+    // it can be spotted by scanning the list, and a marker that
+    // disappears exactly on the long URLs would be worse than none.
+    if (spec.key === 'url' && row.changed) {
+      return (
+        <span className="flex w-full items-baseline overflow-hidden" title={value}>
+          {/* min-w-0 is what lets a flex child actually truncate — without
+              it the item refuses to shrink below its content width. */}
+          <span className="min-w-0 truncate font-mono text-surface-100">{value}</span>
+          <span
+            className="shrink-0 pl-1 font-mono font-bold text-emerald-400"
+            title={translateLabel(CHANGED_MARKER_TITLE, lang)}
+          >
+            *
+          </span>
+        </span>
+      );
+    }
     return (
       <span className="block truncate font-mono text-surface-100" title={value}>
         {value || <span className="text-surface-700">—</span>}
@@ -1800,6 +2143,163 @@ function Cell({
       {value || <span className="text-surface-700">—</span>}
     </span>
   );
+}
+
+/** Which selection layer a copy reads from. */
+type CopyScope = 'columns' | 'cells' | 'rows';
+
+/** Everything a clipboard copy needs from the live table. */
+interface CopyContext {
+  columns: ColumnSpec[];
+  lang: string;
+  rowAt: (index: number) => CrawlUrlRow | null;
+  selectedCells: Set<string>;
+  selectedIds: Set<number>;
+  selectedColumns: Set<number>;
+  snapshots: Map<number, { index: number; row: CrawlUrlRow }>;
+  /** Row count of the current view — the backfill scan's upper bound. */
+  total: number;
+  /** The query that produced the current view — replayed verbatim when
+   *  a whole-column copy has to re-read the table from SQLite. */
+  query: {
+    category: UrlCategory;
+    search: string | undefined;
+    sortBy: keyof CrawlUrlRow | undefined;
+    sortDir: 'asc' | 'desc';
+    filter: AdvancedFilter | undefined;
+  };
+}
+
+/** Row ids embedded in `"<urlId>:<colIdx>"` selection keys. */
+function rowIdsInKeys(keys: Iterable<string>): number[] {
+  const out: number[] = [];
+  for (const k of keys) {
+    const id = Number(k.slice(0, k.lastIndexOf(':')));
+    if (Number.isFinite(id)) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * Record display positions for selected rows that were never dragged
+ * over.
+ *
+ * Selections normally build their snapshots as they go, but not every
+ * path goes through the grid — picking a node in tree view sets a row
+ * selection too, and switching back to the list leaves that row with no
+ * snapshot at all, so a copy would drop it silently. Scans only what the
+ * lazy loader is currently holding, and only when something is missing.
+ */
+function backfillSnapshots(ctx: CopyContext, ids: Iterable<number>): void {
+  const missing = new Set<number>();
+  for (const id of ids) if (!ctx.snapshots.has(id)) missing.add(id);
+  if (missing.size === 0) return;
+  for (let i = 0; i < ctx.total && missing.size > 0; i++) {
+    const row = ctx.rowAt(i);
+    if (row && missing.delete(row.id)) {
+      ctx.snapshots.set(row.id, { index: i, row });
+    }
+  }
+}
+
+/**
+ * Resolve `"<urlId>:<colIdx>"` selection keys into ordered plain text.
+ *
+ * Order comes from the snapshot's row index — where the row sat when it
+ * was selected. Values prefer the live row, so a copy taken mid-crawl
+ * carries what the table shows now rather than what it showed at click
+ * time, and fall back to the snapshot once the lazy loader has evicted
+ * the row.
+ */
+function cellSource(ctx: CopyContext): CellSource {
+  const resolve = (id: number): CrawlUrlRow | null => {
+    const snap = ctx.snapshots.get(id);
+    if (!snap) return null;
+    const live = ctx.rowAt(snap.index);
+    return live && live.id === id ? live : snap.row;
+  };
+  return {
+    order: (id) => ctx.snapshots.get(id)?.index ?? Number.MAX_SAFE_INTEGER,
+    text: (id, colIdx) => {
+      const spec = ctx.columns[colIdx];
+      if (!spec) return null;
+      const row = resolve(id);
+      return row ? cellText(row, spec, ctx.lang) : null;
+    },
+  };
+}
+
+/**
+ * Copy whole selected columns.
+ *
+ * Unlike a cell or row copy this can't be served from what's on screen:
+ * selecting a column header means every row of the current view, and the
+ * lazy loader only ever holds a few thousand of them. Page back through
+ * SQLite in the view's own sort order so the clipboard gets the complete
+ * column instead of the visible slice.
+ *
+ * @returns the number of cells written.
+ */
+async function copyWholeColumns(ctx: CopyContext): Promise<number> {
+  const specs = [...ctx.selectedColumns]
+    .sort((a, b) => a - b)
+    .map((c) => ctx.columns[c])
+    .filter((c): c is ColumnSpec => c !== undefined);
+  if (specs.length === 0) return 0;
+
+  const lines: string[] = [];
+  for (let offset = 0; ; offset += COPY_FETCH_CHUNK) {
+    const { rows } = await window.freecrawl.urlsQuery({
+      limit: COPY_FETCH_CHUNK,
+      offset,
+      ...ctx.query,
+    });
+    for (const row of rows) {
+      lines.push(toTsvLine(specs.map((s) => cellText(row, s, ctx.lang))));
+    }
+    if (rows.length < COPY_FETCH_CHUNK) break;
+  }
+  if (lines.length === 0) return 0;
+  await writeTextToClipboard(lines.join('\n'));
+  return lines.length * specs.length;
+}
+
+/**
+ * Plain-text value of one cell — the clipboard counterpart of
+ * {@link Cell}, and the single place the two agree on what a cell "says".
+ *
+ * Two deliberate departures from what's painted on screen, both because
+ * the consumer here is a spreadsheet rather than a reader: numbers are
+ * emitted unformatted (thousands separators would arrive as text, not a
+ * number), and an absent value is emitted as an empty string rather than
+ * the "—" placeholder.
+ */
+function cellText(row: CrawlUrlRow, spec: ColumnSpec, lang: string): string {
+  if (spec.kind === 'status') {
+    const code = row.statusCode;
+    if (code !== null && code !== undefined) return String(code);
+    const label = shortFailureLabel(row.statusText);
+    return label === '—' ? '' : label;
+  }
+
+  if (spec.kind === 'indexability') {
+    return translateLabel(
+      row.indexability === 'indexable' ? 'Indexable' : 'Non-Indexable',
+      lang,
+    );
+  }
+
+  if (spec.kind === 'indexability-status') {
+    const label = indexabilityStatusLabel(row.indexability);
+    return label === '' ? '' : translateLabel(label, lang);
+  }
+
+  const raw = row[spec.key];
+  if (raw === null || raw === undefined) return '';
+  // Booleans render as "Y" / blank rather than the JS-default
+  // "true"/"false" — matches the compact flag-column convention.
+  if (typeof raw === 'boolean') return raw ? 'Y' : '';
+  return String(raw);
 }
 
 function indexabilityStatusLabel(v: CrawlUrlRow['indexability']): string {

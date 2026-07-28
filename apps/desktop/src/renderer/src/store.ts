@@ -367,6 +367,11 @@ interface AppState {
   applyProjectConfig: (config: CrawlConfig) => void;
   setProgress: (p: CrawlProgress) => void;
   setSummary: (s: CrawlSummary) => void;
+  /** Force the UI out of the "Running" state. `crawl:done` is terminal,
+   *  so the toolbar must not depend on the crawler's final progress
+   *  frame arriving — if that frame is ever late or lost, Start stays
+   *  disabled and Stop/Pause target a crawler that no longer exists. */
+  markCrawlFinished: () => void;
   setOverview: (o: OverviewCounts) => void;
   setActiveTab: (t: TabKey) => void;
   setActiveCategory: (c: UrlCategory) => void;
@@ -492,6 +497,12 @@ export const useAppStore = create<AppState>((set) => ({
     set({ config: { ...config, startUrl: '' } }),
   setProgress: (p) => set({ progress: p }),
   setSummary: (s) => set({ summary: s }),
+  markCrawlFinished: () =>
+    set((s) =>
+      s.progress === null || (!s.progress.running && !s.progress.paused)
+        ? {}
+        : { progress: { ...s.progress, running: false, paused: false } },
+    ),
   setOverview: (o) => set({ overview: o }),
   setActiveTab: (t) => set({ activeTab: t, activeCategory: categoryForTab(t) }),
   setActiveCategory: (c) => set({ activeCategory: c }),

@@ -109,6 +109,8 @@ import {
   type SitemapGenerateInput,
   type SitemapGenerateResult,
   type UrlBulkContextMenuInput,
+  type UrlGridContextMenuInput,
+  type UrlGridCopyEvent,
   type UrlContextMenuInput,
   type UrlDetail,
   type UrlDetailInput,
@@ -5277,7 +5279,18 @@ function registerIpc(): void {
     // window (multi-window) — these callbacks run outside any IPC handler's
     // AsyncLocalStorage context, so they can't use `currentSession()`.
     crawler.on('progress', (p: CrawlProgress) => {
-      if (sess.activeCrawler !== crawler) return;
+      // A superseded crawler must not clobber the live crawl's UI state
+      // — but its own terminal `running: false` frame is still valid
+      // when NO crawl is active, and dropping it is what left the UI
+      // pinned to "Running" with a dead Stop/Pause button. The 200 ms
+      // progress throttle can push that frame past the 'done' handler,
+      // which has already set `activeCrawler = null` by then.
+      if (
+        sess.activeCrawler !== crawler &&
+        !(sess.activeCrawler === null && !p.running)
+      ) {
+        return;
+      }
       sess.latestProgress = p;
       sess.send(IPC.crawlProgress, p);
       freezeWatchdog.updateCounters({
@@ -5339,11 +5352,24 @@ function registerIpc(): void {
     });
   }
 
-  async function launchCrawl(config: CrawlConfig): Promise<void> {
+  async function launchCrawl(
+    config: CrawlConfig,
+    opts: {
+      /** Re-fetch only these URLs (Re-Spider) instead of walking the site. */
+      respiderSeeds?: string[];
+      /**
+       * Session to run under. Required from Electron menu callbacks: they
+       * fire after the IPC handler has unwound, so AsyncLocalStorage is
+       * gone and `currentSession()` would silently resolve to the primary
+       * window's project instead of the one that was right-clicked.
+       */
+      session?: ProjectSession;
+    } = {},
+  ): Promise<void> {
     // Capture the launching window's session ONCE. The crawler outlives
     // this handler's AsyncLocalStorage context, so its hooks + listeners
     // are bound to `sess` rather than resolved via `currentSession()`.
-    const sess = currentSession();
+    const sess = opts.session ?? currentSession();
     const previousCrawler = sess.activeCrawler;
     if (previousCrawler) {
       previousCrawler.stop();
@@ -5355,7 +5381,9 @@ function registerIpc(): void {
     logger.log(
       'info',
       'crawler',
-      `Crawl starting: ${config.startUrl} (scope=${config.scope}, maxDepth=${config.maxDepth}, maxUrls=${config.maxUrls}, concurrency=${config.maxConcurrency}, rps=${config.maxRps})`,
+      opts.respiderSeeds
+        ? `Re-Spider starting: ${opts.respiderSeeds.length} URL(s)`
+        : `Crawl starting: ${config.startUrl} (scope=${config.scope}, maxDepth=${config.maxDepth}, maxUrls=${config.maxUrls}, concurrency=${config.maxConcurrency}, rps=${config.maxRps})`,
       undefined,
       sess.logTag,
     );
@@ -5625,6 +5653,7 @@ function registerIpc(): void {
       runDbPass: (method) => runDbPassViaPool(sess, method),
       dbCall: (method, args) => dbCallViaPool(sess, method, args),
       renderUrl: renderHook,
+      respiderSeeds: opts.respiderSeeds,
     });
     sess.activeCrawler = crawler;
     attachCrawlerListeners(crawler, sess);
@@ -5637,6 +5666,59 @@ function registerIpc(): void {
       void disposeBrowserPool(sess);
     });
     void crawler.start();
+  }
+
+  /**
+   * Re-Spider a specific set of URLs, whether or not a crawl is running.
+   *
+   * With a live crawl the URLs are simply pushed back onto its queue. With
+   * none — the normal case once a crawl has finished — a crawler is spun
+   * up for just those URLs. That path is why Re-Spider is no longer gated
+   * on "start a crawl first": re-reading a page the user believes has
+   * changed is the exact moment they do NOT want to re-crawl the site.
+   *
+   * The config is reconstructed from whatever the project last ran with,
+   * so a re-spider honours the same scope, timeouts, rendering mode and
+   * auth as the crawl that produced the rows. `startUrl` is pinned to the
+   * project's recorded seed: a mismatch there is what tells `Crawler` a
+   * different site is being crawled, and the re-spider must never read as
+   * one.
+   */
+  async function launchRespider(sess: ProjectSession, urls: string[]): Promise<void> {
+    if (urls.length === 0) return;
+    const db = sess.getDb();
+    // Clear stale markers on exactly these rows so the green flags that
+    // come back describe this re-spider, not an earlier one.
+    db.clearChangedFlagsForUrls(urls);
+
+    const live = sess.activeCrawler;
+    if (live && live.isRunning) {
+      for (const u of urls) live.requeueUrl(u);
+      fireDataChanged(sess);
+      return;
+    }
+
+    let config = sess.lastCrawlConfig;
+    if (!config) {
+      const stored = db.getMeta('lastCrawlConfig');
+      if (stored) {
+        try {
+          config = JSON.parse(stored) as CrawlConfig;
+        } catch {
+          /* corrupt meta — fall through to defaults */
+        }
+      }
+    }
+    const seed = db.getMeta('startUrl') ?? urls[0]!;
+    // Spider mode explicitly: a project last run in List or Sitemap mode
+    // would otherwise send `start()` down a fixed-URL path that ignores
+    // the re-spider seeds entirely.
+    const respiderConfig: CrawlConfig = {
+      ...(config ?? DEFAULT_CRAWL_CONFIG),
+      mode: 'spider',
+      startUrl: seed,
+    };
+    await launchCrawl(respiderConfig, { respiderSeeds: urls, session: sess });
   }
 
   /**
@@ -5680,8 +5762,23 @@ function registerIpc(): void {
   });
 
   registerHandle(IPC.crawlStop, () => {
-    currentSession().activeCrawler?.stop();
-    void disposeBrowserPool(currentSession());
+    const sess = currentSession();
+    if (sess.activeCrawler) {
+      sess.activeCrawler.stop();
+    } else if (sess.latestProgress?.running) {
+      // No crawler to stop, yet the renderer still thinks one is live —
+      // it missed the terminal progress frame. Re-send it rather than
+      // no-op, so Stop always gets the UI back to an idle state instead
+      // of appearing frozen.
+      const p: CrawlProgress = {
+        ...sess.latestProgress,
+        running: false,
+        paused: false,
+      };
+      sess.latestProgress = p;
+      sess.send(IPC.crawlProgress, p);
+    }
+    void disposeBrowserPool(sess);
   });
 
   registerHandle(IPC.crawlPause, () => {
@@ -5899,27 +5996,20 @@ function registerIpc(): void {
     // ---- Faz 0.5 Increment 3 — URL mutation, exports, config, integrations, project file ----
 
     'respider-urls': async (input) => {
-      // Mirrors the URL-bulk context menu's "Re-Spider" item. Requires
-      // an active crawler — the queued URLs are re-fetched live as part
-      // of the existing crawl. With no active crawl, the DB rows are
-      // still marked dirty so the NEXT crawl will pick them up.
+      // Mirrors the URL-bulk context menu's "Re-Spider" item. A live
+      // crawl absorbs the URLs into its queue; with no crawl running a
+      // crawler is started for exactly these URLs, so an agent can
+      // refresh a page without re-crawling the site.
       const ids = (input as { urlIds?: number[] }).urlIds ?? [];
       if (!Array.isArray(ids) || ids.length === 0) {
         throw new Error('urlIds is required (non-empty array).');
       }
-      const db = getDb();
-      db.markUrlsForRecrawl(ids);
-      let requeued = 0;
-      const requeueCrawler = currentSession().activeCrawler;
-      if (requeueCrawler && requeueCrawler.isRunning) {
-        const urls = db.getUrlsByIds(ids);
-        for (const u of urls) {
-          requeueCrawler.requeueUrl(u);
-          requeued++;
-        }
-      }
+      const sess = currentSession();
+      const urls = sess.getDb().getUrlsByIds(ids);
+      const wasRunning = sess.activeCrawler?.isRunning === true;
+      await launchRespider(sess, urls);
       fireDataChanged();
-      return { marked: ids.length, requeued, hasActiveCrawl: currentSession().activeCrawler?.isRunning === true };
+      return { marked: urls.length, requeued: urls.length, hasActiveCrawl: wasRunning };
     },
 
     'remove-urls': async (input) => {
@@ -7058,8 +7148,6 @@ function registerIpc(): void {
     // getDb() there would silently hit defaultSession (the primary window)
     // and mutate the WRONG project's DB. Bind everything to `sess`.
     const sess = currentSession();
-    const ctxCrawler = sess.activeCrawler;
-    const canRecrawl = ctxCrawler !== null && ctxCrawler.isRunning;
     const L = getMenuLabels(getMenuLang());
 
     const template: MenuItemConstructorOptions[] = [
@@ -7076,16 +7164,11 @@ function registerIpc(): void {
       { type: 'separator' },
       {
         label: L.ctxRespider,
-        enabled: canRecrawl,
-        toolTip: canRecrawl ? undefined : L.ctxStartCrawlFirst,
+        // No longer gated on a live crawl — `launchRespider` starts a
+        // one-URL crawler when none is running, which is when the user
+        // actually reaches for this.
         click: () => {
-          const db = sess.getDb();
-          db.markUrlForRecrawl(input.urlId);
-          const ctxRequeueCrawler = sess.activeCrawler;
-          if (ctxRequeueCrawler) {
-            ctxRequeueCrawler.requeueUrl(input.url);
-          }
-          fireDataChanged(sess);
+          void launchRespider(sess, [input.url]);
         },
       },
       {
@@ -7127,8 +7210,6 @@ function registerIpc(): void {
       const ids = input.urlIds;
       if (ids.length === 0) return;
       const urls = db.getUrlsByIds(ids);
-      const bulkCtxCrawler = sess.activeCrawler;
-      const canRecrawl = bulkCtxCrawler !== null && bulkCtxCrawler.isRunning;
       const n = ids.length.toLocaleString();
       const L = getMenuLabels(getMenuLang());
 
@@ -7149,15 +7230,9 @@ function registerIpc(): void {
         { type: 'separator' },
         {
           label: L.ctxRespiderNUrls.replace('{n}', n),
-          enabled: canRecrawl,
-          toolTip: canRecrawl ? undefined : L.ctxStartCrawlFirst,
+          // Always available — see the single-URL menu above.
           click: () => {
-            db.markUrlsForRecrawl(ids);
-            const bulkRequeueCrawler = sess.activeCrawler;
-            if (bulkRequeueCrawler) {
-              for (const u of urls) bulkRequeueCrawler.requeueUrl(u);
-            }
-            fireDataChanged(sess);
+            void launchRespider(sess, urls);
           },
         },
         {
@@ -7182,6 +7257,129 @@ function registerIpc(): void {
           },
         },
       ];
+
+      const menu = Menu.buildFromTemplate(template);
+      if (win) menu.popup({ window: win });
+      else menu.popup();
+    },
+  );
+
+  /**
+   * Selection-aware context menu for the URL grid.
+   *
+   * Supersedes the two menus above for right-clicks inside the table:
+   * those two are row-only, which forced the renderer to collapse a cell
+   * or column selection down to a single row before it could show a
+   * menu. Here the renderer keeps its selection and tells us which layer
+   * the click landed in; the menu names that scope and the row-semantic
+   * actions apply to every row the selection touches.
+   *
+   * The Copy item is pushed back to the renderer over `urlGridCopy`
+   * instead of being executed here — only the renderer knows what a cell
+   * says. Everything else is handled in place.
+   */
+  registerHandle(
+    IPC.urlGridContextMenu,
+    (e, input: UrlGridContextMenuInput): void => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      // Bind to the calling session while ALS is still live — popup() is
+      // non-blocking, so the click callbacks run after this handler has
+      // unwound (same reasoning as the two menus above).
+      const sess = currentSession();
+      const db = sess.getDb();
+      const ids = input.urlIds;
+      if (ids.length === 0) return;
+      // Display order, not id order — `ids` arrives in the order the rows
+      // appear on screen and every item below should honour that.
+      const urls = db.getUrlsByIdsInOrder(ids);
+      const many = ids.length > 1;
+      const n = ids.length.toLocaleString();
+      const L = getMenuLabels(getMenuLang());
+
+      // Name what the user actually picked, so the menu reads as a
+      // continuation of the selection rather than a reset of it.
+      const copyLabel = ((): string => {
+        if (input.scope === 'columns') {
+          return input.columnCount > 1
+            ? L.ctxCopyNColumns.replace('{n}', input.columnCount.toLocaleString())
+            : L.ctxCopyColumn;
+        }
+        if (input.scope === 'cells') {
+          return input.cellCount > 1
+            ? L.ctxCopyNCells.replace('{n}', input.cellCount.toLocaleString())
+            : L.ctxCopyCell;
+        }
+        return many ? L.ctxCopyNRows.replace('{n}', n) : L.ctxCopyRow;
+      })();
+
+      const template: MenuItemConstructorOptions[] = [
+        {
+          label: copyLabel,
+          click: () => {
+            if (!e.sender.isDestroyed()) {
+              e.sender.send(IPC.urlGridCopy, 'copy-selection' satisfies UrlGridCopyEvent);
+            }
+          },
+        },
+        {
+          label: many ? L.ctxCopyNUrls.replace('{n}', n) : L.ctxCopy,
+          click: () => clipboard.writeText(urls.join('\n')),
+        },
+        {
+          label: many ? L.ctxOpenNUrlsInBrowser.replace('{n}', n) : L.ctxOpenInBrowser,
+          // Opening hundreds of tabs at once is a bad default.
+          enabled: urls.length <= 20,
+          toolTip: urls.length > 20 ? L.ctxOpenLimitTooltip : undefined,
+          click: () => {
+            for (const u of urls) if (isSafeExternalUrl(u)) void shell.openExternal(u);
+          },
+        },
+        { type: 'separator' },
+        {
+          label: many ? L.ctxRespiderNUrls.replace('{n}', n) : L.ctxRespider,
+          click: () => {
+            void launchRespider(sess, urls);
+          },
+        },
+        {
+          label: many ? L.ctxRemoveNUrls.replace('{n}', n) : L.ctxRemove,
+          click: () => {
+            db.deleteUrls(ids);
+            fireDataChanged(sess);
+          },
+        },
+        { type: 'separator' },
+      ];
+      // The tail differs by count, and not only for grammar: bulk export
+      // is meaningless for one row, and robots.txt is per-origin so it
+      // only makes sense when there's a single URL in play. Same split
+      // the two older menus used.
+      if (many) {
+        template.push({
+          label: L.ctxExportNUrlsAsCsv.replace('{n}', n),
+          click: async () => {
+            const w = win ?? mainWindow;
+            if (!w) return;
+            const res = await dialog.showSaveDialog(w, {
+              defaultPath: 'freecrawl-selected.csv',
+              filters: [{ name: 'CSV', extensions: ['csv'] }],
+            });
+            if (res.canceled || !res.filePath) return;
+            await exportUrlsToCsv(db, res.filePath, { selectedIds: ids });
+          },
+        });
+      } else {
+        template.push({
+          label: L.ctxOpenRobotsTxt,
+          click: () => {
+            try {
+              void shell.openExternal(new URL(input.url).origin + '/robots.txt');
+            } catch {
+              /* ignore malformed URL */
+            }
+          },
+        });
+      }
 
       const menu = Menu.buildFromTemplate(template);
       if (win) menu.popup({ window: win });
@@ -7542,6 +7740,10 @@ function registerIpc(): void {
         recomputeIssues: (defs) => recomputeIssuesViaPool(sess, defs),
         runDbPass: (method) => runDbPassViaPool(sess, method),
         dbCall: (method, args) => dbCallViaPool(sess, method, args),
+        // Continue the interrupted crawl only. Without this the same
+        // start URL would read as "Start pressed again" and re-fetch the
+        // pages that already completed before the crash.
+        resumeOnly: true,
       });
       sess.activeCrawler = crawler;
       attachCrawlerListeners(crawler, sess);

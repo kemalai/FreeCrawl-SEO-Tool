@@ -32,6 +32,8 @@ const TR_LABELS: Record<string, string> = {
   'OAuth (your own client)': 'OAuth (kendi istemciniz)',
   'Service Account': 'Servis Hesabı',
   Local: 'Yerel',
+  // URL table — re-crawl change marker
+  'Changed since the previous crawl': 'Önceki taramaya göre değişti',
   // Top-level groups
   Summary: 'Özet',
   'Crawl Data': 'Crawl Verisi',
@@ -635,7 +637,18 @@ const TR_LABELS: Record<string, string> = {
   Presets: 'Hazır Ayarlar',
   Mode: 'Mod',
   Crawler: 'Crawler',
+  'Spider Crawl': 'Spider Tarama',
   Speed: 'Hız',
+  // Spider → Crawl matrix row labels (the ones not already registered
+  // above as table columns / sidebar nodes).
+  Media: 'Medya',
+  'Internal Hyperlinks': 'Dahili Bağlantılar',
+  'External Links': 'Harici Bağlantılar',
+  'Pagination (Rel Next/Prev)': 'Sayfalama (Rel Next/Prev)',
+  AMP: 'AMP',
+  iframes: 'iframe’ler',
+  'Mobile Alternate': 'Mobil Alternatif',
+  'Uncrawlable Links': 'Taranamayan Bağlantılar',
   Requests: 'İstekler',
   'Include/Exclude': 'Dahil Et/Hariç Tut',
   'Custom Search': 'Özel Arama',
