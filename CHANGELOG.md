@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.9.3] — 2026-08-08
+
+### Added
+- Connect several Google Search Console and Analytics accounts, and pick which one each project reports on from the tab toolbar.
+- Every integration now has its own settings page, so one long shared page no longer buries the option you are looking for.
+- Search Console gains a date range, device / search type / country / query filters, and twelve ready-made URL filter presets.
+- A "Crawl New URLs Discovered In Google Search Console" option that pulls in pages Search Console knows about but your crawl never reached.
+- Import several server log files at once, both in the app and from the command line.
+
+### Changed
+- Integrations is now a collapsible heading in the settings sidebar rather than a page of its own.
+
+### Fixed
+- Resuming an interrupted Sitemap or List crawl now genuinely carries on instead of re-fetching every page it had already done.
+- Resuming a crawl no longer risks clearing the project when the sitemap changed while the app was closed.
+- The toolbar now shows the mode and start URL of a resumed crawl, and of a project you open, instead of resetting to an empty Spider.
+- Screenshots are now captured in unsaved projects too — the Screenshot tab used to stay empty unless you had saved the project first.
+- Saving a project now takes its screenshots along, so they still appear after Save As and when the project is reopened.
+- Robots directives are now read from every robots meta tag on a page, including ones written in uppercase.
+- Google sign-in now explains a blocked consent screen and how to fix it, instead of failing with a generic timeout after five minutes.
+- A timed-out database read no longer piles more work onto the busy worker, which could leave every table in the window waiting.
+- Various improvements and refinements.
+
 ## [0.9.2] — 2026-07-29
 
 ### Added
