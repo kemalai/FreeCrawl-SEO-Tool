@@ -25,8 +25,23 @@ import { FreezeWatchdogSharedState } from './freeze-watchdog-shared.js';
 const CHECK_INTERVAL_MS = 250;
 const STALL_THRESHOLD_MAIN_MS = 500;
 const STALL_THRESHOLD_READER_MS = 1000;
+const STALL_THRESHOLD_WRITER_MS = 1000;
 const STALL_THRESHOLD_RENDERER_LAG_MS = 500;
 const STALL_THRESHOLD_RENDERER_SILENCE_MS = 1500;
+/**
+ * How long a stall must persist past detection before it is written to
+ * the file.
+ *
+ * Detection thresholds are deliberately twitchy so the recorded gap and
+ * op string come from the real onset of a freeze. Writing at that same
+ * sensitivity is what made the log unreadable: with a 250 ms sample
+ * interval and a 500 ms main threshold, ordinary GC pauses tripped the
+ * detector constantly and over a third of the `STALL:MAIN` lines in a
+ * real capture were `end after 250ms` — noise that buried the
+ * multi-second freezes worth investigating. Detection is unchanged;
+ * only the reporting waits for the stall to prove itself.
+ */
+const STALL_REPORT_FLOOR_MS = 1000;
 const HEARTBEAT_LOG_INTERVAL_MS = 5000;
 
 interface InitData {
@@ -68,14 +83,62 @@ function sanitizeOp(op: string): string {
 }
 
 interface StallTracker {
+  /** Gap exceeded the threshold and we're timing it. */
   active: boolean;
+  /** The `start` line has been written — so an `end` line is owed. */
+  reported: boolean;
   startTs: number;
   startOp: string;
+  /** `gap=612ms` / `silence=1709ms`, captured at onset. */
+  detail: string;
 }
 
-const mainStall: StallTracker = { active: false, startTs: 0, startOp: '' };
-const readerStall: StallTracker = { active: false, startTs: 0, startOp: '' };
-const rendererStall: StallTracker = { active: false, startTs: 0, startOp: '' };
+const newTracker = (): StallTracker => ({
+  active: false,
+  reported: false,
+  startTs: 0,
+  startOp: '',
+  detail: '',
+});
+
+const mainStall = newTracker();
+const readerStall = newTracker();
+const writerStall = newTracker();
+const rendererStall = newTracker();
+
+/**
+ * Shared start/report/end bookkeeping. `onStart` and `onEnd` build the
+ * log lines; neither runs unless the stall outlives
+ * `STALL_REPORT_FLOOR_MS`, so a blip costs nothing but a few field
+ * writes.
+ */
+function trackStall(
+  t: StallTracker,
+  stalled: boolean,
+  now: number,
+  op: string,
+  detail: string,
+  onStart: (t: StallTracker) => string,
+  onEnd: (t: StallTracker, durationMs: number) => string,
+): void {
+  if (stalled) {
+    if (!t.active) {
+      t.active = true;
+      t.reported = false;
+      t.startTs = now;
+      t.startOp = op;
+      t.detail = detail;
+    } else if (!t.reported && now - t.startTs >= STALL_REPORT_FLOOR_MS) {
+      t.reported = true;
+      appendLine(onStart(t));
+    }
+    return;
+  }
+  if (!t.active) return;
+  if (t.reported) appendLine(onEnd(t, now - t.startTs));
+  t.active = false;
+  t.reported = false;
+}
 
 let lastHeartbeatLogTs = 0;
 let bootLogged = false;
@@ -85,52 +148,64 @@ function check(): void {
   const counters = state.readCounters();
   const mainHb = state.readMainHeartbeatMs();
   const readerHb = state.readReaderHeartbeatMs();
+  const writerHb = state.readWriterHeartbeatMs();
   const rendererTs = state.readRendererReportTsMs();
   const rendererLag = state.readRendererLagMs();
   const mainOp = sanitizeOp(state.readMainOp());
   const readerOp = sanitizeOp(state.readReaderOp());
+  const writerOp = sanitizeOp(state.readWriterOp());
 
   const mainGap = mainHb > 0 ? now - mainHb : 0;
   const readerGap = readerHb > 0 ? now - readerHb : 0;
+  const writerGap = writerHb > 0 ? now - writerHb : 0;
   const rendererSilence = rendererTs > 0 ? now - rendererTs : 0;
 
   // ── Main thread stall ──
-  if (mainHb > 0 && mainGap > STALL_THRESHOLD_MAIN_MS) {
-    if (!mainStall.active) {
-      mainStall.active = true;
-      mainStall.startTs = now;
-      mainStall.startOp = mainOp;
-      appendLine(
-        `${isoNow()} [STALL:MAIN start gap=${mainGap}ms] op="${mainOp || '<unknown>'}" ` +
-          `crawled=${counters.crawled} discovered=${counters.discovered} ` +
-          `pending=${counters.pending} failed=${counters.failed}`,
-      );
-    }
-  } else if (mainStall.active) {
-    const dur = now - mainStall.startTs;
-    appendLine(
-      `${isoNow()} [STALL:MAIN end after ${dur}ms] startOp="${mainStall.startOp}" endOp="${mainOp}"`,
-    );
-    mainStall.active = false;
-  }
+  trackStall(
+    mainStall,
+    mainHb > 0 && mainGap > STALL_THRESHOLD_MAIN_MS,
+    now,
+    mainOp,
+    `gap=${mainGap}ms`,
+    (t) =>
+      `${isoNow()} [STALL:MAIN start ${t.detail}] op="${t.startOp || '<unknown>'}" ` +
+      `crawled=${counters.crawled} discovered=${counters.discovered} ` +
+      `pending=${counters.pending} failed=${counters.failed}`,
+    (t, dur) =>
+      `${isoNow()} [STALL:MAIN end after ${dur}ms] startOp="${t.startOp}" endOp="${mainOp}"`,
+  );
 
-  // ── DB reader thread stall ──
-  if (readerHb > 0 && readerGap > STALL_THRESHOLD_READER_MS) {
-    if (!readerStall.active) {
-      readerStall.active = true;
-      readerStall.startTs = now;
-      readerStall.startOp = readerOp;
-      appendLine(
-        `${isoNow()} [STALL:READER start gap=${readerGap}ms] op="${readerOp || '<unknown>'}"`,
-      );
-    }
-  } else if (readerStall.active) {
-    const dur = now - readerStall.startTs;
-    appendLine(
-      `${isoNow()} [STALL:READER end after ${dur}ms] startOp="${readerStall.startOp}" endOp="${readerOp}"`,
-    );
-    readerStall.active = false;
-  }
+  // ── DB reader pool stall ──
+  // Every reader worker ticks the same heartbeat, so this only fires
+  // when *none* of them got a turn — i.e. the whole pool is blocked.
+  trackStall(
+    readerStall,
+    readerHb > 0 && readerGap > STALL_THRESHOLD_READER_MS,
+    now,
+    readerOp,
+    `gap=${readerGap}ms`,
+    (t) => `${isoNow()} [STALL:READER start ${t.detail}] op="${t.startOp || '<unknown>'}"`,
+    (t, dur) =>
+      `${isoNow()} [STALL:READER end after ${dur}ms] startOp="${t.startOp}" endOp="${readerOp}"`,
+  );
+
+  // ── DB writer thread stall ──
+  // Its own heartbeat and its own op slot: a blocked writer holds up
+  // every per-URL page write behind it, which surfaces as a crawl that
+  // has stopped advancing, and that is worth telling apart from a
+  // blocked reader pool (which only affects what the UI can display).
+  trackStall(
+    writerStall,
+    writerHb > 0 && writerGap > STALL_THRESHOLD_WRITER_MS,
+    now,
+    writerOp,
+    `gap=${writerGap}ms`,
+    (t) =>
+      `${isoNow()} [STALL:WRITER start ${t.detail}] op="${t.startOp || '<unknown>'}" ` +
+      `crawled=${counters.crawled} pending=${counters.pending}`,
+    (t, dur) =>
+      `${isoNow()} [STALL:WRITER end after ${dur}ms] startOp="${t.startOp}" endOp="${writerOp}"`,
+  );
 
   // ── Renderer stall ──
   // We treat both an explicit high-lag report AND a long silence
@@ -146,23 +221,17 @@ function check(): void {
     rendererStalled = true;
     rendererReason = `silence=${rendererSilence}ms`;
   }
-  if (rendererStalled) {
-    if (!rendererStall.active) {
-      rendererStall.active = true;
-      rendererStall.startTs = now;
-      rendererStall.startOp = mainOp;
-      appendLine(
-        `${isoNow()} [STALL:RENDERER start ${rendererReason}] last_main_op="${mainOp || '<unknown>'}" ` +
-          `crawled=${counters.crawled} pending=${counters.pending}`,
-      );
-    }
-  } else if (rendererStall.active) {
-    const dur = now - rendererStall.startTs;
-    appendLine(
-      `${isoNow()} [STALL:RENDERER end after ${dur}ms] last_lag=${rendererLag}ms`,
-    );
-    rendererStall.active = false;
-  }
+  trackStall(
+    rendererStall,
+    rendererStalled,
+    now,
+    mainOp,
+    rendererReason,
+    (t) =>
+      `${isoNow()} [STALL:RENDERER start ${t.detail}] last_main_op="${t.startOp || '<unknown>'}" ` +
+      `crawled=${counters.crawled} pending=${counters.pending}`,
+    (_t, dur) => `${isoNow()} [STALL:RENDERER end after ${dur}ms] last_lag=${rendererLag}ms`,
+  );
 
   // ── Periodic heartbeat (so the file shows the app is alive even
   //    when nothing has stalled) ──
@@ -171,13 +240,16 @@ function check(): void {
     appendLine(
       `${isoNow()} [BOOT] freeze-watchdog started ` +
         `thresholds: main>${STALL_THRESHOLD_MAIN_MS}ms reader>${STALL_THRESHOLD_READER_MS}ms ` +
-        `renderer_lag>${STALL_THRESHOLD_RENDERER_LAG_MS}ms renderer_silence>${STALL_THRESHOLD_RENDERER_SILENCE_MS}ms`,
+        `writer>${STALL_THRESHOLD_WRITER_MS}ms ` +
+        `renderer_lag>${STALL_THRESHOLD_RENDERER_LAG_MS}ms renderer_silence>${STALL_THRESHOLD_RENDERER_SILENCE_MS}ms ` +
+        `report_floor=${STALL_REPORT_FLOOR_MS}ms`,
     );
   }
   if (now - lastHeartbeatLogTs >= HEARTBEAT_LOG_INTERVAL_MS) {
     lastHeartbeatLogTs = now;
     appendLine(
       `${isoNow()} [HEARTBEAT] main_op="${mainOp}" reader_op="${readerOp}" ` +
+        `writer_op="${writerOp}" ` +
         `crawled=${counters.crawled} discovered=${counters.discovered} ` +
         `pending=${counters.pending} renderer_lag=${rendererLag}ms`,
     );

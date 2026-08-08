@@ -23,6 +23,7 @@ import {
   type ExportGridResult,
   type DataDeleteByDomainInput,
   type DataDeleteByDomainResult,
+  type CrashRecoveryResumeResult,
   type CrashRecoveryStatus,
   type ExportHtmlReportInput,
   type ExportHtmlReportResult,
@@ -119,12 +120,14 @@ import {
   type SpellingMatchesResult,
   type SpellingLanguageOption,
   type GoogleAuthState,
+  type GoogleAccount,
   type GoogleAuthResult,
   type GscListSitesResult,
   type GscFetchInput,
   type GscFetchResult,
   type GscQueryInput,
   type GscQueryResult,
+  type GscCrawlNewUrlsResult,
   type Ga4ListPropertiesResult,
   type Ga4FetchInput,
   type Ga4FetchResult,
@@ -265,7 +268,7 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.dataDeleteByDomain, input),
   crashRecoveryStatus: (): Promise<CrashRecoveryStatus> =>
     ipcRenderer.invoke(IPC.crashRecoveryStatus),
-  crashRecoveryResume: (): Promise<{ accepted: boolean }> =>
+  crashRecoveryResume: (): Promise<CrashRecoveryResumeResult> =>
     ipcRenderer.invoke(IPC.crashRecoveryResume),
   crashRecoveryDiscard: (): Promise<void> =>
     ipcRenderer.invoke(IPC.crashRecoveryDiscard),
@@ -398,6 +401,15 @@ const api: FreeCrawlApi = {
   ): Promise<IntegrationsState> => ipcRenderer.invoke(IPC.integrationsSet, id, fields),
   integrationsClear: (id: string): Promise<IntegrationsState> =>
     ipcRenderer.invoke(IPC.integrationsClear, id),
+  integrationSettingsGet: (
+    id: string,
+  ): Promise<Record<string, unknown> | null> =>
+    ipcRenderer.invoke(IPC.integrationSettingsGet, id),
+  integrationSettingsSet: (
+    id: string,
+    settings: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> =>
+    ipcRenderer.invoke(IPC.integrationSettingsSet, id, settings),
   pagespeedQuery: (input: PagespeedQueryInput): Promise<PagespeedQueryResult> =>
     ipcRenderer.invoke(IPC.pagespeedQuery, input),
   pagespeedRun: (input: PagespeedRunInput): Promise<PagespeedRunResult> =>
@@ -426,16 +438,20 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.googleAuthStart, id),
   googleAuthStatus: (id: string): Promise<GoogleAuthState> =>
     ipcRenderer.invoke(IPC.googleAuthStatus, id),
-  googleAuthRevoke: (id: string): Promise<GoogleAuthState> =>
-    ipcRenderer.invoke(IPC.googleAuthRevoke, id),
-  gscListSites: (): Promise<GscListSitesResult> =>
-    ipcRenderer.invoke(IPC.gscListSites),
+  googleAuthRevoke: (id: string, accountId?: string): Promise<GoogleAuthState> =>
+    ipcRenderer.invoke(IPC.googleAuthRevoke, id, accountId),
+  gscListSites: (accountId?: string): Promise<GscListSitesResult> =>
+    ipcRenderer.invoke(IPC.gscListSites, accountId),
+  googleAccountsList: (integrationId: string): Promise<GoogleAccount[]> =>
+    ipcRenderer.invoke(IPC.googleAccountsList, integrationId),
   gscFetch: (input: GscFetchInput): Promise<GscFetchResult> =>
     ipcRenderer.invoke(IPC.gscFetch, input),
   gscQuery: (input: GscQueryInput): Promise<GscQueryResult> =>
     ipcRenderer.invoke(IPC.gscQuery, input),
-  ga4ListProperties: (): Promise<Ga4ListPropertiesResult> =>
-    ipcRenderer.invoke(IPC.ga4ListProperties),
+  gscCrawlNewUrls: (): Promise<GscCrawlNewUrlsResult> =>
+    ipcRenderer.invoke(IPC.gscCrawlNewUrls),
+  ga4ListProperties: (accountId?: string): Promise<Ga4ListPropertiesResult> =>
+    ipcRenderer.invoke(IPC.ga4ListProperties, accountId),
   ga4Fetch: (input: Ga4FetchInput): Promise<Ga4FetchResult> =>
     ipcRenderer.invoke(IPC.ga4Fetch, input),
   ga4Query: (input: Ga4QueryInput): Promise<Ga4QueryResult> =>

@@ -491,10 +491,14 @@ export const useAppStore = create<AppState>((set) => ({
       return { config: next };
     }),
   applyProjectConfig: (config) =>
-    // Swap the UI to a project's saved config on open. Deliberately does
+    // Swap the UI to a project's saved config on open — including its
+    // mode and start URL, which are part of the document: a project
+    // crawled from a sitemap must reopen in Sitemap mode showing that
+    // sitemap, not blank in Spider mode while its tables hold the data.
+    // Also the resume path after an interrupted crawl. Deliberately does
     // NOT touch global prefs — opening a project must not overwrite the
     // user's default settings.
-    set({ config: { ...config, startUrl: '' } }),
+    set({ config }),
   setProgress: (p) => set({ progress: p }),
   setSummary: (s) => set({ summary: s }),
   markCrawlFinished: () =>

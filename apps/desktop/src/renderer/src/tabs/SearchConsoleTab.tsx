@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
-import { Loader2, Search, RefreshCw } from 'lucide-react';
+import { Loader2, Search, RefreshCw, Plus } from 'lucide-react';
 import { InfoTip } from '../components/InfoTip.js';
-import type {
-  GoogleAuthState,
-  GscFetchMeta,
-  GscInspectProgress,
-  GscRow,
-  GscSite,
+import {
+  defaultGscSettings,
+  type GoogleAccount,
+  type GoogleAuthState,
+  type GscDateRange,
+  type GscFetchMeta,
+  type GscInspectProgress,
+  type GscPreset,
+  type GscRow,
+  type GscSite,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
@@ -22,10 +26,25 @@ const POLL_MS_RUNNING = 5000;
  *  small enough chunks that one click is reversible. */
 const INSPECT_BATCH = 100;
 
-type FilterMode = 'all' | 'with-data' | 'without-data';
-type RangeDays = 7 | 28 | 90;
 /** What the tab is currently showing — drives the three-way render. */
 type Stage = 'loading' | 'unconfigured' | 'disconnected' | 'ready';
+
+/** Quick-filter presets, mirroring Screaming Frog's GSC filter dropdown.
+ *  `needsInspection` entries only match once URL Inspection has been run. */
+const FILTER_PRESETS: { value: GscPreset; labelKey: string; label: string }[] = [
+  { value: 'all', labelKey: 'gscTab.presetAll', label: 'All' },
+  { value: 'clicks-above-0', labelKey: 'gscTab.presetClicks', label: 'Clicks Above 0' },
+  { value: 'without-data', labelKey: 'gscTab.presetNoData', label: 'No Search Analytics Data' },
+  { value: 'non-indexable-with-data', labelKey: 'gscTab.presetNonIndexableData', label: 'Non-Indexable with Search Analytics Data' },
+  { value: 'orphan', labelKey: 'gscTab.presetOrphan', label: 'Orphan URLs' },
+  { value: 'not-on-google', labelKey: 'gscTab.presetNotOnGoogle', label: 'URL is Not on Google' },
+  { value: 'indexable-not-indexed', labelKey: 'gscTab.presetIndexableNotIndexed', label: 'Indexable URL Not Indexed' },
+  { value: 'on-google-with-issues', labelKey: 'gscTab.presetOnGoogleIssues', label: 'URL is on Google But Has Issues' },
+  { value: 'canonical-mismatch', labelKey: 'gscTab.presetCanonical', label: 'User-Declared Canonical Not Selected' },
+  { value: 'not-mobile-friendly', labelKey: 'gscTab.presetMobile', label: 'Page is Not Mobile Friendly' },
+  { value: 'amp-invalid', labelKey: 'gscTab.presetAmp', label: 'AMP URL Invalid' },
+  { value: 'rich-result-invalid', labelKey: 'gscTab.presetRich', label: 'Rich Result Invalid' },
+];
 
 /** Average-position bands → cell colour (lower is better). */
 function positionClass(v: number): string {
@@ -55,42 +74,80 @@ export function SearchConsoleTab() {
   const [stage, setStage] = useState<Stage>('loading');
   const [authState, setAuthState] = useState<GoogleAuthState | null>(null);
   const [sites, setSites] = useState<GscSite[]>([]);
+  const [accounts, setAccounts] = useState<GoogleAccount[]>([]);
+  const [accountId, setAccountId] = useState('');
   const [property, setProperty] = useState('');
-  const [days, setDays] = useState<RangeDays>(28);
+  const [dateRange, setDateRange] = useState<GscDateRange>('28d');
   const [rows, setRows] = useState<GscRow[]>([]);
   const [total, setTotal] = useState(0);
   const [meta, setMeta] = useState<GscFetchMeta | null>(null);
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<FilterMode>('all');
+  const [filter, setFilter] = useState<GscPreset>('all');
   const [connecting, setConnecting] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [inspecting, setInspecting] = useState(false);
   const [inspectProgress, setInspectProgress] = useState<GscInspectProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** After a pull: how many GSC URLs were missing from the crawl, and
+   *  whether they were auto-queued (crawl-new-urls setting on). */
+  const [newUrls, setNewUrls] = useState<{ count: number; queued: number } | null>(null);
+  const [crawlingNew, setCrawlingNew] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const loadSites = useCallback(async () => {
-    const res = await window.freecrawl.gscListSites();
+  const loadSites = useCallback(async (account?: string) => {
+    const res = await window.freecrawl.gscListSites(account);
     if (!res.ok) {
       setError(res.error);
+      setSites([]);
       return;
     }
     setError(null);
     setSites(res.sites);
-    setProperty((prev) => prev || res.sites[0]?.siteUrl || '');
+    setProperty((prev) =>
+      // Keep the current property only if the account can still see it.
+      prev && res.sites.some((s) => s.siteUrl === prev)
+        ? prev
+        : (res.sites[0]?.siteUrl ?? ''),
+    );
   }, []);
+
+  /** Switch the project to another linked Google account: persist the
+   *  choice, then re-list that account's properties and reload the table
+   *  (each account's rows are stored separately). */
+  const changeAccount = useCallback(
+    (next: string) => {
+      setAccountId(next);
+      setNewUrls(null);
+      void window.freecrawl.integrationSettingsSet('gsc', { accountId: next });
+      void loadSites(next);
+    },
+    [loadSites],
+  );
 
   // Resolve the tab's stage on mount: needs OAuth credentials, then a
   // connected account, before the data view is meaningful.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [integrations, auth] = await Promise.all([
+      const [integrations, auth, gscSettings] = await Promise.all([
         window.freecrawl.integrationsGetAll(),
         window.freecrawl.googleAuthStatus('gsc'),
+        window.freecrawl.integrationSettingsGet('gsc'),
       ]);
       if (cancelled) return;
       setAuthState(auth);
+      setAccounts(auth.accounts);
+      // Seed the toolbar from the stored per-project GSC settings so the
+      // account + property + date range persist across sessions. A stored
+      // account that has since been unlinked falls back to the first one.
+      const s = { ...defaultGscSettings(), ...(gscSettings ?? {}) };
+      const account =
+        auth.accounts.find((a) => a.accountId === s.accountId)?.accountId ??
+        auth.accounts[0]?.accountId ??
+        '';
+      setAccountId(account);
+      setDateRange(s.dateRange);
+      if (s.property) setProperty(s.property);
       const configured = integrations['gsc']?.configured ?? false;
       if (!configured) {
         setStage('unconfigured');
@@ -98,7 +155,7 @@ export function SearchConsoleTab() {
         setStage('disconnected');
       } else {
         setStage('ready');
-        void loadSites();
+        void loadSites(account);
       }
     })();
     return () => {
@@ -112,11 +169,12 @@ export function SearchConsoleTab() {
       offset: 0,
       search: search || undefined,
       filter,
+      accountId: accountId || undefined,
     });
     setRows(res.rows);
     setTotal(res.total);
     setMeta(res.meta);
-  }, [search, filter]);
+  }, [search, filter, accountId]);
 
   // Candidate list — only while the data view is showing.
   useEffect(() => {
@@ -147,9 +205,12 @@ export function SearchConsoleTab() {
     try {
       const res = await window.freecrawl.googleAuthStart('gsc');
       setAuthState(res.state);
+      setAccounts(res.state.accounts);
       if (res.ok && res.state.connected) {
+        const account = res.state.accounts[0]?.accountId ?? '';
+        setAccountId(account);
         setStage('ready');
-        void loadSites();
+        void loadSites(account);
       } else if (res.error) {
         setError(res.error);
       }
@@ -158,30 +219,72 @@ export function SearchConsoleTab() {
     }
   }, [loadSites]);
 
+  /** Unlink the account currently selected in the toolbar. With several
+   *  linked, the tab stays usable and falls back to the next one. */
   const disconnect = useCallback(async () => {
-    const next = await window.freecrawl.googleAuthRevoke('gsc');
+    const next = await window.freecrawl.googleAuthRevoke(
+      'gsc',
+      accountId || undefined,
+    );
     setAuthState(next);
+    setAccounts(next.accounts);
     setSites([]);
     setProperty('');
-    setStage('disconnected');
+    if (!next.connected) {
+      setAccountId('');
+      setStage('disconnected');
+      return;
+    }
+    const fallback = next.accounts[0]!.accountId;
+    setAccountId(fallback);
+    void window.freecrawl.integrationSettingsSet('gsc', { accountId: fallback });
+    void loadSites(fallback);
+  }, [accountId, loadSites]);
+
+  const changeDateRange = useCallback((next: GscDateRange) => {
+    setDateRange(next);
+    void window.freecrawl.integrationSettingsSet('gsc', { dateRange: next });
   }, []);
 
   const runFetch = useCallback(async () => {
     if (!property || fetching) return;
     setFetching(true);
     setError(null);
+    setNewUrls(null);
     try {
-      const res = await window.freecrawl.gscFetch({ property, days });
+      // Date range + dimension filters + row cap come from the stored GSC
+      // settings; the main process reads them. We only pass the property.
+      const res = await window.freecrawl.gscFetch({
+        property,
+        accountId: accountId || undefined,
+      });
       if (!res.ok) {
         setError(res.error);
       } else {
         setMeta(res.meta);
+        setNewUrls({ count: res.newUrlCount ?? 0, queued: res.queuedNewUrls ?? 0 });
         await reload();
       }
     } finally {
       setFetching(false);
     }
-  }, [property, days, fetching, reload]);
+  }, [property, accountId, fetching, reload]);
+
+  const crawlNew = useCallback(async () => {
+    if (crawlingNew) return;
+    setCrawlingNew(true);
+    setError(null);
+    try {
+      const res = await window.freecrawl.gscCrawlNewUrls();
+      if (!res.ok) {
+        setError(res.error);
+      } else {
+        setNewUrls({ count: res.candidateCount, queued: res.queued });
+      }
+    } finally {
+      setCrawlingNew(false);
+    }
+  }, [crawlingNew]);
 
   const runInspect = useCallback(async () => {
     if (!property || inspecting) return;
@@ -201,13 +304,17 @@ export function SearchConsoleTab() {
     setInspecting(true);
     setError(null);
     try {
-      await window.freecrawl.gscInspectRun({ property, urls });
+      await window.freecrawl.gscInspectRun({
+        property,
+        urls,
+        accountId: accountId || undefined,
+      });
     } finally {
       setInspecting(false);
       setInspectProgress(null);
       void reload();
     }
-  }, [property, inspecting, rows, t, reload]);
+  }, [property, accountId, inspecting, rows, t, reload]);
 
   // Live URL Inspection progress.
   useEffect(() => {
@@ -295,22 +402,39 @@ export function SearchConsoleTab() {
           />
         </div>
         <select
-          className="h-6 rounded border border-surface-700 bg-surface-950 px-1.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+          className="h-6 max-w-[220px] rounded border border-surface-700 bg-surface-950 px-1.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
           value={filter}
-          onChange={(e) => setFilter(e.target.value as FilterMode)}
+          onChange={(e) => setFilter(e.target.value as GscPreset)}
+          title={t('gscTab.presetTitle', {
+            defaultValue: 'Pre-defined filters for URLs verified in GSC',
+          })}
         >
-          <option value="all">
-            {t('gscTab.filterAll', { defaultValue: 'All pages' })}
-          </option>
-          <option value="with-data">
-            {t('gscTab.filterWith', { defaultValue: 'With GSC data' })}
-          </option>
-          <option value="without-data">
-            {t('gscTab.filterWithout', { defaultValue: 'No GSC data' })}
-          </option>
+          {FILTER_PRESETS.map((p) => (
+            <option key={p.value} value={p.value}>
+              {t(p.labelKey, { defaultValue: p.label })}
+            </option>
+          ))}
         </select>
 
         <div className="ml-auto flex items-center gap-2">
+          {accounts.length > 1 && (
+            <select
+              className="h-6 max-w-[170px] rounded border border-surface-700 bg-surface-950 px-1.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+              value={accountId}
+              onChange={(e) => changeAccount(e.target.value)}
+              disabled={fetching || inspecting}
+              title={t('gscTab.accountTitle', {
+                defaultValue:
+                  'Which linked Google account this project reports on. Each account keeps its own stored data.',
+              })}
+            >
+              {accounts.map((a) => (
+                <option key={a.accountId} value={a.accountId}>
+                  {a.email ?? a.accountId}
+                </option>
+              ))}
+            </select>
+          )}
           <select
             className="h-6 max-w-[200px] rounded border border-surface-700 bg-surface-950 px-1.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
             value={property}
@@ -331,13 +455,19 @@ export function SearchConsoleTab() {
           </select>
           <select
             className="h-6 rounded border border-surface-700 bg-surface-950 px-1.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
-            value={days}
-            onChange={(e) => setDays(Number(e.target.value) as RangeDays)}
+            value={dateRange}
+            onChange={(e) => changeDateRange(e.target.value as GscDateRange)}
             disabled={fetching}
+            title={t('gscTab.dateRangeTitle', {
+              defaultValue:
+                'Date range for the pull. Full dimension filters live in Settings → Integrations → Google Search Console.',
+            })}
           >
-            <option value={7}>{t('gscTab.days7', { defaultValue: 'Last 7 days' })}</option>
-            <option value={28}>{t('gscTab.days28', { defaultValue: 'Last 28 days' })}</option>
-            <option value={90}>{t('gscTab.days90', { defaultValue: 'Last 90 days' })}</option>
+            <option value="7d">{t('gscTab.days7', { defaultValue: 'Last 7 days' })}</option>
+            <option value="28d">{t('gscTab.days28', { defaultValue: 'Last 28 days' })}</option>
+            <option value="90d">{t('gscTab.days90', { defaultValue: 'Last 90 days' })}</option>
+            <option value="16m">{t('gscTab.days16m', { defaultValue: 'Last 16 months' })}</option>
+            <option value="custom">{t('gscTab.daysCustom', { defaultValue: 'Custom (Settings)' })}</option>
           </select>
           <button
             type="button"
@@ -384,12 +514,52 @@ export function SearchConsoleTab() {
         </div>
       )}
 
+      {/* New-URLs-in-GSC banner — offer to crawl orphan GSC URLs */}
+      {newUrls && newUrls.count > 0 && (
+        <div className="flex items-center gap-2 border-b border-amber-700/40 bg-amber-900/15 px-3 py-1 text-[10px] text-amber-200">
+          <span>
+            {newUrls.queued > 0
+              ? t('gscTab.newUrlsQueued', {
+                  defaultValue:
+                    '{{n}} new URL(s) discovered in Search Console were added to the crawl.',
+                  n: newUrls.queued,
+                })
+              : t('gscTab.newUrlsFound', {
+                  defaultValue:
+                    '{{n}} URL(s) appear in Search Console but were not found by the crawl.',
+                  n: newUrls.count,
+                })}
+          </span>
+          {newUrls.queued === 0 && (
+            <button
+              type="button"
+              onClick={() => void crawlNew()}
+              disabled={crawlingNew}
+              className="ml-auto inline-flex items-center gap-1 rounded bg-amber-600/80 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+            >
+              {crawlingNew ? (
+                <Loader2 size={11} className="animate-spin" />
+              ) : (
+                <Plus size={11} />
+              )}
+              {t('gscTab.crawlNewUrls', {
+                defaultValue: 'Crawl {{n}} new URLs',
+                n: newUrls.count,
+              })}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Context line — connection + last pull */}
       <div className="flex items-center gap-2 border-b border-surface-800 bg-surface-900/20 px-3 py-1 text-[10px] text-surface-500">
         <span>
           {t('gscTab.connectedAs', {
             defaultValue: 'Connected as {{email}}',
-            email: authState?.email ?? 'Google account',
+            email:
+              accounts.find((a) => a.accountId === accountId)?.email ??
+              authState?.email ??
+              'Google account',
           })}
         </span>
         <button

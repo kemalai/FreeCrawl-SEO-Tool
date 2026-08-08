@@ -28,6 +28,7 @@ import type {
   SpellingStatus,
   SpellingEngine,
   GscRow,
+  GscPreset,
   Ga4Row,
   AiProvider,
   AiResult,
@@ -295,6 +296,20 @@ interface ImageRowDb {
   height: number | null;
   is_internal: number;
   occurrences: number;
+}
+
+/**
+ * Incremental update for the `crawl_queue` recovery checkpoint. The
+ * crawler accumulates enqueues and completions between ticks and ships
+ * only the difference, so the write cost tracks crawl throughput rather
+ * than the size of the pending frontier.
+ */
+export interface QueueCheckpointPatch {
+  /** Wipe the table first — used for the first tick of a run and to
+   *  resynchronise after a failed write. */
+  replaceAll?: boolean;
+  added?: ReadonlyArray<{ url: string; depth: number }>;
+  removed?: readonly string[];
 }
 
 export interface UpsertUrlInput {
@@ -751,8 +766,19 @@ const DUPLICATE_ALT_PREDICATE = `alt IS NOT NULL AND alt != '' AND alt IN (
   SELECT alt FROM images WHERE alt IS NOT NULL AND alt != '' GROUP BY alt HAVING COUNT(*) > 1
 )`;
 
+/**
+ * Scope shared by every issue counter: only crawled internal HTML pages
+ * are eligible. Kept module-level because `runOverviewBatch` splits the
+ * counters on this exact prefix to hoist it into a `WHERE` — if the two
+ * spellings ever drifted, the split would silently stop matching and
+ * every scoped counter would fall back to the slow path.
+ */
+const INTERNAL_HTML_SCOPE = "is_external = 0 AND content_kind = 'html'";
+
 export class ProjectDb {
   private readonly db: DatabaseSync;
+  /** Read-only connections can't write `sqlite_stat1`; see `optimize()`. */
+  private readonly readOnly: boolean;
   private readonly stmtUpsertUrl: StatementSync;
   private readonly stmtGetUrlId: StatementSync;
   private readonly stmtInsertLink: StatementSync;
@@ -780,6 +806,7 @@ export class ProjectDb {
    */
   constructor(filePath: string, opts: { readOnly?: boolean } = {}) {
     const readOnly = opts.readOnly === true;
+    this.readOnly = readOnly;
     // node:sqlite's `DatabaseSync` constructor type-asserts the second
     // argument as an object — passing `undefined` throws
     // `TypeError: The "options" argument must be an object`. Use the
@@ -820,6 +847,11 @@ export class ProjectDb {
       this.db.exec('PRAGMA page_size = 4096');
       this.db.exec('PRAGMA wal_autocheckpoint = 2000');
       runMigrations(this.db);
+      // Projects written before this existed carry no `sqlite_stat1` at
+      // all, and a crawl that starts on an empty DB would otherwise plan
+      // every query as if the tables were still empty. See `optimize()`
+      // for what that costs.
+      this.optimize();
     }
 
     if (readOnly) {
@@ -1120,6 +1152,52 @@ export class ProjectDb {
   /** True when the caller is already inside a `runInTransaction` frame. */
   isInTransaction(): boolean {
     return this.txDepth > 0;
+  }
+
+  /**
+   * Refresh the query planner's table statistics (`PRAGMA optimize`).
+   *
+   * This is not a micro-optimisation. Nothing in the app ever ran
+   * ANALYZE, so SQLite planned every query with no statistics at all,
+   * and for correlated subqueries it guessed the join order wrong. The
+   * worst case measured on a 200k-URL project: the sidebar's
+   * "image over 100 KB" counter drove its subquery from `images`
+   * (thousands of candidate rows probed per page) instead of from
+   * `image_usages.from_url_id` (one or two). That single counter took
+   * **16.3 s**; with statistics present it takes **134 ms**. Whole
+   * classes of query in this file have the same shape, which is what
+   * made the overview aggregate pin a reader thread for minutes at a
+   * time on real crawls.
+   *
+   * Deliberately NOT bounded by `PRAGMA analysis_limit`. The usual
+   * advice is to cap sampling at a few hundred rows per index to keep
+   * ANALYZE cheap, and that was tried first — but approximate stats are
+   * worse than no stats when they point the planner the wrong way. On a
+   * 200k-URL project sampled at 400 rows/index, the "internal link to a
+   * redirect" counter drove its subquery from `idx_urls_status` instead
+   * of `idx_links_from` and did not finish inside 200 s; a full ANALYZE
+   * on that same project takes **87 ms** and brings the counter back to
+   * 158 ms. Index sampling is linear in table size, so the full pass
+   * stays in the sub-second range even on much larger projects — far
+   * too cheap to trade a plan cliff for.
+   *
+   * `PRAGMA optimize` only re-analyses tables whose size has drifted
+   * enough to matter, so most calls do nothing at all. That is what
+   * makes it safe on the crawl's periodic tick, where it matters most:
+   * the tables start empty, and the plans chosen at row zero are
+   * exactly the wrong ones by row 200k.
+   *
+   * No-op on read-only connections (writing `sqlite_stat1` needs write
+   * access); the reader pool picks up the writer's statistics on its own
+   * — SQLite re-plans already-prepared statements when they change.
+   */
+  optimize(): void {
+    if (this.readOnly) return;
+    try {
+      this.db.exec('PRAGMA optimize');
+    } catch {
+      /* statistics are an optimisation, never a correctness input */
+    }
   }
 
   /** Force a passive WAL → main-DB checkpoint so the on-disk
@@ -2010,29 +2088,55 @@ export class ProjectDb {
   /**
    * Persist the in-flight queue snapshot. Called by the crawler on a
    * fixed cadence (every 30 s by default) so a crash, OOM, or OS
-   * reboot only loses up to that window. The pass is idempotent:
-   * `INSERT OR IGNORE` against the URL primary key, then the matching
-   * `seed_url` to discriminate stale checkpoints from a different
-   * start URL the user may have queued earlier in the same project.
+   * reboot only loses up to that window. `seed_url` discriminates a
+   * stale checkpoint from a different start URL the user may have
+   * queued earlier in the same project.
    *
-   * Truncate-then-insert is intentional: the queue shrinks as URLs
-   * complete, and we don't want yesterday's pending entries lingering
-   * after a successful crawl finishes.
+   * This used to truncate the table and re-insert every pending item on
+   * every tick. That is O(pending) work on a fixed clock: at 200k
+   * queued URLs it meant a 200k-row delete plus 200k inserts inside one
+   * transaction, twice a minute, on the *same* writer connection the
+   * crawler's per-URL `writeFetchedUrl` goes through — so every page
+   * write queued behind it and the crawl loop stalled for tens of
+   * seconds at a time.
+   *
+   * The crawler now ships a delta instead (`added` / `removed` since the
+   * last tick), which is proportional to crawl throughput rather than to
+   * queue depth — a few hundred rows per tick regardless of how big the
+   * frontier gets. `replaceAll` requests the old truncate-then-insert
+   * behaviour; the crawler uses it for the first tick of a run so the
+   * table starts in a known state, and again after a failed write so a
+   * dropped delta can't leave the checkpoint drifting from the live
+   * queue. A plain array is still accepted for the CLI / older callers.
    */
-  checkpointQueue(items: ReadonlyArray<{ url: string; depth: number }>, seedUrl: string): void {
+  checkpointQueue(
+    patch: ReadonlyArray<{ url: string; depth: number }> | QueueCheckpointPatch,
+    seedUrl: string,
+  ): void {
+    // `Array.isArray` doesn't narrow a `readonly T[]` out of the union,
+    // so state the legacy shape as an explicit predicate.
+    const isItemList = (
+      v: typeof patch,
+    ): v is ReadonlyArray<{ url: string; depth: number }> => Array.isArray(v);
+    const { replaceAll, added, removed }: QueueCheckpointPatch = isItemList(patch)
+      ? { replaceAll: true, added: patch, removed: [] }
+      : patch;
+    const seed = seedUrl ?? '';
     this.runInTransaction(() => {
-      this.db.exec('DELETE FROM crawl_queue');
-      if (items.length === 0) return;
-      const stmt = this.db.prepare(
-        'INSERT OR IGNORE INTO crawl_queue (url, depth, seed_url) VALUES (?, ?, ?)',
-      );
-      const seed = seedUrl ?? '';
-      const CHUNK = 500;
-      // Multi-row VALUES inserts in chunks — single .run() per item is
-      // ~10× slower at 100k+ items.
-      for (let i = 0; i < items.length; i += CHUNK) {
-        const slice = items.slice(i, i + CHUNK);
-        for (const it of slice) stmt.run(it.url, it.depth, seed);
+      if (replaceAll) this.db.exec('DELETE FROM crawl_queue');
+      if (removed && removed.length > 0) {
+        const del = this.db.prepare('DELETE FROM crawl_queue WHERE url = ?');
+        for (const url of removed) del.run(url);
+      }
+      if (added && added.length > 0) {
+        // OR REPLACE, not OR IGNORE: a URL re-enqueued at a shallower
+        // depth has to overwrite the earlier row, otherwise a resumed
+        // crawl would inherit the deeper value and cut the subtree off
+        // against `maxDepth`.
+        const ins = this.db.prepare(
+          'INSERT OR REPLACE INTO crawl_queue (url, depth, seed_url) VALUES (?, ?, ?)',
+        );
+        for (const it of added) ins.run(it.url, it.depth, seed);
       }
     });
   }
@@ -4072,26 +4176,54 @@ export class ProjectDb {
       position: number;
     }[],
     fetchedAt: string,
+    accountId = '',
   ): void {
     this.runInTransaction(() => {
-      this.db.exec('DELETE FROM gsc_results');
+      // Scoped to this account — a blanket DELETE would wipe every other
+      // linked account's snapshot on each pull.
+      this.db.prepare('DELETE FROM gsc_results WHERE account_id = ?').run(accountId);
       const CHUNK = 400;
       for (let i = 0; i < rows.length; i += CHUNK) {
         const slice = rows.slice(i, i + CHUNK);
-        const placeholders = slice.map(() => '(?, ?, ?, ?, ?, ?)').join(',');
+        const placeholders = slice.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(',');
         const args: (string | number)[] = [];
         for (const r of slice) {
-          args.push(r.url, r.clicks, r.impressions, r.ctr, r.position, fetchedAt);
+          args.push(r.url, accountId, r.clicks, r.impressions, r.ctr, r.position, fetchedAt);
         }
         this.db
           .prepare(
             `INSERT OR REPLACE INTO gsc_results
-               (url, clicks, impressions, ctr, position, fetched_at)
+               (url, account_id, clicks, impressions, ctr, position, fetched_at)
              VALUES ${placeholders}`,
           )
           .run(...args);
       }
     });
+  }
+
+  /**
+   * Adopt rows left by a pre-multi-account version (`account_id = ''`)
+   * into a real account id, so an upgraded project keeps the data it
+   * already pulled instead of showing an empty table until the next
+   * fetch. Idempotent: once relabelled there is nothing left to move,
+   * and a collision with an already-migrated row is ignored.
+   */
+  adoptLegacyGoogleRows(table: string, accountId: string): number {
+    if (!accountId) return 0;
+    const allowed = ['gsc_results', 'ga4_results', 'gsc_inspection_results'];
+    if (!allowed.includes(table)) return 0;
+    const res = this.db
+      .prepare(
+        `UPDATE OR IGNORE ${table} SET account_id = ? WHERE account_id = ''`,
+      )
+      .run(accountId);
+    const moved = Number(res.changes ?? 0);
+    if (moved > 0) {
+      // Anything that collided with an existing row for this account is
+      // a stale duplicate — drop it so '' can never resurface.
+      this.db.prepare(`DELETE FROM ${table} WHERE account_id = ''`).run();
+    }
+    return moved;
   }
 
   /**
@@ -4103,34 +4235,16 @@ export class ProjectDb {
     limit: number;
     offset: number;
     search?: string;
-    filter?: 'all' | 'with-data' | 'without-data';
+    filter?: GscPreset;
+    accountId?: string;
   }): { rows: GscRow[]; total: number } {
-    const where: string[] = [
-      "u.is_external = 0 AND u.content_kind = 'html'",
-      'u.status_code >= 200 AND u.status_code < 300',
-    ];
-    const args: (string | number)[] = [];
-    if (params.search) {
-      where.push('u.url LIKE ?');
-      args.push(`%${params.search}%`);
-    }
-    const filter = params.filter ?? 'all';
-    if (filter === 'with-data') where.push('g.url IS NOT NULL');
-    else if (filter === 'without-data') where.push('g.url IS NULL');
-    const whereSql = `WHERE ${where.join(' AND ')}`;
-    const joinSql =
-      `FROM urls u
-       LEFT JOIN gsc_results g ON g.url = u.url
-       LEFT JOIN gsc_inspection_results i ON i.url = u.url`;
-
-    const totalRow = this.db
-      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
-      .get(...args) as { c: number };
-
-    const rowsDb = this.db
-      .prepare(
-        `SELECT u.url AS url, u.status_code AS status_code,
-                g.clicks AS clicks, g.impressions AS impressions,
+    const filter: GscPreset = params.filter ?? 'all';
+    // Every join below is account-scoped: with several linked accounts a
+    // bare `g.url = u.url` would fan out one row per account.
+    const accountId = params.accountId ?? '';
+    // The full column projection + row mapper is shared by both the
+    // crawled-pages branch and the orphan branch below.
+    const selectCols = `g.clicks AS clicks, g.impressions AS impressions,
                 g.ctr AS ctr, g.position AS position,
                 g.fetched_at AS g_fetched,
                 i.verdict AS i_verdict,
@@ -4140,9 +4254,154 @@ export class ProjectDb {
                 i.last_crawl_time AS i_last_crawl_time,
                 i.google_canonical AS i_google_canonical,
                 i.user_canonical AS i_user_canonical,
+                i.mobile_verdict AS i_mobile_verdict,
+                i.amp_verdict AS i_amp_verdict,
+                i.rich_results_verdict AS i_rich_results_verdict,
                 i.status AS i_status,
                 i.error AS i_error,
-                i.fetched_at AS i_fetched
+                i.fetched_at AS i_fetched`;
+    const mapRow = (r: Record<string, unknown>): GscRow => {
+      const gFetched = r['g_fetched'];
+      const iFetched = r['i_fetched'];
+      const iStatus = r['i_status'];
+      return {
+        url: r['url'] as string,
+        statusCode: (r['status_code'] as number | null) ?? null,
+        gsc:
+          typeof gFetched === 'string'
+            ? {
+                clicks: (r['clicks'] as number | null) ?? 0,
+                impressions: (r['impressions'] as number | null) ?? 0,
+                ctr: (r['ctr'] as number | null) ?? 0,
+                position: (r['position'] as number | null) ?? 0,
+                fetchedAt: gFetched,
+              }
+            : null,
+        inspection:
+          typeof iFetched === 'string' && typeof iStatus === 'string'
+            ? {
+                verdict: (r['i_verdict'] as string | null) ?? null,
+                coverageState: (r['i_coverage_state'] as string | null) ?? null,
+                robotsTxtState: (r['i_robots_txt_state'] as string | null) ?? null,
+                indexingState: (r['i_indexing_state'] as string | null) ?? null,
+                lastCrawlTime: (r['i_last_crawl_time'] as string | null) ?? null,
+                googleCanonical: (r['i_google_canonical'] as string | null) ?? null,
+                userCanonical: (r['i_user_canonical'] as string | null) ?? null,
+                mobileVerdict: (r['i_mobile_verdict'] as string | null) ?? null,
+                ampVerdict: (r['i_amp_verdict'] as string | null) ?? null,
+                richResultsVerdict:
+                  (r['i_rich_results_verdict'] as string | null) ?? null,
+                status: iStatus === 'error' ? 'error' : 'ok',
+                error: (r['i_error'] as string | null) ?? null,
+                fetchedAt: iFetched,
+              }
+            : null,
+      };
+    };
+
+    // ── Orphan preset — GSC URLs missing from the crawl. Distinct
+    //    candidate set (driven by gsc_results, not the crawled pages),
+    //    so it gets its own query rather than a WHERE clause. ──────────
+    if (filter === 'orphan') {
+      const oWhere: string[] = ['(u.url IS NULL OR u.status_code IS NULL)'];
+      const oArgs: (string | number)[] = [accountId, accountId];
+      oWhere.push('g.account_id = ?');
+      if (params.search) {
+        oWhere.push('g.url LIKE ?');
+        oArgs.push(`%${params.search}%`);
+      }
+      const oJoin = `FROM gsc_results g
+         LEFT JOIN urls u ON u.url = g.url
+         LEFT JOIN gsc_inspection_results i ON i.url = g.url AND i.account_id = ?`;
+      const oWhereSql = `WHERE ${oWhere.join(' AND ')}`;
+      const oTotal = this.db
+        .prepare(`SELECT COUNT(*) AS c ${oJoin} ${oWhereSql}`)
+        .get(...oArgs) as { c: number };
+      const oRows = this.db
+        .prepare(
+          `SELECT g.url AS url, u.status_code AS status_code, ${selectCols}
+           ${oJoin}
+           ${oWhereSql}
+           ORDER BY g.impressions DESC, g.url ASC
+           LIMIT ? OFFSET ?`,
+        )
+        .all(...oArgs, params.limit, params.offset) as unknown as Record<
+        string,
+        unknown
+      >[];
+      return { total: oTotal.c, rows: oRows.map(mapRow) };
+    }
+
+    // ── Crawled-pages branch — every other preset filters the set of
+    //    crawled internal HTML 2xx pages. ─────────────────────────────
+    const where: string[] = [
+      "u.is_external = 0 AND u.content_kind = 'html'",
+      'u.status_code >= 200 AND u.status_code < 300',
+    ];
+    // The two account placeholders sit in the JOINs, which precede the
+    // WHERE clause in the statement — so they lead the argument list.
+    const args: (string | number)[] = [accountId, accountId];
+    if (params.search) {
+      where.push('u.url LIKE ?');
+      args.push(`%${params.search}%`);
+    }
+    switch (filter) {
+      case 'with-data':
+        where.push('g.url IS NOT NULL');
+        break;
+      case 'without-data':
+        where.push('g.url IS NULL');
+        break;
+      case 'clicks-above-0':
+        where.push('COALESCE(g.clicks, 0) > 0');
+        break;
+      case 'non-indexable-with-data':
+        where.push("g.url IS NOT NULL AND u.indexability != 'indexable'");
+        break;
+      case 'not-on-google':
+        where.push("i.status = 'ok' AND i.verdict IN ('FAIL', 'NEUTRAL')");
+        break;
+      case 'indexable-not-indexed':
+        where.push(
+          "u.indexability = 'indexable' AND i.status = 'ok' AND i.verdict IN ('FAIL', 'NEUTRAL')",
+        );
+        break;
+      case 'on-google-with-issues':
+        where.push("i.status = 'ok' AND i.verdict = 'PARTIAL'");
+        break;
+      case 'canonical-mismatch':
+        where.push(
+          "i.status = 'ok' AND i.google_canonical IS NOT NULL AND i.google_canonical != ''" +
+            " AND i.user_canonical IS NOT NULL AND i.user_canonical != ''" +
+            ' AND i.google_canonical != i.user_canonical',
+        );
+        break;
+      case 'not-mobile-friendly':
+        where.push("i.status = 'ok' AND i.mobile_verdict = 'FAIL'");
+        break;
+      case 'amp-invalid':
+        where.push("i.status = 'ok' AND i.amp_verdict = 'FAIL'");
+        break;
+      case 'rich-result-invalid':
+        where.push("i.status = 'ok' AND i.rich_results_verdict = 'FAIL'");
+        break;
+      case 'all':
+      default:
+        break;
+    }
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    const joinSql =
+      `FROM urls u
+       LEFT JOIN gsc_results g ON g.url = u.url AND g.account_id = ?
+       LEFT JOIN gsc_inspection_results i ON i.url = u.url AND i.account_id = ?`;
+
+    const totalRow = this.db
+      .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
+      .get(...args) as { c: number };
+
+    const rowsDb = this.db
+      .prepare(
+        `SELECT u.url AS url, u.status_code AS status_code, ${selectCols}
          ${joinSql}
          ${whereSql}
          ORDER BY g.impressions DESC, u.url ASC
@@ -4153,55 +4412,23 @@ export class ProjectDb {
       unknown
     >[];
 
-    return {
-      total: totalRow.c,
-      rows: rowsDb.map((r) => {
-        const gFetched = r['g_fetched'];
-        const iFetched = r['i_fetched'];
-        const iStatus = r['i_status'];
-        return {
-          url: r['url'] as string,
-          statusCode: (r['status_code'] as number | null) ?? null,
-          gsc:
-            typeof gFetched === 'string'
-              ? {
-                  clicks: (r['clicks'] as number | null) ?? 0,
-                  impressions: (r['impressions'] as number | null) ?? 0,
-                  ctr: (r['ctr'] as number | null) ?? 0,
-                  position: (r['position'] as number | null) ?? 0,
-                  fetchedAt: gFetched,
-                }
-              : null,
-          inspection:
-            typeof iFetched === 'string' && typeof iStatus === 'string'
-              ? {
-                  verdict: (r['i_verdict'] as string | null) ?? null,
-                  coverageState: (r['i_coverage_state'] as string | null) ?? null,
-                  robotsTxtState: (r['i_robots_txt_state'] as string | null) ?? null,
-                  indexingState: (r['i_indexing_state'] as string | null) ?? null,
-                  lastCrawlTime: (r['i_last_crawl_time'] as string | null) ?? null,
-                  googleCanonical: (r['i_google_canonical'] as string | null) ?? null,
-                  userCanonical: (r['i_user_canonical'] as string | null) ?? null,
-                  status: iStatus === 'error' ? 'error' : 'ok',
-                  error: (r['i_error'] as string | null) ?? null,
-                  fetchedAt: iFetched,
-                }
-              : null,
-        };
-      }),
-    };
+    return { total: totalRow.c, rows: rowsDb.map(mapRow) };
   }
 
   /** Combined per-URL Analytics view for the detail panel. Three small
    *  lookups (GSC Search Analytics + GA4 + GSC URL Inspection) keyed by
    *  the URL string. Returns null when none of the three is present. */
-  getUrlAnalytics(url: string): UrlAnalyticsDetail | null {
+  getUrlAnalytics(
+    url: string,
+    gscAccountId = '',
+    ga4AccountId = '',
+  ): UrlAnalyticsDetail | null {
     const g = this.db
       .prepare(
         `SELECT clicks, impressions, ctr, position, fetched_at
-         FROM gsc_results WHERE url = ?`,
+         FROM gsc_results WHERE url = ? AND account_id = ?`,
       )
-      .get(url) as
+      .get(url, gscAccountId) as
       | {
           clicks: number;
           impressions: number;
@@ -4214,9 +4441,9 @@ export class ProjectDb {
       .prepare(
         `SELECT sessions, users, pageviews, engagement_rate,
                 avg_session_duration, fetched_at
-         FROM ga4_results WHERE url = ?`,
+         FROM ga4_results WHERE url = ? AND account_id = ?`,
       )
-      .get(url) as
+      .get(url, ga4AccountId) as
       | {
           sessions: number;
           users: number;
@@ -4230,10 +4457,11 @@ export class ProjectDb {
       .prepare(
         `SELECT verdict, coverage_state, robots_txt_state, indexing_state,
                 last_crawl_time, google_canonical, user_canonical,
+                mobile_verdict, amp_verdict, rich_results_verdict,
                 status, error, fetched_at
-         FROM gsc_inspection_results WHERE url = ?`,
+         FROM gsc_inspection_results WHERE url = ? AND account_id = ?`,
       )
-      .get(url) as
+      .get(url, gscAccountId) as
       | {
           verdict: string | null;
           coverage_state: string | null;
@@ -4242,6 +4470,9 @@ export class ProjectDb {
           last_crawl_time: string | null;
           google_canonical: string | null;
           user_canonical: string | null;
+          mobile_verdict: string | null;
+          amp_verdict: string | null;
+          rich_results_verdict: string | null;
           status: string;
           error: string | null;
           fetched_at: string;
@@ -4278,6 +4509,9 @@ export class ProjectDb {
             lastCrawlTime: i.last_crawl_time,
             googleCanonical: i.google_canonical,
             userCanonical: i.user_canonical,
+            mobileVerdict: i.mobile_verdict,
+            ampVerdict: i.amp_verdict,
+            richResultsVerdict: i.rich_results_verdict,
             status: i.status === 'error' ? 'error' : 'ok',
             error: i.error,
             fetchedAt: i.fetched_at,
@@ -4287,15 +4521,20 @@ export class ProjectDb {
   }
 
   /** Faz 7 — store one Search Console URL Inspection result. */
-  upsertGscInspection(url: string, result: GscInspectionResult): void {
+  upsertGscInspection(
+    url: string,
+    result: GscInspectionResult,
+    accountId = '',
+  ): void {
     this.db
       .prepare(
         `INSERT INTO gsc_inspection_results
-           (url, verdict, coverage_state, robots_txt_state, indexing_state,
+           (url, account_id, verdict, coverage_state, robots_txt_state, indexing_state,
             last_crawl_time, google_canonical, user_canonical,
+            mobile_verdict, amp_verdict, rich_results_verdict,
             status, error, fetched_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(url) DO UPDATE SET
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(url, account_id) DO UPDATE SET
            verdict = excluded.verdict,
            coverage_state = excluded.coverage_state,
            robots_txt_state = excluded.robots_txt_state,
@@ -4303,12 +4542,16 @@ export class ProjectDb {
            last_crawl_time = excluded.last_crawl_time,
            google_canonical = excluded.google_canonical,
            user_canonical = excluded.user_canonical,
+           mobile_verdict = excluded.mobile_verdict,
+           amp_verdict = excluded.amp_verdict,
+           rich_results_verdict = excluded.rich_results_verdict,
            status = excluded.status,
            error = excluded.error,
            fetched_at = excluded.fetched_at`,
       )
       .run(
         url,
+        accountId,
         result.verdict,
         result.coverageState,
         result.robotsTxtState,
@@ -4316,10 +4559,56 @@ export class ProjectDb {
         result.lastCrawlTime,
         result.googleCanonical,
         result.userCanonical,
+        result.mobileVerdict,
+        result.ampVerdict,
+        result.richResultsVerdict,
         result.status,
         result.error,
         result.fetchedAt,
       );
+  }
+
+  /**
+   * GSC URLs that aren't in the crawl — the candidate set for "Crawl New
+   * URLs Discovered In Google Search Console". A URL counts as missing
+   * when it has no crawled `urls` row (or only an unfetched stub with a
+   * null status). `matchSlash` / `matchCase` mirror Screaming Frog's
+   * URL-matching options so a trailing-slash or case variant that IS in
+   * the crawl doesn't get re-crawled as a phantom orphan. Returns the
+   * original GSC URL strings, de-duplicated by their normalised form.
+   */
+  gscOrphanUrls(opts: {
+    matchSlash: boolean;
+    matchCase: boolean;
+    accountId?: string;
+  }): string[] {
+    const gsc = this.db
+      .prepare('SELECT url FROM gsc_results WHERE account_id = ?')
+      .all(opts.accountId ?? '') as {
+      url: string;
+    }[];
+    if (gsc.length === 0) return [];
+    const crawled = this.db
+      .prepare('SELECT url FROM urls WHERE status_code IS NOT NULL')
+      .all() as { url: string }[];
+    const norm = (u: string): string => {
+      let s = u;
+      if (opts.matchCase) s = s.toLowerCase();
+      // Strip a single trailing slash so `/page` and `/page/` compare
+      // equal (never empties — these are absolute URLs with a host).
+      if (opts.matchSlash && s.endsWith('/')) s = s.slice(0, -1);
+      return s;
+    };
+    const crawledSet = new Set(crawled.map((r) => norm(r.url)));
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const r of gsc) {
+      const n = norm(r.url);
+      if (crawledSet.has(n) || seen.has(n)) continue;
+      seen.add(n);
+      out.push(r.url);
+    }
+    return out;
   }
 
   /** Faz 7 — store one SEO authority provider result. The metrics blob
@@ -4449,17 +4738,20 @@ export class ProjectDb {
       avgSessionDuration: number;
     }[],
     fetchedAt: string,
+    accountId = '',
   ): void {
     this.runInTransaction(() => {
-      this.db.exec('DELETE FROM ga4_results');
+      // Scoped to this account — see `replaceGscResults`.
+      this.db.prepare('DELETE FROM ga4_results WHERE account_id = ?').run(accountId);
       const CHUNK = 400;
       for (let i = 0; i < rows.length; i += CHUNK) {
         const slice = rows.slice(i, i + CHUNK);
-        const placeholders = slice.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(',');
+        const placeholders = slice.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(',');
         const args: (string | number)[] = [];
         for (const r of slice) {
           args.push(
             r.url,
+            accountId,
             r.sessions,
             r.users,
             r.pageviews,
@@ -4471,7 +4763,7 @@ export class ProjectDb {
         this.db
           .prepare(
             `INSERT OR REPLACE INTO ga4_results
-               (url, sessions, users, pageviews, engagement_rate,
+               (url, account_id, sessions, users, pageviews, engagement_rate,
                 avg_session_duration, fetched_at)
              VALUES ${placeholders}`,
           )
@@ -4490,12 +4782,14 @@ export class ProjectDb {
     offset: number;
     search?: string;
     filter?: 'all' | 'with-data' | 'without-data';
+    accountId?: string;
   }): { rows: Ga4Row[]; total: number } {
     const where: string[] = [
       "u.is_external = 0 AND u.content_kind = 'html'",
       'u.status_code >= 200 AND u.status_code < 300',
     ];
-    const args: (string | number)[] = [];
+    // The account placeholder sits in the JOIN, ahead of the WHERE args.
+    const args: (string | number)[] = [params.accountId ?? ''];
     if (params.search) {
       where.push('u.url LIKE ?');
       args.push(`%${params.search}%`);
@@ -4504,7 +4798,8 @@ export class ProjectDb {
     if (filter === 'with-data') where.push('a.url IS NOT NULL');
     else if (filter === 'without-data') where.push('a.url IS NULL');
     const whereSql = `WHERE ${where.join(' AND ')}`;
-    const joinSql = 'FROM urls u LEFT JOIN ga4_results a ON a.url = u.url';
+    const joinSql =
+      'FROM urls u LEFT JOIN ga4_results a ON a.url = u.url AND a.account_id = ?';
 
     const totalRow = this.db
       .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
@@ -4814,33 +5109,176 @@ export class ProjectDb {
 
   /**
    * Per-instance cache of compiled `SELECT COUNT(*) … WHERE <clause>`
-   * statements. Without this, every call to `getOverviewCounts` was
-   * re-compiling the same ~135 WHERE clauses from scratch — the SQLite
-   * parser is fast but parsing 135 statements every 3 s sidebar tick
-   * still added 30–80 ms to the main thread on a 2k-URL crawl. With
-   * the cache the parser cost is paid once at first call; subsequent
-   * ticks are pure execute time.
+   * statements. Only the single-clause fallback path uses it now (a
+   * caller asking for one counter outside a batch); the batched path
+   * compiles a single combined statement instead.
    */
   private readonly countWhereStmtCache = new Map<string, StatementSync>();
+  /** Same idea for the standalone scalar sub-counts (images, sitemap). */
+  private readonly scalarStmtCache = new Map<string, StatementSync>();
+
+  /**
+   * The overview aggregate used to fire ~150 separate
+   * `SELECT COUNT(*) FROM urls WHERE <clause>` statements — one table
+   * scan each. At 200k URLs that is ~30M row visits per sidebar tick,
+   * and it pinned a reader worker for 60–250 s at a time on real
+   * crawls, which in turn starved every other UI query queued behind
+   * it.
+   *
+   * Every one of those clauses shares the same `FROM urls`, so they
+   * fold into ONE statement:
+   *
+   *   SELECT SUM(CASE WHEN (<clause0>) THEN 1 ELSE 0 END) AS c0,
+   *          SUM(CASE WHEN (<clause1>) THEN 1 ELSE 0 END) AS c1, …
+   *     FROM urls
+   *
+   * — a single scan that evaluates every predicate per row. The numbers
+   * are identical by construction: a clause evaluating to NULL yields 0
+   * under `CASE WHEN` exactly as `WHERE` excludes the row, and the
+   * correlated `EXISTS` sub-selects still short-circuit behind their
+   * cheap `is_external` / `content_kind` guards, so they are reached for
+   * the same rows as before.
+   *
+   * The clause list is discovered once by running the builder in
+   * "collect" mode, where every DB read is skipped and `countUrlsWhere`
+   * only records its clause. The set is static for the lifetime of the
+   * instance, so the combined statement is compiled once as well.
+   */
+  private overviewClauses: string[] | null = null;
+  /**
+   * The batch is split in two rather than run as one statement over the
+   * whole table. ~150 of the counters begin with the same
+   * `INTERNAL_HTML_SCOPE` prefix, so that prefix is hoisted into a
+   * `WHERE` and those counters only ever visit internal HTML rows —
+   * on a 200k-URL project that is 37k rows instead of 200k. The
+   * remaining handful (response-code / security / external buckets)
+   * genuinely span every row and keep their own full-table pass, which
+   * still beats running them as individual indexed counts.
+   */
+  private overviewScopedStmt: StatementSync | null = null;
+  private overviewScopedClauses: string[] = [];
+  private overviewGlobalStmt: StatementSync | null = null;
+  private overviewGlobalClauses: string[] = [];
+  /** Non-null only while the collect pass runs; receives every clause. */
+  private overviewCollect: Set<string> | null = null;
+  /** Results of the batch for the call in progress, keyed by clause. */
+  private overviewBatch: Map<string, number> | null = null;
+
+  /**
+   * `SELECT COUNT(*) FROM urls WHERE <clause>` — served from the active
+   * batch when there is one, recorded and stubbed during collection,
+   * and executed on its own otherwise.
+   */
+  private countUrlsWhere(clause: string): number {
+    if (this.overviewCollect) {
+      this.overviewCollect.add(clause);
+      return 0;
+    }
+    const batched = this.overviewBatch?.get(clause);
+    if (batched !== undefined) return batched;
+    let stmt = this.countWhereStmtCache.get(clause);
+    if (!stmt) {
+      stmt = this.db.prepare(`SELECT COUNT(*) AS c FROM urls WHERE ${clause}`);
+      this.countWhereStmtCache.set(clause, stmt);
+    }
+    return (stmt.get() as { c: number }).c;
+  }
+
+  /**
+   * One-row scalar count against a table other than `urls` (so it can't
+   * join the batch). Skipped during the collect pass, cached otherwise.
+   */
+  private scalarCount(sql: string): number {
+    if (this.overviewCollect) return 0;
+    let stmt = this.scalarStmtCache.get(sql);
+    if (!stmt) {
+      stmt = this.db.prepare(sql);
+      this.scalarStmtCache.set(sql, stmt);
+    }
+    return Number((stmt.get() as { c: number | null }).c ?? 0);
+  }
+
+  /** Discover the clause set (once) and run the two combined scans. */
+  private runOverviewBatch(): void {
+    if (!this.overviewClauses) {
+      const collect = new Set<string>();
+      this.overviewCollect = collect;
+      try {
+        this.buildOverviewCounts();
+      } finally {
+        this.overviewCollect = null;
+      }
+      this.overviewClauses = [...collect];
+      this.overviewScopedClauses = this.overviewClauses.filter((c) =>
+        c.startsWith(INTERNAL_HTML_SCOPE),
+      );
+      this.overviewGlobalClauses = this.overviewClauses.filter(
+        (c) => !c.startsWith(INTERNAL_HTML_SCOPE),
+      );
+    }
+    if (this.overviewClauses.length === 0) return;
+    const projection = (clauses: string[]): string =>
+      clauses
+        .map((c, i) => `SUM(CASE WHEN (${c}) THEN 1 ELSE 0 END) AS c${i}`)
+        .join(', ');
+    // `A AND B` counted over every row is the same as `B` counted over
+    // the rows where `A` holds, so dropping the hoisted prefix from each
+    // clause is an identity, not an approximation.
+    const withoutScope = (c: string): string =>
+      c.slice(INTERNAL_HTML_SCOPE.length).replace(/^\s*AND\s+/, '') || '1 = 1';
+
+    const batch = new Map<string, number>();
+    const collectInto = (
+      stmt: StatementSync,
+      clauses: string[],
+    ): void => {
+      const row = stmt.get() as Record<string, number | null>;
+      for (let i = 0; i < clauses.length; i++) {
+        batch.set(clauses[i]!, Number(row[`c${i}`] ?? 0));
+      }
+    };
+
+    if (this.overviewScopedClauses.length > 0) {
+      if (!this.overviewScopedStmt) {
+        this.overviewScopedStmt = this.db.prepare(
+          `SELECT ${projection(this.overviewScopedClauses.map(withoutScope))} ` +
+            `FROM urls WHERE ${INTERNAL_HTML_SCOPE}`,
+        );
+      }
+      collectInto(this.overviewScopedStmt, this.overviewScopedClauses);
+    }
+    if (this.overviewGlobalClauses.length > 0) {
+      if (!this.overviewGlobalStmt) {
+        this.overviewGlobalStmt = this.db.prepare(
+          `SELECT ${projection(this.overviewGlobalClauses)} FROM urls`,
+        );
+      }
+      collectInto(this.overviewGlobalStmt, this.overviewGlobalClauses);
+    }
+    this.overviewBatch = batch;
+  }
 
   /**
    * Synchronous `getOverviewCounts`. Kept for back-compat callers (CLI,
    * tests, code paths that aren't latency-sensitive). The desktop main
-   * process should prefer `getOverviewCountsAsync` which yields to the
-   * event loop every N counters so the renderer's input IPC keeps
-   * draining mid-aggregate.
+   * process should prefer `getOverviewCountsAsync`, which yields to the
+   * event loop before the scan so the renderer's input IPC keeps
+   * draining.
    */
   getOverviewCounts(): OverviewCounts {
-    const countWhere = (clause: string): number => {
-      let stmt = this.countWhereStmtCache.get(clause);
-      if (!stmt) {
-        stmt = this.db.prepare(`SELECT COUNT(*) AS c FROM urls WHERE ${clause}`);
-        this.countWhereStmtCache.set(clause, stmt);
-      }
-      return (stmt.get() as { c: number }).c;
-    };
+    this.runOverviewBatch();
+    try {
+      return this.buildOverviewCounts();
+    } finally {
+      this.overviewBatch = null;
+    }
+  }
+
+  private buildOverviewCounts(): OverviewCounts {
+    const countWhere = (clause: string): number => this.countUrlsWhere(clause);
     const groupByInternal = (col: string): Record<string, number> => {
       const out: Record<string, number> = {};
+      if (this.overviewCollect) return out;
       for (const r of this.db
         .prepare(
           `SELECT ${col} AS k, COUNT(*) AS c FROM urls WHERE is_external = 0 GROUP BY ${col}`,
@@ -4872,9 +5310,7 @@ export class ProjectDb {
     // tab shows exactly the rows this headline counts.
     const totalIndexable = countCategory('indexability:indexable');
     const totalNonIndexable = countCategory('indexability:non-indexable');
-    const totalImages = (
-      this.db.prepare('SELECT COUNT(*) AS c FROM images').get() as { c: number }
-    ).c;
+    const totalImages = this.scalarCount('SELECT COUNT(*) AS c FROM images');
 
     return {
       summary: {
@@ -4927,34 +5363,23 @@ export class ProjectDb {
   }
 
   private getIssuesCounts(): OverviewCounts['issues'] {
-    const countWhere = (clause: string): number => {
-      let stmt = this.countWhereStmtCache.get(clause);
-      if (!stmt) {
-        stmt = this.db.prepare(`SELECT COUNT(*) AS c FROM urls WHERE ${clause}`);
-        this.countWhereStmtCache.set(clause, stmt);
-      }
-      return (stmt.get() as { c: number }).c;
-    };
+    const countWhere = (clause: string): number => this.countUrlsWhere(clause);
     // Materialised counters fan-out (I-3). Heavy issue checks read
     // from `urls_issues` instead of running their own correlated
     // subquery on every sidebar tick.
-    const issueCounts = this.getIssueCounts();
-    const issueCount = (key: string): number => issueCounts.get(key) ?? 0;
+    const issueCounts = this.overviewCollect ? null : this.getIssueCounts();
+    const issueCount = (key: string): number => issueCounts?.get(key) ?? 0;
     // Common prefix for all issue checks — only crawled internal HTML pages
     // are eligible (is_external = 0, content_kind = 'html').
-    const html = "is_external = 0 AND content_kind = 'html'";
+    const html = INTERNAL_HTML_SCOPE;
     const dup = (col: string): number =>
-      (
-        this.db
-          .prepare(
-            `SELECT COALESCE(SUM(c), 0) AS total FROM (
-               SELECT COUNT(*) AS c FROM urls
-               WHERE ${html} AND ${col} IS NOT NULL AND ${col} != ''
-               GROUP BY ${col} HAVING c > 1
-             )`,
-          )
-          .get() as { total: number }
-      ).total;
+      this.scalarCount(
+        `SELECT COALESCE(SUM(c), 0) AS c FROM (
+           SELECT COUNT(*) AS c FROM urls
+           WHERE ${html} AND ${col} IS NOT NULL AND ${col} != ''
+           GROUP BY ${col} HAVING c > 1
+         )`,
+      );
     return {
       titleMissing: countWhere(`${html} AND (title IS NULL OR title = '')`),
       titleTooLong: countWhere(`${html} AND title_length > 60`),
@@ -5109,20 +5534,16 @@ export class ProjectDb {
          AND (status_code < 200 OR status_code >= 300)
          AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`,
       ),
-      imageMissingAlt: (
-        this.db.prepare('SELECT COUNT(*) AS c FROM images WHERE alt IS NULL').get() as {
-          c: number;
-        }
-      ).c,
+      imageMissingAlt: this.scalarCount(
+        'SELECT COUNT(*) AS c FROM images WHERE alt IS NULL',
+      ),
       // Distinct images sharing a non-empty alt with ≥1 other image —
       // non-descriptive / templated alt reuse. Counted image-level (the
       // `images` table is deduped by src) so it lines up with the Images
       // tab drill-down and with Missing/Empty Alt.
-      imageDuplicateAlt: (
-        this.db
-          .prepare(`SELECT COUNT(*) AS c FROM images WHERE ${DUPLICATE_ALT_PREDICATE}`)
-          .get() as { c: number }
-      ).c,
+      imageDuplicateAlt: this.scalarCount(
+        `SELECT COUNT(*) AS c FROM images WHERE ${DUPLICATE_ALT_PREDICATE}`,
+      ),
       metaRefreshUsed: countWhere(
         `${html} AND meta_refresh IS NOT NULL AND meta_refresh != ''`,
       ),
@@ -5172,14 +5593,10 @@ export class ProjectDb {
         `is_external = 0 AND status_code >= 300 AND status_code < 400
          AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`,
       ),
-      sitemapNotCrawled: (
-        this.db
-          .prepare(
-            `SELECT COUNT(*) AS c FROM sitemap_urls s
-              WHERE NOT EXISTS (SELECT 1 FROM urls u WHERE u.url = s.url)`,
-          )
-          .get() as { c: number }
-      ).c,
+      sitemapNotCrawled: this.scalarCount(
+        `SELECT COUNT(*) AS c FROM sitemap_urls s
+          WHERE NOT EXISTS (SELECT 1 FROM urls u WHERE u.url = s.url)`,
+      ),
       h1Empty: countWhere(`${html} AND h1_count > 0 AND (h1 IS NULL OR h1 = '')`),
       h1TooLong: countWhere(`${html} AND h1_length > 70`),
       titleMultiple: countWhere(`${html} AND title_count > 1`),
@@ -5191,11 +5608,9 @@ export class ProjectDb {
       // Image-level (was page-level `images_empty_alt > 0`): count distinct
       // images with an explicit `alt=""` so it's the same unit as Missing
       // Alt and matches the Images tab drill-down.
-      imageEmptyAlt: (
-        this.db.prepare("SELECT COUNT(*) AS c FROM images WHERE alt = ''").get() as {
-          c: number;
-        }
-      ).c,
+      imageEmptyAlt: this.scalarCount(
+        "SELECT COUNT(*) AS c FROM images WHERE alt = ''",
+      ),
       linkEmptyAnchor: countWhere(`${html} AND empty_anchor_count > 0`),
       appleTouchIconMissing: countWhere(
         `${html} AND status_code >= 200 AND status_code < 300
@@ -5599,32 +6014,18 @@ export class ProjectDb {
   }
 
   /**
-   * Async, cooperatively-scheduled version of `getOverviewCounts`.
-   * Splits the 130+ counters into ~8 chunks of ≤ 20 each and yields to
-   * the Node event loop between chunks via `setImmediate`. This converts
-   * what was a single 30–100 ms synchronous blob into a stream of
-   * ≤ 16 ms chunks, which is exactly the budget for one frame at 60 Hz
-   * — so user input arriving during the aggregate is processed within a
-   * frame instead of waiting for the whole thing to finish.
+   * Async wrapper around `getOverviewCounts` for the reader worker.
    *
-   * Total wall-clock time is identical or marginally higher (yield
-   * overhead is < 1 ms per yield, total ~8 ms). Perceived UI latency
-   * drops by 5–10×.
+   * The counters themselves are no longer the problem — folding ~150
+   * per-clause scans into one combined scan (see `runOverviewBatch`) is
+   * what made the aggregate affordable. The `setImmediate` here is only
+   * so the worker drains any queued short query before committing its
+   * thread to the scan; it is not a substitute for the batch and never
+   * was one on its own.
    *
-   * Result is identical to `getOverviewCounts()`. Implementation just
-   * re-runs that method in a `runInIdle` wrapper — no SQL duplication.
+   * Result is identical to `getOverviewCounts()`.
    */
   async getOverviewCountsAsync(): Promise<OverviewCounts> {
-    // We can't easily interleave the SQL inside the existing function
-    // body without rewriting it as a long flat list of [key, where]
-    // tuples — too risky given how many counters there are. Instead we
-    // exploit a simpler observation: the parser cost (the slow part on
-    // first call) is amortised by `countWhereStmtCache`, and the
-    // execute-only cost on cached statements is dominated by SQLite
-    // hitting the disk. Yielding once before the aggregate AND once
-    // before the broken-links join is enough in practice to keep
-    // input flowing — measured by Lag drop from 200 ms → 30 ms on a
-    // 5k-URL crawl.
     await new Promise<void>((resolve) => setImmediate(resolve));
     return this.getOverviewCounts();
   }
@@ -5636,15 +6037,11 @@ export class ProjectDb {
         : kind === 'external'
           ? 'AND l.is_internal = 0'
           : '';
-    return (
-      this.db
-        .prepare(
-          `SELECT COUNT(*) AS c FROM links l
-             JOIN urls t ON l.to_url = t.url
-             WHERE t.status_code >= 400 AND t.status_code < 600 ${scope}`,
-        )
-        .get() as { c: number }
-    ).c;
+    return this.scalarCount(
+      `SELECT COUNT(*) AS c FROM links l
+         JOIN urls t ON l.to_url = t.url
+         WHERE t.status_code >= 400 AND t.status_code < 600 ${scope}`,
+    );
   }
 
   getSummary(): CrawlSummary {
@@ -6009,6 +6406,29 @@ export class ProjectDb {
         paths.fold ?? null,
         paths.mobile ?? null,
       );
+  }
+
+  /**
+   * Re-point stored screenshot paths at a new sidecar directory. Save As
+   * copies the sidecar next to the new document; without this rewrite the
+   * rows keep naming the old location, and the saved copy's Screenshot tab
+   * comes up blank. `REPLACE` leaves NULL columns NULL, so URLs with only
+   * some variants captured are unaffected.
+   */
+  remapScreenshotDir(oldDir: string, newDir: string): number {
+    if (!oldDir || !newDir || oldDir === newDir) return 0;
+    const res = this.db
+      .prepare(
+        `UPDATE url_sources
+            SET screenshot_fullpage_path = REPLACE(screenshot_fullpage_path, :old, :new),
+                screenshot_fold_path     = REPLACE(screenshot_fold_path, :old, :new),
+                screenshot_mobile_path   = REPLACE(screenshot_mobile_path, :old, :new)
+          WHERE screenshot_fullpage_path IS NOT NULL
+             OR screenshot_fold_path IS NOT NULL
+             OR screenshot_mobile_path IS NOT NULL`,
+      )
+      .run({ old: oldDir, new: newDir });
+    return Number(res.changes ?? 0);
   }
 
   /**
@@ -7694,7 +8114,11 @@ export class ProjectDb {
    * triage why it was missed (sitemap-only = drop or fix internal
    * linking; GSC + GA4 = real but unreachable from the crawl seed).
    */
-  orphanPagesCrossSource(limit = 1000): {
+  orphanPagesCrossSource(
+    limit = 1000,
+    gscAccountId = '',
+    ga4AccountId = '',
+  ): {
     url: string;
     sources: string[];
     gscClicks: number | null;
@@ -7703,19 +8127,21 @@ export class ProjectDb {
     lastmod: string | null;
   }[] {
     const cap = Math.max(1, Math.min(10_000, limit));
-    // The GSC / GA4 / sitemap joins are all 1:1 (url is PK / UNIQUE in each
-    // source table), so pulling their metrics alongside the GROUP_CONCAT of
-    // sources introduces no fan-out. Ordered by traffic (GSC clicks + GA4
-    // sessions) descending so the highest-value orphans — real pages users
-    // reach that the crawl can't — float to the top.
+    // Every GSC / GA4 reference is pinned to one account id, which is what
+    // keeps these joins 1:1: `(url, account_id)` is the primary key of both
+    // snapshot tables, so without the account predicate a URL reported by
+    // two linked accounts would fan out into duplicated rows. The sitemap
+    // join is 1:1 on its own (url is UNIQUE there). Ordered by traffic (GSC
+    // clicks + GA4 sessions) descending so the highest-value orphans — real
+    // pages users reach that the crawl can't — float to the top.
     const rows = this.db
       .prepare(
         `WITH src AS (
            SELECT url, 'sitemap' AS source FROM sitemap_urls
            UNION ALL
-           SELECT url, 'gsc' AS source FROM gsc_results
+           SELECT url, 'gsc' AS source FROM gsc_results WHERE account_id = ?
            UNION ALL
-           SELECT url, 'ga4' AS source FROM ga4_results
+           SELECT url, 'ga4' AS source FROM ga4_results WHERE account_id = ?
          )
          SELECT s.url AS url,
                 GROUP_CONCAT(DISTINCT s.source) AS sources,
@@ -7725,15 +8151,15 @@ export class ProjectDb {
                 sm.lastmod AS lastmod
            FROM src s
            LEFT JOIN urls u ON u.url = s.url
-           LEFT JOIN gsc_results g ON g.url = s.url
-           LEFT JOIN ga4_results a ON a.url = s.url
+           LEFT JOIN gsc_results g ON g.url = s.url AND g.account_id = ?
+           LEFT JOIN ga4_results a ON a.url = s.url AND a.account_id = ?
            LEFT JOIN sitemap_urls sm ON sm.url = s.url
           WHERE u.url IS NULL OR u.status_code IS NULL
           GROUP BY s.url
           ORDER BY (COALESCE(g.clicks, 0) + COALESCE(a.sessions, 0)) DESC, s.url
           LIMIT ?`,
       )
-      .all(cap) as {
+      .all(gscAccountId, ga4AccountId, gscAccountId, ga4AccountId, cap) as {
       url: string;
       sources: string;
       gscClicks: number | null;

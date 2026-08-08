@@ -57,6 +57,12 @@ export interface ParsedPage {
   canonical: string | null;
   /** Number of `<link rel="canonical">` elements declared. >1 is a confusion signal. */
   canonicalCount: number;
+  /**
+   * Every `<meta name="robots">` content value on the page, lowercased
+   * and joined with `, ` in document order. Multiple declarations are
+   * kept because search engines union them and honour the most
+   * restrictive directive.
+   */
   metaRobots: string | null;
   lang: string | null;
   viewport: string | null;
@@ -524,7 +530,28 @@ export function parseHtml(
   const canonicalEls = $('link[rel="canonical"]');
   const canonical = (canonicalEls.first().attr('href') ?? '').trim() || null;
   const canonicalCount = canonicalEls.length;
-  const metaRobots = ($('meta[name="robots"]').attr('content') ?? '').trim().toLowerCase() || null;
+  // Robots directives — collected from EVERY `<meta name="robots">` in
+  // the document, not just the first. Two details that a plain
+  // `$('meta[name="robots"]').attr('content')` gets wrong on real sites:
+  //
+  //  1. `name` is matched case-insensitively. CSS attribute *values* are
+  //     case-sensitive outside a small HTML whitelist that `name` is not
+  //     part of, so `<meta name="ROBOTS">` matched nothing at all and the
+  //     page came back "Indexable" with an empty Meta Robots column.
+  //  2. A page may declare the tag more than once — a theme default plus
+  //     an SEO plugin's own output is the classic WordPress case. Search
+  //     engines union the directives and apply the most restrictive one,
+  //     so reading only the first tag reported `index,follow` + `noindex`
+  //     pages as indexable. The contents are joined (comma-separated, in
+  //     document order) into one value: the UI's Meta Robots column then
+  //     shows the conflict instead of hiding half of it.
+  const robotsMetaContents: string[] = [];
+  $('meta').each((_, el) => {
+    if (($(el).attr('name') ?? '').trim().toLowerCase() !== 'robots') return;
+    const content = ($(el).attr('content') ?? '').trim().toLowerCase();
+    if (content) robotsMetaContents.push(content);
+  });
+  const metaRobots = robotsMetaContents.length > 0 ? robotsMetaContents.join(', ') : null;
   const lang = ($('html').attr('lang') ?? '').trim() || null;
   const viewport = ($('meta[name="viewport"]').attr('content') ?? '').trim() || null;
   const ogTitle =
@@ -1076,8 +1103,17 @@ export function parseHtml(
     }
   }
 
-  const hasNoindex = metaRobots !== null && metaRobots.includes('noindex');
-  const hasNofollow = metaRobots !== null && metaRobots.includes('nofollow');
+  // `none` is the spec's shorthand for `noindex, nofollow` — a page
+  // carrying only that directive used to slip through as indexable. It is
+  // matched as a whole token (split on comma / semicolon / whitespace so
+  // malformed separators still tokenize) rather than as a substring,
+  // which would fire on unrelated values. The substring check on the
+  // combined string is kept alongside it so any separator we haven't
+  // thought of still yields the old, lenient detection.
+  const robotsTokens = new Set((metaRobots ?? '').split(/[\s,;]+/).filter(Boolean));
+  const hasNone = robotsTokens.has('none');
+  const hasNoindex = metaRobots !== null && (metaRobots.includes('noindex') || hasNone);
+  const hasNofollow = metaRobots !== null && (metaRobots.includes('nofollow') || hasNone);
 
   // Text/code ratio — visible body text bytes divided by raw HTML bytes,
   // rounded to integer percent. Reuses the script/style/noscript-stripped

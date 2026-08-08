@@ -2,6 +2,7 @@ import type {
   AdvancedFilter,
   BrokenLinkRow,
   CrawlConfig,
+  CrawlMode,
   CrawlProgress,
   CrawlSummary,
   CrawlUrlRow,
@@ -35,9 +36,11 @@ import type { RecentProject } from './project.js';
 import type {
   GoogleAuthState,
   GoogleAuthResult,
+  GoogleAccount,
   GscSite,
   GscRow,
   GscFetchMeta,
+  GscPreset,
   Ga4Property,
   Ga4Row,
   Ga4FetchMeta,
@@ -265,6 +268,16 @@ export const IPC = {
   integrationsGetAll: 'integrations:get-all',
   integrationsSet: 'integrations:set',
   integrationsClear: 'integrations:clear',
+  /** Per-project, per-integration behaviour settings (distinct from the
+   *  encrypted credential store). `get` reads the stored JSON blob for
+   *  one integration id (or null); `set` merges the supplied object.
+   *  Currently used by Google Search Console (date range, dimension
+   *  filters, "crawl new URLs"). */
+  integrationSettingsGet: 'integrations:settings-get',
+  integrationSettingsSet: 'integrations:settings-set',
+  /** Feed GSC-discovered URLs missing from the crawl into the crawler
+   *  (SF: "Crawl New URLs Discovered In Google Search Console"). */
+  gscCrawlNewUrls: 'gsc:crawl-new-urls',
   /** Open a native directory picker. Used by Settings → Storage to let the
    *  user choose the default folder for new `.seoproject` files. */
   pickDirectory: 'app:pick-directory',
@@ -317,6 +330,9 @@ export const IPC = {
   googleAuthStart: 'google:auth-start',
   googleAuthStatus: 'google:auth-status',
   googleAuthRevoke: 'google:auth-revoke',
+  /** List every Google account linked to one integration — a user can
+   *  connect several (their own property plus a client's). */
+  googleAccountsList: 'google:accounts-list',
   /** Faz 7 — Google Search Console. `gscListSites` lists the connected
    *  account's verified properties; `gscFetch` pulls per-page clicks /
    *  impressions / CTR / position for a date range; `gscQuery` lists
@@ -650,6 +666,18 @@ export interface CrashRecoveryStatus {
   pendingCount: number;
   /** The start URL the previous crawl was running against. */
   seedUrl: string;
+  /** Mode of the interrupted crawl, so the prompt can say whether it
+   *  was a Spider / List / Sitemap run instead of only naming a URL. */
+  mode: CrawlMode;
+}
+
+/** Outcome of a resume request. `config` is the crawl config the run
+ *  was restarted with — the renderer applies it so the toolbar shows
+ *  the mode + start URL that are actually being crawled rather than
+ *  the blank Spider defaults it booted with. */
+export interface CrashRecoveryResumeResult {
+  accepted: boolean;
+  config: CrawlConfig | null;
 }
 
 /**
@@ -1462,8 +1490,13 @@ export interface GscListSitesResult {
 export interface GscFetchInput {
   /** Search Console property to pull from (`siteUrl` from `GscSite`). */
   property: string;
-  /** Trailing window in days (Search Console data lags ~2-3 days). */
-  days: 7 | 28 | 90;
+  /** Which connected Google account to pull with. Omitted / empty falls
+   *  back to the project's configured account, then the first one. */
+  accountId?: string;
+  /** Legacy trailing window in days — used only by the MCP `gsc_fetch`
+   *  tool. The desktop pull reads the date range from the stored GSC
+   *  integration settings instead. */
+  days?: 7 | 28 | 90;
 }
 
 export interface GscFetchResult {
@@ -1472,14 +1505,36 @@ export interface GscFetchResult {
   /** Page rows stored from this pull. */
   rowCount: number;
   meta: GscFetchMeta | null;
+  /** GSC URLs from this pull that aren't in the crawl (orphan candidates
+   *  for "Crawl New URLs"). Absent on older callers. */
+  newUrlCount?: number;
+  /** How many of those were queued into the crawler because the
+   *  "crawl new URLs" setting is on (0 when the setting is off). */
+  queuedNewUrls?: number;
 }
 
 export interface GscQueryInput {
   limit: number;
   offset: number;
   search?: string;
-  /** `all` (default), `with-data` (has GSC impressions), `without-data`. */
-  filter?: 'all' | 'with-data' | 'without-data';
+  /** Filter preset — see `GscPreset`. `all` (default). Legacy
+   *  `with-data` / `without-data` still accepted. */
+  filter?: GscPreset;
+  /** Which account's stored rows to join. Omitted / empty falls back to
+   *  the project's configured account, then the first one. */
+  accountId?: string;
+}
+
+export interface GscCrawlNewUrlsResult {
+  ok: boolean;
+  error: string | null;
+  /** GSC URLs found missing from the crawl. */
+  candidateCount: number;
+  /** How many were fed into the crawler (== candidateCount unless empty). */
+  queued: number;
+  /** True when the URLs were injected into a live crawl (vs. spinning up
+   *  a fresh re-spider pass). */
+  hasActiveCrawl: boolean;
 }
 
 export interface GscQueryResult {
@@ -1502,6 +1557,9 @@ export interface Ga4FetchInput {
   /** Friendly label persisted into the fetch meta for the UI. */
   propertyName: string;
   days: 7 | 28 | 90;
+  /** Which connected Google account to pull with. Omitted / empty falls
+   *  back to the project's configured account, then the first one. */
+  accountId?: string;
 }
 
 export interface Ga4FetchResult {
@@ -1516,6 +1574,9 @@ export interface Ga4QueryInput {
   offset: number;
   search?: string;
   filter?: 'all' | 'with-data' | 'without-data';
+  /** Which account's stored rows to join. Omitted / empty falls back to
+   *  the project's configured account, then the first one. */
+  accountId?: string;
 }
 
 export interface Ga4QueryResult {
@@ -1601,6 +1662,9 @@ export interface GscInspectRunInput {
   /** Search Console property the URLs belong to. */
   property: string;
   urls: string[];
+  /** Which connected Google account owns that property. Omitted / empty
+   *  falls back to the project's configured account. */
+  accountId?: string;
 }
 
 export interface GscInspectRunResult {
@@ -1742,7 +1806,7 @@ export interface FreeCrawlApi {
     input: DataDeleteByDomainInput,
   ): Promise<DataDeleteByDomainResult>;
   crashRecoveryStatus(): Promise<CrashRecoveryStatus>;
-  crashRecoveryResume(): Promise<{ accepted: boolean }>;
+  crashRecoveryResume(): Promise<CrashRecoveryResumeResult>;
   crashRecoveryDiscard(): Promise<void>;
   exportHtmlReport(input: ExportHtmlReportInput): Promise<ExportHtmlReportResult>;
   exportBulk(): Promise<BulkExportResult>;
@@ -1877,18 +1941,33 @@ export interface FreeCrawlApi {
    *  integration. Resolves once the user finishes (or cancels) in the
    *  browser. */
   googleAuthStart(integrationId: string): Promise<GoogleAuthResult>;
-  /** Read the stored OAuth connection state of one Google integration. */
+  /** Read the stored OAuth connection state of one Google integration,
+   *  including every connected account. */
   googleAuthStatus(integrationId: string): Promise<GoogleAuthState>;
-  /** Disconnect — wipe the stored OAuth tokens for one integration. */
-  googleAuthRevoke(integrationId: string): Promise<GoogleAuthState>;
-  /** List the connected account's Search Console properties. */
-  gscListSites(): Promise<GscListSitesResult>;
+  /** Disconnect one linked account, or every account for the integration
+   *  when `accountId` is omitted. */
+  googleAuthRevoke(integrationId: string, accountId?: string): Promise<GoogleAuthState>;
+  /** List a connected account's Search Console properties. Omitting
+   *  `accountId` uses the project's configured account. */
+  gscListSites(accountId?: string): Promise<GscListSitesResult>;
   /** Pull per-page Search Console metrics for the given property + range. */
   gscFetch(input: GscFetchInput): Promise<GscFetchResult>;
   /** List crawled pages joined with their stored Search Console metrics. */
   gscQuery(input: GscQueryInput): Promise<GscQueryResult>;
-  /** List the connected account's Google Analytics 4 properties. */
-  ga4ListProperties(): Promise<Ga4ListPropertiesResult>;
+  /** Feed GSC-discovered URLs missing from the crawl into the crawler
+   *  (SF: "Crawl New URLs Discovered In Google Search Console"). */
+  gscCrawlNewUrls(): Promise<GscCrawlNewUrlsResult>;
+  /** Read one integration's per-project behaviour settings (or null when
+   *  none stored). Currently used by Google Search Console. */
+  integrationSettingsGet(id: string): Promise<Record<string, unknown> | null>;
+  /** Merge-save one integration's per-project behaviour settings. */
+  integrationSettingsSet(
+    id: string,
+    settings: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  /** List a connected account's Google Analytics 4 properties. Omitting
+   *  `accountId` uses the project's configured account. */
+  ga4ListProperties(accountId?: string): Promise<Ga4ListPropertiesResult>;
   /** Pull per-page GA4 metrics for the given property + range. */
   ga4Fetch(input: Ga4FetchInput): Promise<Ga4FetchResult>;
   /** List crawled pages joined with their stored GA4 metrics. */
@@ -1921,8 +2000,11 @@ export interface FreeCrawlApi {
    *  GCP project. Uses the `bigquery` service-account credentials. */
   exportBigquery(input: ExportBigqueryInput): Promise<ExportBigqueryResult>;
   /** Read the combined Analytics detail (GSC + GA4 + URL Inspection)
-   *  for one URL. Returns null when the URL hasn't been crawled. */
+   *  for one URL, scoped to the project's configured accounts. Returns
+   *  null when the URL hasn't been crawled. */
   urlAnalyticsGet(url: string): Promise<UrlAnalyticsDetail | null>;
+  /** List the Google accounts linked to one integration. */
+  googleAccountsList(integrationId: string): Promise<GoogleAccount[]>;
   onLogEntry(cb: (entry: LogEntry) => void): () => void;
   onLogsBatch(cb: (entries: LogEntry[]) => void): () => void;
   onLogsBusy(cb: (busy: boolean) => void): () => void;

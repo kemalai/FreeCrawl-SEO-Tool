@@ -73,6 +73,9 @@ interface PendingRequest {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Caller already gave up (timeout) but the worker is still executing
+   *  the query. The slot stays counted as busy until the reply lands. */
+  abandoned?: boolean;
 }
 
 interface ResponseMessage {
@@ -166,14 +169,16 @@ export class DbReaderPool {
     slot.pending++;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
+        // A timeout frees the *caller*, not the worker: the query is
+        // already running inside a synchronous SQLite call that cannot
+        // be cancelled. Dropping the slot's pending count here made
+        // `pickSlot` treat a worker that was minutes deep in a heavy
+        // aggregate as idle and pile more work onto it, until every
+        // worker in the pool was stacked with abandoned queries and no
+        // UI read could get through. Keep the slot counted as busy and
+        // release it when the reply actually arrives.
         const p = this.pending.get(requestId);
-        if (p) {
-          this.pending.delete(requestId);
-          this.slots[p.workerIdx]!.pending = Math.max(
-            0,
-            this.slots[p.workerIdx]!.pending - 1,
-          );
-        }
+        if (p) p.abandoned = true;
         reject(new Error(`reader-timeout: ${method} > ${timeoutMs}ms`));
       }, timeoutMs);
       this.pending.set(requestId, {
@@ -253,6 +258,9 @@ export class DbReaderPool {
     clearTimeout(pending.timer);
     const slot = this.slots[pending.workerIdx];
     if (slot) slot.pending = Math.max(0, slot.pending - 1);
+    // The caller was already rejected on timeout; this reply only
+    // releases the slot.
+    if (pending.abandoned) return;
     if (msg.ok) {
       pending.resolve(msg.result);
     } else {

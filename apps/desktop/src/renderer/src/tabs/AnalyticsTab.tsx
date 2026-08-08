@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Search, RefreshCw } from 'lucide-react';
-import type {
-  Ga4FetchMeta,
-  Ga4Property,
-  Ga4Row,
-  GoogleAuthState,
+import {
+  defaultGa4Settings,
+  type Ga4FetchMeta,
+  type Ga4Property,
+  type Ga4Row,
+  type GoogleAccount,
+  type GoogleAuthState,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
@@ -57,6 +59,8 @@ export function AnalyticsTab() {
   const [stage, setStage] = useState<Stage>('loading');
   const [authState, setAuthState] = useState<GoogleAuthState | null>(null);
   const [properties, setProperties] = useState<Ga4Property[]>([]);
+  const [accounts, setAccounts] = useState<GoogleAccount[]>([]);
+  const [accountId, setAccountId] = useState('');
   const [propertyId, setPropertyId] = useState('');
   const [days, setDays] = useState<RangeDays>(28);
   const [rows, setRows] = useState<Ga4Row[]>([]);
@@ -69,26 +73,55 @@ export function AnalyticsTab() {
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const loadProperties = useCallback(async () => {
-    const res = await window.freecrawl.ga4ListProperties();
+  const loadProperties = useCallback(async (account?: string) => {
+    const res = await window.freecrawl.ga4ListProperties(account);
     if (!res.ok) {
       setError(res.error);
+      setProperties([]);
       return;
     }
     setError(null);
     setProperties(res.properties);
-    setPropertyId((prev) => prev || res.properties[0]?.propertyId || '');
+    setPropertyId((prev) =>
+      // Keep the current property only if the account can still see it.
+      prev && res.properties.some((p) => p.propertyId === prev)
+        ? prev
+        : (res.properties[0]?.propertyId ?? ''),
+    );
   }, []);
+
+  /** Switch the project to another linked Google account: persist it,
+   *  re-list that account's properties, reload the table. */
+  const changeAccount = useCallback(
+    (next: string) => {
+      setAccountId(next);
+      void window.freecrawl.integrationSettingsSet('ga4', { accountId: next });
+      void loadProperties(next);
+    },
+    [loadProperties],
+  );
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [integrations, auth] = await Promise.all([
+      const [integrations, auth, ga4Settings] = await Promise.all([
         window.freecrawl.integrationsGetAll(),
         window.freecrawl.googleAuthStatus('ga4'),
+        window.freecrawl.integrationSettingsGet('ga4'),
       ]);
       if (cancelled) return;
       setAuthState(auth);
+      setAccounts(auth.accounts);
+      // Seed from the stored per-project settings; a stored account that
+      // has since been unlinked falls back to the first one.
+      const s = { ...defaultGa4Settings(), ...(ga4Settings ?? {}) };
+      const account =
+        auth.accounts.find((a) => a.accountId === s.accountId)?.accountId ??
+        auth.accounts[0]?.accountId ??
+        '';
+      setAccountId(account);
+      setDays(s.days);
+      if (s.property) setPropertyId(s.property);
       const configured = integrations['ga4']?.configured ?? false;
       if (!configured) {
         setStage('unconfigured');
@@ -96,7 +129,7 @@ export function AnalyticsTab() {
         setStage('disconnected');
       } else {
         setStage('ready');
-        void loadProperties();
+        void loadProperties(account);
       }
     })();
     return () => {
@@ -110,11 +143,12 @@ export function AnalyticsTab() {
       offset: 0,
       search: search || undefined,
       filter,
+      accountId: accountId || undefined,
     });
     setRows(res.rows);
     setTotal(res.total);
     setMeta(res.meta);
-  }, [search, filter]);
+  }, [search, filter, accountId]);
 
   useEffect(() => {
     if (stage !== 'ready') return;
@@ -144,9 +178,12 @@ export function AnalyticsTab() {
     try {
       const res = await window.freecrawl.googleAuthStart('ga4');
       setAuthState(res.state);
+      setAccounts(res.state.accounts);
       if (res.ok && res.state.connected) {
+        const account = res.state.accounts[0]?.accountId ?? '';
+        setAccountId(account);
         setStage('ready');
-        void loadProperties();
+        void loadProperties(account);
       } else if (res.error) {
         setError(res.error);
       }
@@ -155,13 +192,27 @@ export function AnalyticsTab() {
     }
   }, [loadProperties]);
 
+  /** Unlink the account currently selected in the toolbar; with several
+   *  linked, the tab stays usable and falls back to the next one. */
   const disconnect = useCallback(async () => {
-    const next = await window.freecrawl.googleAuthRevoke('ga4');
+    const next = await window.freecrawl.googleAuthRevoke(
+      'ga4',
+      accountId || undefined,
+    );
     setAuthState(next);
+    setAccounts(next.accounts);
     setProperties([]);
     setPropertyId('');
-    setStage('disconnected');
-  }, []);
+    if (!next.connected) {
+      setAccountId('');
+      setStage('disconnected');
+      return;
+    }
+    const fallback = next.accounts[0]!.accountId;
+    setAccountId(fallback);
+    void window.freecrawl.integrationSettingsSet('ga4', { accountId: fallback });
+    void loadProperties(fallback);
+  }, [accountId, loadProperties]);
 
   const runFetch = useCallback(async () => {
     if (!propertyId || fetching) return;
@@ -173,6 +224,7 @@ export function AnalyticsTab() {
         property: propertyId,
         propertyName: selected?.displayName || propertyId,
         days,
+        accountId: accountId || undefined,
       });
       if (!res.ok) {
         setError(res.error);
@@ -183,7 +235,7 @@ export function AnalyticsTab() {
     } finally {
       setFetching(false);
     }
-  }, [propertyId, properties, days, fetching, reload]);
+  }, [propertyId, properties, days, accountId, fetching, reload]);
 
   // ── Gate states ──────────────────────────────────────────────────────
   if (stage === 'loading') {
@@ -277,6 +329,24 @@ export function AnalyticsTab() {
         </select>
 
         <div className="ml-auto flex items-center gap-2">
+          {accounts.length > 1 && (
+            <select
+              className="h-6 max-w-[170px] rounded border border-surface-700 bg-surface-950 px-1.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+              value={accountId}
+              onChange={(e) => changeAccount(e.target.value)}
+              disabled={fetching}
+              title={t('ga4Tab.accountTitle', {
+                defaultValue:
+                  'Which linked Google account this project reports on. Each account keeps its own stored data.',
+              })}
+            >
+              {accounts.map((a) => (
+                <option key={a.accountId} value={a.accountId}>
+                  {a.email ?? a.accountId}
+                </option>
+              ))}
+            </select>
+          )}
           <select
             className="h-6 max-w-[260px] rounded border border-surface-700 bg-surface-950 px-1.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
             value={propertyId}
@@ -327,7 +397,10 @@ export function AnalyticsTab() {
         <span>
           {t('ga4Tab.connectedAs', {
             defaultValue: 'Connected as {{email}}',
-            email: authState?.email ?? 'Google account',
+            email:
+              accounts.find((a) => a.accountId === accountId)?.email ??
+              authState?.email ??
+              'Google account',
           })}
         </span>
         <button

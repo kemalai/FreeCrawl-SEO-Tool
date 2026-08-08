@@ -24,6 +24,12 @@ export type LogFormatChoice = LogFormat | 'auto';
 export interface LogAnalyzeInput {
   /** Absolute log file path. Omitted → the main process opens a picker. */
   filePath?: string;
+  /**
+   * Absolute log file paths for a bulk import (each analyzed + ingested in
+   * turn). Takes precedence over `filePath`. When both are omitted the main
+   * process opens a multi-select picker.
+   */
+  filePaths?: string[];
   /** Dialect. Default `auto`. */
   format?: LogFormatChoice;
   /**
@@ -99,8 +105,15 @@ export interface LogImportSummary {
 export interface LogAnalyzeResult {
   ok: boolean;
   error?: string;
-  /** Null when the user cancelled the file picker. */
+  /**
+   * Single-file convenience: the first file successfully ingested in this
+   * call. Null when the user cancelled the picker or nothing was ingested.
+   */
   imported: LogImportSummary | null;
+  /** Every file ingested in this (possibly bulk) call. */
+  batch?: LogImportSummary[];
+  /** Per-file failures that did not abort the rest of the batch. */
+  errors?: Array<{ fileName: string; error: string }>;
   overview: LogOverview | null;
 }
 

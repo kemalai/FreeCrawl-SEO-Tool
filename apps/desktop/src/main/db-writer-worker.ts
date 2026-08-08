@@ -55,6 +55,20 @@ const watchdog = init.freezeWatchdogSab
   ? new FreezeWatchdogSharedState(init.freezeWatchdogSab)
   : null;
 
+// Publish into the writer's own slot and keep its own heartbeat. This
+// thread used to write the *reader* op string while never ticking any
+// heartbeat, which meant a stalled reader pool got logged with whatever
+// write happened to run last pinned to it, and a genuinely stuck writer
+// produced no evidence at all.
+const WATCHDOG_HEARTBEAT_INTERVAL_MS = 100;
+if (watchdog) {
+  watchdog.tickWriterHeartbeat();
+  watchdog.setWriterOp('idle');
+  setInterval(() => {
+    watchdog.tickWriterHeartbeat();
+  }, WATCHDOG_HEARTBEAT_INTERVAL_MS).unref();
+}
+
 interface RequestMessage {
   requestId: number;
   method: string;
@@ -93,6 +107,7 @@ const ALLOWED_METHODS = new Set<string>([
   'checkpointQueue',
   'clearQueueCheckpoint',
   'walCheckpoint',
+  'optimize',
   'markUrlForRecrawl',
   'markUrlsForRecrawl',
   'deleteUrl',
@@ -104,7 +119,7 @@ const ALLOWED_METHODS = new Set<string>([
 parentPort.on('message', async (msg: RequestMessage) => {
   if (!msg || typeof msg.requestId !== 'number') return;
   const { requestId, method, args } = msg;
-  if (watchdog) watchdog.setReaderOp('writer:' + method);
+  if (watchdog) watchdog.setWriterOp(method);
   try {
     if (!ALLOWED_METHODS.has(method)) {
       throw new Error(`db-writer-worker: method '${method}' is not whitelisted`);
@@ -123,7 +138,7 @@ parentPort.on('message', async (msg: RequestMessage) => {
       error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
     });
   } finally {
-    if (watchdog) watchdog.setReaderOp('idle');
+    if (watchdog) watchdog.setWriterOp('idle');
   }
 });
 

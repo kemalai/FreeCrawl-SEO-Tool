@@ -1984,6 +1984,132 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 83,
+    name: 'add_gsc_inspection_appearance_verdicts',
+    // GSC URL Inspection returns more than the index-status verdict:
+    // mobileUsabilityResult / ampResult / richResultsResult each carry
+    // their own PASS/FAIL verdict. Storing them powers the "Page is Not
+    // Mobile Friendly", "AMP URL Invalid" and "Rich Result Invalid"
+    // filter presets on the Search Console tab.
+    //
+    // Left NULL for rows inspected before these columns existed — absent
+    // and "not inspected for this facet" are the same thing to consumers.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(gsc_inspection_results)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'mobile_verdict')) {
+        db.exec('ALTER TABLE gsc_inspection_results ADD COLUMN mobile_verdict TEXT');
+      }
+      if (!cols.some((c) => c.name === 'amp_verdict')) {
+        db.exec('ALTER TABLE gsc_inspection_results ADD COLUMN amp_verdict TEXT');
+      }
+      if (!cols.some((c) => c.name === 'rich_results_verdict')) {
+        db.exec(
+          'ALTER TABLE gsc_inspection_results ADD COLUMN rich_results_verdict TEXT',
+        );
+      }
+    },
+  },
+  {
+    version: 84,
+    name: 'add_google_account_id',
+    // Multi-account GSC / GA4: a user can link several Google accounts to
+    // the same integration (their own property plus a client's), so these
+    // three snapshot tables can no longer be keyed by `url` alone — two
+    // accounts may legitimately report on the same URL.
+    //
+    // SQLite cannot ALTER a PRIMARY KEY, so each table is rebuilt with the
+    // composite `(url, account_id)` key and its rows copied across.
+    // Pre-existing rows came from the single connected account and get
+    // `account_id = ''`; the main process adopts them into that account's
+    // id the first time the account list is resolved, so an upgrade keeps
+    // its data instead of silently showing an empty table.
+    up: (db) => {
+      const hasAccountCol = (table: string): boolean =>
+        (db.prepare(`PRAGMA table_info(${table})`).all() as unknown as {
+          name: string;
+        }[]).some((c) => c.name === 'account_id');
+
+      if (!hasAccountCol('gsc_results')) {
+        db.exec(`
+          CREATE TABLE gsc_results_new (
+            url          TEXT NOT NULL,
+            account_id   TEXT NOT NULL DEFAULT '',
+            clicks       INTEGER,
+            impressions  INTEGER,
+            ctr          REAL,
+            position     REAL,
+            fetched_at   TEXT NOT NULL,
+            PRIMARY KEY (url, account_id)
+          );
+          INSERT INTO gsc_results_new (url, account_id, clicks, impressions, ctr, position, fetched_at)
+            SELECT url, '', clicks, impressions, ctr, position, fetched_at FROM gsc_results;
+          DROP TABLE gsc_results;
+          ALTER TABLE gsc_results_new RENAME TO gsc_results;
+          CREATE INDEX IF NOT EXISTS idx_gsc_results_account ON gsc_results(account_id);
+        `);
+      }
+
+      if (!hasAccountCol('ga4_results')) {
+        db.exec(`
+          CREATE TABLE ga4_results_new (
+            url                  TEXT NOT NULL,
+            account_id           TEXT NOT NULL DEFAULT '',
+            sessions             INTEGER,
+            users                INTEGER,
+            pageviews            INTEGER,
+            engagement_rate      REAL,
+            avg_session_duration REAL,
+            fetched_at           TEXT NOT NULL,
+            PRIMARY KEY (url, account_id)
+          );
+          INSERT INTO ga4_results_new (url, account_id, sessions, users, pageviews,
+                                       engagement_rate, avg_session_duration, fetched_at)
+            SELECT url, '', sessions, users, pageviews,
+                   engagement_rate, avg_session_duration, fetched_at FROM ga4_results;
+          DROP TABLE ga4_results;
+          ALTER TABLE ga4_results_new RENAME TO ga4_results;
+          CREATE INDEX IF NOT EXISTS idx_ga4_results_account ON ga4_results(account_id);
+        `);
+      }
+
+      if (!hasAccountCol('gsc_inspection_results')) {
+        db.exec(`
+          CREATE TABLE gsc_inspection_results_new (
+            url                  TEXT NOT NULL,
+            account_id           TEXT NOT NULL DEFAULT '',
+            verdict              TEXT,
+            coverage_state       TEXT,
+            robots_txt_state     TEXT,
+            indexing_state       TEXT,
+            last_crawl_time      TEXT,
+            google_canonical     TEXT,
+            user_canonical       TEXT,
+            mobile_verdict       TEXT,
+            amp_verdict          TEXT,
+            rich_results_verdict TEXT,
+            status               TEXT NOT NULL,
+            error                TEXT,
+            fetched_at           TEXT NOT NULL,
+            PRIMARY KEY (url, account_id)
+          );
+          INSERT INTO gsc_inspection_results_new
+              (url, account_id, verdict, coverage_state, robots_txt_state, indexing_state,
+               last_crawl_time, google_canonical, user_canonical,
+               mobile_verdict, amp_verdict, rich_results_verdict, status, error, fetched_at)
+            SELECT url, '', verdict, coverage_state, robots_txt_state, indexing_state,
+                   last_crawl_time, google_canonical, user_canonical,
+                   mobile_verdict, amp_verdict, rich_results_verdict, status, error, fetched_at
+              FROM gsc_inspection_results;
+          DROP TABLE gsc_inspection_results;
+          ALTER TABLE gsc_inspection_results_new RENAME TO gsc_inspection_results;
+          CREATE INDEX IF NOT EXISTS idx_gsc_inspection_account ON gsc_inspection_results(account_id);
+        `);
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

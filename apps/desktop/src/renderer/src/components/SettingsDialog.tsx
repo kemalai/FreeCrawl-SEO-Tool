@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import {
   SUPPORTED_LANGUAGES,
@@ -42,6 +42,8 @@ import {
   Target,
   Check,
   Workflow,
+  ChevronRight,
+  ChevronDown,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -62,6 +64,9 @@ import { useAppStore } from '../store.js';
 import { InfoTip, type FieldInfo } from './InfoTip.js';
 import { ExtractionPreviewDialog } from './ExtractionPreviewDialog.js';
 import { IntegrationSetupGuideModal } from './IntegrationSetupGuideModal.js';
+import { GscSettingsSection } from './GscSettingsSection.js';
+import { Ga4SettingsSection } from './Ga4SettingsSection.js';
+import { GoogleAccountsSection } from './GoogleAccountsSection.js';
 
 interface Props {
   open: boolean;
@@ -252,10 +257,30 @@ export type SettingsSectionKey =
   | 'storage'
   | 'spelling'
   | 'privacy'
-  | 'language';
+  | 'language'
+  /** Per-integration sub-page, e.g. `integration:gsc`. Each integration
+   *  gets its own page under the "Integrations" group header, so a
+   *  provider's credentials and its behaviour settings are never mixed
+   *  in with a dozen other providers on one scrolling page. */
+  | `integration:${string}`;
 
 /** Local alias — the exported name is the one other modules import. */
 type SectionKey = SettingsSectionKey;
+
+/** Sidebar key prefix for per-integration sub-pages. */
+const INTEGRATION_KEY_PREFIX = 'integration:';
+
+/** Build the sidebar key for one integration's sub-page. */
+function integrationSectionKey(id: string): SectionKey {
+  return `${INTEGRATION_KEY_PREFIX}${id}` as SectionKey;
+}
+
+/** Extract the integration id from a sub-page key (null when not one). */
+function integrationIdFromSection(key: SectionKey): string | null {
+  return key.startsWith(INTEGRATION_KEY_PREFIX)
+    ? key.slice(INTEGRATION_KEY_PREFIX.length)
+    : null;
+}
 
 interface SectionDef {
   key: SectionKey;
@@ -263,7 +288,21 @@ interface SectionDef {
   icon: LucideIcon;
   /** Searchable keywords beyond the label. */
   keywords: string;
+  /** A collapsible header rather than a page — clicking it expands its
+   *  children instead of selecting content. */
+  group?: true;
+  /** Parent group key, for entries nested under a header. */
+  parent?: SectionKey;
 }
+
+/** Sidebar icon per integration category — keeps the sub-page list
+ *  scannable without inventing a bespoke icon for every provider. */
+const INTEGRATION_CATEGORY_ICON: Record<IntegrationDef['category'], LucideIcon> = {
+  ai: Sparkles,
+  performance: Gauge,
+  seo: Target,
+  google: Chrome,
+};
 
 const SECTIONS: SectionDef[] = [
   {
@@ -405,7 +444,19 @@ const SECTIONS: SectionDef[] = [
     icon: Plug,
     keywords:
       'integrations api key oauth google search console analytics gsc ga4 pagespeed ahrefs moz semrush majestic openai anthropic claude ollama sheets bigquery credentials',
+    group: true,
   },
+  // One sub-page per integration, generated from the shared catalog so a
+  // new provider shows up in the sidebar without touching this file.
+  ...INTEGRATIONS.map(
+    (def): SectionDef => ({
+      key: integrationSectionKey(def.id),
+      label: def.name,
+      icon: INTEGRATION_CATEGORY_ICON[def.category],
+      keywords: `integration ${def.id} ${def.name} ${def.category} ${def.authType} ${def.description}`,
+      parent: 'integrations',
+    }),
+  ),
   {
     key: 'rendering',
     label: 'Rendering',
@@ -626,6 +677,10 @@ export function SettingsDialog({ open, onClose }: Props) {
   const [form, setForm] = useState<FormState>(() => configToForm(config));
   const [active, setActive] = useState<SectionKey>('mode');
   const [search, setSearch] = useState('');
+  /** Collapsible sidebar groups the user has opened. */
+  const [expandedGroups, setExpandedGroups] = useState<Set<SectionKey>>(
+    () => new Set(),
+  );
 
   // Re-seed the form whenever the dialog reopens — picks up any external
   // config change (e.g. URL/scope edits in the top bar) so the dialog
@@ -638,10 +693,32 @@ export function SettingsDialog({ open, onClose }: Props) {
   }, [open, config]);
 
   // Follow a deep link ("Add API Key…" and friends). Without a target the
-  // dialog stays on whichever section the user last used.
+  // dialog stays on whichever section the user last used. A target naming
+  // an integration lands on that provider's own sub-page (and opens the
+  // group so the selection is visible in the sidebar); a bare
+  // `integrations` target falls back to the first provider, since the
+  // group header itself is no longer a page.
   useEffect(() => {
-    if (open && target) setActive(target.section);
+    if (!open || !target) return;
+    if (target.section === 'integrations') {
+      const id = target.integration ?? INTEGRATIONS[0]?.id;
+      if (id) {
+        setActive(integrationSectionKey(id));
+        setExpandedGroups((prev) => new Set(prev).add('integrations'));
+      }
+      return;
+    }
+    setActive(target.section);
   }, [open, target]);
+
+  // Selecting a nested page opens its group so the highlighted row is
+  // actually visible in the sidebar. Applied as a state change (not a
+  // derived override) so the header stays collapsible afterwards.
+  useEffect(() => {
+    const parent = SECTIONS.find((s) => s.key === active)?.parent;
+    if (!parent) return;
+    setExpandedGroups((prev) => (prev.has(parent) ? prev : new Set(prev).add(parent)));
+  }, [active]);
 
   // ESC closes — common modal expectation.
   useEffect(() => {
@@ -656,17 +733,38 @@ export function SettingsDialog({ open, onClose }: Props) {
   const visibleSections = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return SECTIONS;
-    return SECTIONS.filter(
-      (s) =>
-        s.label.toLowerCase().includes(q) || s.keywords.toLowerCase().includes(q),
-    );
+    const matches = (s: SectionDef): boolean =>
+      s.label.toLowerCase().includes(q) || s.keywords.toLowerCase().includes(q);
+    // Keep parent/child pairs intact. A matching child always brings its
+    // header along, so no row is orphaned. A matching group expands to all
+    // its children only when no child matched on its own — otherwise
+    // searching "gsc" would list every provider, since the group's own
+    // keywords name them all.
+    const keep = new Set<SectionKey>();
+    for (const s of SECTIONS) {
+      if (matches(s) && !s.group) {
+        keep.add(s.key);
+        if (s.parent) keep.add(s.parent);
+      }
+    }
+    for (const s of SECTIONS) {
+      if (!s.group || !matches(s)) continue;
+      keep.add(s.key);
+      const children = SECTIONS.filter((c) => c.parent === s.key);
+      if (!children.some((c) => keep.has(c.key))) {
+        for (const c of children) keep.add(c.key);
+      }
+    }
+    return SECTIONS.filter((s) => keep.has(s.key));
   }, [search]);
 
-  // If the search filter hides the active section, jump to the first visible.
+  // If the search filter hides the active section, jump to the first visible
+  // page — group headers are skipped since they render no content.
   useEffect(() => {
-    if (visibleSections.length === 0) return;
-    if (!visibleSections.some((s) => s.key === active)) {
-      setActive(visibleSections[0]!.key);
+    const pages = visibleSections.filter((s) => !s.group);
+    if (pages.length === 0) return;
+    if (!pages.some((s) => s.key === active)) {
+      setActive(pages[0]!.key);
     }
   }, [visibleSections, active]);
 
@@ -897,6 +995,28 @@ export function SettingsDialog({ open, onClose }: Props) {
   }
 
   const activeDef = SECTIONS.find((s) => s.key === active) ?? SECTIONS[0]!;
+  const parentDef = activeDef.parent
+    ? SECTIONS.find((s) => s.key === activeDef.parent)
+    : undefined;
+  const searching = search.trim().length > 0;
+
+  /** A group renders open when the user opened it, or while a search is
+   *  narrowing the list (so matches are never hidden behind a collapsed
+   *  header). Selecting a child auto-opens its group once, via the effect
+   *  above — deriving openness from the selection instead would make the
+   *  header un-collapsible while one of its pages is active. */
+  function isGroupOpen(key: SectionKey): boolean {
+    return searching || expandedGroups.has(key);
+  }
+
+  function toggleGroup(key: SectionKey) {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   return (
     <div
@@ -943,20 +1063,46 @@ export function SettingsDialog({ open, onClose }: Props) {
               )}
               {visibleSections.map((s) => {
                 const Icon = s.icon;
+
+                // Group header — expands/collapses its children instead of
+                // selecting a page of its own.
+                if (s.group) {
+                  const open = isGroupOpen(s.key);
+                  const Chevron = open ? ChevronDown : ChevronRight;
+                  return (
+                    <button
+                      key={s.key}
+                      className="flex w-full items-center gap-2 border-l-2 border-transparent px-3 py-1.5 text-left text-[12px] text-surface-300 transition-colors hover:bg-surface-800 hover:text-surface-100"
+                      onClick={() => toggleGroup(s.key)}
+                      aria-expanded={open}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      <span>{translateLabel(s.label, lang)}</span>
+                      <Chevron className="ml-auto h-3.5 w-3.5 text-surface-500" />
+                    </button>
+                  );
+                }
+
+                // Child page — only rendered while its group is open.
+                if (s.parent && !isGroupOpen(s.parent)) return null;
+
                 const isActive = s.key === active;
                 return (
                   <button
                     key={s.key}
                     className={clsx(
-                      'flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors',
+                      'flex w-full items-center gap-2 py-1.5 text-left text-[12px] transition-colors',
+                      s.parent ? 'pl-8 pr-3' : 'px-3',
                       isActive
                         ? 'bg-accent-600/20 text-accent-200 border-l-2 border-accent-500'
                         : 'border-l-2 border-transparent text-surface-300 hover:bg-surface-800 hover:text-surface-100',
                     )}
                     onClick={() => setActive(s.key)}
+                    // Long provider names truncate in the narrow sidebar.
+                    title={translateLabel(s.label, lang)}
                   >
-                    <Icon className="h-3.5 w-3.5" />
-                    <span>{translateLabel(s.label, lang)}</span>
+                    <Icon className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{translateLabel(s.label, lang)}</span>
                   </button>
                 );
               })}
@@ -968,6 +1114,12 @@ export function SettingsDialog({ open, onClose }: Props) {
             <div className="border-b border-surface-800 px-5 py-2 text-[11px] text-surface-400">
               {t('settings.title', { defaultValue: 'Settings' })}{' '}
               <span className="mx-1 text-surface-600">›</span>
+              {parentDef && (
+                <>
+                  <span>{translateLabel(parentDef.label, lang)}</span>
+                  <span className="mx-1 text-surface-600">›</span>
+                </>
+              )}
               <span className="text-surface-200">{translateLabel(activeDef.label, lang)}</span>
             </div>
             <div className="flex-1 overflow-auto px-5 py-4 text-[12px]">
@@ -1056,8 +1208,8 @@ export function SettingsDialog({ open, onClose }: Props) {
               {active === 'per-host-ua' && (
                 <PerHostUaPanel form={form} update={update} />
               )}
-              {active === 'integrations' && (
-                <IntegrationsPanel focusId={target?.integration ?? null} />
+              {integrationIdFromSection(active) && (
+                <IntegrationPage id={integrationIdFromSection(active)!} />
               )}
               {active === 'rendering' && (
                 <RenderingPanel form={form} update={update} />
@@ -4326,108 +4478,119 @@ function PerformanceBudgetPanel({ form, update }: PanelProps) {
 }
 
 /**
- * @param focusId Integration the user was sent here to configure. The
- *   panel lists a dozen-plus cards across four categories, so landing on
- *   the section alone would still leave them hunting; the matching card
- *   is scrolled into view and outlined for as long as the panel is open.
+ * One integration's own settings page. Every provider gets a dedicated
+ * sub-page under the "Integrations" sidebar group — credentials plus any
+ * behaviour settings the provider defines (e.g. the GSC date range and
+ * dimension filters). The previous single scrolling page listed a
+ * dozen-plus providers at once, which buried each one's settings.
+ *
+ * @param id Integration id from the shared `INTEGRATIONS` catalog.
  */
-function IntegrationsPanel({ focusId }: { focusId: string | null }) {
+function IntegrationPage({ id }: { id: string }) {
   const { t, i18n } = useTranslation();
+  const def = INTEGRATIONS.find((i) => i.id === id);
   const [state, setState] = useState<IntegrationsState | null>(null);
-  const focusRef = useRef<HTMLDivElement | null>(null);
-  // Per-integration → per-field draft text. Only fields the user has
-  // actually typed into are tracked; a save sends just these so an
-  // untouched "saved" secret is never overwritten.
-  const [drafts, setDrafts] = useState<Record<string, Record<string, string>>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  const [notice, setNotice] = useState<Record<string, string>>({});
+  // Per-field draft text. Only fields the user has actually typed into
+  // are tracked; a save sends just these so an untouched "saved" secret
+  // is never overwritten.
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | undefined>();
+  /** Bumped whenever an account is linked/unlinked, to re-seed the
+   *  provider settings section's account dropdown. */
+  const [accountsVersion, setAccountsVersion] = useState(0);
 
   useEffect(() => {
     void window.freecrawl.integrationsGetAll().then(setState);
   }, []);
 
+  // Switching provider must not carry the previous page's draft or
+  // "Saved." notice across.
   useEffect(() => {
-    focusRef.current?.scrollIntoView({ block: 'center' });
-  }, [focusId]);
+    setDraft({});
+    setNotice(undefined);
+  }, [id]);
 
-  const setDraft = (id: string, key: string, value: string) => {
-    setDrafts((d) => ({ ...d, [id]: { ...(d[id] ?? {}), [key]: value } }));
-  };
+  if (!def) return null;
 
-  const save = async (id: string) => {
-    const fields = drafts[id];
-    if (!fields || Object.keys(fields).length === 0) return;
-    setBusy(id);
+  const category = INTEGRATION_CATEGORIES.find((c) => c.key === def.category);
+
+  const save = async () => {
+    if (Object.keys(draft).length === 0) return;
+    setBusy(true);
     try {
-      const next = await window.freecrawl.integrationsSet(id, fields);
-      setState(next);
-      setDrafts((d) => ({ ...d, [id]: {} }));
-      setNotice((n) => ({ ...n, [id]: t('integrations.saved', { defaultValue: 'Saved.' }) }));
+      setState(await window.freecrawl.integrationsSet(def.id, draft));
+      setDraft({});
+      setNotice(t('integrations.saved', { defaultValue: 'Saved.' }));
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   };
 
-  const clear = async (id: string) => {
+  const clear = async () => {
     if (!window.confirm(t('integrations.confirmClear', { defaultValue: 'Remove all stored credentials for this integration?' }))) {
       return;
     }
-    setBusy(id);
+    setBusy(true);
     try {
-      const next = await window.freecrawl.integrationsClear(id);
-      setState(next);
-      setDrafts((d) => ({ ...d, [id]: {} }));
-      setNotice((n) => ({ ...n, [id]: t('integrations.cleared', { defaultValue: 'Removed.' }) }));
+      setState(await window.freecrawl.integrationsClear(def.id));
+      setDraft({});
+      setNotice(t('integrations.cleared', { defaultValue: 'Removed.' }));
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   };
 
   return (
     <>
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[13px] font-semibold text-surface-100">{def.name}</span>
+        {category && (
+          <span className="rounded bg-surface-800 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-surface-400">
+            {translateLabel(category.label, i18n.language)}
+          </span>
+        )}
+      </div>
       <p className="mb-3 text-[11px] text-surface-400">
         {t('integrations.intro', { defaultValue: 'Connect external services with your own credentials. API keys and secrets are encrypted at rest using your operating system\'s secure storage and never leave this machine.' })}
       </p>
-      <div className="mb-3 rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
-        {t('integrations.byocNote', { defaultValue: 'Google integrations use a "bring your own client" model — you create your own Google Cloud OAuth client and paste its ID/secret, so no shared FreeCrawl app or verification is involved.' })}
-      </div>
+      {def.authType === 'oauth-byoc' && (
+        <div className="mb-3 rounded border border-blue-700/40 bg-blue-900/15 px-3 py-2 text-[11px] text-blue-200">
+          {t('integrations.byocNote', { defaultValue: 'Google integrations use a "bring your own client" model — you create your own Google Cloud OAuth client and paste its ID/secret, so no shared FreeCrawl app or verification is involved.' })}
+        </div>
+      )}
 
-      {INTEGRATION_CATEGORIES.map((cat) => {
-        const items = INTEGRATIONS.filter((i) => i.category === cat.key);
-        if (items.length === 0) return null;
-        return (
-          <div key={cat.key} className="mb-4">
-            <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-              {translateLabel(cat.label, i18n.language)}
-            </div>
-            <div className="space-y-2">
-              {items.map((def) => (
-                <IntegrationCard
-                  key={def.id}
-                  def={def}
-                  cardRef={def.id === focusId ? focusRef : undefined}
-                  focused={def.id === focusId}
-                  state={state?.[def.id]}
-                  draft={drafts[def.id] ?? {}}
-                  busy={busy === def.id}
-                  notice={notice[def.id]}
-                  onDraft={(k, v) => setDraft(def.id, k, v)}
-                  onSave={() => void save(def.id)}
-                  onClear={() => void clear(def.id)}
-                />
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      <IntegrationCard
+        def={def}
+        state={state?.[def.id]}
+        draft={draft}
+        busy={busy}
+        notice={notice}
+        onDraft={(k, v) => setDraft((d) => ({ ...d, [k]: v }))}
+        onSave={() => void save()}
+        onClear={() => void clear()}
+      />
+
+      {/* Linked Google accounts — several can share one OAuth client. */}
+      {def.authType === 'oauth-byoc' && (
+        <GoogleAccountsSection
+          integrationId={def.id}
+          configured={state?.[def.id]?.configured ?? false}
+          onChange={() => setAccountsVersion((v) => v + 1)}
+        />
+      )}
+
+      {/* Provider-specific behaviour settings, kept separate from the
+          credential card above. Re-mounted when the account list changes
+          so their account dropdowns pick up a new or removed link. */}
+      {def.id === 'gsc' && <GscSettingsSection key={accountsVersion} />}
+      {def.id === 'ga4' && <Ga4SettingsSection key={accountsVersion} />}
     </>
   );
 }
 
 function IntegrationCard({
   def,
-  cardRef,
-  focused,
   state,
   draft,
   busy,
@@ -4437,8 +4600,6 @@ function IntegrationCard({
   onClear,
 }: {
   def: IntegrationDef;
-  cardRef?: RefObject<HTMLDivElement | null>;
-  focused?: boolean;
   state: IntegrationsState[string] | undefined;
   draft: Record<string, string>;
   busy: boolean;
@@ -4453,17 +4614,10 @@ function IntegrationCard({
   const [guideOpen, setGuideOpen] = useState(false);
 
   return (
-    <div
-      ref={cardRef}
-      className={clsx(
-        'rounded border bg-surface-950/40 p-3',
-        focused
-          ? 'border-accent-500 ring-1 ring-accent-500/40'
-          : 'border-surface-800',
-      )}
-    >
+    <div className="rounded border border-surface-800 bg-surface-950/40 p-3">
       <div className="mb-1 flex items-center gap-2">
-        <span className="text-[12px] font-medium text-surface-100">{def.name}</span>
+        {/* The provider name lives in the page header above — the card
+            only carries its credential model + connection status. */}
         <span className="rounded bg-surface-800 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-surface-400">
           {translateLabel(AUTH_TYPE_LABEL[def.authType], i18n.language)}
         </span>

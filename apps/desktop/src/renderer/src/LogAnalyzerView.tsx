@@ -85,17 +85,35 @@ export function LogAnalyzerView() {
         verifyBots,
       });
       if (res.overview) setOverview(res.overview);
-      if (res.ok && res.imported) {
-        const i = res.imported;
-        showToast(
-          t('logAnalyzer.imported', {
-            defaultValue: '{{file}} — parsed {{parsed}}/{{total}} lines ({{format}})',
-            file: i.fileName,
-            parsed: i.parsedLines.toLocaleString(),
-            total: i.totalLines.toLocaleString(),
-            format: i.format,
-          }),
-        );
+      const batch = res.batch ?? (res.imported ? [res.imported] : []);
+      const failed = res.errors?.length ?? 0;
+      if (res.ok && batch.length > 0) {
+        if (batch.length === 1) {
+          const i = batch[0]!;
+          showToast(
+            t('logAnalyzer.imported', {
+              defaultValue: '{{file}} — parsed {{parsed}}/{{total}} lines ({{format}})',
+              file: i.fileName,
+              parsed: i.parsedLines.toLocaleString(),
+              total: i.totalLines.toLocaleString(),
+              format: i.format,
+            }),
+          );
+        } else {
+          const parsed = batch.reduce((s, b) => s + b.parsedLines, 0);
+          const total = batch.reduce((s, b) => s + b.totalLines, 0);
+          showToast(
+            t('logAnalyzer.importedBatch', {
+              defaultValue: '{{files}} files — parsed {{parsed}}/{{total}} lines',
+              files: batch.length,
+              parsed: parsed.toLocaleString(),
+              total: total.toLocaleString(),
+            }) +
+              (failed > 0
+                ? ` · ${t('logAnalyzer.importedFailed', { defaultValue: '{{n}} failed', n: failed })}`
+                : ''),
+          );
+        }
         setVersion((v) => v + 1);
       } else if (res.error) {
         showToast(t('logAnalyzer.importError', { defaultValue: 'Import failed: {{err}}', err: res.error }));
@@ -184,7 +202,7 @@ export function LogAnalyzerView() {
           >
             {busy
               ? t('logAnalyzer.analyzing', { defaultValue: 'Analyzing…' })
-              : t('logAnalyzer.import', { defaultValue: 'Import Log File…' })}
+              : t('logAnalyzer.import', { defaultValue: 'Import Log Files…' })}
           </button>
           {hasData && <ExportMenu onExport={onExport} />}
           {hasData && (

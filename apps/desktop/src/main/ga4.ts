@@ -46,8 +46,10 @@ function apiError(json: unknown, status: number): string {
 }
 
 /** Flatten the GA4 Admin `accountSummaries` tree into a flat property list. */
-export async function listProperties(): Promise<Ga4Property[]> {
-  const token = await getAccessToken('ga4');
+export async function listProperties(
+  accountId?: string,
+): Promise<Ga4Property[]> {
+  const token = await getAccessToken('ga4', accountId);
   const out: Ga4Property[] = [];
   let pageToken: string | undefined;
   for (;;) {
@@ -113,8 +115,9 @@ export async function runReport(
   property: string,
   startDate: string,
   endDate: string,
+  accountId?: string,
 ): Promise<Ga4PageRow[]> {
-  const token = await getAccessToken('ga4');
+  const token = await getAccessToken('ga4', accountId);
   const endpoint = `${DATA_BASE}/${property}:runReport`;
   const out: Ga4PageRow[] = [];
   let offset = 0;

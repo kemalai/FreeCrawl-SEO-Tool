@@ -185,13 +185,20 @@ export function App() {
         const proceed = window.confirm(
           t('app.crashRecovery', {
             defaultValue:
-              "FreeCrawl detected a previous crawl that didn't finish cleanly:\n\n  Start URL: {{seed}}\n  Pending URLs: {{pending}}\n\nResume the crawl from where it stopped?\n\nClick OK to resume, Cancel to discard the recovery state and start fresh.",
+              "FreeCrawl detected a previous crawl that didn't finish cleanly:\n\n  Mode: {{mode}}\n  Start URL: {{seed}}\n  Pending URLs: {{pending}}\n\nResume the crawl from where it stopped?\n\nClick OK to resume, Cancel to discard the recovery state and start fresh.",
+            mode: t(`topbar.mode.${status.mode}`, { defaultValue: status.mode }),
             seed: status.seedUrl,
             pending: status.pendingCount.toLocaleString(),
           }),
         );
         if (proceed) {
-          void window.freecrawl.crashRecoveryResume();
+          // Adopt the resumed run's config so the toolbar shows the mode
+          // and start URL actually being crawled — the renderer boots
+          // with blank Spider defaults, which made a Sitemap/List resume
+          // look like it had started over.
+          void window.freecrawl.crashRecoveryResume().then((res) => {
+            if (res.accepted && res.config) applyProjectConfig(res.config);
+          });
         } else {
           void window.freecrawl.crashRecoveryDiscard();
         }

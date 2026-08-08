@@ -236,21 +236,74 @@ export class Crawler extends EventEmitter {
   /** Pending queue snapshot used by the checkpoint timer. Mirrors
    * what's in `this.queue` minus already-completed items. */
   private pendingItems = new Map<string, number>();
+  /**
+   * Enqueues and completions accumulated since the last checkpoint.
+   * Shipping this delta instead of the whole of `pendingItems` is what
+   * keeps the checkpoint proportional to crawl throughput: on a crawl
+   * with a 200k-URL frontier the old full snapshot rebuilt a 200k-entry
+   * array on the main thread, structured-cloned it to the writer worker
+   * and re-inserted every row twice a minute, which blocked the writer
+   * FIFO the per-URL page writes share and stalled the crawl loop for
+   * tens of seconds each pass. The delta is a few hundred rows.
+   */
+  private queueAdded = new Map<string, number>();
+  private queueRemoved = new Set<string>();
+  /** First tick of a run does a full replace so the table starts in a
+   *  known state; set again after a failed write to resynchronise. */
+  private queueCheckpointNeedsFull = true;
   private startQueueCheckpointTimer(): void {
     if (this.queueCheckpointTimer) return;
+    // A resumed run inherits rows written by the previous process, and
+    // a fresh run may inherit a discarded checkpoint, so the first tick
+    // always rebuilds from `pendingItems` rather than trusting the
+    // table to match.
+    this.queueCheckpointNeedsFull = true;
+    this.queueAdded.clear();
+    this.queueRemoved.clear();
     this.queueCheckpointTimer = setInterval(() => {
       if (this.stopped || !this.running) return;
-      const items = Array.from(this.pendingItems.entries()).map(([url, depth]) => ({
-        url,
-        depth,
-      }));
-      void this.dbCall<void>('checkpointQueue', [items, this.config.startUrl]).catch((err) => {
-        this.emit(
-          'debug',
-          `queue checkpoint failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+      void this.flushQueueCheckpoint();
+      // Piggyback the planner-statistics refresh on the same tick. A
+      // crawl starts with empty tables, so any plan chosen at row zero
+      // assumes tables that never grow; `PRAGMA optimize` re-analyses
+      // only what has actually drifted, so this is a no-op most ticks
+      // and tens of milliseconds when it isn't.
+      void this.dbCall<void>('optimize', []).catch(() => {
+        /* statistics are an optimisation, never a correctness input */
       });
     }, Crawler.QUEUE_CHECKPOINT_INTERVAL_MS);
+  }
+  private async flushQueueCheckpoint(): Promise<void> {
+    const full = this.queueCheckpointNeedsFull;
+    if (!full && this.queueAdded.size === 0 && this.queueRemoved.size === 0) return;
+    const patch = full
+      ? {
+          replaceAll: true,
+          added: Array.from(this.pendingItems, ([url, depth]) => ({ url, depth })),
+          removed: [],
+        }
+      : {
+          replaceAll: false,
+          added: Array.from(this.queueAdded, ([url, depth]) => ({ url, depth })),
+          removed: Array.from(this.queueRemoved),
+        };
+    // Clear before awaiting so events arriving during the write land in
+    // the next delta instead of being written twice.
+    this.queueAdded.clear();
+    this.queueRemoved.clear();
+    this.queueCheckpointNeedsFull = false;
+    try {
+      await this.dbCall<void>('checkpointQueue', [patch, this.config.startUrl]);
+    } catch (err) {
+      // The delta is already gone, so fall back to a full rebuild next
+      // tick — otherwise the checkpoint would silently drift from the
+      // live queue and a resume would replay the wrong set.
+      this.queueCheckpointNeedsFull = true;
+      this.emit(
+        'debug',
+        `queue checkpoint failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
   private stopQueueCheckpointTimer(): void {
     if (this.queueCheckpointTimer) {
@@ -952,6 +1005,18 @@ export class Crawler extends EventEmitter {
    * — see rule 1.7 (root-cause perf, never mask by degrading UX).
    */
   private async runPostCrawlPasses(): Promise<void> {
+    // Refresh the planner's statistics before anything else runs. Every
+    // pass below is a correlated-subquery / self-join workload, and the
+    // tables they read only reached their final size moments ago — the
+    // plans SQLite would pick from stale (or absent) stats are the ones
+    // that turn a sub-second pass into a multi-minute one.
+    await yieldToEventLoop();
+    this.setOp('post-crawl:optimize');
+    try {
+      await this.dbCall<void>('optimize', []);
+    } catch {
+      /* statistics are an optimisation, never a correctness input */
+    }
     if (this.config.analyseInlinks) {
       await yieldToEventLoop();
       this.emit('info', 'Recomputing inlinks…');
@@ -1740,10 +1805,18 @@ export class Crawler extends EventEmitter {
     afterReset?: () => Promise<void>,
   ): Promise<void> {
     const previousStart = this.db.getMeta('startUrl');
-    if (previousStart !== fingerprint) {
-      this.db.reset();
+    // A crash-recovery resume continues the interrupted crawl, so its rows
+    // must survive even though the fingerprint may no longer match — a
+    // sitemap that gained or lost a single URL changes the count baked into
+    // it, and wiping there would destroy exactly the data the user asked to
+    // keep. The fingerprint is left pointing at the list that was actually
+    // crawled, so a later Start still reads a drifted list as a new crawl.
+    if (!this.resumeOnly) {
+      if (previousStart !== fingerprint) {
+        this.db.reset();
+      }
+      this.db.setMeta('startUrl', fingerprint);
     }
-    this.db.setMeta('startUrl', fingerprint);
     if (afterReset) await afterReset();
 
     // Force exact-url scope so anything fetched in fetchAndProcess never
@@ -1761,6 +1834,22 @@ export class Crawler extends EventEmitter {
     this.progressTimer = setInterval(() => this.emitProgress(), 500);
     this.startIssueRecomputeTimer();
     this.startQueueCheckpointTimer();
+
+    // Resume: mark everything already in the project as seen so the loop
+    // below only picks up what is genuinely still outstanding. Without it a
+    // resumed List/Sitemap run re-fetches the whole source list — the exact
+    // "it didn't carry on where it left off" the checkpoint exists to
+    // prevent. Spider mode gets the same treatment from `hydrateFromDb`.
+    // The checkpointed pending URLs are already queued by the caller
+    // (`enqueueCheckpointed`) before `start()`, so they survive this sweep;
+    // list entries added since the interruption are still picked up below.
+    if (this.resumeOnly) {
+      for (const known of this.db.getAllUrls()) {
+        this.seen.add(known);
+      }
+      this.crawled = this.db.countCrawledUrls();
+      this.resourceAdmitted = this.db.countSubresourceUrls();
+    }
 
     for (const u of urls) {
       this.enqueue({ url: u, depth: 0 });
@@ -2568,6 +2657,8 @@ export class Crawler extends EventEmitter {
     if (item.resourceRow) this.resourceAdmitted++;
     this.pending++;
     this.pendingItems.set(item.url, item.depth);
+    this.queueRemoved.delete(item.url);
+    this.queueAdded.set(item.url, item.depth);
     this.queue
       .add(() => this.fetchAndProcess(item), { priority: Crawler.priorityFor(item) })
       .catch((err: unknown) => {
@@ -2582,6 +2673,8 @@ export class Crawler extends EventEmitter {
         // failures are recorded in the urls table and shouldn't be
         // retried by a resumed crawl.
         this.pendingItems.delete(item.url);
+        this.queueAdded.delete(item.url);
+        this.queueRemoved.add(item.url);
       });
   }
 
@@ -3268,7 +3361,12 @@ export class Crawler extends EventEmitter {
       }
 
       const xRobotsLower = xRobotsTag?.toLowerCase() ?? '';
-      const headerNoindex = xRobotsLower.includes('noindex');
+      // Same `none` shorthand as the meta tag, plus the header's optional
+      // `<bot>: <directives>` form (`X-Robots-Tag: googlebot: none`) — the
+      // colon is a token separator here, not part of a directive.
+      const headerNoindex =
+        xRobotsLower.includes('noindex') ||
+        xRobotsLower.split(/[\s,;:]+/).includes('none');
 
       let indexability: Indexability = 'indexable';
       let reason: string | null = null;

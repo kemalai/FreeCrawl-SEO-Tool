@@ -26,8 +26,8 @@ Usage:
   freecrawl audit-robots <url> [--user-agent UA]  Test if a URL is allowed by robots.txt
   freecrawl compare <before.seoproject> <after.seoproject>
                                                   Cross-project diff (added / removed / status / title / meta / h1 / canonical / indexability / response_time)
-  freecrawl analyze-logs <access.log> [--project file]
-                                                  Parse a server access log (Apache / Nginx / IIS / custom), detect bots,
+  freecrawl analyze-logs <access.log> [more.log …] [--project file]
+                                                  Parse one or more server access logs (Apache / Nginx / IIS / custom), detect bots,
                                                   and merge the aggregates into a project for crawl × log analysis
 
 Options:
@@ -133,16 +133,19 @@ async function main(): Promise<void> {
   }
   if (positionals[0] === 'analyze-logs') {
     if (!positionals[1]) {
-      console.error('Usage: freecrawl analyze-logs <access.log> [--project file] [--format f] [--regex p] [--verify-bots]');
+      console.error('Usage: freecrawl analyze-logs <access.log> [more.log …] [--project file] [--format f] [--regex p] [--verify-bots]');
       process.exit(2);
     }
-    const exitCode = await runAnalyzeLogs(resolve(positionals[1]), {
-      projectPath: resolve(values.project ?? values.db ?? 'crawl.seoproject'),
-      format: (values.format as LogIngestInput['file']['format'] | 'auto' | undefined) ?? 'auto',
-      regex: values.regex,
-      verifyBots: Boolean(values['verify-bots']),
-      json: Boolean(values.json),
-    });
+    const exitCode = await runAnalyzeLogs(
+      positionals.slice(1).map((p) => resolve(p)),
+      {
+        projectPath: resolve(values.project ?? values.db ?? 'crawl.seoproject'),
+        format: (values.format as LogIngestInput['file']['format'] | 'auto' | undefined) ?? 'auto',
+        regex: values.regex,
+        verifyBots: Boolean(values['verify-bots']),
+        json: Boolean(values.json),
+      },
+    );
     process.exit(exitCode);
   }
 
@@ -526,11 +529,12 @@ function flattenLogResult(filePath: string, result: LogAnalysisResult): LogInges
 }
 
 /**
- * Parse an access log, detect bots, and merge the aggregates into a
- * project DB. Prints a summary (or JSON). Exit 0 on success, 2 on error.
+ * Parse one or more access logs, detect bots, and merge every file's
+ * aggregates into the same project DB. Prints a per-file line plus a combined
+ * summary (or JSON). Exit 0 when at least one file ingested, 2 on error.
  */
 async function runAnalyzeLogs(
-  logPath: string,
+  logPaths: string[],
   opts: {
     projectPath: string;
     format: 'auto' | 'apache-combined' | 'apache-common' | 'nginx' | 'iis-w3c' | 'custom';
@@ -547,12 +551,37 @@ async function runAnalyzeLogs(
     return 2;
   }
   try {
-    const result = await analyzeLogFile(logPath, {
-      format: opts.format,
-      customRegex: opts.regex,
-      verifyBots: opts.verifyBots,
-    });
-    const summary = db.ingestLogAnalysis(flattenLogResult(logPath, result));
+    const imported: ReturnType<ProjectDb['ingestLogAnalysis']>[] = [];
+    const failures: Array<{ file: string; error: string }> = [];
+    for (const logPath of logPaths) {
+      try {
+        const result = await analyzeLogFile(logPath, {
+          format: opts.format,
+          customRegex: opts.regex,
+          verifyBots: opts.verifyBots,
+        });
+        const summary = db.ingestLogAnalysis(flattenLogResult(logPath, result));
+        imported.push(summary);
+        if (!opts.json) {
+          console.log(`Log: ${summary.fileName} (${summary.format})`);
+          console.log(`  Lines:  ${summary.parsedLines}/${summary.totalLines} parsed, ${summary.skippedLines} skipped`);
+        }
+      } catch (err) {
+        const error = (err as Error).message;
+        failures.push({ file: logPath, error });
+        if (!opts.json) console.error(`  Skipped ${logPath}: ${error}`);
+      }
+    }
+
+    if (imported.length === 0) {
+      if (opts.json) {
+        process.stdout.write(JSON.stringify({ ok: false, imported: [], errors: failures }, null, 2) + '\n');
+      } else {
+        console.error('analyze-logs failed: no files could be ingested.');
+      }
+      return 2;
+    }
+
     const overview = db.getLogOverview();
     const bots = db.getLogBots().slice(0, 10);
     const topUrls = db
@@ -561,11 +590,14 @@ async function runAnalyzeLogs(
 
     if (opts.json) {
       process.stdout.write(
-        JSON.stringify({ ok: true, imported: summary, overview, topBots: bots, topBotUrls: topUrls }, null, 2) + '\n',
+        JSON.stringify(
+          { ok: true, imported, errors: failures, overview, topBots: bots, topBotUrls: topUrls },
+          null,
+          2,
+        ) + '\n',
       );
     } else {
-      console.log(`Log: ${summary.fileName} (${summary.format})`);
-      console.log(`  Lines:  ${summary.parsedLines}/${summary.totalLines} parsed, ${summary.skippedLines} skipped`);
+      if (imported.length > 1) console.log(`Ingested ${imported.length} files.`);
       console.log(`  Hits:   ${overview.totalHits} total · ${overview.botHits} bot · ${overview.humanHits} human`);
       if (overview.minTs) {
         const d = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');

@@ -21,6 +21,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join, resolve as resolvePath, sep as pathSep } from 'node:path';
 import {
+  cpSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -59,6 +60,7 @@ import {
   type ExportGridResult,
   type DataDeleteByDomainInput,
   type DataDeleteByDomainResult,
+  type CrashRecoveryResumeResult,
   type CrashRecoveryStatus,
   type ExportHtmlReportInput,
   type ExportHtmlReportResult,
@@ -148,6 +150,12 @@ import {
   type GscFetchMeta,
   type GscQueryInput,
   type GscQueryResult,
+  type GscCrawlNewUrlsResult,
+  type GscIntegrationSettings,
+  type Ga4IntegrationSettings,
+  type GoogleAccount,
+  defaultGscSettings,
+  defaultGa4Settings,
   type Ga4ListPropertiesResult,
   type Ga4FetchInput,
   type Ga4FetchResult,
@@ -258,8 +266,20 @@ import {
 } from './languagetool.js';
 import { warmLanguageDetector } from './language-detect.js';
 import { warmLocalDictionary } from './local-spell.js';
-import { startAuth, getAuthState, revokeAuth } from './google-oauth.js';
-import { listSites, querySearchAnalytics, inspectUrl } from './gsc.js';
+import {
+  startAuth,
+  getAuthState,
+  revokeAuth,
+  listAccounts,
+  resolveAccountId,
+} from './google-oauth.js';
+import {
+  listSites,
+  querySearchAnalytics,
+  inspectUrl,
+  resolveGscDateRange,
+  buildGscQueryOptions,
+} from './gsc.js';
 import { exportCategoryToSheets } from './sheets-export.js';
 import { exportCategoryToBigQuery } from './bigquery-export.js';
 import { listProperties as ga4ListProperties, runReport as ga4RunReport } from './ga4.js';
@@ -473,6 +493,16 @@ class ProjectSession {
       this.pendingRecoveryCheckpoint = [];
     }
     database.reset();
+    // The scratch database is wiped on every launch, so the PNGs the last
+    // session captured into its sidecar are now unreferenced. Drop them with
+    // it — otherwise the directory in userData grows forever across crawls
+    // of unrelated sites. A saved project keeps its own copy (see
+    // `saveProjectDocument`), so nothing the user chose to keep is at risk.
+    try {
+      rmSync(screenshotDirFor(path), { recursive: true, force: true });
+    } catch {
+      /* best-effort — a locked file just means it is cleaned next launch */
+    }
     if (ramMode) {
       logger.log(
         'info',
@@ -1467,6 +1497,27 @@ function markDirty(s: ProjectSession): void {
 }
 
 /**
+ * V2 Faz 1 — Screenshot PNGs are too big to sit in the database, so they
+ * live on disk in a sidecar directory named after the file the session is
+ * bound to: `<name>.screenshots/`.
+ */
+function screenshotDirFor(basePath: string): string {
+  return join(dirname(basePath), `${basename(basePath)}.screenshots`);
+}
+
+/**
+ * Sidecar for whatever this session is actually writing to. An unsaved
+ * session has no document, so it falls back to the working/scratch database
+ * in userData — keying this on the document alone meant screenshot capture
+ * was silently disabled for every crawl until the user saved a project,
+ * which is the common case and left the Screenshot tab permanently empty.
+ */
+function activeScreenshotDir(s: ProjectSession): string | null {
+  const base = s.currentProjectPath || s.scratchPath;
+  return base ? screenshotDirFor(base) : null;
+}
+
+/**
  * Write the working database to `documentPath` as a compressed container.
  *
  * `VACUUM INTO` is what makes the snapshot safe to take while the app is
@@ -1477,8 +1528,46 @@ function markDirty(s: ProjectSession): void {
 async function saveProjectDocument(
   s: ProjectSession,
   documentPath: string,
+  opts: {
+    /**
+     * False for the MCP snapshot action, which writes a copy without moving
+     * the session onto it. The sidecar handling below rewrites the LIVE
+     * database, so it must only run when this save is the session's new
+     * home — a snapshot doing it would leave the open project's rows
+     * pointing into the snapshot's directory.
+     */
+    rebind?: boolean;
+  } = {},
 ): Promise<{ bytesWritten: number; sourceBytes: number }> {
   const database = s.getDb();
+  // Screenshots sit beside the document rather than inside the archive, so
+  // saving has to bring them along and re-point the rows at the new sidecar
+  // — otherwise the saved copy names a directory that belongs to the
+  // previous location and its Screenshot tab comes up blank. Covers the
+  // first save too: captures taken while unsaved live in the userData
+  // scratch sidecar. Runs BEFORE the snapshot below so the archive carries
+  // the rewritten paths.
+  const previousShotDir = activeScreenshotDir(s);
+  const nextShotDir = screenshotDirFor(documentPath);
+  if (
+    opts.rebind !== false &&
+    previousShotDir &&
+    previousShotDir !== nextShotDir &&
+    existsSync(previousShotDir)
+  ) {
+    try {
+      cpSync(previousShotDir, nextShotDir, { recursive: true });
+      database.remapScreenshotDir(previousShotDir, nextShotDir);
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `Could not move the screenshots sidecar to ${nextShotDir}: ${
+          err instanceof Error ? err.message : String(err)
+        } — the saved project will have no screenshots.`,
+      );
+    }
+  }
   try {
     database.walCheckpoint();
   } catch {
@@ -3139,8 +3228,15 @@ function registerIpc(): void {
   registerHandle(
     IPC.logAnalyze,
     async (e, input: LogAnalyzeInput): Promise<LogAnalyzeResult> => {
-      let filePath = input?.filePath;
-      if (!filePath) {
+      // Resolve the file list: explicit `filePaths` (bulk) wins, then a single
+      // `filePath`, then a multi-select picker.
+      let filePaths =
+        input?.filePaths && input.filePaths.length > 0
+          ? input.filePaths
+          : input?.filePath
+            ? [input.filePath]
+            : undefined;
+      if (!filePaths) {
         const parent =
           BrowserWindow.fromWebContents(e.sender) ?? logAnalyzerWindow ?? mainWindow;
         if (!parent) {
@@ -3148,7 +3244,7 @@ function registerIpc(): void {
         }
         const res = await dialog.showOpenDialog(parent, {
           title: L().dlgOpenAccessLogTitle,
-          properties: ['openFile'],
+          properties: ['openFile', 'multiSelections'],
           filters: [
             { name: 'Log Files', extensions: ['log', 'txt', 'gz', 'out', 'access'] },
             { name: 'All Files', extensions: ['*'] },
@@ -3157,30 +3253,52 @@ function registerIpc(): void {
         if (res.canceled || res.filePaths.length === 0) {
           return { ok: false, error: undefined, imported: null, overview: getDb().getLogOverview() };
         }
-        filePath = res.filePaths[0]!;
+        filePaths = res.filePaths;
       }
-      try {
-        const result = await analyzeLogFile(filePath, {
-          format: input?.format ?? 'auto',
-          customRegex: input?.customRegex,
-          verifyBots: input?.verifyBots === true,
-        });
-        const imported = ingestLogResult(filePath, result);
-        if (result.urlCapHit) {
-          logger.log('warn', 'main', `Log Analyzer: distinct-URL cap hit while ingesting ${basename(filePath)}; some long-tail URLs were dropped.`);
+      // Ingest each file in turn; one bad file must not abort the batch.
+      const batch: LogImportSummary[] = [];
+      const errors: Array<{ fileName: string; error: string }> = [];
+      for (const filePath of filePaths) {
+        try {
+          const result = await analyzeLogFile(filePath, {
+            format: input?.format ?? 'auto',
+            customRegex: input?.customRegex,
+            verifyBots: input?.verifyBots === true,
+          });
+          batch.push(ingestLogResult(filePath, result));
+          if (result.urlCapHit) {
+            logger.log('warn', 'main', `Log Analyzer: distinct-URL cap hit while ingesting ${basename(filePath)}; some long-tail URLs were dropped.`);
+          }
+          logger.log(
+            'info',
+            'main',
+            `Log Analyzer ingested ${basename(filePath)} (${result.format}): ${result.parsedLines}/${result.totalLines} lines, ${result.bots.size} bot type(s).`,
+          );
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          logger.log('warn', 'main', `Log Analyzer failed on ${filePath}: ${error}`);
+          errors.push({ fileName: basename(filePath), error });
         }
-        logger.log(
-          'info',
-          'main',
-          `Log Analyzer ingested ${basename(filePath)} (${result.format}): ${result.parsedLines}/${result.totalLines} lines, ${result.bots.size} bot type(s).`,
-        );
-        fireDataChanged();
-        return { ok: true, imported, overview: getDb().getLogOverview() };
-      } catch (err) {
-        const error = err instanceof Error ? err.message : String(err);
-        logger.log('warn', 'main', `Log Analyzer failed on ${filePath}: ${error}`);
-        return { ok: false, error, imported: null, overview: getDb().getLogOverview() };
       }
+      fireDataChanged();
+      const overview = getDb().getLogOverview();
+      if (batch.length === 0) {
+        return {
+          ok: false,
+          error: errors[0]?.error ?? 'No log files could be ingested.',
+          imported: null,
+          batch: [],
+          errors,
+          overview,
+        };
+      }
+      return {
+        ok: true,
+        imported: batch[0] ?? null,
+        batch,
+        errors: errors.length > 0 ? errors : undefined,
+        overview,
+      };
     },
   );
 
@@ -3271,9 +3389,11 @@ function registerIpc(): void {
       // naive startsWith() lets `<root>/../../../etc/passwd` pass.
       const resolved = resolvePath(absolutePath);
       const allowedRoots: string[] = [];
-      if (currentSession().currentProjectPath) {
-        const dir = resolveScreenshotDir(currentSession().currentProjectPath);
-        if (dir) allowedRoots.push(resolvePath(dir));
+      const sess = currentSession();
+      // Both sidecars: the document's own, and the working/scratch one —
+      // rows captured before the project was ever saved point at the latter.
+      for (const base of [sess.currentProjectPath, sess.scratchPath]) {
+        if (base) allowedRoots.push(resolvePath(screenshotDirFor(base)));
       }
       // Append the separator so that `<root>` doesn't match `<root>2`.
       const safe = allowedRoots.some(
@@ -3733,12 +3853,20 @@ function registerIpc(): void {
 
   registerHandle(
     IPC.reportsOrphanCrossSource,
-    (_e, limit?: number): Promise<OrphanCrossSourceRow[]> =>
-      callReaderOrFallback<OrphanCrossSourceRow[]>(
+    (_e, limit?: number): Promise<OrphanCrossSourceRow[]> => {
+      // Scoped to the project's selected accounts — the cross-source
+      // joins are only 1:1 when pinned to one GSC + one GA4 account.
+      const args: [number, string, string] = [
+        limit ?? 1000,
+        resolveGoogleAccount('gsc'),
+        resolveGoogleAccount('ga4'),
+      ];
+      return callReaderOrFallback<OrphanCrossSourceRow[]>(
         'orphanPagesCrossSource',
-        [limit ?? 1000],
-        () => getDb().orphanPagesCrossSource(limit ?? 1000),
-      ),
+        args,
+        () => getDb().orphanPagesCrossSource(...args),
+      );
+    },
   );
 
   registerHandle(IPC.reportsServerHeaders, () =>
@@ -3898,6 +4026,19 @@ function registerIpc(): void {
     if (id === 'languagetool') clearSupportedLanguagesCache();
     return clearIntegrationCredentials(id);
   });
+
+  // Per-project, per-integration behaviour settings (date ranges, filter
+  // options, "crawl new URLs"). Stored as a JSON blob in project_meta
+  // under `integrationSettings:<id>` — separate from the encrypted,
+  // app-global credential store above.
+  registerHandle(IPC.integrationSettingsGet, (_e, id: string) =>
+    readIntegrationSettings(id),
+  );
+  registerHandle(
+    IPC.integrationSettingsSet,
+    (_e, id: string, settings: Record<string, unknown>) =>
+      writeIntegrationSettings(id, settings),
+  );
 
   // V1 Faz 7 — Google PageSpeed Insights. `pagespeedQuery` lists the
   // crawled internal HTML pages joined with any stored audit results;
@@ -4494,7 +4635,8 @@ function registerIpc(): void {
   );
   registerHandle(
     IPC.googleAuthRevoke,
-    (_e, id: string): Promise<GoogleAuthState> => revokeAuth(id),
+    (_e, id: string, accountId?: string): Promise<GoogleAuthState> =>
+      revokeAuth(id, accountId),
   );
 
   // V1 Faz 7 — Google Search Console. `gscFetch` pulls per-page metrics
@@ -4502,9 +4644,10 @@ function registerIpc(): void {
   // `gscQuery` lists crawled pages joined with that data.
   registerHandle(
     IPC.gscListSites,
-    async (): Promise<GscListSitesResult> => {
+    async (_e, accountId?: string): Promise<GscListSitesResult> => {
       try {
-        return { ok: true, error: null, sites: await listSites() };
+        const account = resolveGoogleAccount('gsc', accountId);
+        return { ok: true, error: null, sites: await listSites(account) };
       } catch (err) {
         return {
           ok: false,
@@ -4513,6 +4656,10 @@ function registerIpc(): void {
         };
       }
     },
+  );
+  registerHandle(
+    IPC.googleAccountsList,
+    (_e, integrationId: string): GoogleAccount[] => listAccounts(integrationId),
   );
   registerHandle(
     IPC.gscFetch,
@@ -4525,23 +4672,27 @@ function registerIpc(): void {
           meta: null,
         };
       }
-      // Search Console data lags ~2 days — end the window there and
-      // span `days` back so the range only covers data that exists.
-      const isoDate = (d: Date): string => d.toISOString().slice(0, 10);
-      const end = new Date(Date.now() - 2 * 86_400_000);
-      const start = new Date(end.getTime() - (input.days - 1) * 86_400_000);
-      const startDate = isoDate(start);
-      const endDate = isoDate(end);
-      // Pin the DB to the project active when the pull started.
+      // The date range + dimension filters + row cap come from the stored
+      // per-project GSC settings (Settings → Integrations). Persist the
+      // property the user pulled from so it's remembered next session.
+      const settings = resolveGscSettings();
+      const accountId = resolveGoogleAccount('gsc', input.accountId);
+      writeIntegrationSettings('gsc', { property: input.property, accountId });
+      const { startDate, endDate } = resolveGscDateRange(settings);
+      const queryOpts = buildGscQueryOptions(settings);
+      // Pin the DB + session to the project active when the pull started.
       const runDb = getDb();
+      const runSession = currentSession();
       try {
         const rows = await querySearchAnalytics(
           input.property,
           startDate,
           endDate,
+          queryOpts,
+          accountId,
         );
         const fetchedAt = new Date().toISOString();
-        runDb.replaceGscResults(rows, fetchedAt);
+        runDb.replaceGscResults(rows, fetchedAt, accountId);
         const meta: GscFetchMeta = {
           property: input.property,
           startDate,
@@ -4549,14 +4700,38 @@ function registerIpc(): void {
           fetchedAt,
           rowCount: rows.length,
         };
-        runDb.setMeta('gscFetchMeta', JSON.stringify(meta));
+        runDb.setMeta(googleMetaKey('gscFetchMeta', accountId), JSON.stringify(meta));
         fireDataChanged();
         logger.log(
           'info',
           'gsc',
           `Search Console pull stored — ${rows.length} page row(s)`,
         );
-        return { ok: true, error: null, rowCount: rows.length, meta };
+        // How many GSC URLs are missing from the crawl — the candidates
+        // for "Crawl New URLs Discovered In Google Search Console".
+        const orphans = runDb.gscOrphanUrls({
+          matchSlash: settings.matchSlash,
+          matchCase: settings.matchCase,
+          accountId,
+        });
+        let queuedNewUrls = 0;
+        if (settings.crawlNewUrls && orphans.length > 0) {
+          await launchRespider(runSession, orphans);
+          queuedNewUrls = orphans.length;
+          logger.log(
+            'info',
+            'gsc',
+            `Crawling ${orphans.length} new URL(s) discovered in Search Console`,
+          );
+        }
+        return {
+          ok: true,
+          error: null,
+          rowCount: rows.length,
+          meta,
+          newUrlCount: orphans.length,
+          queuedNewUrls,
+        };
       } catch (err) {
         return {
           ok: false,
@@ -4568,13 +4743,46 @@ function registerIpc(): void {
     },
   );
   registerHandle(
+    IPC.gscCrawlNewUrls,
+    async (): Promise<GscCrawlNewUrlsResult> => {
+      const settings = resolveGscSettings();
+      const runSession = currentSession();
+      try {
+        const orphans = getDb().gscOrphanUrls({
+          matchSlash: settings.matchSlash,
+          matchCase: settings.matchCase,
+          accountId: resolveGoogleAccount('gsc'),
+        });
+        const hasActiveCrawl = runSession.activeCrawler?.isRunning === true;
+        if (orphans.length > 0) await launchRespider(runSession, orphans);
+        return {
+          ok: true,
+          error: null,
+          candidateCount: orphans.length,
+          queued: orphans.length,
+          hasActiveCrawl,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          candidateCount: 0,
+          queued: 0,
+          hasActiveCrawl: false,
+        };
+      }
+    },
+  );
+  registerHandle(
     IPC.gscQuery,
     async (_e, input: GscQueryInput): Promise<GscQueryResult> => {
+      const accountId = resolveGoogleAccount('gsc', input.accountId);
       const params = {
         limit: input.limit,
         offset: input.offset,
         search: input.search,
         filter: input.filter,
+        accountId,
       };
       const result = await callReaderOrFallback<{
         rows: GscQueryResult['rows'];
@@ -4582,7 +4790,7 @@ function registerIpc(): void {
       }>('queryGsc', [params], () => getDb().queryGsc(params));
       let meta: GscFetchMeta | null = null;
       try {
-        const raw = getDb().getMeta('gscFetchMeta');
+        const raw = getDb().getMeta(googleMetaKey('gscFetchMeta', accountId));
         if (raw) meta = JSON.parse(raw) as GscFetchMeta;
       } catch {
         /* no / corrupt meta — render without the context line */
@@ -4596,9 +4804,14 @@ function registerIpc(): void {
   // stored data. Auth runs through the shared OAuth keystone.
   registerHandle(
     IPC.ga4ListProperties,
-    async (): Promise<Ga4ListPropertiesResult> => {
+    async (_e, accountId?: string): Promise<Ga4ListPropertiesResult> => {
       try {
-        return { ok: true, error: null, properties: await ga4ListProperties() };
+        const account = resolveGoogleAccount('ga4', accountId);
+        return {
+          ok: true,
+          error: null,
+          properties: await ga4ListProperties(account),
+        };
       } catch (err) {
         return {
           ok: false,
@@ -4626,10 +4839,22 @@ function registerIpc(): void {
       const startDate = isoDate(start);
       const endDate = isoDate(end);
       const runDb = getDb();
+      const accountId = resolveGoogleAccount('ga4', input.accountId);
+      writeIntegrationSettings('ga4', {
+        accountId,
+        property: input.property,
+        propertyName: input.propertyName || input.property,
+        days: input.days,
+      });
       try {
-        const rows = await ga4RunReport(input.property, startDate, endDate);
+        const rows = await ga4RunReport(
+          input.property,
+          startDate,
+          endDate,
+          accountId,
+        );
         const fetchedAt = new Date().toISOString();
-        runDb.replaceGa4Results(rows, fetchedAt);
+        runDb.replaceGa4Results(rows, fetchedAt, accountId);
         const meta: Ga4FetchMeta = {
           property: input.property,
           propertyName: input.propertyName || input.property,
@@ -4638,7 +4863,7 @@ function registerIpc(): void {
           fetchedAt,
           rowCount: rows.length,
         };
-        runDb.setMeta('ga4FetchMeta', JSON.stringify(meta));
+        runDb.setMeta(googleMetaKey('ga4FetchMeta', accountId), JSON.stringify(meta));
         fireDataChanged();
         logger.log(
           'info',
@@ -4659,11 +4884,13 @@ function registerIpc(): void {
   registerHandle(
     IPC.ga4Query,
     async (_e, input: Ga4QueryInput): Promise<Ga4QueryResult> => {
+      const accountId = resolveGoogleAccount('ga4', input.accountId);
       const params = {
         limit: input.limit,
         offset: input.offset,
         search: input.search,
         filter: input.filter,
+        accountId,
       };
       const result = await callReaderOrFallback<{
         rows: Ga4QueryResult['rows'];
@@ -4671,7 +4898,7 @@ function registerIpc(): void {
       }>('queryGa4', [params], () => getDb().queryGa4(params));
       let meta: Ga4FetchMeta | null = null;
       try {
-        const raw = getDb().getMeta('ga4FetchMeta');
+        const raw = getDb().getMeta(googleMetaKey('ga4FetchMeta', accountId));
         if (raw) meta = JSON.parse(raw) as Ga4FetchMeta;
       } catch {
         /* no / corrupt meta — render without the context line */
@@ -5050,6 +5277,7 @@ function registerIpc(): void {
         return { completed: 0, failed: 0, cancelled: false };
       }
       const runDb = runSession.getDb();
+      const inspectAccountId = resolveGoogleAccount('gsc', input.accountId);
       run.active = true;
       run.cancelRequested = false;
       let completed = 0;
@@ -5077,14 +5305,14 @@ function registerIpc(): void {
           });
           const fetchedAt = new Date().toISOString();
           try {
-            const raw = await inspectUrl(input.property, url);
+            const raw = await inspectUrl(input.property, url, inspectAccountId);
             const result: GscInspectionResult = {
               ...raw,
               status: 'ok',
               error: null,
               fetchedAt,
             };
-            runDb.upsertGscInspection(url, result);
+            runDb.upsertGscInspection(url, result, inspectAccountId);
             completed++;
           } catch (err) {
             runDb.upsertGscInspection(url, {
@@ -5095,10 +5323,13 @@ function registerIpc(): void {
               lastCrawlTime: null,
               googleCanonical: null,
               userCanonical: null,
+              mobileVerdict: null,
+              ampVerdict: null,
+              richResultsVerdict: null,
               status: 'error',
               error: err instanceof Error ? err.message : String(err),
               fetchedAt,
-            });
+            }, inspectAccountId);
             failed++;
           }
           done++;
@@ -5165,10 +5396,17 @@ function registerIpc(): void {
     IPC.urlAnalyticsGet,
     async (_e, url: string): Promise<UrlAnalyticsDetail | null> => {
       if (!url) return null;
+      // Scoped to the project's selected accounts so the panel agrees
+      // with what the Search Console / GA4 tabs are showing.
+      const args: [string, string, string] = [
+        url,
+        resolveGoogleAccount('gsc'),
+        resolveGoogleAccount('ga4'),
+      ];
       return callReaderOrFallback<UrlAnalyticsDetail | null>(
         'getUrlAnalytics',
-        [url],
-        () => getDb().getUrlAnalytics(url),
+        args,
+        () => getDb().getUrlAnalytics(...args),
       );
     },
   );
@@ -5527,7 +5765,7 @@ function registerIpc(): void {
           renderHook = undefined;
         }
       }
-      const screenshotDir = resolveScreenshotDir(currentSession().currentProjectPath);
+      const screenshotDir = activeScreenshotDir(sess);
       const wantsScreenshot = config.jsRender.screenshotMode !== 'none';
       const wantsMobile =
         config.jsRender.mobileScreenshot || config.jsRender.mobileUsability;
@@ -5684,6 +5922,129 @@ function registerIpc(): void {
    * different site is being crawled, and the re-spider must never read as
    * one.
    */
+  /** project_meta key for one integration's per-project settings blob. */
+  function integrationSettingsKey(id: string): string {
+    return `integrationSettings:${id}`;
+  }
+
+  /** Read one integration's stored settings blob (or null). */
+  function readIntegrationSettings(
+    id: string,
+  ): Record<string, unknown> | null {
+    const raw = getDb().getMeta(integrationSettingsKey(id));
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === 'object'
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Merge-save one integration's settings blob; returns the merged result. */
+  function writeIntegrationSettings(
+    id: string,
+    settings: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const merged = { ...(readIntegrationSettings(id) ?? {}), ...settings };
+    getDb().setMeta(integrationSettingsKey(id), JSON.stringify(merged));
+    return merged;
+  }
+
+  /** Resolve the effective GSC settings (defaults + stored overrides). */
+  function resolveGscSettings(): GscIntegrationSettings {
+    return {
+      ...defaultGscSettings(),
+      ...(readIntegrationSettings('gsc') ?? {}),
+    } as GscIntegrationSettings;
+  }
+
+  /** Resolve the effective GA4 settings (defaults + stored overrides). */
+  function resolveGa4Settings(): Ga4IntegrationSettings {
+    return {
+      ...defaultGa4Settings(),
+      ...(readIntegrationSettings('ga4') ?? {}),
+    } as Ga4IntegrationSettings;
+  }
+
+  /**
+   * Which linked Google account a call should act on. An explicit id from
+   * the caller wins, then the project's stored choice, then the first
+   * linked account (what every pre-multi-account project means).
+   *
+   * Also folds in the legacy-row adoption: the first time an account is
+   * resolved for an integration, any rows still tagged `account_id = ''`
+   * — written before multi-account existed — are relabelled to it, so an
+   * upgraded project keeps the data it already pulled.
+   */
+  function resolveGoogleAccount(
+    integrationId: 'gsc' | 'ga4',
+    requested?: string,
+  ): string {
+    const stored =
+      integrationId === 'gsc'
+        ? resolveGscSettings().accountId
+        : resolveGa4Settings().accountId;
+    const accountId = resolveAccountId(integrationId, requested || stored) ?? '';
+    if (accountId) adoptLegacyRowsOnce(integrationId, accountId);
+    return accountId;
+  }
+
+  /**
+   * `project_meta` key holding the last pull's metadata for one account.
+   * Pre-multi-account projects stored it under the bare base key; that
+   * row is moved across during legacy adoption.
+   */
+  function googleMetaKey(base: string, accountId: string): string {
+    return accountId ? `${base}:${accountId}` : base;
+  }
+
+  /** Projects whose legacy rows have already been adopted this session. */
+  const legacyAdopted = new Set<string>();
+
+  function adoptLegacyRowsOnce(
+    integrationId: 'gsc' | 'ga4',
+    accountId: string,
+  ): void {
+    const sess = currentSession();
+    const marker = `${sess.currentProjectPath || 'default'}:${integrationId}:${accountId}`;
+    if (legacyAdopted.has(marker)) return;
+    legacyAdopted.add(marker);
+    try {
+      const db = sess.getDb();
+      const tables =
+        integrationId === 'gsc'
+          ? ['gsc_results', 'gsc_inspection_results']
+          : ['ga4_results'];
+      let moved = 0;
+      for (const table of tables) {
+        moved += db.adoptLegacyGoogleRows(table, accountId);
+      }
+      // Move the matching fetch-meta row so the tab's context line
+      // ("property · range · fetched N ago") survives the upgrade too.
+      const metaBase = integrationId === 'gsc' ? 'gscFetchMeta' : 'ga4FetchMeta';
+      const legacyMeta = db.getMeta(metaBase);
+      if (legacyMeta && !db.getMeta(googleMetaKey(metaBase, accountId))) {
+        db.setMeta(googleMetaKey(metaBase, accountId), legacyMeta);
+      }
+      if (moved > 0) {
+        logger.log(
+          'info',
+          integrationId,
+          `Adopted ${moved} pre-multi-account row(s) into the connected account`,
+        );
+      }
+    } catch (err) {
+      logger.log(
+        'warn',
+        integrationId,
+        `legacy row adoption skipped: ${(err as Error).message}`,
+      );
+    }
+  }
+
   async function launchRespider(sess: ProjectSession, urls: string[]): Promise<void> {
     if (urls.length === 0) return;
     const db = sess.getDb();
@@ -5719,18 +6080,6 @@ function registerIpc(): void {
       startUrl: seed,
     };
     await launchCrawl(respiderConfig, { respiderSeeds: urls, session: sess });
-  }
-
-  /**
-   * V2 Faz 1 — Resolve the per-project screenshots sidecar directory.
-   * Lives alongside the `.seoproject` file as `<project>.screenshots/`
-   * so it tracks with Save As / move operations.
-   */
-  function resolveScreenshotDir(projectPath: string): string | null {
-    if (!projectPath) return null;
-    const dir = dirname(projectPath);
-    const base = basename(projectPath);
-    return join(dir, `${base}.screenshots`);
   }
 
   /**
@@ -6203,9 +6552,13 @@ function registerIpc(): void {
     // batches with progress events + cancellation flags; those stay
     // desktop-only until a polling tool pattern is designed.
 
-    'gsc-list-sites': async () => {
+    'gsc-list-sites': async (input) => {
       try {
-        return { ok: true, error: null, sites: await listSites() };
+        const account = resolveGoogleAccount(
+          'gsc',
+          (input as { accountId?: string } | undefined)?.accountId,
+        );
+        return { ok: true, error: null, sites: await listSites(account) };
       } catch (err) {
         return {
           ok: false,
@@ -6235,10 +6588,17 @@ function registerIpc(): void {
       const startDate = isoDate(start);
       const endDate = isoDate(end);
       const runDb = getDb();
+      const accountId = resolveGoogleAccount('gsc', i.accountId);
       try {
-        const rows = await querySearchAnalytics(i.property, startDate, endDate);
+        const rows = await querySearchAnalytics(
+          i.property,
+          startDate,
+          endDate,
+          {},
+          accountId,
+        );
         const fetchedAt = new Date().toISOString();
-        runDb.replaceGscResults(rows, fetchedAt);
+        runDb.replaceGscResults(rows, fetchedAt, accountId);
         const meta = {
           property: i.property,
           startDate,
@@ -6246,7 +6606,7 @@ function registerIpc(): void {
           fetchedAt,
           rowCount: rows.length,
         };
-        runDb.setMeta('gscFetchMeta', JSON.stringify(meta));
+        runDb.setMeta(googleMetaKey('gscFetchMeta', accountId), JSON.stringify(meta));
         fireDataChanged();
         return { ok: true, error: null, rowCount: rows.length, meta };
       } catch (err) {
@@ -6259,9 +6619,17 @@ function registerIpc(): void {
       }
     },
 
-    'ga4-list-properties': async () => {
+    'ga4-list-properties': async (input) => {
       try {
-        return { ok: true, error: null, properties: await ga4ListProperties() };
+        const account = resolveGoogleAccount(
+          'ga4',
+          (input as { accountId?: string } | undefined)?.accountId,
+        );
+        return {
+          ok: true,
+          error: null,
+          properties: await ga4ListProperties(account),
+        };
       } catch (err) {
         return {
           ok: false,
@@ -6290,10 +6658,16 @@ function registerIpc(): void {
       const startDate = isoDate(start);
       const endDate = isoDate(end);
       const runDb = getDb();
+      const accountId = resolveGoogleAccount('ga4', i.accountId);
       try {
-        const rows = await ga4RunReport(i.property, startDate, endDate);
+        const rows = await ga4RunReport(
+          i.property,
+          startDate,
+          endDate,
+          accountId,
+        );
         const fetchedAt = new Date().toISOString();
-        runDb.replaceGa4Results(rows, fetchedAt);
+        runDb.replaceGa4Results(rows, fetchedAt, accountId);
         const meta = {
           property: i.property,
           propertyName: i.propertyName || i.property,
@@ -6302,7 +6676,7 @@ function registerIpc(): void {
           fetchedAt,
           rowCount: rows.length,
         };
-        runDb.setMeta('ga4FetchMeta', JSON.stringify(meta));
+        runDb.setMeta(googleMetaKey('ga4FetchMeta', accountId), JSON.stringify(meta));
         fireDataChanged();
         return { ok: true, error: null, rowCount: rows.length, meta };
       } catch (err) {
@@ -6673,7 +7047,7 @@ function registerIpc(): void {
       const sess = currentSession();
       const wasDirty = sess.dirty;
       const boundPath = sess.currentProjectPath;
-      const result = await saveProjectDocument(sess, target);
+      const result = await saveProjectDocument(sess, target, { rebind: false });
       // Restore the binding: this was a snapshot, not a Save As.
       sess.currentProjectPath = boundPath;
       sess.dirty = wasDirty;
@@ -7712,27 +8086,53 @@ function registerIpc(): void {
     async (): Promise<CrashRecoveryStatus> => {
       // Read from the in-memory snapshot we captured before
       // `db.reset()` wiped the previous session's data.
-      if (currentSession().pendingRecoveryCheckpoint.length === 0) {
-        return { pendingCount: 0, seedUrl: '' };
+      const sess = currentSession();
+      if (sess.pendingRecoveryCheckpoint.length === 0) {
+        return { pendingCount: 0, seedUrl: '', mode: 'spider' };
       }
+      const mode = sess.lastCrawlConfig?.mode ?? 'spider';
+      // Show what the crawl was actually pointed at. A List/Sitemap run
+      // checkpoints the first URL of its list rather than its own seed
+      // (see the resume handler), so quoting it back would name a random
+      // content page as the "start URL" of a sitemap crawl.
+      const seedUrl =
+        mode === 'spider'
+          ? (sess.pendingRecoveryCheckpoint[0]?.seedUrl ?? '')
+          : (sess.lastCrawlConfig?.startUrl ?? '');
       return {
-        pendingCount: currentSession().pendingRecoveryCheckpoint.length,
-        seedUrl: currentSession().pendingRecoveryCheckpoint[0]?.seedUrl ?? '',
+        pendingCount: sess.pendingRecoveryCheckpoint.length,
+        seedUrl,
+        mode,
       };
     },
   );
 
   registerHandle(
     IPC.crashRecoveryResume,
-    async (): Promise<{ accepted: boolean }> => {
+    async (): Promise<CrashRecoveryResumeResult> => {
       const sess = currentSession();
-      if (sess.activeCrawler) return { accepted: false };
-      if (sess.pendingRecoveryCheckpoint.length === 0) return { accepted: false };
+      if (sess.activeCrawler) return { accepted: false, config: null };
+      if (sess.pendingRecoveryCheckpoint.length === 0)
+        return { accepted: false, config: null };
       const seedUrl = sess.pendingRecoveryCheckpoint[0]?.seedUrl ?? '';
-      if (!seedUrl) return { accepted: false };
       const savedCfg = sess.lastCrawlConfig;
-      const cfg = savedCfg ? { ...savedCfg, startUrl: seedUrl } : null;
-      if (!cfg) return { accepted: false };
+      if (!savedCfg) return { accepted: false, config: null };
+      // Spider mode checkpoints the *resolved* start URL (post-redirect),
+      // which is also what `project_meta.startUrl` holds — taking it from
+      // the checkpoint is what stops the resume from reading as a different
+      // site and wiping the project. List/Sitemap runs rewrite
+      // `config.startUrl` to the first URL of their list before the first
+      // checkpoint tick, so their seed is a content page, not a start URL:
+      // resuming with it would hand a plain HTML page to the sitemap parser
+      // and fail. Their saved config already carries the right value.
+      const cfg =
+        savedCfg.mode === 'spider' && seedUrl
+          ? { ...savedCfg, startUrl: seedUrl }
+          : savedCfg;
+      // List mode seeds from `urlList`, so only the other two need a URL.
+      if (cfg.mode !== 'list' && !cfg.startUrl.trim()) {
+        return { accepted: false, config: null };
+      }
       const crawler = new Crawler(cfg, sess.getDb(), {
         setOp: (op: string) => freezeWatchdog.setMainOp(op),
         parseHtml: parseHtmlViaPool,
@@ -7755,7 +8155,11 @@ function registerIpc(): void {
       sess.pendingRecoveryCheckpoint = [];
       crawler.enqueueCheckpointed(items);
       void crawler.start();
-      return { accepted: true };
+      // Hand the config back so the toolbar can adopt the crawl that is
+      // now actually running. Without this the renderer keeps the blank
+      // Spider defaults it booted with, and a Sitemap/List resume reads
+      // as "it didn't continue where it left off".
+      return { accepted: true, config: cfg };
     },
   );
 

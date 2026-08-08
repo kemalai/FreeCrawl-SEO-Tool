@@ -1,12 +1,17 @@
 /**
  * Shared SharedArrayBuffer layout for the freeze watchdog.
  *
- * Three execution contexts read/write to the same SAB:
+ * Four execution contexts read/write to the same SAB:
  *   1. The Electron main process (the writer for `mainHB`, counters,
  *      `mainOp`, and rendererLag forwarded from IPC).
- *   2. The db-reader worker thread (writes its own `readerHB` and
+ *   2. The db-reader worker threads (write their own `readerHB` and
  *      `readerOp`).
- *   3. The freeze-watchdog worker thread (reads everything; writes
+ *   3. The db-writer worker thread (writes `writerHB` and `writerOp`).
+ *      It used to publish into the *reader* op slot without ever
+ *      ticking the reader heartbeat, so a reader-pool stall could be
+ *      logged with a writer's method name attached to it and the writer
+ *      itself was invisible to the watchdog.
+ *   4. The freeze-watchdog worker thread (reads everything; writes
  *      nothing — its job is purely observational).
  *
  * All scalar reads/writes use `Atomics.{load,store}` so the watchdog
@@ -18,11 +23,11 @@
  * thread is alive, and that IS atomic.
  *
  * Layout (1024 bytes total, generous for future fields):
- *   [0..32)    BigInt64Array(4)  — heartbeat timestamps + spare
+ *   [0..32)    BigInt64Array(4)  — heartbeat timestamps
  *      [0]    main heartbeat (ms since epoch)
  *      [1]    db-reader heartbeat
  *      [2]    last renderer lag-report timestamp
- *      [3]    spare
+ *      [3]    db-writer heartbeat
  *   [32..96)   Int32Array(16)    — counters + op-string lengths
  *      [0]    renderer lag (ms)
  *      [1]    crawled
@@ -31,10 +36,12 @@
  *      [4]    failed
  *      [5]    main op string byte length
  *      [6]    reader op string byte length
- *      [7..15] spare
+ *      [7]    writer op string byte length
+ *      [8..15] spare
  *   [96..)     Uint8Array        — op string bytes (UTF-8)
  *      [0..256)    main op
  *      [256..512)  reader op
+ *      [512..768)  writer op
  */
 
 const I64_BYTE_OFFSET = 0;
@@ -45,11 +52,13 @@ const U8_BYTE_OFFSET = 96;
 
 const MAIN_OP_OFFSET_IN_U8 = 0;
 const READER_OP_OFFSET_IN_U8 = 256;
+const WRITER_OP_OFFSET_IN_U8 = 512;
 const OP_MAX_BYTES = 255;
 
 const I64_IDX_MAIN_HB = 0;
 const I64_IDX_READER_HB = 1;
 const I64_IDX_RENDERER_REPORT_TS = 2;
+const I64_IDX_WRITER_HB = 3;
 
 const I32_IDX_RENDERER_LAG = 0;
 const I32_IDX_CRAWLED = 1;
@@ -58,6 +67,7 @@ const I32_IDX_PENDING = 3;
 const I32_IDX_FAILED = 4;
 const I32_IDX_MAIN_OP_LEN = 5;
 const I32_IDX_READER_OP_LEN = 6;
+const I32_IDX_WRITER_OP_LEN = 7;
 
 export const SAB_BYTE_LENGTH = 1024;
 
@@ -106,6 +116,10 @@ export class FreezeWatchdogSharedState {
     Atomics.store(this.i64, I64_IDX_READER_HB, BigInt(Date.now()));
   }
 
+  tickWriterHeartbeat(): void {
+    Atomics.store(this.i64, I64_IDX_WRITER_HB, BigInt(Date.now()));
+  }
+
   reportRendererLag(lagMs: number): void {
     Atomics.store(this.i32, I32_IDX_RENDERER_LAG, lagMs | 0);
     Atomics.store(this.i64, I64_IDX_RENDERER_REPORT_TS, BigInt(Date.now()));
@@ -117,6 +131,10 @@ export class FreezeWatchdogSharedState {
 
   setReaderOp(op: string): void {
     this.writeOpString(op, READER_OP_OFFSET_IN_U8, I32_IDX_READER_OP_LEN);
+  }
+
+  setWriterOp(op: string): void {
+    this.writeOpString(op, WRITER_OP_OFFSET_IN_U8, I32_IDX_WRITER_OP_LEN);
   }
 
   updateCounters(c: CounterPatch): void {
@@ -144,6 +162,10 @@ export class FreezeWatchdogSharedState {
     return Number(Atomics.load(this.i64, I64_IDX_READER_HB));
   }
 
+  readWriterHeartbeatMs(): number {
+    return Number(Atomics.load(this.i64, I64_IDX_WRITER_HB));
+  }
+
   readRendererReportTsMs(): number {
     return Number(Atomics.load(this.i64, I64_IDX_RENDERER_REPORT_TS));
   }
@@ -167,6 +189,10 @@ export class FreezeWatchdogSharedState {
 
   readReaderOp(): string {
     return this.readOpString(READER_OP_OFFSET_IN_U8, I32_IDX_READER_OP_LEN);
+  }
+
+  readWriterOp(): string {
+    return this.readOpString(WRITER_OP_OFFSET_IN_U8, I32_IDX_WRITER_OP_LEN);
   }
 
   // ── Internals ─────────────────────────────────────────────────────
