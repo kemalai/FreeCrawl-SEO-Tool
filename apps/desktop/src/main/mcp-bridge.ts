@@ -48,93 +48,147 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { randomBytes } from 'node:crypto';
 import { writeFileSync, unlinkSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { CrawlConfig, CrawlProgress } from '@freecrawl/shared-types';
+import type {
+  BridgeCapabilities,
+  BridgeErrorBody,
+  BridgeErrorCode,
+  BridgeProgressResult,
+  BridgeSessionCloseInput,
+  BridgeSessionCloseResult,
+  BridgeSessionCreateInput,
+  BridgeSessionCreateResult,
+  BridgeSessionInfo,
+  BridgeSessionSaveInput,
+  BridgeSessionSaveResult,
+  McpStartCrawlInput,
+  McpStartCrawlResult,
+} from '@freecrawl/shared-types';
+import {
+  BRIDGE_CLIENT_HEADER,
+  BRIDGE_SESSION_HEADER,
+  PRIMARY_SESSION_ID,
+} from '@freecrawl/shared-types';
+
+/** Which client + session an incoming request is acting on. Parsed from the
+ *  `X-FreeCrawl-*` headers; a headerless (v1) request targets `primary` with
+ *  a null client so single-client setups keep working unchanged. */
+export interface BridgeRequestContext {
+  sessionId: string;
+  clientId: string | null;
+}
+
+/** Either a typed error the route should surface, or a success value `T`. */
+export type BridgeResult<T> = T | BridgeErrorBody;
+
+function isBridgeError(v: unknown): v is BridgeErrorBody {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    'error' in v &&
+    'message' in v &&
+    typeof (v as { message: unknown }).message === 'string'
+  );
+}
+
+/** Map each error code to its HTTP status. */
+const ERROR_STATUS: Record<BridgeErrorCode, number> = {
+  'crawl-in-progress': 409,
+  'crawl-not-owned': 409,
+  'session-not-found': 404,
+  'session-expired': 410,
+  'session-limit-reached': 429,
+  'project-locked': 409,
+  'invalid-project-path': 400,
+  'unsupported-feature': 501,
+  'queue-timeout': 504,
+  'bad-request': 400,
+  'internal-error': 500,
+};
 
 /**
  * Functions the bridge needs from the main process. Wired by the
  * caller (`index.ts`) at startup — the bridge module stays
  * decoupled from the global desktop state.
+ *
+ * Protocol v2 (Issue #12): every crawl-control call carries a
+ * `BridgeRequestContext` so the main process can route it to the right
+ * session and enforce lease ownership. A dep may return a `BridgeErrorBody`
+ * instead of its success value; the route surfaces it with the mapped
+ * HTTP status.
  */
 export interface McpBridgeDeps {
   /** Discovery + token directory — usually `app.getPath('userData')`. */
   userDataDir: string;
+  /** Static capabilities snapshot for `GET /v1/capabilities`. */
+  getCapabilities: () => BridgeCapabilities;
   /**
-   * Kick off a crawl. The caller resolves any defaults/overrides and
-   * dispatches the existing crawler IPC pipeline. Returns synchronously
-   * once the crawl is launched (not when it finishes).
+   * Kick off a crawl. Resolves defaults/overrides, arbitrates the crawl
+   * lease (reject / queue / takeover), and dispatches the crawler pipeline.
+   * Resolves once the crawl is launched (not when it finishes), or with a
+   * typed error when the slot is busy / the project is locked.
    */
-  startCrawl: (input: McpStartCrawlInput) => Promise<{ ok: true; config: CrawlConfig } | { ok: false; error: string }>;
-  stopCrawl: () => void;
-  pauseCrawl: () => void;
-  resumeCrawl: () => void;
+  startCrawl: (
+    input: McpStartCrawlInput,
+    ctx: BridgeRequestContext,
+  ) => Promise<BridgeResult<McpStartCrawlResult>>;
+  stopCrawl: (ctx: BridgeRequestContext, opts: { force?: boolean }) => BridgeResult<{ ok: true }>;
+  pauseCrawl: (ctx: BridgeRequestContext, opts: { force?: boolean }) => BridgeResult<{ ok: true }>;
+  resumeCrawl: (ctx: BridgeRequestContext, opts: { force?: boolean }) => BridgeResult<{ ok: true }>;
   /**
    * Wipe the URLs table (and all dependent rows — links / images /
    * headers / cookies / sitemap_urls / crawl_queue). Same primitive
-   * the desktop's "Clear" button calls. Required because the crawler's
-   * resume-vs-fresh decision is "same start URL → keep existing rows"
-   * — without an explicit clear, an MCP-driven re-start after a
-   * completed crawl finds zero pending work and exits immediately.
+   * the desktop's "Clear" button calls. Refuses to wipe the desktop
+   * window's project when it has unsaved user work unless `force`.
    */
-  clearCrawl: () => Promise<void>;
+  clearCrawl: (
+    ctx: BridgeRequestContext,
+    opts: { force?: boolean },
+  ) => Promise<BridgeResult<{ ok: true }>>;
   /**
-   * Generic action dispatch table — keyed by short kebab-case action
-   * name, value is the closure that performs the action. The bridge's
-   * `POST /v1/action/<name>` route looks up by name and invokes with
-   * the request body. Keeps the bridge route surface flat (one route
-   * for N actions) while letting the main process explicitly allow-list
-   * which actions MCP can drive. Closures return `unknown` so they can
-   * be wired up to any util-function shape; the MCP server is the
-   * point that gives each action a typed contract.
+   * Generic action dispatch — `POST /v1/action/<name>` routes here. Split
+   * into a membership check and a session-scoped runner so an action's DB
+   * reads/writes land on the request's session (a headless agent exports
+   * from ITS project, not the desktop window's).
    */
-  actions: Record<string, (input: unknown) => Promise<unknown>>;
-  /**
-   * Snapshot of the latest progress event the Crawler emitted. Null
-   * when no crawl has ever run in this session. The bridge passes it
-   * verbatim to MCP — `running` / `paused` fields are authoritative.
-   */
-  getProgress: () => CrawlProgress | null;
-  /** Absolute path to the active `.seoproject`, or null if none. */
-  getProjectPath: () => string | null;
-  /** Row count for the active project — useful for confirming the
-   * MCP-side read-only view is targetting the same DB. */
-  getUrlCount: () => number;
+  hasAction: (name: string) => boolean;
+  runAction: (
+    name: string,
+    input: unknown,
+    ctx: BridgeRequestContext,
+  ) => Promise<unknown>;
+  /** Rich progress snapshot for a session: crawl counts + lease ownership. */
+  getCrawlProgress: (ctx: BridgeRequestContext) => BridgeProgressResult;
+  /** Project path + row count for a session. */
+  getProjectInfo: (
+    ctx: BridgeRequestContext,
+  ) => { projectPath: string | null; urlsCrawled: number };
+  /** Enumerate every live session (primary + windows + headless). */
+  listSessions?: () => BridgeSessionInfo[];
+  /** Create a headless agent session (scratch / open / attach). */
+  createSession?: (
+    input: BridgeSessionCreateInput,
+    ctx: BridgeRequestContext,
+  ) => Promise<BridgeResult<BridgeSessionCreateResult>>;
+  /** Close (optionally saving) the request's headless session. */
+  closeSession?: (
+    input: BridgeSessionCloseInput,
+    ctx: BridgeRequestContext,
+  ) => Promise<BridgeResult<BridgeSessionCloseResult>>;
+  /** Save the request's headless session to a `.seoproject`. */
+  saveSession?: (
+    input: BridgeSessionSaveInput,
+    ctx: BridgeRequestContext,
+  ) => Promise<BridgeResult<BridgeSessionSaveResult>>;
   /** Optional logger (info / warn / error). When omitted, the bridge
    *  swallows internal trace; only HTTP-visible errors propagate. */
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
-}
-
-/**
- * Fields the MCP server may pass when starting a crawl. Everything is
- * optional except an effective startUrl must exist — either supplied
- * here or already saved in the last-used config. The caller layers
- * these on top of the last-used CrawlConfig and dispatches.
- */
-export interface McpStartCrawlInput {
-  startUrl?: string;
-  /** Whitelisted CrawlConfig field overrides — keeping the contract
-   *  narrow so MCP can't smuggle in fields we'd rather validate. */
-  configOverrides?: {
-    scope?: CrawlConfig['scope'];
-    maxDepth?: number;
-    maxUrls?: number;
-    maxConcurrency?: number;
-    maxRps?: number;
-    crawlDelayMs?: number;
-    requestTimeoutMs?: number;
-    respectRobotsTxt?: boolean;
-    followRedirects?: boolean;
-    crawlExternal?: boolean;
-    userAgent?: string;
-    includePatterns?: string[];
-    excludePatterns?: string[];
-  };
 }
 
 interface DiscoveryFile {
   port: number;
   token: string;
   pid: number;
-  version: 1;
+  version: 2;
 }
 
 const DISCOVERY_FILENAME = 'mcp-bridge.json';
@@ -228,7 +282,7 @@ export async function startMcpBridge(
   // reads this to find us. We `chmod 600` on POSIX so other local
   // users can't sniff the token — Windows ACLs already restrict
   // the userData directory to the current user.
-  const payload: DiscoveryFile = { port, token, pid: process.pid, version: 1 };
+  const payload: DiscoveryFile = { port, token, pid: process.pid, version: 2 };
   try {
     writeFileSync(discoveryPath, JSON.stringify(payload), { encoding: 'utf8' });
     if (process.platform !== 'win32') {
@@ -315,6 +369,25 @@ function send(res: ServerResponse, status: number, payload: unknown): void {
   res.end(JSON.stringify(payload));
 }
 
+/** Send a typed error body with the status mapped from its code. */
+function sendError(res: ServerResponse, body: BridgeErrorBody): void {
+  send(res, ERROR_STATUS[body.error] ?? 500, body);
+}
+
+/** Parse the routing headers. Absent session ⇒ `primary`; absent client ⇒
+ *  null (a legacy single-client caller), which the lease treats as owner. */
+function readContext(req: IncomingMessage): BridgeRequestContext {
+  const rawSession = req.headers[BRIDGE_SESSION_HEADER];
+  const rawClient = req.headers[BRIDGE_CLIENT_HEADER];
+  const sessionId =
+    typeof rawSession === 'string' && rawSession.trim() !== ''
+      ? rawSession.trim()
+      : PRIMARY_SESSION_ID;
+  const clientId =
+    typeof rawClient === 'string' && rawClient.trim() !== '' ? rawClient.trim() : null;
+  return { sessionId, clientId };
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -342,17 +415,66 @@ async function handleRequest(
   }
 
   // 3) Route — flat switch; the surface is small enough that we don't
-  //    need a router library.
+  //    need a router library. Every crawl-control route resolves the
+  //    calling client + session from headers first (v1 callers → primary).
+  const ctx = readContext(req);
+
+  if (method === 'GET' && path === '/v1/capabilities') {
+    send(res, 200, deps.getCapabilities());
+    return;
+  }
   if (method === 'GET' && path === '/v1/crawl/progress') {
-    const progress = deps.getProgress();
-    send(res, 200, { progress });
+    send(res, 200, deps.getCrawlProgress(ctx));
     return;
   }
   if (method === 'GET' && path === '/v1/project') {
-    send(res, 200, {
-      projectPath: deps.getProjectPath(),
-      urlsCrawled: deps.getUrlCount(),
-    });
+    send(res, 200, deps.getProjectInfo(ctx));
+    return;
+  }
+  if (method === 'GET' && path === '/v1/session/list') {
+    if (!deps.listSessions) {
+      sendError(res, {
+        error: 'unsupported-feature',
+        message: 'Session enumeration is not available on this desktop build.',
+      });
+      return;
+    }
+    send(res, 200, { sessions: deps.listSessions() });
+    return;
+  }
+  if (
+    method === 'POST' &&
+    (path === '/v1/session/create' ||
+      path === '/v1/session/close' ||
+      path === '/v1/session/save')
+  ) {
+    const dep =
+      path === '/v1/session/create'
+        ? deps.createSession
+        : path === '/v1/session/close'
+          ? deps.closeSession
+          : deps.saveSession;
+    if (!dep) {
+      sendError(res, {
+        error: 'unsupported-feature',
+        message: 'Headless sessions are not available on this desktop build.',
+      });
+      return;
+    }
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      sendError(res, {
+        error: 'bad-request',
+        message: err instanceof Error ? err.message : 'malformed request body',
+      });
+      return;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await dep(body as any, ctx);
+    if (isBridgeError(result)) sendError(res, result);
+    else send(res, 200, result);
     return;
   }
   if (method === 'POST' && path === '/v1/crawl/start') {
@@ -360,70 +482,83 @@ async function handleRequest(
     try {
       body = await readJsonBody(req);
     } catch (err) {
-      send(res, 400, { error: err instanceof Error ? err.message : 'bad-body' });
-      return;
-    }
-    const input = body as McpStartCrawlInput;
-    const result = await deps.startCrawl(input);
-    if (!result.ok) {
-      send(res, 400, { error: result.error });
-      return;
-    }
-    send(res, 200, { ok: true, config: result.config });
-    return;
-  }
-  if (method === 'POST' && path === '/v1/crawl/stop') {
-    deps.stopCrawl();
-    send(res, 200, { ok: true });
-    return;
-  }
-  if (method === 'POST' && path === '/v1/crawl/pause') {
-    deps.pauseCrawl();
-    send(res, 200, { ok: true });
-    return;
-  }
-  if (method === 'POST' && path === '/v1/crawl/resume') {
-    deps.resumeCrawl();
-    send(res, 200, { ok: true });
-    return;
-  }
-  if (method === 'POST' && path === '/v1/crawl/clear') {
-    try {
-      await deps.clearCrawl();
-      send(res, 200, { ok: true });
-    } catch (err) {
-      send(res, 500, {
-        error: err instanceof Error ? err.message : 'clear-failed',
+      sendError(res, {
+        error: 'bad-request',
+        message: err instanceof Error ? err.message : 'malformed request body',
       });
+      return;
     }
+    const result = await deps.startCrawl(body as McpStartCrawlInput, ctx);
+    if (isBridgeError(result)) {
+      sendError(res, result);
+      return;
+    }
+    send(res, 200, result);
+    return;
+  }
+  if (
+    method === 'POST' &&
+    (path === '/v1/crawl/stop' ||
+      path === '/v1/crawl/pause' ||
+      path === '/v1/crawl/resume' ||
+      path === '/v1/crawl/clear')
+  ) {
+    // These carry an optional `{ force: true }` to override ownership /
+    // unsaved-work guards. Body is tiny and optional.
+    let body: unknown = {};
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      sendError(res, {
+        error: 'bad-request',
+        message: err instanceof Error ? err.message : 'malformed request body',
+      });
+      return;
+    }
+    const force = (body as { force?: unknown }).force === true;
+    let result: BridgeResult<{ ok: true }>;
+    if (path === '/v1/crawl/stop') result = deps.stopCrawl(ctx, { force });
+    else if (path === '/v1/crawl/pause') result = deps.pauseCrawl(ctx, { force });
+    else if (path === '/v1/crawl/resume') result = deps.resumeCrawl(ctx, { force });
+    else result = await deps.clearCrawl(ctx, { force });
+    if (isBridgeError(result)) sendError(res, result);
+    else send(res, 200, result);
     return;
   }
   if (method === 'POST' && path.startsWith('/v1/action/')) {
     const name = path.slice('/v1/action/'.length);
-    const action = deps.actions[name];
-    if (!action) {
-      send(res, 404, { error: `unknown-action: ${name}` });
+    if (!deps.hasAction(name)) {
+      sendError(res, {
+        error: 'bad-request',
+        message: `unknown action: ${name}`,
+        details: { action: name },
+      });
       return;
     }
     let body: unknown;
     try {
       body = await readJsonBody(req);
     } catch (err) {
-      send(res, 400, { error: err instanceof Error ? err.message : 'bad-body' });
+      sendError(res, {
+        error: 'bad-request',
+        message: err instanceof Error ? err.message : 'malformed request body',
+      });
       return;
     }
     try {
-      const result = await action(body);
+      const result = await deps.runAction(name, body, ctx);
       send(res, 200, result === undefined ? { ok: true } : result);
     } catch (err) {
-      send(res, 500, {
-        error: err instanceof Error ? err.message : 'action-failed',
+      sendError(res, {
+        error: 'internal-error',
+        message: err instanceof Error ? err.message : 'action failed',
+        details: { action: name },
       });
     }
     return;
   }
 
-  send(res, 404, { error: 'not-found' });
+  sendError(res, { error: 'bad-request', message: `no such route: ${method} ${path}` });
 }
 
 /**

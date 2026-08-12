@@ -53,8 +53,10 @@ export interface LazyRowsState {
  *
  * Strategy: when sort/filter/category changes the cache is cleared and
  * the virtualizer re-fills through `ensureRange`. While a crawl is
- * running, a 1500ms timer re-queries only the currently visible chunks
- * and REPLACES them in place — no `.clear()`, no placeholder flicker.
+ * running, a progress-driven tick re-queries the currently visible span
+ * as ONE atomic snapshot and REPLACES those chunks in place — no
+ * `.clear()`, no placeholder flicker, and no cross-chunk tearing that
+ * would duplicate a row's key across a boundary.
  * Combined with `getItemKey: row.id` on the virtualizer, rows that still
  * exist keep their DOM nodes and only their cells re-render; rows that
  * have moved (because new higher-priority rows were inserted ahead of
@@ -90,11 +92,18 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     [opts.category, opts.search, opts.sortBy, opts.sortDir, opts.filter],
   );
 
-  const queryMeta = useCallback(
-    () =>
+  // Fetch an arbitrary contiguous span in ONE query. Used to refresh the
+  // whole visible range as a single consistent snapshot: fetching chunks
+  // one-by-one with awaits between them lets the crawler insert a row
+  // mid-sort, shifting a row across a 500-boundary so the same `row.id`
+  // lands in two adjacent chunks — which the virtualizer then renders with
+  // the same key, painting two rows on top of each other. A single
+  // LIMIT/OFFSET can't tear that way.
+  const queryRange = useCallback(
+    (offset: number, limit: number) =>
       window.freecrawl.urlsQuery({
-        limit: 0,
-        offset: 0,
+        limit,
+        offset,
         category: opts.category,
         search: opts.search || undefined,
         sortBy: opts.sortBy,
@@ -148,17 +157,19 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     let cancelled = false;
 
     const load = async (): Promise<void> => {
-      const metaPromise = queryMeta();
       const { first, last } = activeRange.current;
-      const chunkPromises: Promise<{ rows: CrawlUrlRow[]; total: number; idx: number }>[] = [];
-      for (let i = first; i <= last; i++) {
-        chunkPromises.push(queryChunk(i).then((r) => ({ ...r, idx: i })));
-      }
+      const spanCount = Math.max(1, last - first + 1);
       try {
-        const [{ total: t }, ...newChunks] = await Promise.all([metaPromise, ...chunkPromises]);
+        // One consistent snapshot of the whole visible span rather than a
+        // chunk-per-query fan-out — see queryRange for why tearing across
+        // chunk boundaries duplicates row keys.
+        const { rows, total: t } = await queryRange(
+          first * CHUNK_SIZE,
+          spanCount * CHUNK_SIZE,
+        );
         if (cancelled || token !== resetToken.current) return;
-        for (const ch of newChunks) {
-          storeChunk(ch.idx, ch.rows);
+        for (let c = 0; c < spanCount; c++) {
+          storeChunk(first + c, rows.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE));
         }
         setTotal(t);
         setVersion((v) => v + 1);
@@ -205,22 +216,23 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
       lastTickTs = Date.now();
       const token = resetToken.current;
       try {
+        const { first, last } = activeRange.current;
+        const spanCount = Math.max(1, last - first + 1);
         try {
-          const { total: t } = await queryMeta();
+          // Atomic snapshot of the visible span: rows + total in one query
+          // so a mid-crawl insert can't shift a row across a chunk boundary
+          // and duplicate its key (the row-overlap bug). See queryRange.
+          const { rows, total: t } = await queryRange(
+            first * CHUNK_SIZE,
+            spanCount * CHUNK_SIZE,
+          );
           if (cancelled || token !== resetToken.current) return;
           setTotal(t);
+          for (let c = 0; c < spanCount; c++) {
+            storeChunk(first + c, rows.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE));
+          }
         } catch {
           /* ignore transient errors */
-        }
-        const { first, last } = activeRange.current;
-        for (let i = first; i <= last; i++) {
-          try {
-            const { rows } = await queryChunk(i);
-            if (cancelled || token !== resetToken.current) return;
-            storeChunk(i, rows);
-          } catch {
-            /* ignore */
-          }
         }
         if (cancelled || token !== resetToken.current) return;
         setVersion((v) => v + 1);

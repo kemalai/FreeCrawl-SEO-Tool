@@ -2,6 +2,7 @@ export * from './crawl.js';
 export * from './issue-severity.js';
 export * from './ipc.js';
 export * from './project.js';
+export * from './bridge.js';
 export * from './integrations.js';
 export * from './pagespeed.js';
 export * from './crux.js';

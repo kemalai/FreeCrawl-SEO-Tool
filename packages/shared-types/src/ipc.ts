@@ -33,6 +33,7 @@ import type {
   SpellingStatus,
 } from './spelling.js';
 import type { RecentProject } from './project.js';
+import type { BridgeSessionInfo } from './bridge.js';
 import type {
   GoogleAuthState,
   GoogleAuthResult,
@@ -112,6 +113,13 @@ export const IPC = {
   browserInstallState: 'browser:install-state',
   browserInstallGet: 'browser:install-get',
   browserInstallStart: 'browser:install-start',
+  /** MCP agent sessions (Issue #12). `agentsList` returns the live headless
+   *  sessions; `agentsClose` tears one down; `agentsChanged` is pushed
+   *  main→renderer whenever a session is created / closed or its crawl state
+   *  changes, so the status-bar Agents indicator stays live. */
+  agentsList: 'agents:list',
+  agentsClose: 'agents:close',
+  agentsChanged: 'agents:changed',
   urlsQuery: 'urls:query',
   urlDetailGet: 'urls:detail',
   urlSourceGet: 'urls:source',
@@ -1766,6 +1774,14 @@ export interface FreeCrawlApi {
   browserInstallStart(): Promise<BrowserInstallState>;
   /** Fires on every provisioning state change (download progress included). */
   onBrowserInstallState(cb: (state: BrowserInstallState) => void): () => void;
+  /** Live headless MCP agent sessions (Issue #12). Empty when no agent has
+   *  created one — the desktop window itself is not included. */
+  agentsList(): Promise<BridgeSessionInfo[]>;
+  /** Close a headless agent session by id (stops its crawl, frees resources). */
+  agentsClose(sessionId: string): Promise<{ ok: boolean }>;
+  /** Fires when an agent session is created / closed or its crawl state
+   *  changes — the status-bar indicator re-fetches on this. */
+  onAgentsChanged(cb: () => void): () => void;
   /** Full recent-projects list including archived entries. */
   recentProjectsList(): Promise<RecentProject[]>;
   /** Archive / unarchive a recent project (hides it from Open Recent). */

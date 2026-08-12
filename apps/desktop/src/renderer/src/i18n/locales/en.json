@@ -99,6 +99,21 @@
     "downloadingTitle": "Downloading the Chromium browser used for JavaScript rendering. Crawling in text mode is unaffected.",
     "failed": "Browser download failed — retry"
   },
+  "agents": {
+    "badge": "{{n}} agents",
+    "runningBadge": "{{n}} crawling",
+    "indicatorTitle": "{{n}} MCP agent session(s) active — click to manage",
+    "popoverTitle": "MCP Agent Sessions",
+    "popoverSubtitle": "Isolated crawl sessions driven by AI agents over MCP.",
+    "statusRunning": "Crawling",
+    "statusPaused": "Paused",
+    "statusIdle": "Idle",
+    "urls": "URLs",
+    "scratchProject": "unsaved scratch project",
+    "idleFor": "idle {{d}}",
+    "close": "Close",
+    "closeTitle": "Close this agent session (stops its crawl and frees resources)"
+  },
   "stats": {
     "discovered": "Discovered",
     "crawled": "Crawled",
@@ -1250,7 +1265,7 @@
     "days90": "Last 90 days",
     "fetch": "Fetch",
     "fetching": "Fetching from Search Console…",
-    "metaLine": "{{property}} · {{start}} → {{end}} · {{rows}} pages · fetched {{ago}}",
+    "metaLine": "{{property}} · {{start}} → {{end}} · {{rows}} pages with search data · fetched {{ago}}",
     "colUrl": "URL",
     "colStatus": "Status",
     "colVerdict": "Index",
@@ -1372,7 +1387,7 @@
     "days90": "Last 90 days",
     "fetch": "Fetch",
     "fetching": "Fetching from GA4…",
-    "metaLine": "{{property}} · {{start}} → {{end}} · {{rows}} pages · fetched {{ago}}",
+    "metaLine": "{{property}} · {{start}} → {{end}} · {{rows}} pages with search data · fetched {{ago}}",
     "colUrl": "URL",
     "colStatus": "Status",
     "colSessions": "Sessions",
@@ -1565,6 +1580,13 @@
       "resolvedPath": "Resolved path",
       "resetTitle": "Reset to the OS Documents folder",
       "note": "Active crawl data lives in the app's user-data directory until you Save As — the path above only controls where Save As starts. Changing this won't move any existing project files."
+    },
+    "agents": {
+      "title": "Agent Sessions (MCP)",
+      "intro": "AI agents can open their own isolated crawl sessions inside this app over MCP. These limits keep several parallel agents from oversubscribing the machine.",
+      "maxSessions": "Max concurrent agent sessions",
+      "idleMinutes": "Auto-close idle agent sessions after (minutes)",
+      "note": "An idle session with a saved project is saved before it is closed. Changes apply to sessions created from now on."
     },
     "privacy": {
       "title": "Privacy",

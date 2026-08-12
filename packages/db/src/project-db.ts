@@ -775,6 +775,19 @@ const DUPLICATE_ALT_PREDICATE = `alt IS NOT NULL AND alt != '' AND alt IN (
  */
 const INTERNAL_HTML_SCOPE = "is_external = 0 AND content_kind = 'html'";
 
+/**
+ * Scope for on-page-element "missing" checks that only make sense on a real
+ * fetched page body (title / meta / h1 / lang / viewport / OG / Twitter /
+ * security headers / structured data). Redirects (3xx) and error responses
+ * (4xx/5xx) carry none of these by nature, so counting them as "missing"
+ * produces false positives on redirect rows — the fix for redirect false
+ * errors. Kept as `INTERNAL_HTML_SCOPE + status gate` so `runOverviewBatch`
+ * still recognises the shared prefix and hoists it (the extra status
+ * predicate rides along in the per-clause remainder).
+ */
+const INDEXABLE_HTML_SCOPE =
+  INTERNAL_HTML_SCOPE + ' AND status_code >= 200 AND status_code < 300';
+
 export class ProjectDb {
   private readonly db: DatabaseSync;
   /** Read-only connections can't write `sqlite_stat1`; see `optimize()`. */
@@ -4237,8 +4250,32 @@ export class ProjectDb {
     search?: string;
     filter?: GscPreset;
     accountId?: string;
+    /** Mirror Screaming Frog's URL-matching options when joining GSC data
+     *  onto crawled pages. Default slash-insensitive so a GSC `/page`
+     *  attaches to a crawled `/page/` (and vice versa) instead of showing
+     *  "—" — the same normalisation `gscOrphanUrls` already applies. */
+    matchSlash?: boolean;
+    matchCase?: boolean;
   }): { rows: GscRow[]; total: number } {
     const filter: GscPreset = params.filter ?? 'all';
+    const matchSlash = params.matchSlash ?? true;
+    const matchCase = params.matchCase ?? false;
+    // ON-condition builder between an indexed lookup column `probe` (the
+    // table joined INTO) and the driver column `drive`. Slash-tolerance
+    // keeps `probe` an equality target so its `url` index still serves the
+    // lookup (exact, add-slash, strip-slash all resolve to `probe = <value>`).
+    // Case-folding is opt-in and rare — it wraps both sides in LOWER and
+    // gives up the index, which is acceptable since `gsc_results` is small.
+    const urlMatch = (probe: string, drive: string): string => {
+      const eq = (p: string, d: string): string =>
+        matchCase ? `LOWER(${p}) = LOWER(${d})` : `${p} = ${d}`;
+      if (!matchSlash) return eq(probe, drive);
+      return (
+        `(${eq(probe, drive)}` +
+        ` OR ${eq(probe, `${drive} || '/'`)}` +
+        ` OR ${eq(probe, `RTRIM(${drive}, '/')`)})`
+      );
+    };
     // Every join below is account-scoped: with several linked accounts a
     // bare `g.url = u.url` would fan out one row per account.
     const accountId = params.accountId ?? '';
@@ -4311,8 +4348,8 @@ export class ProjectDb {
         oArgs.push(`%${params.search}%`);
       }
       const oJoin = `FROM gsc_results g
-         LEFT JOIN urls u ON u.url = g.url
-         LEFT JOIN gsc_inspection_results i ON i.url = g.url AND i.account_id = ?`;
+         LEFT JOIN urls u ON ${urlMatch('u.url', 'g.url')}
+         LEFT JOIN gsc_inspection_results i ON ${urlMatch('i.url', 'g.url')} AND i.account_id = ?`;
       const oWhereSql = `WHERE ${oWhere.join(' AND ')}`;
       const oTotal = this.db
         .prepare(`SELECT COUNT(*) AS c ${oJoin} ${oWhereSql}`)
@@ -4392,8 +4429,8 @@ export class ProjectDb {
     const whereSql = `WHERE ${where.join(' AND ')}`;
     const joinSql =
       `FROM urls u
-       LEFT JOIN gsc_results g ON g.url = u.url AND g.account_id = ?
-       LEFT JOIN gsc_inspection_results i ON i.url = u.url AND i.account_id = ?`;
+       LEFT JOIN gsc_results g ON ${urlMatch('g.url', 'u.url')} AND g.account_id = ?
+       LEFT JOIN gsc_inspection_results i ON ${urlMatch('i.url', 'u.url')} AND i.account_id = ?`;
 
     const totalRow = this.db
       .prepare(`SELECT COUNT(*) AS c ${joinSql} ${whereSql}`)
@@ -5372,6 +5409,10 @@ export class ProjectDb {
     // Common prefix for all issue checks — only crawled internal HTML pages
     // are eligible (is_external = 0, content_kind = 'html').
     const html = INTERNAL_HTML_SCOPE;
+    // Stricter prefix for on-page-element "missing" checks: also require a
+    // 2xx response so redirects / error pages (which never carry these
+    // elements) aren't flagged as "missing".
+    const indexable = INDEXABLE_HTML_SCOPE;
     const dup = (col: string): number =>
       this.scalarCount(
         `SELECT COALESCE(SUM(c), 0) AS c FROM (
@@ -5381,19 +5422,19 @@ export class ProjectDb {
          )`,
       );
     return {
-      titleMissing: countWhere(`${html} AND (title IS NULL OR title = '')`),
+      titleMissing: countWhere(`${indexable} AND (title IS NULL OR title = '')`),
       titleTooLong: countWhere(`${html} AND title_length > 60`),
       titleTooShort: countWhere(`${html} AND title_length > 0 AND title_length < 30`),
       titleDuplicate: dup('title'),
       metaMissing: countWhere(
-        `${html} AND (meta_description IS NULL OR meta_description = '')`,
+        `${indexable} AND (meta_description IS NULL OR meta_description = '')`,
       ),
       metaTooLong: countWhere(`${html} AND meta_description_length > 160`),
       metaTooShort: countWhere(
         `${html} AND meta_description_length > 0 AND meta_description_length < 120`,
       ),
       metaDuplicate: dup('meta_description'),
-      h1Missing: countWhere(`${html} AND (h1 IS NULL OR h1 = '')`),
+      h1Missing: countWhere(`${indexable} AND (h1 IS NULL OR h1 = '')`),
       h1Duplicate: dup('h1'),
       h1Multiple: countWhere(`${html} AND h1_count > 1`),
       headingSkippedLevel: countWhere(
@@ -5461,31 +5502,31 @@ export class ProjectDb {
         `${html} AND INSTR(SUBSTR(url, INSTR(url, '://') + 3), '//') > 0`,
       ),
       urlNonAscii: countWhere(`${html} AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)`),
-      langMissing: countWhere(`${html} AND (lang IS NULL OR lang = '')`),
-      viewportMissing: countWhere(`${html} AND (viewport IS NULL OR viewport = '')`),
+      langMissing: countWhere(`${indexable} AND (lang IS NULL OR lang = '')`),
+      viewportMissing: countWhere(`${indexable} AND (viewport IS NULL OR viewport = '')`),
       ogMissing: countWhere(
-        `${html}
+        `${indexable}
          AND (og_title IS NULL OR og_title = '')
          AND (og_description IS NULL OR og_description = '')
          AND (og_image IS NULL OR og_image = '')`,
       ),
       twitterMissing: countWhere(
-        `${html}
+        `${indexable}
          AND (twitter_card IS NULL OR twitter_card = '')
          AND (twitter_image IS NULL OR twitter_image = '')`,
       ),
       hstsMissing: countWhere(
-        `${html} AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')`,
+        `${indexable} AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')`,
       ),
       xFrameOptionsMissing: countWhere(
-        `${html} AND (x_frame_options IS NULL OR x_frame_options = '')`,
+        `${indexable} AND (x_frame_options IS NULL OR x_frame_options = '')`,
       ),
       xContentTypeOptionsMissing: countWhere(
-        `${html} AND (x_content_type_options IS NULL OR x_content_type_options = '')`,
+        `${indexable} AND (x_content_type_options IS NULL OR x_content_type_options = '')`,
       ),
-      cspMissing: countWhere(`${html} AND (csp IS NULL OR csp = '')`),
+      cspMissing: countWhere(`${indexable} AND (csp IS NULL OR csp = '')`),
       structuredDataMissing: countWhere(
-        `${html} AND schema_block_count = 0 AND schema_invalid_count = 0
+        `${indexable} AND schema_block_count = 0 AND schema_invalid_count = 0
          AND microdata_count = 0 AND rdfa_count = 0`,
       ),
       structuredDataInvalid: countWhere(`${html} AND schema_invalid_count > 0`),
@@ -8784,10 +8825,28 @@ function buildAdvancedFilterSql(
 }
 
 function buildClauseSql(c: FilterClause, args: (string | number)[]): string | null {
-  // Whitelist-check the column name — it's interpolated into the SQL
-  // string, so allowing arbitrary values would be an injection vector.
-  if (!ALLOWED_FILTER_FIELDS.has(c.field)) return null;
-  const col = c.field;
+  // The column expression `col` is interpolated into the SQL string, so it
+  // must never carry unchecked input.
+  let col: string;
+  if (c.field === 'extraction') {
+    // Custom-extraction field → pull the named value out of the
+    // `extraction_results` JSON map. The key is embedded in a single-quoted
+    // SQL literal AND a JSON path, so: reject `"` / `\` (would break the
+    // path) and SQL-escape `'`. Unicode / spaces / normal punctuation pass.
+    const key = c.extractionKey ?? '';
+    if (key.length === 0 || key.length > 128 || key.includes('"') || key.includes('\\')) {
+      return null;
+    }
+    const safeKey = key.replace(/'/g, "''");
+    // NULLIF('' → NULL) so json_extract never sees a non-JSON empty string
+    // (which would raise "malformed JSON" and fail the whole query); NULL
+    // input yields NULL, matching a page that carries no extraction data.
+    col = `json_extract(NULLIF(extraction_results, ''), '$."${safeKey}"')`;
+  } else {
+    // Whitelist-check the column name for the same reason.
+    if (!ALLOWED_FILTER_FIELDS.has(c.field)) return null;
+    col = c.field;
+  }
   switch (c.operator) {
     case 'contains':
       args.push(`%${c.value}%`);
@@ -8890,7 +8949,11 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND indexability = 'non-indexable:robots-blocked'`;
     case 'issues:title-missing':
-      return "is_external = 0 AND content_kind = 'html' AND (title IS NULL OR title = '')";
+      // Gate on 2xx: redirects / error pages have no body, so a NULL title
+      // there isn't a "missing title" — matches getIssuesCounts.titleMissing.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (title IS NULL OR title = '')`;
     case 'issues:title-too-long':
       return "is_external = 0 AND content_kind = 'html' AND title_length > 60";
     case 'issues:title-too-short':
@@ -8904,7 +8967,9 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                 GROUP BY title HAVING COUNT(*) > 1
               )`;
     case 'issues:meta-missing':
-      return "is_external = 0 AND content_kind = 'html' AND (meta_description IS NULL OR meta_description = '')";
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (meta_description IS NULL OR meta_description = '')`;
     case 'issues:meta-too-long':
       return "is_external = 0 AND content_kind = 'html' AND meta_description_length > 160";
     case 'issues:meta-too-short':
@@ -8918,7 +8983,9 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                 GROUP BY meta_description HAVING COUNT(*) > 1
               )`;
     case 'issues:h1-missing':
-      return "is_external = 0 AND content_kind = 'html' AND (h1 IS NULL OR h1 = '')";
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (h1 IS NULL OR h1 = '')`;
     case 'issues:h1-duplicate':
       return `is_external = 0 AND content_kind = 'html' AND h1 IS NOT NULL AND h1 != ''
               AND h1 IN (
@@ -9061,11 +9128,16 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // contains multi-byte UTF-8, i.e. any non-ASCII code point.
       return "is_external = 0 AND content_kind = 'html' AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)";
     case 'issues:lang-missing':
-      return "is_external = 0 AND content_kind = 'html' AND (lang IS NULL OR lang = '')";
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (lang IS NULL OR lang = '')`;
     case 'issues:viewport-missing':
-      return "is_external = 0 AND content_kind = 'html' AND (viewport IS NULL OR viewport = '')";
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (viewport IS NULL OR viewport = '')`;
     case 'issues:og-missing':
       return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
               AND (og_title IS NULL OR og_title = '')
               AND (og_description IS NULL OR og_description = '')
               AND (og_image IS NULL OR og_image = '')`;
@@ -9073,21 +9145,28 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // Twitter card is “missing” if there’s no twitter:card tag AND no
       // twitter:image — the minimum pair needed for a valid preview.
       return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
               AND (twitter_card IS NULL OR twitter_card = '')
               AND (twitter_image IS NULL OR twitter_image = '')`;
     // HSTS on HTTP is meaningless — only flag HTTPS pages. X-Frame-Options
     // and X-Content-Type-Options matter on any HTML response regardless
-    // of scheme, so they're only scheme-gated on a per-page basis.
+    // of scheme, so they're only scheme-gated on a per-page basis. All three
+    // are gated on 2xx so redirect / error responses aren't flagged.
     case 'issues:hsts-missing':
-      return "is_external = 0 AND content_kind = 'html' AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')";
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND url LIKE 'https://%' AND (hsts IS NULL OR hsts = '')`;
     case 'issues:x-frame-options-missing':
       return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
               AND (x_frame_options IS NULL OR x_frame_options = '')`;
     case 'issues:x-content-type-options-missing':
       return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
               AND (x_content_type_options IS NULL OR x_content_type_options = '')`;
     case 'issues:csp-missing':
       return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
               AND (csp IS NULL OR csp = '')`;
     case 'issues:structured-data-missing':
       // "Missing" = no valid JSON-LD block AND no malformed block either,
@@ -9095,6 +9174,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // accepts all three formats, so a page using only Microdata isn't
       // missing structured data even though JSON-LD is empty.
       return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
               AND schema_block_count = 0 AND schema_invalid_count = 0
               AND microdata_count = 0 AND rdfa_count = 0`;
     case 'issues:structured-data-invalid':

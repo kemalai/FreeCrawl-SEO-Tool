@@ -3675,8 +3675,18 @@ export class Crawler extends EventEmitter {
           }
         }
       }
-      for (const link of storableLinks) {
-        if (!link.isInternal) this.enqueueExternal(link.toUrl);
+      // List / Sitemap ("fixed-URL") modes crawl exactly the supplied set —
+      // nothing the pages point at. External links and internal subresources
+      // aren't part of that set, so probing/fetching them would balloon the
+      // crawl far past the sitemap (the "it keeps crawling page links / I see
+      // social links" report). Outlinks are still stored as link rows for the
+      // Outlinks tab; they're just not fetched as their own URL rows here.
+      const fixedUrlMode =
+        this.config.mode === 'list' || this.config.mode === 'sitemap';
+      if (!fixedUrlMode) {
+        for (const link of storableLinks) {
+          if (!link.isInternal) this.enqueueExternal(link.toUrl);
+        }
       }
       this.crawled++;
 
@@ -3686,7 +3696,10 @@ export class Crawler extends EventEmitter {
       // Done before the noindex/nofollow early-return so a page's assets are
       // crawled regardless of its own indexability. Resources are leaf nodes:
       // the non-HTML fetch path stores them without extracting further links.
-      this.enqueueResources(parsed, item.depth);
+      // Skipped in fixed-URL modes for the same reason as external probing.
+      if (!fixedUrlMode) {
+        this.enqueueResources(parsed, item.depth);
+      }
 
       if (parsed.hasNofollow || indexability === 'non-indexable:noindex') {
         return;
@@ -4307,6 +4320,16 @@ export class Crawler extends EventEmitter {
    * lifts.
    */
   private throttleScale = 1;
+  /**
+   * Per-source throttle scales, so independent pressure signals compose
+   * instead of overwriting each other. The effective scale is the MINIMUM
+   * across sources — the tightest constraint wins. The source key is the
+   * part of `reason` before the first `:` (e.g. `thermal:serious` →
+   * `thermal`, `multi-session` → `multi-session`), so a source updating its
+   * level (thermal fair→serious) replaces its own entry rather than piling
+   * up. A scale of ≥1 removes the source (no longer constraining).
+   */
+  private readonly throttleScales = new Map<string, number>();
 
   /** Configured ceiling with the external throttle scale applied. */
   private effectiveCeiling(): number {
@@ -4314,11 +4337,17 @@ export class Crawler extends EventEmitter {
     return Math.max(1, Math.round(base * this.throttleScale));
   }
 
-  /** Public — the desktop main process maps thermal state changes here. */
+  /** Public — the desktop main process maps thermal state + multi-session
+   *  concurrency budget here. Sources compose via minimum (see field doc). */
   setThrottleScale(scale: number, reason: string): void {
     const s = Math.min(1, Math.max(0.1, scale));
-    if (s === this.throttleScale) return;
-    this.throttleScale = s;
+    const source = reason.split(':')[0] || reason;
+    if (scale >= 1) this.throttleScales.delete(source);
+    else this.throttleScales.set(source, s);
+    let min = 1;
+    for (const v of this.throttleScales.values()) min = Math.min(min, v);
+    if (min === this.throttleScale) return;
+    this.throttleScale = min;
     const ceiling = this.effectiveCeiling();
     if (this.currentConcurrency === 0 || this.currentConcurrency > ceiling) {
       this.currentConcurrency = ceiling;

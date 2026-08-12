@@ -250,6 +250,17 @@ export function App() {
     const offConfig = window.freecrawl.onProjectConfigChanged((cfg) => {
       if (cfg) applyProjectConfig(cfg);
     });
+    // The push above is missed on a cold start: double-clicking a
+    // `.seoproject` opens the project in the main process before this
+    // renderer has mounted and subscribed, so `projectConfigChanged` fires
+    // into the void and the URL bar / mode come up blank even though the
+    // data loaded. Pull the already-open project's config once on mount to
+    // close that race; the subscription still covers projects opened later
+    // while the app is running. Returns null on a fresh scratch session, so
+    // this is a no-op when there's nothing to restore.
+    void window.freecrawl.projectConfigGet().then((cfg) => {
+      if (cfg) applyProjectConfig(cfg);
+    });
     const off4 = window.freecrawl.onMenuEvent((event: MenuEvent) => {
       switch (event) {
         case 'edit-copy': {

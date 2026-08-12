@@ -573,7 +573,7 @@ export function SearchConsoleTab() {
           <span className="ml-auto">
             {t('gscTab.metaLine', {
               defaultValue:
-                '{{property}} · {{start}} → {{end}} · {{rows}} pages · fetched {{ago}}',
+                '{{property}} · {{start}} → {{end}} · {{rows}} pages with search data · fetched {{ago}}',
               property: meta.property,
               start: meta.startDate,
               end: meta.endDate,

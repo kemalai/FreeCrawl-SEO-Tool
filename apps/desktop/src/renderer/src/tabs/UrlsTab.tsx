@@ -150,6 +150,16 @@ export function UrlsTab() {
   const selectedUrlId = useAppStore((s) => s.selectedUrlId);
   const setSelectedUrlId = useAppStore((s) => s.setSelectedUrlId);
   const setSelectedUrlIds = useAppStore((s) => s.setSelectedUrlIds);
+  // Active custom-extraction rule names → offered as filterable fields in
+  // the Advanced Filter dialog. Reference is stable unless the config edits.
+  const customExtractionRules = useAppStore((s) => s.config.customExtractionRules);
+  const extractionFieldNames = useMemo(
+    () =>
+      (customExtractionRules ?? [])
+        .map((r) => r.name)
+        .filter((n) => n.trim().length > 0),
+    [customExtractionRules],
+  );
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<keyof CrawlUrlRow | undefined>(undefined);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -1637,6 +1647,7 @@ export function UrlsTab() {
       <AdvancedFilterDialog
         open={filterDialogOpen}
         initial={filter}
+        extractionFields={extractionFieldNames}
         onClose={() => setFilterDialogOpen(false)}
         onApply={(f) => setFilter(f)}
       />
@@ -2294,12 +2305,51 @@ function cellText(row: CrawlUrlRow, spec: ColumnSpec, lang: string): string {
     return label === '' ? '' : translateLabel(label, lang);
   }
 
+  // Custom-extraction column holds a `{ruleName: value}` JSON map. Showing
+  // the raw `{"h2":"…"}` in the cell reads as noise — the preview and Detail
+  // panel already unwrap it, so match them here (single rule → just the
+  // value; multiple → `name: value` pairs). Full JSON stays in the Detail
+  // panel and in exports (which format from the DB, not this path).
+  if (spec.key === 'extractionResults') {
+    const rawEx = row[spec.key];
+    return typeof rawEx === 'string' && rawEx ? formatExtractionCell(rawEx) : '';
+  }
+
   const raw = row[spec.key];
   if (raw === null || raw === undefined) return '';
   // Booleans render as "Y" / blank rather than the JS-default
   // "true"/"false" — matches the compact flag-column convention.
   if (typeof raw === 'boolean') return raw ? 'Y' : '';
   return String(raw);
+}
+
+/**
+ * Flatten the `extraction_results` `{ruleName: value}` map into one compact
+ * line for the table cell. Single rule → the value alone; multiple rules →
+ * `name: value` pairs joined by " · ". Arrays (multi: all/concat) join with
+ * " | ". Malformed JSON falls back to the raw string so nothing is hidden.
+ */
+function formatExtractionCell(raw: string): string {
+  let obj: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return raw;
+    }
+    obj = parsed as Record<string, unknown>;
+  } catch {
+    return raw;
+  }
+  const fmt = (v: unknown): string => {
+    if (v === null || v === undefined) return '';
+    if (Array.isArray(v)) return v.map(String).join(' | ');
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
+  };
+  const entries = Object.entries(obj);
+  if (entries.length === 0) return '';
+  if (entries.length === 1) return fmt(entries[0]![1]);
+  return entries.map(([name, v]) => `${name}: ${fmt(v)}`).join('  ·  ');
 }
 
 function indexabilityStatusLabel(v: CrawlUrlRow['indexability']): string {

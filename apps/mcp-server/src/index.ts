@@ -21,9 +21,22 @@
 
 import fs from 'node:fs';
 import { ProjectDb } from '@freecrawl/db';
+import { SESSIONS_MIN_APP_VERSION } from '@freecrawl/shared-types';
+import type {
+  BridgeSessionCreateResult,
+  BridgeSessionCloseResult,
+  BridgeSessionSaveResult,
+  BridgeSessionInfo,
+} from '@freecrawl/shared-types';
 import { JsonRpcServer } from './rpc.js';
 import { buildTools, type Tool } from './tools.js';
 import { defaultProjectPath, listProjectFiles } from './project-resolver.js';
+import {
+  bridgeRequest,
+  hasFeature,
+  setActiveSessionId,
+  getActiveSessionId,
+} from './desktop-bridge.js';
 
 const SERVER_NAME = 'freecrawl-seo';
 const SERVER_VERSION = '0.8.0';
@@ -65,6 +78,33 @@ function setProject(projectPath: string): Session {
   }
   session = openProject(projectPath);
   return session;
+}
+
+/** Drop the read-only DB handle (e.g. after a headless session's working DB
+ *  is torn down). The next DB tool reopens the default project lazily. */
+function closeReadSession(): void {
+  if (session) {
+    try {
+      session.db.close();
+    } catch {
+      // best-effort
+    }
+    session = null;
+  }
+}
+
+/**
+ * Fail a session tool early on a desktop that predates headless sessions,
+ * with guidance an agent can act on rather than a raw HTTP error.
+ */
+async function ensureSessionsSupported(): Promise<void> {
+  if (!(await hasFeature('sessions'))) {
+    throw new Error(
+      `This FreeCrawl desktop build does not support headless agent sessions ` +
+        `(needs v${SESSIONS_MIN_APP_VERSION}+). Update the desktop app, or drive the ` +
+        `desktop window's project directly with start_crawl (no session).`,
+    );
+  }
 }
 
 const tools: Tool[] = [
@@ -112,12 +152,167 @@ const tools: Tool[] = [
   {
     name: 'current_project',
     description:
-      'Report which `.seoproject` the MCP server is currently reading from.',
+      'Report which `.seoproject` the MCP server is currently reading from, plus the active agent session id (if any). `mcpReadPath` is the read-only DB the query/report tools hit; `activeSessionId` is the headless session your crawl-control tools write to (null = the desktop window).',
     inputSchema: { type: 'object', properties: {} },
     requiresDb: false,
     // Report the open project without forcing one open — fall back to the
     // default path (which may not exist yet) purely as a hint.
-    handler: () => ({ projectPath: session ? session.projectPath : defaultProjectPath() }),
+    handler: () => ({
+      projectPath: session ? session.projectPath : defaultProjectPath(),
+      mcpReadPath: session ? session.projectPath : null,
+      activeSessionId: getActiveSessionId(),
+    }),
+  },
+
+  // ── Headless agent sessions (Issue #12) ────────────────────────────
+  {
+    name: 'session_create',
+    requiresDb: false,
+    description:
+      'Create your OWN isolated crawl session inside the running desktop app, so several agents can work in parallel without touching each other or the desktop window. `mode:"scratch"` (default) starts an empty project; `mode:"open"` unpacks an existing `.seoproject` to keep working on it (PageSpeed, spelling, exports, re-crawl); `mode:"attach"` reuses the session already bound to that path. Returns a `sessionId` — from here on your start_crawl / query / export tools automatically target this session, and the read-only view is repointed to its live database. Call session_close when done (optionally saving). Requires a desktop build with headless-session support.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['scratch', 'open', 'attach'],
+          description: '"scratch" = new empty project (default); "open" = open an existing .seoproject; "attach" = reuse the session already bound to that path.',
+        },
+        projectPath: {
+          type: 'string',
+          description: 'Absolute path to a `.seoproject`. Required for mode "open"/"attach".',
+        },
+        label: {
+          type: 'string',
+          description: 'Optional human label shown in the app (defaults to agent-N).',
+        },
+        exclusive: {
+          type: 'boolean',
+          description: 'For mode "open": fail with project-locked if the file is already open elsewhere instead of sharing it.',
+        },
+      },
+    },
+    handler: async (args) => {
+      await ensureSessionsSupported();
+      const res = await bridgeRequest<BridgeSessionCreateResult>(
+        'POST',
+        '/v1/session/create',
+        {
+          mode: typeof args.mode === 'string' ? args.mode : undefined,
+          projectPath: typeof args.projectPath === 'string' ? args.projectPath : undefined,
+          label: typeof args.label === 'string' ? args.label : undefined,
+          exclusive: args.exclusive === true,
+        },
+        { sessionId: null },
+      );
+      setActiveSessionId(res.sessionId);
+      // Repoint the read-only view at this session's live working DB so the
+      // query/report tools read what this session crawls.
+      try {
+        setProject(res.dbPath);
+      } catch {
+        // The DB may not be flushed yet on a brand-new scratch session; the
+        // first read tool will retry openProject.
+      }
+      return res;
+    },
+  },
+  {
+    name: 'session_close',
+    requiresDb: false,
+    description:
+      'Close your active agent session and free its resources. Set `save:true` (optionally with `savePath`) to persist it to a `.seoproject` first so you can reopen it later with session_create mode:"open". After closing, your tools target the desktop window again until you create another session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        save: { type: 'boolean', description: 'Persist the session to disk before closing.' },
+        savePath: { type: 'string', description: 'Where to save (defaults to the session\'s current document).' },
+      },
+    },
+    handler: async (args) => {
+      const id = getActiveSessionId();
+      if (!id) {
+        throw new Error('No active agent session to close — call session_create first.');
+      }
+      const res = await bridgeRequest<BridgeSessionCloseResult>(
+        'POST',
+        '/v1/session/close',
+        { save: args.save === true, savePath: typeof args.savePath === 'string' ? args.savePath : undefined },
+        { sessionId: id },
+      );
+      setActiveSessionId(null);
+      // The session's working DB is gone now — drop the read handle so the
+      // next DB tool reopens the default project instead of a dead file.
+      closeReadSession();
+      return res;
+    },
+  },
+  {
+    name: 'session_save',
+    requiresDb: false,
+    description:
+      'Save your active agent session to a `.seoproject` without closing it — the persistence half of "sessions you can come back to". Defaults to the session\'s current document; pass `projectPath` to write elsewhere.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: { type: 'string', description: 'Destination .seoproject (defaults to the session\'s document).' },
+      },
+    },
+    handler: async (args) => {
+      await ensureSessionsSupported();
+      const id = getActiveSessionId();
+      if (!id) {
+        throw new Error('No active agent session to save — call session_create first.');
+      }
+      return bridgeRequest<BridgeSessionSaveResult>(
+        'POST',
+        '/v1/session/save',
+        { projectPath: typeof args.projectPath === 'string' ? args.projectPath : undefined },
+        { sessionId: id },
+      );
+    },
+  },
+  {
+    name: 'session_list',
+    requiresDb: false,
+    description:
+      'List every live session in the desktop app — the desktop window (`primary`) plus all headless agent sessions — with their project, row count, crawl state and owner. Use it to see what other agents are doing before you start.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      const res = await bridgeRequest<{ sessions: BridgeSessionInfo[] }>(
+        'GET',
+        '/v1/session/list',
+        undefined,
+        { sessionId: null },
+      );
+      return { ...res, activeSessionId: getActiveSessionId() };
+    },
+  },
+  {
+    name: 'session_status',
+    requiresDb: false,
+    description:
+      'Report your own active agent session: its id, document, live DB path, crawl state and idle time. Returns `activeSessionId: null` when you have not created a session (your tools target the desktop window).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      const id = getActiveSessionId();
+      if (!id) {
+        return { activeSessionId: null, mcpReadPath: session ? session.projectPath : null, session: null };
+      }
+      const res = await bridgeRequest<{ sessions: BridgeSessionInfo[] }>(
+        'GET',
+        '/v1/session/list',
+        undefined,
+        { sessionId: null },
+      );
+      const active = res.sessions.find((s) => s.sessionId === id) ?? null;
+      return {
+        activeSessionId: id,
+        mcpReadPath: session ? session.projectPath : null,
+        idleForMs: active ? Math.max(0, Date.now() - active.lastUsedAt) : null,
+        session: active,
+      };
+    },
   },
 ];
 

@@ -2024,7 +2024,11 @@ export type FilterField =
   | 'x_robots_tag'
   | 'redirect_target'
   | 'images_count'
-  | 'images_missing_alt';
+  | 'images_missing_alt'
+  // Sentinel for a custom-extraction field. The concrete rule is named by
+  // `FilterClause.extractionKey`; the query layer maps it to a
+  // `json_extract(extraction_results, …)` expression rather than a column.
+  | 'extraction';
 
 export type FilterOperator =
   | 'contains'
@@ -2044,6 +2048,9 @@ export interface FilterClause {
   field: FilterField;
   operator: FilterOperator;
   value: string;
+  /** Only when `field === 'extraction'`: the custom-extraction rule name
+   *  (the JSON key in `extraction_results`) this clause targets. */
+  extractionKey?: string;
 }
 
 /** Clauses inside a group are AND'd together. */

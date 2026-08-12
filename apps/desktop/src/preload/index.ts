@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IPC,
+  type BridgeSessionInfo,
   type BrowserInstallState,
   type ConfirmClearResult,
   type CrawlConfig,
@@ -208,6 +209,12 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.browserInstallStart),
   onBrowserInstallState: (cb: (state: BrowserInstallState) => void) =>
     subscribe<BrowserInstallState>(IPC.browserInstallState, cb),
+  agentsList: (): Promise<BridgeSessionInfo[]> =>
+    ipcRenderer.invoke(IPC.agentsList),
+  agentsClose: (sessionId: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke(IPC.agentsClose, sessionId),
+  onAgentsChanged: (cb: () => void) =>
+    subscribe<void>(IPC.agentsChanged, () => cb()),
   recentProjectsList: (): Promise<RecentProject[]> =>
     ipcRenderer.invoke(IPC.recentProjectsList),
   recentProjectSetArchived: (path: string, archived: boolean): Promise<void> =>

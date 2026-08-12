@@ -4914,6 +4914,87 @@ function SpellingPanel() {
   );
 }
 
+/**
+ * Settings for parallel MCP agent sessions (Issue #12): how many headless
+ * sessions may run at once, and how long an idle one lives before it is
+ * auto-closed (saved first if it has a document). Persisted as prefs the main
+ * process reads directly (`maxAgentSessions`, `agentSessionIdleMinutes`).
+ */
+function AgentSessionsSettings() {
+  const { t } = useTranslation();
+  const [maxSessions, setMaxSessions] = useState<number>(() => {
+    const raw = window.freecrawl.prefsGet('maxAgentSessions');
+    return typeof raw === 'number' ? Math.max(1, Math.min(8, Math.floor(raw))) : 3;
+  });
+  const [idleMinutes, setIdleMinutes] = useState<number>(() => {
+    const raw = window.freecrawl.prefsGet('agentSessionIdleMinutes');
+    return typeof raw === 'number' ? Math.max(1, Math.min(1440, Math.floor(raw))) : 30;
+  });
+
+  function applyMax(n: number) {
+    const clamped = Math.max(1, Math.min(8, Math.floor(n)));
+    setMaxSessions(clamped);
+    if (clamped === 3) window.freecrawl.prefsDelete('maxAgentSessions');
+    else window.freecrawl.prefsSet('maxAgentSessions', clamped);
+  }
+  function applyIdle(n: number) {
+    const clamped = Math.max(1, Math.min(1440, Math.floor(n)));
+    setIdleMinutes(clamped);
+    if (clamped === 30) window.freecrawl.prefsDelete('agentSessionIdleMinutes');
+    else window.freecrawl.prefsSet('agentSessionIdleMinutes', clamped);
+  }
+
+  return (
+    <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+        {t('settings.agents.title', { defaultValue: 'Agent Sessions (MCP)' })}
+      </div>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settings.agents.intro', {
+          defaultValue:
+            'AI agents can open their own isolated crawl sessions inside this app over MCP. These limits keep several parallel agents from oversubscribing the machine.',
+        })}
+      </p>
+      <div className="flex flex-col gap-3">
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-[12px] text-surface-100">
+            {t('settings.agents.maxSessions', { defaultValue: 'Max concurrent agent sessions' })}
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={8}
+            value={maxSessions}
+            onChange={(e) => applyMax(Number(e.target.value))}
+            className="w-20 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-right text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+          />
+        </label>
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-[12px] text-surface-100">
+            {t('settings.agents.idleMinutes', {
+              defaultValue: 'Auto-close idle agent sessions after (minutes)',
+            })}
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={1440}
+            value={idleMinutes}
+            onChange={(e) => applyIdle(Number(e.target.value))}
+            className="w-20 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-right text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+          />
+        </label>
+      </div>
+      <p className="mt-2 text-[10px] text-surface-500">
+        {t('settings.agents.note', {
+          defaultValue:
+            'An idle session with a saved project is saved before it is closed. Changes apply to sessions created from now on.',
+        })}
+      </p>
+    </div>
+  );
+}
+
 function StoragePanel() {
   const { t } = useTranslation();
   const [override, setOverride] = useState<string>(() => {
@@ -5024,6 +5105,8 @@ function StoragePanel() {
           </p>
         )}
       </div>
+
+      <AgentSessionsSettings />
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">

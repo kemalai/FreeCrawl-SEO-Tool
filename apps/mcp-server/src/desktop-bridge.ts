@@ -18,9 +18,40 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { BridgeCapabilities } from '@freecrawl/shared-types';
+import {
+  BRIDGE_CLIENT_HEADER,
+  BRIDGE_SESSION_HEADER,
+} from '@freecrawl/shared-types';
 import { userDataDir } from './project-resolver.js';
 
 const DISCOVERY_FILENAME = 'mcp-bridge.json';
+
+/**
+ * Stable per-process id for this MCP server. Every bridge request carries it
+ * so the desktop can tell which client owns a crawl lease — one autonomous
+ * agent's MCP process is one client. Generated once at import time and never
+ * changes for the life of the process.
+ */
+export const CLIENT_ID = randomUUID();
+
+/**
+ * The headless session this MCP process is currently driving, if any. Set by
+ * `session_create`, cleared by `session_close`. Every bridge request defaults
+ * its session header to this, so once an agent creates a session all of its
+ * crawl-control + action tools route there automatically — no per-call
+ * plumbing. A null value targets the desktop window (`primary`).
+ */
+let activeSessionId: string | null = null;
+
+export function setActiveSessionId(id: string | null): void {
+  activeSessionId = id;
+}
+
+export function getActiveSessionId(): string | null {
+  return activeSessionId;
+}
 
 interface DiscoveryFile {
   port: number;
@@ -75,6 +106,7 @@ export async function bridgeRequest<T>(
   method: 'GET' | 'POST',
   path: string,
   body?: Record<string, unknown>,
+  opts: { sessionId?: string | null } = {},
 ): Promise<T> {
   const disc = readDiscovery();
   if (!disc) {
@@ -83,12 +115,18 @@ export async function bridgeRequest<T>(
     );
   }
   const url = `http://127.0.0.1:${disc.port}${path}`;
+  // Explicit sessionId wins; otherwise fall back to the active session. Pass
+  // `sessionId: null` to force the desktop window (primary) regardless.
+  const effectiveSession =
+    opts.sessionId !== undefined ? opts.sessionId : activeSessionId;
   let res: Response;
   try {
     res = await fetch(url, {
       method,
       headers: {
         Authorization: `Bearer ${disc.token}`,
+        [BRIDGE_CLIENT_HEADER]: CLIENT_ID,
+        ...(effectiveSession ? { [BRIDGE_SESSION_HEADER]: effectiveSession } : {}),
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -112,20 +150,56 @@ export async function bridgeRequest<T>(
   }
 
   if (!res.ok) {
-    const errMsg =
-      parsed && typeof parsed === 'object' && 'error' in parsed
-        ? String((parsed as { error: unknown }).error)
-        : `HTTP ${res.status}`;
+    const obj =
+      parsed && typeof parsed === 'object'
+        ? (parsed as { error?: unknown; message?: unknown })
+        : null;
+    const errCode = obj && 'error' in obj ? String(obj.error) : `HTTP ${res.status}`;
+    // Prefer the bridge's agent-facing `message` (protocol v2) — it says what
+    // to do next; fall back to the bare error code on a v1 desktop.
+    const guidance =
+      obj && typeof obj.message === 'string' && obj.message.length > 0
+        ? obj.message
+        : errCode;
     if (res.status === 401) {
       throw new Error(
-        `Desktop bridge auth failed (${errMsg}). The token may be stale — ` +
+        `Desktop bridge auth failed (${errCode}). The token may be stale — ` +
           'this happens when the desktop app was restarted between MCP calls. Retry.',
       );
     }
-    throw new Error(`Desktop bridge: ${errMsg}`);
+    throw new Error(`Desktop bridge [${errCode}]: ${guidance}`);
   }
 
   return parsed as T;
+}
+
+/**
+ * Cached `GET /v1/capabilities` fetch (60 s TTL). Returns null when the
+ * desktop is a v1 build (route 404s) or unreachable — callers degrade
+ * gracefully by treating every session feature as unavailable.
+ */
+let capsCache: { at: number; value: BridgeCapabilities | null } | null = null;
+const CAPS_TTL_MS = 60_000;
+
+export async function capabilities(): Promise<BridgeCapabilities | null> {
+  const now = Date.now();
+  if (capsCache && now - capsCache.at < CAPS_TTL_MS) return capsCache.value;
+  let value: BridgeCapabilities | null = null;
+  try {
+    value = await bridgeRequest<BridgeCapabilities>('GET', '/v1/capabilities');
+  } catch {
+    // v1 desktop (no such route) or bridge down — remember the miss so we
+    // don't hammer it, and let session tools report unsupported-feature.
+    value = null;
+  }
+  capsCache = { at: now, value };
+  return value;
+}
+
+/** Whether the running desktop advertises a given bridge feature flag. */
+export async function hasFeature(name: string): Promise<boolean> {
+  const caps = await capabilities();
+  return caps?.features.includes(name) ?? false;
 }
 
 /**

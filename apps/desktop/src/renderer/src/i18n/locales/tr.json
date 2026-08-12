@@ -99,6 +99,21 @@
     "downloadingTitle": "JavaScript render için kullanılan Chromium tarayıcısı indiriliyor. Metin modunda tarama bundan etkilenmez.",
     "failed": "Tarayıcı indirme başarısız — tekrar dene"
   },
+  "agents": {
+    "badge": "{{n}} ajan",
+    "runningBadge": "{{n}} tarıyor",
+    "indicatorTitle": "{{n}} MCP ajan oturumu etkin — yönetmek için tıklayın",
+    "popoverTitle": "MCP Ajan Oturumları",
+    "popoverSubtitle": "Yapay zekâ ajanlarının MCP üzerinden sürdüğü izole crawl oturumları.",
+    "statusRunning": "Tarıyor",
+    "statusPaused": "Duraklatıldı",
+    "statusIdle": "Boşta",
+    "urls": "URL",
+    "scratchProject": "kaydedilmemiş taslak proje",
+    "idleFor": "{{d}} boşta",
+    "close": "Kapat",
+    "closeTitle": "Bu ajan oturumunu kapat (crawl'ını durdurur ve kaynakları serbest bırakır)"
+  },
   "stats": {
     "discovered": "Keşfedilen",
     "crawled": "Taranan",
@@ -1250,7 +1265,7 @@
     "days90": "Son 90 gün",
     "fetch": "Getir",
     "fetching": "Search Console'dan getiriliyor…",
-    "metaLine": "{{property}} · {{start}} → {{end}} · {{rows}} sayfa · getirildi {{ago}}",
+    "metaLine": "{{property}} · {{start}} → {{end}} · {{rows}} arama verili sayfa · getirildi {{ago}}",
     "colUrl": "URL",
     "colStatus": "Durum",
     "colVerdict": "İndeks",
@@ -1372,7 +1387,7 @@
     "days90": "Son 90 gün",
     "fetch": "Getir",
     "fetching": "GA4'ten getiriliyor…",
-    "metaLine": "{{property}} · {{start}} → {{end}} · {{rows}} sayfa · getirildi {{ago}}",
+    "metaLine": "{{property}} · {{start}} → {{end}} · {{rows}} arama verili sayfa · getirildi {{ago}}",
     "colUrl": "URL",
     "colStatus": "Durum",
     "colSessions": "Oturum",
@@ -1565,6 +1580,13 @@
       "resolvedPath": "Çözümlenen yol",
       "resetTitle": "OS Belgeler klasörüne sıfırla",
       "note": "Aktif crawl verisi siz Farklı Kaydet diyene kadar uygulamanın kullanıcı veri dizininde durur — yukarıdaki yol yalnızca Farklı Kaydet'in nereden başlayacağını belirler. Bunu değiştirmek mevcut proje dosyalarını taşımaz."
+    },
+    "agents": {
+      "title": "Ajan Oturumları (MCP)",
+      "intro": "Yapay zekâ ajanları MCP üzerinden bu uygulama içinde kendi izole crawl oturumlarını açabilir. Bu limitler, paralel çalışan birden çok ajanın makineyi aşırı yüklemesini engeller.",
+      "maxSessions": "Eşzamanlı en fazla ajan oturumu",
+      "idleMinutes": "Boştaki ajan oturumlarını şu süre sonra otomatik kapat (dakika)",
+      "note": "Kaydedilmiş projesi olan boştaki bir oturum, kapatılmadan önce kaydedilir. Değişiklikler bundan sonra oluşturulan oturumlara uygulanır."
     },
     "privacy": {
       "title": "Gizlilik",

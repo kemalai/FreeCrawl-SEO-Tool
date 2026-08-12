@@ -37,7 +37,7 @@ Every link type — images, CSS, JavaScript, media, canonicals, pagination, href
 
 Pull in real data from **Google Search Console, Analytics 4, PageSpeed Insights, and Chrome UX Report**, check spelling and grammar with **LanguageTool** — with a **bundled offline dictionary** for languages LanguageTool has no rules for, such as Turkish — and run your own **AI prompts** on each page (OpenAI, Claude, or Ollama). Open several projects side by side, each in its own window running its own crawl, and manage them from a Projects dialog with search, tags, and starter templates.
 
-Export to **Excel, CSV, JSON, XML**, an HTML report, sitemaps, **Google Sheets**, or **BigQuery**, save each project as **one compressed file** (or a **password-protected encrypted file**), and export any URL Details sub-table on its own. A built-in **MCP server** (96 tools) lets AI agents like Claude drive crawls live and read every result — every action a human can take in the desktop is callable from an agent. Everything runs **fully local** — no telemetry, no cloud, MIT-licensed.
+Export to **Excel, CSV, JSON, XML**, an HTML report, sitemaps, **Google Sheets**, or **BigQuery**, save each project as **one compressed file** (or a **password-protected encrypted file**), and export any URL Details sub-table on its own. A built-in **MCP server** (100+ tools) lets AI agents like Claude drive crawls live and read every result — every action a human can take in the desktop is callable from an agent, and **several agents can run in parallel**, each in its own isolated crawl session. Everything runs **fully local** — no telemetry, no cloud, MIT-licensed.
 
 <br />
 
@@ -209,7 +209,7 @@ FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the acti
 1. **Read-only data access** to the SQLite project — runs alongside the desktop app without contention (WAL allows concurrent readers).
 2. **Live crawl control** — when the desktop app is open, an agent can start / pause / resume / stop crawls and poll progress in real time. This goes through a localhost-only HTTP bridge (127.0.0.1, ephemeral random port, 32-byte Bearer token auth, discovery file written to `<userData>/mcp-bridge.json` on app launch).
 
-**96 tools** — every action a human can take in the desktop is callable from an agent. Representative groups:
+**100+ tools** — every action a human can take in the desktop is callable from an agent, plus multi-agent session management so several agents can work in parallel. Representative groups:
 
 | Group | Tools |
 | :--- | :--- |
@@ -224,8 +224,11 @@ FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the acti
 | ⚙ **Config & schedule** | `get_crawl_config`, `set_crawl_config`, `schedule_get`, `schedule_set` |
 | 📁 **Project management** | `list_projects`, `set_project`, `current_project` |
 | 🕷 **Crawl control** (desktop must be open) | `start_crawl`, `stop_crawl`, `pause_crawl`, `resume_crawl`, `clear_crawl`, `get_crawl_progress`, `get_desktop_project` |
+| 🧑‍🤝‍🧑 **Agent sessions** (parallel agents) | `session_create`, `session_close`, `session_save`, `session_list`, `session_status` |
 
 `start_crawl` accepts a `startUrl` plus optional whitelisted overrides (scope, maxDepth, maxUrls, maxConcurrency, maxRps, crawlDelayMs, requestTimeoutMs, respectRobotsTxt, followRedirects, crawlExternal, userAgent, include/excludePatterns) — anything you don't override keeps the desktop user's saved value. Crawls launched via MCP go through the **same code path** as the UI's Start button, so progress shows up in the desktop app live as the agent drives it. Call `clear_crawl` first when you want a fresh BFS after a completed crawl with the same seed URL (otherwise the crawler treats the re-start as a resume and exits because every URL is already in the DB).
+
+**Several agents at once.** Multiple MCP clients can drive one running desktop app safely. Crawl control is a *lease*: `start_crawl` returns a `crawlId` you own, a second start against a busy session fails with `crawl-in-progress` (or, with `onBusy: "queue"`, waits its turn — or `"takeover"` to replace it), and `stop`/`pause`/`resume` refuse to touch a crawl owned by another client unless you pass `force: true`. `clear_crawl` won't wipe the desktop window's project when it has unsaved work. For full isolation, call **`session_create`** to get your own headless session inside the same app — its own database, crawler and worker pool — so each agent crawls its own project without seeing the others; the MCP read tools automatically repoint to it. `session_create({ mode: "open", projectPath })` reopens a saved `.seoproject` to keep working on it (PageSpeed, spelling, exports, re-crawl), and `session_save` / `session_close({ save: true })` persist it — so the data no longer disappears when the session that produced it ends. Sessions are capped and idle ones are auto-closed (saving first if they have a document).
 
 **1. Build it once:**
 

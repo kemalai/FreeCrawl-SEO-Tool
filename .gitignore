@@ -63,6 +63,7 @@ crawls/
 *.db
 *.sqlite
 *.sqlite3
+*.seoproject
 
 # Claude Code
 .claude

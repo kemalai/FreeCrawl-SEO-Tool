@@ -80,11 +80,15 @@ export function AdvancedFilterDialog({
   initial,
   onClose,
   onApply,
+  extractionFields = [],
 }: {
   open: boolean;
   initial: AdvancedFilter | null;
   onClose: () => void;
   onApply: (filter: AdvancedFilter | null) => void;
+  /** Names of the active custom-extraction rules, offered as filterable
+   *  fields ("Extract: <name>") in addition to the built-in columns. */
+  extractionFields?: string[];
 }) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -212,6 +216,7 @@ export function AdvancedFilterDialog({
                     clause={clause}
                     showAndLabel={ci > 0}
                     lang={lang}
+                    extractionFields={extractionFields}
                     onChange={(patch) => updateClause(gi, ci, patch)}
                     onDelete={() => deleteClause(gi, ci)}
                   />
@@ -267,23 +272,34 @@ export function AdvancedFilterDialog({
   );
 }
 
+const EXTRACTION_PREFIX = 'extraction:';
+
 function ClauseRow({
   clause,
   showAndLabel,
   lang,
+  extractionFields,
   onChange,
   onDelete,
 }: {
   clause: FilterClause;
   showAndLabel: boolean;
   lang: string;
+  extractionFields: string[];
   onChange: (patch: Partial<FilterClause>) => void;
   onDelete: () => void;
 }) {
   const { t } = useTranslation();
-  const numeric = isNumericField(clause.field);
+  // Extraction fields are always text; built-in fields keep their own kind.
+  const numeric = clause.field !== 'extraction' && isNumericField(clause.field);
   const operators = numeric ? NUMERIC_OPS : TEXT_OPS;
   const needsValue = !NO_VALUE_OPS.includes(clause.operator);
+  // The <select> value for an extraction clause encodes the rule name so the
+  // dropdown can distinguish one extraction field from another.
+  const fieldValue =
+    clause.field === 'extraction'
+      ? `${EXTRACTION_PREFIX}${clause.extractionKey ?? ''}`
+      : clause.field;
 
   return (
     <div className="flex items-center gap-2">
@@ -297,15 +313,29 @@ function ClauseRow({
       </span>
       <select
         className="input w-52"
-        value={clause.field}
+        value={fieldValue}
         onChange={(e) => {
-          const field = e.target.value as FilterField;
+          const v = e.target.value;
+          if (v.startsWith(EXTRACTION_PREFIX)) {
+            // Extraction fields are text-only; keep the operator if it's a
+            // valid text operator, else fall back to the first text op.
+            const opStillValid = TEXT_OPS.some((o) => o.value === clause.operator);
+            onChange({
+              field: 'extraction',
+              extractionKey: v.slice(EXTRACTION_PREFIX.length),
+              operator: opStillValid ? clause.operator : TEXT_OPS[0]!.value,
+            });
+            return;
+          }
+          const field = v as FilterField;
           // Switching field may make the current operator invalid — reset
-          // to a safe default for the new field type.
+          // to a safe default for the new field type. Clearing extractionKey
+          // keeps the clause well-formed when leaving an extraction field.
           const nextOps = isNumericField(field) ? NUMERIC_OPS : TEXT_OPS;
           const opStillValid = nextOps.some((o) => o.value === clause.operator);
           onChange({
             field,
+            extractionKey: undefined,
             operator: opStillValid ? clause.operator : nextOps[0]!.value,
           });
         }}
@@ -315,6 +345,17 @@ function ClauseRow({
             {translateLabel(f.label, lang)}
           </option>
         ))}
+        {extractionFields.length > 0 && (
+          <optgroup
+            label={translateLabel('Custom Extraction', lang)}
+          >
+            {extractionFields.map((name) => (
+              <option key={`${EXTRACTION_PREFIX}${name}`} value={`${EXTRACTION_PREFIX}${name}`}>
+                {`Extract: ${name}`}
+              </option>
+            ))}
+          </optgroup>
+        )}
       </select>
       <select
         className="input w-48"

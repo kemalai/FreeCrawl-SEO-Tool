@@ -56,8 +56,29 @@ type SubTab =
   | 'spelling';
 
 /**
+ * Canonical toolbar strip for every detail-panel sub-tab. Giving each tab the
+ * same header band — identical background, border and height, even when the
+ * tab has no controls — stops the panel from looking ragged (or losing the
+ * strip entirely) as you switch between tabs. `min-h` keeps an empty bar the
+ * same height as a populated one.
+ */
+const SUBTAB_BAR_CLASS =
+  'flex min-h-[29px] shrink-0 items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-500';
+
+function SubTabBar({
+  children,
+  className,
+}: {
+  children?: ReactNode;
+  className?: string;
+}) {
+  return <div className={clsx(SUBTAB_BAR_CLASS, className)}>{children}</div>;
+}
+
+/**
  * Right-aligned Export control shared by the detail-panel sub-tabs, with
- * optional status text (e.g. "Showing 500 of 1,703") on the left.
+ * optional status text (e.g. "Showing 500 of 1,703") on the left. Rendered
+ * inside the canonical {@link SubTabBar} so it reads as the same strip.
  */
 function SubTabExportBar({
   fileName,
@@ -73,7 +94,7 @@ function SubTabExportBar({
   children?: ReactNode;
 }) {
   return (
-    <div className="flex shrink-0 items-center gap-3 px-3 pt-2 text-[11px] text-surface-500">
+    <SubTabBar>
       {children}
       <GridExportButton
         className="ml-auto"
@@ -82,7 +103,7 @@ function SubTabExportBar({
         disabled={disabled}
         getData={getData}
       />
-    </div>
+    </SubTabBar>
   );
 }
 
@@ -651,24 +672,27 @@ function SpellingView({
   }
   if (data.matches.length === 0) {
     return (
-      <div className="p-3 text-[11px] text-emerald-400">
-        {/* Saying "no grammar issues" would be a claim the offline
-            dictionary never made — it only ever looked at spelling. */}
-        {data.engine === 'local'
-          ? t('spelling.cleanLocal', {
-              defaultValue:
-                'No spelling mistakes found. Grammar was not checked — LanguageTool has no rules for this language, so an offline dictionary was used instead.',
-            })
-          : t('spelling.clean', {
-              defaultValue: 'No spelling or grammar issues found.',
-            })}
+      <div className="flex h-full flex-col">
+        <SubTabBar />
+        <div className="p-3 text-[11px] text-emerald-400">
+          {/* Saying "no grammar issues" would be a claim the offline
+              dictionary never made — it only ever looked at spelling. */}
+          {data.engine === 'local'
+            ? t('spelling.cleanLocal', {
+                defaultValue:
+                  'No spelling mistakes found. Grammar was not checked — LanguageTool has no rules for this language, so an offline dictionary was used instead.',
+              })
+            : t('spelling.clean', {
+                defaultValue: 'No spelling or grammar issues found.',
+              })}
+        </div>
       </div>
     );
   }
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-3 border-b border-surface-800 px-3 py-1.5 text-[10px] text-surface-400">
+      <div className="flex items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[10px] text-surface-400">
         <span>
           {t('spelling.summary', {
             defaultValue: '{{n}} finding(s)',
@@ -1070,15 +1094,18 @@ function ScreenshotView({ urlId }: { urlId: number | null }) {
   }
   if (noneCaptured) {
     return (
-      <div className="p-4 text-[11px] text-surface-500">
-        {t('screenshot.empty', {
-          defaultValue: 'No screenshots stored for this URL.',
-        })}
-        <div className="mt-1 text-[10px] text-surface-600">
-          {t('screenshot.emptyHint', {
-            defaultValue:
-              'Screenshots are only captured when Rendering Mode = JavaScript Rendering and Screenshot Capture is enabled in Settings → Rendering. Re-crawl the URL with those options on.',
+      <div className="flex h-full flex-col">
+        <SubTabBar />
+        <div className="p-4 text-[11px] text-surface-500">
+          {t('screenshot.empty', {
+            defaultValue: 'No screenshots stored for this URL.',
           })}
+          <div className="mt-1 text-[10px] text-surface-600">
+            {t('screenshot.emptyHint', {
+              defaultValue:
+                'Screenshots are only captured when Rendering Mode = JavaScript Rendering and Screenshot Capture is enabled in Settings → Rendering. Re-crawl the URL with those options on.',
+            })}
+          </div>
         </div>
       </div>
     );
@@ -1086,7 +1113,7 @@ function ScreenshotView({ urlId }: { urlId: number | null }) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-1 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+      <div className="flex items-center gap-1 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px]">
         <span className="text-surface-500">
           {t('screenshot.variant', { defaultValue: 'Variant' })}:
         </span>
@@ -1293,7 +1320,7 @@ function ViewSourceView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+      <div className="flex flex-wrap items-center gap-2 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px]">
         <span className="text-surface-500">
           {(activeLength / 1024).toFixed(1)} KB
           {src.truncated && kind === 'raw' && (
@@ -2209,7 +2236,7 @@ function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: stri
   ];
 
   return (
-    <div className="p-3">
+    <div className="flex h-full flex-col">
       <SubTabExportBar
         fileName={`${exportName}-url-details`}
         sheetName="URL Details"
@@ -2221,6 +2248,7 @@ function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: stri
           ]),
         })}
       />
+      <div className="flex-1 overflow-auto p-3">
       <table className="w-full text-[11px]">
         <thead className="sticky top-0 bg-surface-900">
           <tr className="text-surface-400">
@@ -2246,6 +2274,7 @@ function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: stri
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -2663,7 +2692,7 @@ function LinksView({
       className="relative flex h-full select-none flex-col"
       onMouseDown={() => markGridActive(GRID_ID)}
     >
-      <div className="flex shrink-0 items-center gap-3 px-3 pt-2 text-[11px] text-surface-500">
+      <div className="flex min-h-[29px] shrink-0 items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-500">
         <span>
           {t('links.showing', { defaultValue: 'Showing' })}{' '}
           <span className="font-mono text-surface-200">{shown.toLocaleString()}</span>{' '}
@@ -2984,7 +3013,11 @@ function SerpSnippet({ row }: { row: CrawlUrlRow }) {
   const charsSuffix = t('serp.chars', { defaultValue: 'chars' });
 
   return (
-    <div className="p-5">
+    <div className="flex h-full flex-col">
+      {/* Empty strip so the SERP Snippet tab carries the same header band as
+          every other sub-tab (this tab has no controls of its own). */}
+      <SubTabBar />
+      <div className="flex-1 overflow-auto p-5">
       <div className="max-w-[580px] rounded border border-surface-800 bg-surface-900 p-4">
         <div className="mb-1 truncate text-[12px] text-surface-400">{displayUrl(row.url)}</div>
         <div
@@ -3009,6 +3042,7 @@ function SerpSnippet({ row }: { row: CrawlUrlRow }) {
           label={t('serp.descriptionLength', { defaultValue: 'Description length' })}
           value={String(row.metaDescriptionLength ?? 0) + ' ' + charsSuffix}
         />
+      </div>
       </div>
     </div>
   );
@@ -3247,20 +3281,23 @@ function CookiesView({
 
   if (cookies.length === 0) {
     return (
-      <div className="p-4 text-[11px] text-surface-500">
-        {t('cookies.emptyPrefix', { defaultValue: 'This page did not set any cookies (no' })}{' '}
-        <span className="font-mono">Set-Cookie</span>{' '}
-        {t('cookies.emptySuffix', { defaultValue: 'response headers).' })}
-        <div className="mt-2 text-[10px] text-surface-600">
-          {t('cookies.emptyNote', { defaultValue: 'Note: only first-party cookies set by the page itself are listed here. Cookies set by third-party scripts (analytics, ads) are set in the browser at runtime and are not visible to a static crawler.' })}
+      <div className="flex h-full flex-col">
+        <SubTabBar />
+        <div className="p-4 text-[11px] text-surface-500">
+          {t('cookies.emptyPrefix', { defaultValue: 'This page did not set any cookies (no' })}{' '}
+          <span className="font-mono">Set-Cookie</span>{' '}
+          {t('cookies.emptySuffix', { defaultValue: 'response headers).' })}
+          <div className="mt-2 text-[10px] text-surface-600">
+            {t('cookies.emptyNote', { defaultValue: 'Note: only first-party cookies set by the page itself are listed here. Cookies set by third-party scripts (analytics, ads) are set in the browser at runtime and are not visible to a static crawler.' })}
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="p-3">
-      <div className="mb-2 flex flex-wrap gap-3 text-[11px] text-surface-400">
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
           <span className="font-medium text-surface-200">{cookies.length}</span> {t('cookies.cookiesSet', { defaultValue: 'cookies set' })}
         </span>
@@ -3305,6 +3342,7 @@ function CookiesView({
           })}
         />
       </div>
+      <div className="flex-1 overflow-auto p-3">
       <table className="w-full text-[11px]">
         <thead className="sticky top-0 bg-surface-900">
           <tr className="text-surface-400">
@@ -3354,6 +3392,7 @@ function CookiesView({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -3438,7 +3477,7 @@ function StructuredDataView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
           <span className="font-medium text-surface-200">{row.schemaBlockCount}</span> JSON-LD{' '}
           {t('structured.blocks', { defaultValue: 'block(s)' })}
@@ -3606,7 +3645,7 @@ function ImagesView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
           <span className="font-medium text-surface-200">{rows.length}</span> {t('imagesView.images', { defaultValue: 'images' })}
         </span>
@@ -3928,7 +3967,7 @@ function ResourcesView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px]">
         {FILTERS.map((f) => (
           <button
             key={f.key}
@@ -4101,7 +4140,7 @@ function MultiImagesView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
           <span className="font-medium text-surface-200">{total.toLocaleString()}</span>{' '}
           {t('imagesView.multiSummary', { defaultValue: 'images across {{n}} pages', n: pages.length })}
@@ -4332,7 +4371,7 @@ function MultiResourcesView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px]">
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px]">
         {FILTERS.map((f) => (
           <button
             key={f.key}
@@ -4455,20 +4494,23 @@ function ExtractedDataView({
 
   if (!hasExtraction && !hasSearch) {
     return (
-      <div className="p-4 text-[11px] text-surface-500">
-        {t('extraction.empty1', { defaultValue: 'No custom extraction rules or search terms have produced data for this page.' })}
-        <div className="mt-2 text-[10px] text-surface-600">
-          {t('extraction.empty2', { defaultValue: 'Configure rules in' })}{' '}
-          <span className="font-mono">Settings → Extraction</span>{' '}
-          {t('extraction.empty3', { defaultValue: 'or search terms in' })}{' '}
-          <span className="font-mono">Settings → Custom Search</span>, {t('extraction.empty4', { defaultValue: 'then re-crawl.' })}
+      <div className="flex h-full flex-col">
+        <SubTabBar />
+        <div className="p-4 text-[11px] text-surface-500">
+          {t('extraction.empty1', { defaultValue: 'No custom extraction rules or search terms have produced data for this page.' })}
+          <div className="mt-2 text-[10px] text-surface-600">
+            {t('extraction.empty2', { defaultValue: 'Configure rules in' })}{' '}
+            <span className="font-mono">Settings → Extraction</span>{' '}
+            {t('extraction.empty3', { defaultValue: 'or search terms in' })}{' '}
+            <span className="font-mono">Settings → Custom Search</span>, {t('extraction.empty4', { defaultValue: 'then re-crawl.' })}
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-auto p-3">
+    <div className="flex h-full flex-col">
       <SubTabExportBar
         fileName={`${exportName}-extracted-data`}
         sheetName="Extracted Data"
@@ -4504,6 +4546,7 @@ function ExtractedDataView({
           ] as (string | number | boolean | null)[][],
         })}
       />
+      <div className="flex-1 space-y-3 overflow-auto p-3">
       {hasExtraction && (
         <section>
           <div className="mb-2 text-[10px] uppercase tracking-wide text-surface-500">
@@ -4555,6 +4598,7 @@ function ExtractedDataView({
           </table>
         </section>
       )}
+      </div>
     </div>
   );
 }
@@ -4644,7 +4688,7 @@ function OutlineView({ row, exportName }: { row: CrawlUrlRow; exportName: string
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900/50 px-3 py-1.5 text-[11px] text-surface-400">
+      <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
           <span className="font-medium text-surface-200">{outline.length}</span> {t('outline.headings', { defaultValue: 'headings' })}
         </span>

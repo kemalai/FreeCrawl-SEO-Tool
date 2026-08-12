@@ -263,13 +263,27 @@ export function buildTools(): Tool[] {
       requiresDb: false,
       name: 'start_crawl',
       description:
-        'Start a crawl in the running FreeCrawl desktop app. The desktop app must be open — this drives the SAME crawler the UI uses, so progress shows up in the app as it runs. `startUrl` is required unless the user has already run a crawl in this session (the last-used start URL is reused). Other config overrides are optional and layered on top of the desktop\'s saved settings. NOTE: when the previous crawl with the same start URL already completed, the crawler treats this as a resume and exits immediately because every URL is already in the DB. To force a fresh BFS from the seed, call `clear_crawl` first.',
+        'Start a crawl in the running FreeCrawl desktop app. The desktop app must be open — this drives the SAME crawler the UI uses, so progress shows up in the app as it runs. `startUrl` is required unless the user has already run a crawl in this session (the last-used start URL is reused). Other config overrides are optional and layered on top of the desktop\'s saved settings. Returns a `crawlId` you own — `stop_crawl`/`pause_crawl` refuse to touch a crawl owned by a different client unless forced. If a crawl is ALREADY running, this fails with `crawl-in-progress` by default; set `onBusy` to "queue" to wait your turn or "takeover" to replace it. NOTE: when the previous crawl with the same start URL already completed, the crawler treats a re-start as a resume and exits immediately; call `clear_crawl` first to force a fresh BFS from the seed.',
       inputSchema: {
         type: 'object',
         properties: {
           startUrl: {
             type: 'string',
             description: 'Seed URL to crawl. Required unless the desktop already has a saved last-used crawl config.',
+          },
+          projectPath: {
+            type: 'string',
+            description: 'Optional absolute path to a `.seoproject` this crawl should target. On the desktop-bound session it must match the project the desktop window already has open (otherwise `project-locked`); for an isolated per-agent project, open it with `session_create` (headless session) and crawl there.',
+          },
+          onBusy: {
+            type: 'string',
+            enum: ['reject', 'queue', 'takeover'],
+            description: 'What to do when a crawl is already running: "reject" (default) fails immediately with `crawl-in-progress`; "queue" waits FIFO until the slot frees (up to `queueTimeoutMs`); "takeover" stops the running crawl and replaces it.',
+          },
+          queueTimeoutMs: {
+            type: 'integer',
+            minimum: 1000,
+            description: 'For onBusy:"queue", the max time to wait for the crawl slot before giving up with `queue-timeout`. Default 15 minutes.',
           },
           configOverrides: {
             type: 'object',
@@ -298,12 +312,23 @@ export function buildTools(): Tool[] {
       },
       handler: async (args) => {
         const startUrl = typeof args.startUrl === 'string' ? args.startUrl : undefined;
+        const projectPath =
+          typeof args.projectPath === 'string' ? args.projectPath : undefined;
+        const onBusy =
+          args.onBusy === 'queue' || args.onBusy === 'takeover' || args.onBusy === 'reject'
+            ? args.onBusy
+            : undefined;
+        const queueTimeoutMs =
+          typeof args.queueTimeoutMs === 'number' ? args.queueTimeoutMs : undefined;
         const configOverrides =
           args.configOverrides && typeof args.configOverrides === 'object'
             ? (args.configOverrides as Record<string, unknown>)
             : undefined;
-        return bridgeRequest<{ ok: true; config: unknown }>('POST', '/v1/crawl/start', {
+        return bridgeRequest('POST', '/v1/crawl/start', {
           startUrl,
+          projectPath,
+          onBusy,
+          queueTimeoutMs,
           configOverrides,
         });
       },
@@ -313,43 +338,79 @@ export function buildTools(): Tool[] {
       requiresDb: false,
       name: 'stop_crawl',
       description:
-        'Stop the active crawl in the desktop app immediately. Crawled URLs stay in the project DB; pending URLs are dropped. No-op when no crawl is running.',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () => bridgeRequest<{ ok: true }>('POST', '/v1/crawl/stop'),
+        'Stop the active crawl in the desktop app immediately. Crawled URLs stay in the project DB; pending URLs are dropped. No-op when no crawl is running. Refuses with `crawl-not-owned` if the running crawl belongs to a different client; pass `force: true` to stop it anyway.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          force: {
+            type: 'boolean',
+            description: 'Stop the crawl even if it is owned by another client.',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<{ ok: true }>('POST', '/v1/crawl/stop', { force: args.force === true }),
     },
 
     {
       requiresDb: false,
       name: 'pause_crawl',
       description:
-        'Pause the active crawl in the desktop app. The pending queue is preserved — call resume_crawl to continue. No-op when no crawl is running.',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () => bridgeRequest<{ ok: true }>('POST', '/v1/crawl/pause'),
+        'Pause the active crawl in the desktop app. The pending queue is preserved — call resume_crawl to continue. No-op when no crawl is running. Refuses with `crawl-not-owned` for another client\'s crawl unless `force: true`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          force: {
+            type: 'boolean',
+            description: 'Pause the crawl even if it is owned by another client.',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<{ ok: true }>('POST', '/v1/crawl/pause', { force: args.force === true }),
     },
 
     {
       requiresDb: false,
       name: 'resume_crawl',
       description:
-        'Resume a paused crawl in the desktop app. No-op when the crawl is already running or no crawl is paused.',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () => bridgeRequest<{ ok: true }>('POST', '/v1/crawl/resume'),
+        'Resume a paused crawl in the desktop app. No-op when the crawl is already running or no crawl is paused. Refuses with `crawl-not-owned` for another client\'s crawl unless `force: true`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          force: {
+            type: 'boolean',
+            description: 'Resume the crawl even if it is owned by another client.',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<{ ok: true }>('POST', '/v1/crawl/resume', { force: args.force === true }),
     },
 
     {
       requiresDb: false,
       name: 'clear_crawl',
       description:
-        'Wipe every URL / link / image / header / cookie / sitemap entry from the active project — the same primitive the desktop "Clear" button calls. Stops any running crawl first. Use this before `start_crawl` when you want a fresh BFS from the seed and the previous crawl with that seed already completed (the crawler treats same-seed re-starts as a resume, so without clearing the new start would no-op). DESTRUCTIVE: there is no undo; the project file ends up empty until the new crawl populates it.',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () => bridgeRequest<{ ok: true }>('POST', '/v1/crawl/clear'),
+        'Wipe every URL / link / image / header / cookie / sitemap entry from the active project — the same primitive the desktop "Clear" button calls. Stops any running crawl first. Use this before `start_crawl` when you want a fresh BFS from the seed and the previous crawl with that seed already completed (the crawler treats same-seed re-starts as a resume, so without clearing the new start would no-op). Refuses with `project-locked` when the desktop window has unsaved user work, or `crawl-not-owned` for another client\'s crawl — pass `force: true` to override. DESTRUCTIVE: there is no undo; the project file ends up empty until the new crawl populates it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          force: {
+            type: 'boolean',
+            description: 'Clear even if the desktop project has unsaved work or another client owns the crawl.',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<{ ok: true }>('POST', '/v1/crawl/clear', { force: args.force === true }),
     },
 
     {
       requiresDb: false,
       name: 'get_crawl_progress',
       description:
-        'Snapshot of the current crawl progress in the desktop app: discovered / crawled / pending / failed counts, URLs per second, average response time, elapsed time, and running/paused flags. Returns `progress: null` when no crawl has run this session. Poll this every 1–2 s to watch a crawl live; once `running` flips to false the crawl is done.',
+        'Snapshot of the current crawl progress in the desktop app: discovered / crawled / pending / failed counts, URLs per second, average response time, elapsed time, and running/paused flags. Also returns `crawlId`, `ownerClientId`, and `ownedByCaller` so you can tell whether the running crawl is yours. Returns `progress: null` when no crawl has run this session. Poll this every 1–2 s to watch a crawl live; once `running` flips to false the crawl is done.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () =>
         bridgeRequest<{ progress: unknown | null }>('GET', '/v1/crawl/progress'),

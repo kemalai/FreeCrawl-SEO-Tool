@@ -19,7 +19,14 @@ import {
 } from 'electron';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
-import { basename, dirname, join, resolve as resolvePath, sep as pathSep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  resolve as resolvePath,
+  sep as pathSep,
+} from 'node:path';
 import {
   cpSync,
   mkdirSync,
@@ -30,8 +37,8 @@ import {
   rmSync,
 } from 'node:fs';
 import { copyFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
-import { totalmem, freemem } from 'node:os';
+import { createHash, randomBytes } from 'node:crypto';
+import { totalmem, freemem, cpus } from 'node:os';
 // Lives under src/main/assets (not resources/) on purpose: electron-vite
 // treats resources/ as the public dir and references it in place, which the
 // packaged app doesn't ship — assets/ files get copied into out/main/chunks.
@@ -195,6 +202,22 @@ import {
   type LogExportResult,
   type LogEntry,
   type BrowserInstallState,
+  type McpStartCrawlInput,
+  type McpStartCrawlResult,
+  type BridgeErrorBody,
+  type BridgeErrorCode,
+  type BridgeProgressResult,
+  type BridgeCapabilities,
+  type BridgeSessionInfo,
+  type BridgeSessionCreateInput,
+  type BridgeSessionCreateResult,
+  type BridgeSessionCloseInput,
+  type BridgeSessionCloseResult,
+  type BridgeSessionSaveInput,
+  type BridgeSessionSaveResult,
+  BRIDGE_PROTOCOL_VERSION,
+  BRIDGE_FEATURES,
+  PRIMARY_SESSION_ID,
 } from '@freecrawl/shared-types';
 import {
   setupPlaywrightBrowsersPath,
@@ -304,8 +327,13 @@ import { parseHtml as inlineParseHtml } from '@freecrawl/core';
 import {
   startMcpBridge,
   stopMcpBridge,
-  type McpStartCrawlInput,
+  type BridgeRequestContext,
+  type BridgeResult,
 } from './mcp-bridge.js';
+import {
+  SessionRegistry,
+  computeGlobalThrottleScale,
+} from './agent-session-registry.js';
 import {
   claimIfDue,
   getSchedule,
@@ -394,6 +422,25 @@ function newFetchRunSlot(): FetchRunSlot {
 class ProjectSession {
   /** Owning renderer window (null for the default/headless session). */
   window: BrowserWindow | null = null;
+  /**
+   * What kind of session this is (Issue #12). `primary` = the desktop
+   * window's project; `window` = a secondary project window; `headless` =
+   * a window-less session an MCP agent drives over the bridge. Guards
+   * throughout key on `headless` so an agent's crawl never touches the
+   * desktop window's title / recents / dialogs / visualization panes. */
+  kind: 'primary' | 'window' | 'headless' = 'window';
+  /** Short human label for logs + the Agents UI (e.g. `agent-3`). */
+  label = '';
+  /** Bridge session id when this session is exposed to MCP (headless), else
+   *  null. The primary session is addressed by the well-known `primary` id
+   *  instead of this field. */
+  bridgeSessionId: string | null = null;
+  /** MCP client that created a headless session (for ownership + the UI). */
+  ownerClientId: string | null = null;
+  /** Epoch ms the session was created / last serviced a bridge call — drives
+   *  the idle-session reaper (Faz 4) and the Agents list ordering. */
+  createdAt = 0;
+  lastUsedAt = 0;
   db: ProjectDb | null = null;
   activeCrawler: Crawler | null = null;
   activeBrowserPool: BrowserPool | null = null;
@@ -414,6 +461,13 @@ class ProjectSession {
   storageModeActive: 'disk' | 'ram' = 'disk';
   lastCrawlConfig: CrawlConfig | null = null;
   latestProgress: CrawlProgress | null = null;
+  /**
+   * Lease id of this session's live crawl (Issue #12). Set when the MCP
+   * bridge acquires the crawl slot, cleared on the crawl's terminal event.
+   * Lets the bridge report ownership and release the exact lease it took —
+   * a superseded crawler's stale release then no-ops. Null when no
+   * MCP-arbitrated crawl is running. */
+  currentCrawlId: string | null = null;
   pendingRecoveryCheckpoint: { url: string; depth: number; seedUrl: string }[] =
     [];
   /** True from the moment the scheduler launches this session's crawl until
@@ -465,7 +519,10 @@ class ProjectSession {
     // RAM-only mode keeps the project in an in-memory DB (`:memory:`) with
     // the worker pools disabled — every query runs on the main-thread
     // connection (the pool-call wrappers fall back when pools aren't ready).
-    const ramMode = prefsCache['storageMode'] === 'ram';
+    // A headless (MCP agent) session is ALWAYS on disk: its whole point is
+    // that the MCP server opens the same file read-only, and `:memory:`
+    // can't be shared across connections.
+    const ramMode = this.kind !== 'headless' && prefsCache['storageMode'] === 'ram';
     this.storageModeActive = ramMode ? 'ram' : 'disk';
     const path =
       this.scratchPath ??
@@ -604,10 +661,28 @@ const defaultSession = new ProjectSession({
   readerPool: dbReaderPool,
   writerPool: dbWriterPool,
 });
+defaultSession.kind = 'primary';
+defaultSession.label = 'Primary';
 
 /** All live sessions keyed by their window's `webContents.id`. The
  *  default session is also registered here once its window is created. */
 const sessionsByWc = new Map<number, ProjectSession>();
+
+/** Headless MCP-agent sessions (Issue #12), keyed by bridge session id. These
+ *  have no window and are addressed only over the localhost bridge. Kept
+ *  separate from `sessionsByWc` (which is webContents-keyed) so the two
+ *  addressing schemes never collide. */
+const headlessSessions = new Map<string, ProjectSession>();
+
+/** Normalised-path → bridge session id, so `session_create({ mode:'attach' })`
+ *  reuses the session already bound to a project instead of opening a second
+ *  writer against the same file. */
+const sessionsByProjectPath = new Map<string, string>();
+
+/** Case-insensitive absolute-path key for the path→session index. */
+function projectPathKey(p: string): string {
+  return resolvePath(p).toLowerCase();
+}
 
 /** Propagates the calling window's session through an IPC handler's async
  *  chain so `currentSession()` resolves correctly across `await`s without
@@ -670,6 +745,476 @@ function focusedOwnerWcId(): number {
  *  robust and lets the pinned code use `currentSession()`/`getDb()` normally. */
 function runInPrimarySession<T>(fn: () => T): T {
   return sessionStore.run(defaultSession, fn);
+}
+
+/**
+ * Crawl-lease arbitration for MCP clients (Issue #12). Keyed by bridge
+ * session id. In Faz 1 the only session is `primary` (the desktop window);
+ * Faz 2 registers headless sessions here too. Kept module-level so the
+ * crawl callbacks (which run outside any request context) can release the
+ * lease on a crawl's terminal event.
+ */
+const sessionRegistry = new SessionRegistry();
+
+/**
+ * Resolve a bridge session id to the `ProjectSession` it targets. Faz 1
+ * only knows `primary` → the desktop window's session; any other id is
+ * rejected until Faz 2 introduces headless sessions. Returning null lets
+ * the caller surface a `session-not-found` error.
+ */
+function resolveBridgeSession(sessionId: string): ProjectSession | null {
+  const sess =
+    sessionId === PRIMARY_SESSION_ID
+      ? defaultSession
+      : headlessSessions.get(sessionId) ?? null;
+  if (sess) sess.lastUsedAt = Date.now();
+  return sess;
+}
+
+/** Run `fn` bound to the `ProjectSession` a bridge request targets. */
+function runInBridgeSession<T>(sess: ProjectSession, fn: () => T): T {
+  return sessionStore.run(sess, fn);
+}
+
+/** Bridge session id a `ProjectSession` is registered under, or null when it
+ *  is not exposed to MCP (Faz 1: only the primary/default session is). */
+function bridgeSessionIdFor(sess: ProjectSession): string | null {
+  if (sess === defaultSession) return PRIMARY_SESSION_ID;
+  return sess.bridgeSessionId;
+}
+
+/**
+ * Release the crawl lease this session holds, if any, and promote the next
+ * queued MCP `start_crawl` waiter. Safe to call from every crawl exit path
+ * (done / error / stopped / clear) — a stale crawlId no-ops in the registry.
+ */
+function releaseSessionLease(sess: ProjectSession): void {
+  const crawlId = sess.currentCrawlId;
+  if (!crawlId) return;
+  sess.currentCrawlId = null;
+  const sid = bridgeSessionIdFor(sess);
+  if (sid) sessionRegistry.releaseCrawl(sid, crawlId);
+}
+
+/** Build a typed bridge error body. */
+function makeBridgeError(
+  error: BridgeErrorCode,
+  message: string,
+  details?: Record<string, unknown>,
+): BridgeErrorBody {
+  return details ? { error, message, details } : { error, message };
+}
+
+/**
+ * Resolve a bridge session or return a typed error. A session id that was
+ * recently reaped for idleness yields `session-expired` (410) with a "create
+ * a new one" hint; a never-seen id yields `session-not-found` (404).
+ */
+function resolveBridgeSessionOrError(
+  ctx: BridgeRequestContext,
+): ProjectSession | BridgeErrorBody {
+  const sess = resolveBridgeSession(ctx.sessionId);
+  if (sess) return sess;
+  if (expiredSessions.has(ctx.sessionId)) {
+    return makeBridgeError(
+      'session-expired',
+      `Session '${ctx.sessionId}' was closed after being idle. Create a new one with session_create.`,
+      { sessionId: ctx.sessionId },
+    );
+  }
+  return makeBridgeError('session-not-found', `No such session '${ctx.sessionId}'.`, {
+    sessionId: ctx.sessionId,
+  });
+}
+
+/**
+ * Stop / pause / resume the crawl in a bridge session, enforcing lease
+ * ownership. A control call from a client that doesn't own the running crawl
+ * is refused with `crawl-not-owned` unless `force` — this is what stops one
+ * agent from killing another agent's (or the user's) crawl.
+ */
+function bridgeControlCrawl(
+  ctx: BridgeRequestContext,
+  opts: { force?: boolean },
+  action: 'stop' | 'pause' | 'resume',
+): BridgeResult<{ ok: true }> {
+  const found = resolveBridgeSessionOrError(ctx);
+  if ('error' in found) return found;
+  const sess = found;
+  if (!crawlController) return { ok: true };
+  const lease = sessionRegistry.peekLease(ctx.sessionId);
+  if (
+    lease &&
+    !opts.force &&
+    !sessionRegistry.isOwner(ctx.sessionId, ctx.clientId)
+  ) {
+    return makeBridgeError(
+      'crawl-not-owned',
+      `The crawl in session '${ctx.sessionId}' (crawlId=${lease.crawlId}) is owned ` +
+        `by another client. Pass force:true to control it anyway, or wait for it to finish.`,
+      { sessionId: ctx.sessionId, crawlId: lease.crawlId, ownerClientId: lease.ownerClientId },
+    );
+  }
+  runInBridgeSession(sess, () => {
+    if (action === 'stop') crawlController!.stopCrawl();
+    else if (action === 'pause') crawlController!.pauseCrawl();
+    else crawlController!.resumeCrawl();
+  });
+  return { ok: true };
+}
+
+/** Whether an MCP action name is allow-listed. */
+function bridgeHasAction(name: string): boolean {
+  return crawlController?.actions[name] !== undefined;
+}
+
+/** Run an MCP action bound to the request's session, so its DB reads/writes
+ *  land on that session's project (a headless agent exports its own data). */
+async function bridgeRunAction(
+  name: string,
+  input: unknown,
+  ctx: BridgeRequestContext,
+): Promise<unknown> {
+  const action = crawlController?.actions[name];
+  if (!action) throw new Error(`unknown action: ${name}`);
+  const sess = resolveBridgeSession(ctx.sessionId) ?? defaultSession;
+  return runInBridgeSession(sess, () => action(input));
+}
+
+/** `POST /v1/session/create` — open a headless agent session. */
+async function bridgeCreateSession(
+  input: BridgeSessionCreateInput,
+  ctx: BridgeRequestContext,
+): Promise<BridgeResult<BridgeSessionCreateResult>> {
+  const mode = input.mode ?? 'scratch';
+  // Only creating a NEW session counts against the cap; `attach` to an
+  // existing one does not.
+  const wouldCreate = mode !== 'attach';
+  if (wouldCreate && headlessSessions.size >= maxHeadlessSessions()) {
+    return makeBridgeError(
+      'session-limit-reached',
+      `The headless session limit (${maxHeadlessSessions()}) is reached. Close an idle ` +
+        `session with session_close or raise "Max concurrent agent sessions" in the desktop app.`,
+      { limit: maxHeadlessSessions(), open: headlessSessions.size },
+    );
+  }
+
+  if (mode === 'scratch') {
+    const sess = createHeadlessSession({ label: input.label, clientId: ctx.clientId });
+    // Materialise the empty working DB now so the returned dbPath is real and
+    // the MCP server can open it read-only immediately.
+    runInBridgeSession(sess, () => sess.getDb());
+    return {
+      sessionId: sess.bridgeSessionId!,
+      dbPath: sess.scratchPath!,
+      documentPath: null,
+      created: true,
+      label: sess.label,
+    };
+  }
+
+  // open | attach — need a valid, existing project file.
+  const v = validateProjectPath(input.projectPath, { mustExist: true });
+  if (!v.ok) {
+    return makeBridgeError('invalid-project-path', v.message, {
+      projectPath: input.projectPath ?? null,
+    });
+  }
+  const norm = v.normalized;
+  const key = projectPathKey(norm);
+
+  // Refuse to open a second writable session against a file the desktop
+  // window already has open — two writers on one archive is silent data loss.
+  if (
+    defaultSession.currentProjectPath &&
+    projectPathKey(defaultSession.currentProjectPath) === key
+  ) {
+    return makeBridgeError(
+      'project-locked',
+      `The desktop window already has '${norm}' open. Target the primary session (omit ` +
+        `the session header) or choose a different project — two writers on one file corrupt it.`,
+      { sessionId: PRIMARY_SESSION_ID, projectPath: norm },
+    );
+  }
+
+  const existingId = sessionsByProjectPath.get(key);
+  if (existingId) {
+    const existing = headlessSessions.get(existingId);
+    if (existing) {
+      if (mode === 'open' && input.exclusive) {
+        return makeBridgeError(
+          'project-locked',
+          `'${norm}' is already open in session ${existingId}. Use mode:'attach' or ` +
+            `exclusive:false to share it.`,
+          { sessionId: existingId, projectPath: norm },
+        );
+      }
+      // attach, or non-exclusive open → hand back the existing session.
+      return {
+        sessionId: existingId,
+        dbPath: existing.scratchPath!,
+        documentPath: existing.currentProjectPath || norm,
+        created: false,
+        label: existing.label,
+      };
+    }
+    // Dangling index entry — clean it and open fresh below.
+    sessionsByProjectPath.delete(key);
+  }
+
+  // Enforce the cap for the fresh-open case too (attach was exempt above).
+  if (headlessSessions.size >= maxHeadlessSessions()) {
+    return makeBridgeError(
+      'session-limit-reached',
+      `The headless session limit (${maxHeadlessSessions()}) is reached. Close an idle session first.`,
+      { limit: maxHeadlessSessions(), open: headlessSessions.size },
+    );
+  }
+
+  const sess = createHeadlessSession({ label: input.label, clientId: ctx.clientId });
+  try {
+    await runInBridgeSession(sess, async () => {
+      // Init the pools against the empty scratch first, then open the document
+      // (which swaps the pools onto its working copy). Opening without the
+      // prior init would swap uninitialised pools.
+      sess.getDb();
+      await openProjectAtPath(norm);
+    });
+  } catch (err) {
+    await destroyHeadlessSession(sess);
+    return makeBridgeError(
+      'internal-error',
+      `Failed to open project: ${err instanceof Error ? err.message : String(err)}`,
+      { projectPath: norm },
+    );
+  }
+  sessionsByProjectPath.set(key, sess.bridgeSessionId!);
+  return {
+    sessionId: sess.bridgeSessionId!,
+    dbPath: sess.scratchPath!,
+    documentPath: sess.currentProjectPath || norm,
+    created: true,
+    label: sess.label,
+  };
+}
+
+/** Guard: a bridge session op must target a live headless session. */
+function requireHeadless(
+  ctx: BridgeRequestContext,
+): ProjectSession | BridgeErrorBody {
+  const found = resolveBridgeSessionOrError(ctx);
+  if ('error' in found) return found;
+  const sess = found;
+  if (sess.kind !== 'headless') {
+    return makeBridgeError(
+      'bad-request',
+      `Session '${ctx.sessionId}' is the desktop window, not a headless agent session — ` +
+        `it is managed from the app, not the bridge.`,
+      { sessionId: ctx.sessionId },
+    );
+  }
+  return sess;
+}
+
+/** `POST /v1/session/close` — save (optional) then tear down a headless session. */
+async function bridgeCloseSession(
+  input: BridgeSessionCloseInput,
+  ctx: BridgeRequestContext,
+): Promise<BridgeResult<BridgeSessionCloseResult>> {
+  const found = requireHeadless(ctx);
+  if ('error' in found) return found;
+  const sess = found;
+  let savedTo: string | undefined;
+  if (input.save) {
+    const target = input.savePath?.trim() || sess.currentProjectPath;
+    const v = validateProjectPath(target, { mustExist: false });
+    if (!v.ok) {
+      return makeBridgeError('invalid-project-path', v.message, {
+        savePath: input.savePath ?? sess.currentProjectPath ?? null,
+      });
+    }
+    try {
+      await runInBridgeSession(sess, () =>
+        saveProjectDocument(sess, v.normalized, { rebind: true }),
+      );
+      savedTo = v.normalized;
+    } catch (err) {
+      return makeBridgeError(
+        'internal-error',
+        `Save before close failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  await destroyHeadlessSession(sess);
+  return savedTo ? { ok: true, savedTo } : { ok: true };
+}
+
+/** `POST /v1/session/save` — persist a headless session to a `.seoproject`. */
+async function bridgeSaveSession(
+  input: BridgeSessionSaveInput,
+  ctx: BridgeRequestContext,
+): Promise<BridgeResult<BridgeSessionSaveResult>> {
+  const found = requireHeadless(ctx);
+  if ('error' in found) return found;
+  const sess = found;
+  const target = input.projectPath?.trim() || sess.currentProjectPath;
+  const v = validateProjectPath(target, { mustExist: false });
+  if (!v.ok) {
+    return makeBridgeError('invalid-project-path', v.message, {
+      projectPath: input.projectPath ?? sess.currentProjectPath ?? null,
+    });
+  }
+  let res: { bytesWritten: number };
+  try {
+    res = await runInBridgeSession(sess, () =>
+      saveProjectDocument(sess, v.normalized, { rebind: true }),
+    );
+  } catch (err) {
+    return makeBridgeError(
+      'internal-error',
+      `Save failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  // The session now backs the saved document — refresh the path index.
+  sessionsByProjectPath.set(projectPathKey(v.normalized), sess.bridgeSessionId!);
+  return { filePath: v.normalized, bytesWritten: res.bytesWritten };
+}
+
+/** Notify every window that the agent-session set / crawl state changed, so
+ *  the status-bar Agents indicator re-fetches. Cheap fan-out; non-project
+ *  windows simply have no listener. */
+function broadcastAgentsChanged(): void {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.webContents.send(IPC.agentsChanged);
+  }
+}
+
+/** `GET /v1/session/list` — every live session (primary + headless). */
+function bridgeListSessions(): BridgeSessionInfo[] {
+  const out: BridgeSessionInfo[] = [
+    buildSessionInfo(defaultSession, PRIMARY_SESSION_ID),
+  ];
+  for (const [id, s] of headlessSessions) out.push(buildSessionInfo(s, id));
+  return out;
+}
+
+// ── Global concurrency budget across all live crawls (Issue #12, Faz 4) ──
+
+/**
+ * Ceiling on the SUM of concurrency across every live crawl in this process.
+ * When several agent sessions crawl at once they otherwise each open their
+ * configured thread count independently and oversubscribe the machine. The
+ * budget is shared out proportionally via each crawler's `setThrottleScale`
+ * (the same mechanism thermal throttling uses — they compose via minimum).
+ */
+function globalConcurrencyBudget(): number {
+  const raw = prefsCache['globalMaxConcurrency'];
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return Math.floor(raw);
+  }
+  const cores = cpus()?.length || 4;
+  return Math.min(64, Math.max(8, cores * 8));
+}
+
+/** Every session with a live, running crawl. */
+function activeCrawlSessions(): ProjectSession[] {
+  return [
+    defaultSession,
+    ...sessionsByWc.values(),
+    ...headlessSessions.values(),
+  ].filter((s) => s.activeCrawler?.isRunning === true);
+}
+
+/**
+ * Recompute and apply the multi-session concurrency scale. Called whenever the
+ * set of live crawls changes (a crawl starts / ends, a session is destroyed).
+ * With one crawl running the scale is 1 (the source is cleared), so a lone
+ * agent — or the normal single-window user — is never throttled by this.
+ */
+function rebalanceGlobalConcurrency(): void {
+  const active = activeCrawlSessions();
+  const concs = active.map((s) =>
+    Math.max(1, Math.min(200, s.lastCrawlConfig?.maxConcurrency ?? DEFAULT_CRAWL_CONFIG.maxConcurrency)),
+  );
+  const scale =
+    active.length <= 1
+      ? 1
+      : computeGlobalThrottleScale(concs, globalConcurrencyBudget());
+  for (const s of active) {
+    s.activeCrawler?.setThrottleScale(scale, 'multi-session');
+  }
+  // The live-crawl set just changed (start / end / session teardown) — refresh
+  // the status-bar Agents indicator's running/idle counts.
+  broadcastAgentsChanged();
+}
+
+// ── Idle headless-session reaper (Issue #12, Faz 4) ──────────────────────
+
+/** Recently reaped session ids, so a later call gets a precise
+ *  `session-expired` (410) instead of a bare `session-not-found`. Bounded. */
+const expiredSessions = new Set<string>();
+
+function markExpired(sessionId: string): void {
+  expiredSessions.add(sessionId);
+  // Keep the set small — it's only for a friendlier error on the next call.
+  if (expiredSessions.size > 64) {
+    const first = expiredSessions.values().next().value;
+    if (first !== undefined) expiredSessions.delete(first);
+  }
+}
+
+let reaperTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Auto-close headless sessions idle past the TTL. A session is idle when it
+ * has no running crawl and hasn't serviced a bridge call within the window.
+ * Its work is saved first when it has a backing document (so an agent that
+ * opened a project and wandered off doesn't lose the enrichment it ran).
+ */
+function reapIdleSessions(): void {
+  const ttl = sessionIdleTtlMs();
+  const now = Date.now();
+  for (const sess of [...headlessSessions.values()]) {
+    if (sess.activeCrawler?.isRunning) continue;
+    if (now - sess.lastUsedAt < ttl) continue;
+    const id = sess.bridgeSessionId;
+    const hasDoc = !!sess.currentProjectPath;
+    logger.log(
+      'info',
+      'mcp-bridge',
+      `Reaping idle headless session ${id} (${sess.label}); ${hasDoc ? 'saving first' : 'no document, discarding'}.`,
+    );
+    void (async () => {
+      try {
+        if (hasDoc) {
+          await runInBridgeSession(sess, () =>
+            saveProjectDocument(sess, sess.currentProjectPath, { rebind: true }),
+          );
+        }
+      } catch (err) {
+        logger.log(
+          'warn',
+          'mcp-bridge',
+          `Idle-reap save failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } finally {
+        if (id) markExpired(id);
+        await destroyHeadlessSession(sess);
+      }
+    })();
+  }
+}
+
+function startSessionReaper(): void {
+  if (reaperTimer) return;
+  reaperTimer = setInterval(reapIdleSessions, 60_000);
+}
+
+function stopSessionReaper(): void {
+  if (reaperTimer) {
+    clearInterval(reaperTimer);
+    reaperTimer = null;
+  }
 }
 
 // Route every pooled read (callReaderOrFallback) to the calling window's
@@ -783,6 +1328,11 @@ function fireDataChanged(sess: ProjectSession = currentSession()): void {
   // repaints its own renderer). Callers inside an IPC handler get the
   // right session for free; crawler callbacks pass their captured session.
   sess.send(IPC.dataChanged);
+  // A headless (MCP agent) session owns no window and must not repaint the
+  // shared Visualization / Log Analyzer panes — those track the desktop
+  // window's project, and an agent's crawl mutating them would show the
+  // wrong data. Its own data changes reach MCP through the read-only DB.
+  if (sess.kind === 'headless') return;
   // Mirror the event to the standalone Visualization window so its
   // Cytoscape graph repaints when a crawl finishes or rows change.
   if (visualizationWindow && !visualizationWindow.isDestroyed()) {
@@ -1187,7 +1737,11 @@ function thermalScaleFor(state: string): number {
 
 function applyThermalStateToCrawlers(state: string): void {
   const scale = thermalScaleFor(state);
-  for (const s of [defaultSession, ...sessionsByWc.values()]) {
+  for (const s of [
+    defaultSession,
+    ...sessionsByWc.values(),
+    ...headlessSessions.values(),
+  ]) {
     s.activeCrawler?.setThrottleScale(scale, `thermal:${state}`);
   }
 }
@@ -1345,11 +1899,30 @@ function sweepStaleWorkingCopies(keep: ReadonlySet<string>): void {
     const dir = join(app.getPath('userData'), 'projects');
     if (!existsSync(dir)) return;
     for (const name of readdirSync(dir)) {
-      if (!name.startsWith('work-')) continue;
+      // Working copies (`work-*`) plus crashed headless-agent scratch files
+      // (`agent-*`) are the two throwaway families under projects/.
+      const isWork = name.startsWith('work-');
+      const isAgent = name.startsWith('agent-');
+      if (!isWork && !isAgent) continue;
       const full = join(dir, name);
       // Includes the `-wal` / `-shm` sidecars of dead working copies.
       if (keep.has(full)) continue;
-      if (keep.has(full.replace(/-(wal|shm)$/, ''))) continue;
+      const bare = full.replace(/-(wal|shm)$/, '');
+      if (keep.has(bare)) continue;
+      // Never delete the scratch file of a headless session that is live in
+      // THIS process — the boot sweep runs before any exist, so this only
+      // matters for the mid-session sweep on Open Project.
+      if (isAgent) {
+        let live = false;
+        for (const s of headlessSessions.values()) {
+          const own = s.ownedScratchPath;
+          if (own && projectPathKey(own) === projectPathKey(bare)) {
+            live = true;
+            break;
+          }
+        }
+        if (live) continue;
+      }
       try {
         rmSync(full, { force: true });
       } catch {
@@ -1440,9 +2013,13 @@ async function openProjectAtPath(documentPath: string): Promise<void> {
     );
   }
   // Recents and the title track the document the user knows about, not
-  // the working copy backing it.
-  pushRecentProject(documentPath, new Date().toISOString());
-  rebuildMenu();
+  // the working copy backing it. A headless (MCP agent) open is invisible
+  // to the user, so it must not push the agent's file into File → Open
+  // Recent or rebuild the menu.
+  if (s.kind !== 'headless') {
+    pushRecentProject(documentPath, new Date().toISOString());
+    rebuildMenu();
+  }
   updateWindowTitle(s);
   // The database we just replaced is nobody's now — reclaim its disk.
   if (previousWorking && previousWorking !== workingPath) {
@@ -1476,6 +2053,9 @@ async function openProjectAtPath(documentPath: string): Promise<void> {
  * reads "Untitled" so it is obvious nothing is on disk.
  */
 function updateWindowTitle(s: ProjectSession): void {
+  // A headless (MCP agent) session has no window and must never retitle the
+  // desktop window it would otherwise fall back to.
+  if (s.kind === 'headless') return;
   const win = s.window ?? mainWindow;
   if (!win || win.isDestroyed()) return;
   const name = s.currentProjectPath
@@ -1585,8 +2165,12 @@ async function saveProjectDocument(
     s.currentProjectPath = documentPath;
     s.dirty = false;
     updateWindowTitle(s);
-    pushRecentProject(documentPath, new Date().toISOString());
-    rebuildMenu();
+    // A headless (MCP agent) save is invisible to the user — keep the agent's
+    // file out of File → Open Recent and don't rebuild the menu for it.
+    if (s.kind !== 'headless') {
+      pushRecentProject(documentPath, new Date().toISOString());
+      rebuildMenu();
+    }
     logger.log(
       'info',
       'main',
@@ -2688,6 +3272,178 @@ function createProjectWindow(): void {
   }
 }
 
+// ── Headless MCP-agent sessions (Issue #12, Faz 2) ───────────────────────
+
+/** Monotonic id for headless agent sessions' scratch DB filenames + labels. */
+let headlessSeq = 0;
+
+/** Cap on concurrent headless sessions (each ≈ two worker threads plus a
+ *  possible browser pool). Overridable from prefs so Faz 5's Settings row can
+ *  raise it; clamped to a sane ceiling. */
+function maxHeadlessSessions(): number {
+  const raw = prefsCache['maxAgentSessions'];
+  const n = typeof raw === 'number' && Number.isFinite(raw) ? Math.floor(raw) : 3;
+  return Math.max(1, Math.min(8, n));
+}
+
+/** Idle time before a headless session is auto-reaped (Faz 4 wires the timer;
+ *  advertised in capabilities now so clients can plan). */
+function sessionIdleTtlMs(): number {
+  const raw = prefsCache['agentSessionIdleMinutes'];
+  const mins = typeof raw === 'number' && Number.isFinite(raw) ? raw : 30;
+  return Math.max(1, Math.min(24 * 60, mins)) * 60_000;
+}
+
+/**
+ * Spin up a window-less session an MCP agent drives over the bridge. Mirrors
+ * `createProjectWindow`'s resource setup (own reader/writer pools + a private
+ * scratch DB) minus the BrowserWindow. Registered in `headlessSessions` under
+ * a fresh bridge session id.
+ */
+function createHeadlessSession(opts: {
+  label?: string;
+  clientId: string | null;
+}): ProjectSession {
+  const seq = ++headlessSeq;
+  const sessionId = `sess_${randomBytes(6).toString('hex')}`;
+  const scratchPath = join(
+    app.getPath('userData'),
+    'projects',
+    `agent-${seq}-${process.pid}.seoproject`,
+  );
+  const sess = new ProjectSession({
+    readerPool: new DbReaderPool(),
+    writerPool: new DbWriterPool(),
+    scratchPath,
+  });
+  sess.kind = 'headless';
+  sess.label = opts.label?.trim() || `agent-${seq}`;
+  sess.bridgeSessionId = sessionId;
+  sess.ownerClientId = opts.clientId;
+  sess.createdAt = Date.now();
+  sess.lastUsedAt = Date.now();
+  headlessSessions.set(sessionId, sess);
+  logger.log(
+    'info',
+    'mcp-bridge',
+    `Headless session ${sessionId} (${sess.label}) created for client ${opts.clientId ?? '(anonymous)'}.`,
+  );
+  broadcastAgentsChanged();
+  return sess;
+}
+
+/**
+ * Tear down a headless session: drop it from the registries, release its
+ * crawl lease + queue, dispose pools/DB/crawler (via `teardown`), and remove
+ * its scratch DB sidecars + screenshot directory. Safe to call once.
+ */
+async function destroyHeadlessSession(sess: ProjectSession): Promise<void> {
+  const id = sess.bridgeSessionId;
+  if (id) {
+    headlessSessions.delete(id);
+    sessionRegistry.dropSession(id);
+  }
+  if (sess.currentProjectPath) {
+    sessionsByProjectPath.delete(projectPathKey(sess.currentProjectPath));
+  }
+  sess.currentCrawlId = null;
+  // Screenshot sidecar lives beside the working DB — teardown removes the DB
+  // files but not this directory, so drop it explicitly to avoid a leak.
+  const shotDir = sess.scratchPath ? screenshotDirFor(sess.scratchPath) : null;
+  await sess.teardown();
+  if (shotDir) {
+    try {
+      rmSync(shotDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort — locked file is swept next launch */
+    }
+  }
+  // This session's crawl (if any) is gone — reshare the concurrency budget
+  // (which also broadcasts the Agents-indicator refresh).
+  rebalanceGlobalConcurrency();
+  if (id) {
+    logger.log('info', 'mcp-bridge', `Headless session ${id} closed.`);
+  }
+}
+
+/**
+ * Validate an agent-supplied `.seoproject` path before opening/saving to it.
+ * The path comes from an MCP client, so it is treated as untrusted: it must
+ * be an absolute `.seoproject`, must not sit inside the app bundle, and —
+ * depending on the operation — the file (open) or its parent dir (save) must
+ * exist.
+ */
+function validateProjectPath(
+  raw: unknown,
+  opts: { mustExist: boolean },
+): { ok: true; normalized: string } | { ok: false; message: string } {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    return { ok: false, message: 'projectPath must be a non-empty string.' };
+  }
+  const trimmed = raw.trim();
+  if (!isAbsolute(trimmed)) {
+    return { ok: false, message: `projectPath must be an absolute path (got '${trimmed}').` };
+  }
+  const normalized = resolvePath(trimmed);
+  if (!normalized.toLowerCase().endsWith('.seoproject')) {
+    return { ok: false, message: 'projectPath must end with .seoproject.' };
+  }
+  // Never let an agent write into the app's own resources (asar / install dir).
+  const appDir = resolvePath(app.getAppPath());
+  if (normalized.toLowerCase().startsWith(appDir.toLowerCase())) {
+    return { ok: false, message: 'projectPath must be outside the application directory.' };
+  }
+  if (opts.mustExist) {
+    if (!existsSync(normalized)) {
+      return { ok: false, message: `No such project file: ${normalized}` };
+    }
+  } else {
+    const parent = dirname(normalized);
+    if (!existsSync(parent)) {
+      return { ok: false, message: `Parent directory does not exist: ${parent}` };
+    }
+  }
+  return { ok: true, normalized };
+}
+
+/**
+ * Whether a `ProjectSession` is worth advertising to MCP `session_list`.
+ * Build the wire shape from a live session.
+ */
+function buildSessionInfo(
+  sess: ProjectSession,
+  sessionId: string,
+): BridgeSessionInfo {
+  const lease = sessionRegistry.peekLease(sessionId);
+  let urlsCrawled = 0;
+  try {
+    urlsCrawled = sess.getDb().countUrls();
+  } catch {
+    urlsCrawled = 0;
+  }
+  return {
+    sessionId,
+    label: sess.label || (sess.kind === 'primary' ? 'Primary' : sessionId),
+    kind: sess.kind,
+    documentPath: sess.currentProjectPath || null,
+    dbPath: sess.scratchPath ?? null,
+    urlsCrawled,
+    crawl: lease
+      ? {
+          crawlId: lease.crawlId,
+          running: sess.latestProgress?.running ?? false,
+          paused: sess.latestProgress?.paused ?? false,
+          ownerClientId: lease.ownerClientId,
+          startUrl: lease.startUrl,
+          startedAt: lease.startedAt,
+        }
+      : null,
+    ownerClientId: sess.ownerClientId,
+    createdAt: sess.createdAt,
+    lastUsedAt: sess.lastUsedAt,
+  };
+}
+
 /**
  * Whether a renderer-supplied URL is safe to hand to `shell.openExternal`.
  * Restricts to the schemes a user actually expects a browser / mail client to
@@ -3164,6 +3920,23 @@ function registerIpc(): void {
     }
     return lastInstallState;
   });
+
+  // MCP agent sessions (Issue #12) — the status-bar Agents indicator lists
+  // the live headless sessions and can close one. Only headless sessions are
+  // returned; the desktop window itself is not an "agent".
+  registerHandle(IPC.agentsList, (): BridgeSessionInfo[] =>
+    bridgeListSessions().filter((s) => s.kind === 'headless'),
+  );
+  registerHandle(
+    IPC.agentsClose,
+    async (_e, sessionId: string): Promise<{ ok: boolean }> => {
+      const sess =
+        typeof sessionId === 'string' ? headlessSessions.get(sessionId) : undefined;
+      if (!sess) return { ok: false };
+      await destroyHeadlessSession(sess);
+      return { ok: true };
+    },
+  );
 
   // Live memory snapshot for the in-app monitor (status bar). Returns
   // process RSS / heap + system total/free + the active project's URL
@@ -4777,12 +5550,17 @@ function registerIpc(): void {
     IPC.gscQuery,
     async (_e, input: GscQueryInput): Promise<GscQueryResult> => {
       const accountId = resolveGoogleAccount('gsc', input.accountId);
+      // Same URL-matching options the orphan/fetch path uses, so the table
+      // join attaches GSC data to slash/case variants consistently.
+      const gscSettings = resolveGscSettings();
       const params = {
         limit: input.limit,
         offset: input.offset,
         search: input.search,
         filter: input.filter,
         accountId,
+        matchSlash: gscSettings.matchSlash,
+        matchCase: gscSettings.matchCase,
       };
       const result = await callReaderOrFallback<{
         rows: GscQueryResult['rows'];
@@ -5547,6 +6325,11 @@ function registerIpc(): void {
       );
       sess.send(IPC.crawlDone, summary);
       sess.activeCrawler = null;
+      // Free the MCP crawl lease so a queued agent start_crawl can proceed.
+      releaseSessionLease(sess);
+      // One fewer live crawl — give the survivors back their share of the
+      // global concurrency budget.
+      rebalanceGlobalConcurrency();
       freezeWatchdog.setMainOp('idle');
       // V1 Faz 6 — if this run was kicked off by the scheduler, record
       // the result so the dialog's "Last status" row reflects the outcome.
@@ -5570,11 +6353,26 @@ function registerIpc(): void {
       if (sess.activeCrawler !== crawler) return;
       logger.log('error', 'crawler', msg, undefined, sess.logTag);
       sess.send(IPC.crawlError, msg);
-      maybeShowDiagnosticDialog(msg, sess.logTag);
+      // A crawl that errors out still holds the lease — release it so the
+      // queue drains instead of stalling on a dead crawl.
+      releaseSessionLease(sess);
+      rebalanceGlobalConcurrency();
+      // Headless (MCP agent) crawls surface errors through the bridge, not a
+      // modal on the desktop window.
+      if (sess.kind !== 'headless') maybeShowDiagnosticDialog(msg, sess.logTag);
       if (sess.crawlerStartedByScheduler) {
         sess.crawlerStartedByScheduler = false;
         recordFireResult(schedulerStore, sess.currentProjectPath, 'failure');
       }
+    });
+    // A user/agent stop (or the crawler stopping itself) suppresses 'done',
+    // so the lease must also be freed here. Guarded by the zombie-crawler
+    // check: a superseded crawler (takeover) sees `activeCrawler !== crawler`
+    // and skips, leaving the NEW crawl's freshly-granted lease intact.
+    crawler.on('stopped', () => {
+      if (sess.activeCrawler !== crawler) return;
+      releaseSessionLease(sess);
+      rebalanceGlobalConcurrency();
     });
     crawler.on('warn', (msg: string) => {
       if (sess.activeCrawler !== crawler) return;
@@ -5904,6 +6702,9 @@ function registerIpc(): void {
       void disposeBrowserPool(sess);
     });
     void crawler.start();
+    // A new crawl joined the pool — reshare the global concurrency budget
+    // across every live crawl so parallel agents don't oversubscribe.
+    rebalanceGlobalConcurrency();
   }
 
   /**
@@ -8554,66 +9355,194 @@ void app.whenReady().then(async () => {
   try {
     const bridge = await startMcpBridge({
       userDataDir: app.getPath('userData'),
-      startCrawl: (input: McpStartCrawlInput) =>
-        // MCP always drives the PRIMARY window's project — pin the session so
-        // launchCrawl's internal currentSession()/getDb() resolve to it.
-        runInPrimarySession(async () => {
-          if (!crawlController) {
-            return { ok: false as const, error: 'IPC handlers not registered yet — try again in a moment.' };
-          }
-          // Layer the supplied overrides on top of the last-used config
-          // (so a `start_crawl` with just a `startUrl` keeps the user's
-          // saved scope/threads/RPS). Fall back to factory defaults when
-          // there is no saved config.
-          const savedBase = currentSession().lastCrawlConfig;
-          const base: CrawlConfig =
-            savedBase !== null ? savedBase : { ...DEFAULT_CRAWL_CONFIG };
-          const overrides = input.configOverrides ?? {};
-          const resolved: CrawlConfig = {
-            ...base,
-            ...overrides,
-            startUrl: (input.startUrl ?? base.startUrl ?? '').trim(),
-          };
-          if (!resolved.startUrl) {
-            return {
-              ok: false as const,
-              error: 'startUrl is empty — pass it in the request or run a crawl from the desktop UI at least once so the bridge has a saved default.',
-            };
-          }
-          await crawlController.launchCrawl(resolved);
-          return { ok: true as const, config: resolved };
-        }),
-      stopCrawl: () => runInPrimarySession(() => crawlController?.stopCrawl()),
-      pauseCrawl: () => runInPrimarySession(() => crawlController?.pauseCrawl()),
-      resumeCrawl: () => runInPrimarySession(() => crawlController?.resumeCrawl()),
-      clearCrawl: () =>
-        runInPrimarySession(async () => {
-          if (crawlController) await crawlController.clearCrawl();
-        }),
-      // Lazy lookup — crawlController is set inside the IPC registration
-      // scope (which runs before the bridge starts), but using a getter
-      // here keeps the wire-up symmetric with the other deps and avoids
-      // a "TDZ between registerIpc() and startMcpBridge()" footgun.
-      actions: new Proxy({}, {
-        get: (_t, name) => {
-          if (typeof name !== 'string') return undefined;
-          const action = crawlController?.actions[name];
-          if (!action) return undefined;
-          // Pin every MCP action to the primary session so its DB reads/writes
-          // and currentSession() land on the primary project's window.
-          return (input: unknown) => runInPrimarySession(() => action(input));
+      getCapabilities: (): BridgeCapabilities => ({
+        bridgeVersion: BRIDGE_PROTOCOL_VERSION,
+        appVersion: app.getVersion(),
+        features: [
+          BRIDGE_FEATURES.crawlLease,
+          BRIDGE_FEATURES.crawlQueue,
+          BRIDGE_FEATURES.sessions,
+        ],
+        limits: {
+          maxHeadlessSessions: maxHeadlessSessions(),
+          maxQueueDepth: 4,
+          sessionIdleTtlMs: sessionIdleTtlMs(),
         },
-        has: (_t, name) =>
-          typeof name === 'string' && crawlController?.actions[name] !== undefined,
-      }) as Record<string, (input: unknown) => Promise<unknown>>,
-      getProgress: () => defaultSession.latestProgress,
-      getProjectPath: () => defaultSession.currentProjectPath || null,
-      getUrlCount: () => {
-        try {
-          return defaultSession.getDb().countUrls();
-        } catch {
-          return 0;
+      }),
+      startCrawl: async (
+        input: McpStartCrawlInput,
+        ctx: BridgeRequestContext,
+      ): Promise<BridgeResult<McpStartCrawlResult>> => {
+        const found = resolveBridgeSessionOrError(ctx);
+        if ('error' in found) return found;
+        const sess = found;
+        if (!crawlController) {
+          return makeBridgeError(
+            'internal-error',
+            'IPC handlers not registered yet — try again in a moment.',
+          );
         }
+        // On this desktop-bound (primary) session projectPath is verify-only:
+        // a path that doesn't match the desktop's open document is refused
+        // rather than silently writing to the wrong project. Real per-agent
+        // isolation (your own file in a headless session) is available now via
+        // `session_create` — route isolated crawls there, not through here.
+        const requestedPath =
+          typeof input.projectPath === 'string' ? input.projectPath.trim() : '';
+        if (requestedPath) {
+          const openPath = sess.currentProjectPath;
+          const sameFile =
+            openPath &&
+            resolvePath(openPath).toLowerCase() ===
+              resolvePath(requestedPath).toLowerCase();
+          if (!sameFile) {
+            return makeBridgeError(
+              'project-locked',
+              `This desktop session is bound to '${openPath || '(unsaved scratch project)'}', ` +
+                `not '${requestedPath}'. For an isolated per-agent project, open it with ` +
+                `session_create (headless session); on this desktop-bound session target the ` +
+                `open project or omit projectPath.`,
+              {
+                sessionId: ctx.sessionId,
+                openProjectPath: openPath || null,
+                requestedProjectPath: requestedPath,
+              },
+            );
+          }
+        }
+        // Arbitrate the crawl slot before launching anything.
+        const startUrlForLease = (
+          input.startUrl ??
+          sess.lastCrawlConfig?.startUrl ??
+          ''
+        ).trim();
+        const gate = await sessionRegistry.acquireCrawl(ctx.sessionId, {
+          clientId: ctx.clientId,
+          startUrl: startUrlForLease,
+          onBusy: input.onBusy,
+          queueTimeoutMs: input.queueTimeoutMs,
+        });
+        if (!gate.ok) return makeBridgeError(gate.error, gate.message, gate.details);
+        // We hold the lease; launch under the target session.
+        try {
+          return await runInBridgeSession(sess, async () => {
+            const savedBase = sess.lastCrawlConfig;
+            const base: CrawlConfig =
+              savedBase !== null ? savedBase : { ...DEFAULT_CRAWL_CONFIG };
+            const overrides = input.configOverrides ?? {};
+            const resolved: CrawlConfig = {
+              ...base,
+              ...overrides,
+              startUrl: (input.startUrl ?? base.startUrl ?? '').trim(),
+            };
+            if (!resolved.startUrl) {
+              sessionRegistry.releaseCrawl(ctx.sessionId, gate.crawlId);
+              return makeBridgeError(
+                'bad-request',
+                'startUrl is empty — pass it in the request or run a crawl from the desktop UI at least once so the bridge has a saved default.',
+              );
+            }
+            if (gate.tookOver) {
+              logger.log(
+                'warn',
+                'mcp-bridge',
+                `Client ${ctx.clientId ?? '(anonymous)'} took over the running crawl in session '${ctx.sessionId}'.`,
+              );
+            }
+            await crawlController!.launchCrawl(resolved);
+            sess.currentCrawlId = gate.crawlId;
+            return {
+              ok: true,
+              crawlId: gate.crawlId,
+              sessionId: ctx.sessionId,
+              config: resolved,
+              queued: gate.queued,
+              waitedMs: gate.waitedMs,
+            } satisfies McpStartCrawlResult;
+          });
+        } catch (err) {
+          sessionRegistry.releaseCrawl(ctx.sessionId, gate.crawlId);
+          return makeBridgeError(
+            'internal-error',
+            err instanceof Error ? err.message : 'crawl launch failed',
+          );
+        }
+      },
+      stopCrawl: (ctx, opts) => bridgeControlCrawl(ctx, opts, 'stop'),
+      pauseCrawl: (ctx, opts) => bridgeControlCrawl(ctx, opts, 'pause'),
+      resumeCrawl: (ctx, opts) => bridgeControlCrawl(ctx, opts, 'resume'),
+      clearCrawl: async (ctx, opts): Promise<BridgeResult<{ ok: true }>> => {
+        const found = resolveBridgeSessionOrError(ctx);
+        if ('error' in found) return found;
+        const sess = found;
+        if (!crawlController) {
+          return makeBridgeError('internal-error', 'IPC handlers not registered yet.');
+        }
+        const lease = sessionRegistry.peekLease(ctx.sessionId);
+        if (lease && !opts.force && !sessionRegistry.isOwner(ctx.sessionId, ctx.clientId)) {
+          return makeBridgeError(
+            'crawl-not-owned',
+            `A crawl owned by another client is running in session '${ctx.sessionId}'. ` +
+              `Pass force:true to clear anyway, or wait for it to finish.`,
+            { sessionId: ctx.sessionId, crawlId: lease.crawlId },
+          );
+        }
+        // Guard the desktop window's own project: clearing wipes it with no
+        // undo, so refuse when it has unsaved user work unless forced.
+        if (sess === defaultSession && sess.dirty && !opts.force) {
+          return makeBridgeError(
+            'project-locked',
+            `The desktop window has unsaved work in its project; clear_crawl would erase it ` +
+              `with no undo. Pass force:true to clear anyway (or use your own session once ` +
+              `headless sessions are available).`,
+            { sessionId: ctx.sessionId },
+          );
+        }
+        await runInBridgeSession(sess, () => crawlController!.clearCrawl());
+        releaseSessionLease(sess);
+        return { ok: true };
+      },
+      // Actions are dispatched by name and bound to the request's session, so
+      // a headless agent's export/query hits ITS project's DB, not the desktop
+      // window's. crawlController is populated in registerIpc() (which runs
+      // before the bridge starts), so these lazy lookups are always resolved.
+      hasAction: bridgeHasAction,
+      runAction: bridgeRunAction,
+      createSession: bridgeCreateSession,
+      closeSession: bridgeCloseSession,
+      saveSession: bridgeSaveSession,
+      listSessions: bridgeListSessions,
+      getCrawlProgress: (ctx): BridgeProgressResult => {
+        const sess = resolveBridgeSession(ctx.sessionId);
+        if (!sess) {
+          return {
+            progress: null,
+            crawlId: null,
+            sessionId: ctx.sessionId,
+            ownerClientId: null,
+            ownedByCaller: false,
+          };
+        }
+        const lease = sessionRegistry.peekLease(ctx.sessionId);
+        return {
+          progress: sess.latestProgress,
+          crawlId: sess.currentCrawlId ?? lease?.crawlId ?? null,
+          sessionId: ctx.sessionId,
+          ownerClientId: lease?.ownerClientId ?? null,
+          ownedByCaller: lease
+            ? sessionRegistry.isOwner(ctx.sessionId, ctx.clientId)
+            : false,
+        };
+      },
+      getProjectInfo: (ctx) => {
+        const sess = resolveBridgeSession(ctx.sessionId) ?? defaultSession;
+        let urlsCrawled = 0;
+        try {
+          urlsCrawled = sess.getDb().countUrls();
+        } catch {
+          urlsCrawled = 0;
+        }
+        return { projectPath: sess.currentProjectPath || null, urlsCrawled };
       },
       log: (level, msg) => logger.log(level, 'mcp-bridge', msg),
     });
@@ -8623,6 +9552,8 @@ void app.whenReady().then(async () => {
         'mcp-bridge',
         `MCP bridge ready on 127.0.0.1:${bridge.port}. Discovery file written to userData/mcp-bridge.json.`,
       );
+      // Start reaping idle headless agent sessions once the bridge is live.
+      startSessionReaper();
     }
   } catch (err) {
     logger.log(
@@ -8745,12 +9676,18 @@ function performShutdown(): void {
     void shutdownPool.close().catch(() => {});
   }
   stopScheduler();
+  stopSessionReaper();
   // Tear down the MCP bridge first so any in-flight HTTP calls fail
   // fast rather than racing with the DB shutdown that follows.
   try {
     stopMcpBridge();
   } catch {
     /* best-effort */
+  }
+  // Dispose every headless agent session (stops its crawl, disposes pools,
+  // removes its scratch DB) so a quit mid-agent-run leaves nothing behind.
+  for (const sess of [...headlessSessions.values()]) {
+    void destroyHeadlessSession(sess);
   }
   freezeWatchdog.setMainOp('shutdown');
   void freezeWatchdog.terminate();

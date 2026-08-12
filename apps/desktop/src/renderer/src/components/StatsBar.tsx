@@ -4,6 +4,7 @@ import { useAppStore } from '../store.js';
 import { usePerfMeter } from '../hooks/usePerfMeter.js';
 import { useMemoryMonitor } from '../hooks/useMemoryMonitor.js';
 import { useBrowserInstall } from '../hooks/useBrowserInstall.js';
+import { AgentSessionsIndicator } from './AgentSessionsIndicator.js';
 
 function Stat({
   label,
@@ -227,6 +228,9 @@ export function StatsBar() {
       />
 
       <div className="ml-auto flex items-center gap-2">
+        {/* Parallel MCP agent sessions (Issue #12) — hidden unless an agent
+            has created one. */}
+        <AgentSessionsIndicator />
         {/* JS-rendering browser provisioning. Silent when everything is
             already in place — only surfaces while downloading or after a
             failure, where it doubles as the retry button. */}
