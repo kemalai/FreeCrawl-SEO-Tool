@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.4] — 2026-08-13
+
+### Added
+- Several automated agents can now share one crawler safely, each working in its own isolated session with a crawl queue.
+- The Advanced table filter can now match on the values captured by your custom extraction rules.
+
+### Changed
+- Custom extraction values now read as plain text in the results table instead of raw JSON, matching the extraction preview.
+- Sitemap and List crawls now stay within the supplied URL set instead of also following on-page links and fetching every asset.
+
+### Fixed
+- Redirect and error pages are no longer reported as missing title, meta description, H1, and other on-page elements they can never have.
+- Search Console data now attaches to a crawled page even when the two URLs differ only by a trailing slash or letter case.
+- Opening a saved project by double-clicking it now restores the start URL and mode in the toolbar instead of coming up blank.
+- The results table no longer briefly draws two rows over each other while a crawl is running.
+- Consistent toolbar strip across every detail-panel sub-tab, plus various interface refinements.
+
 ## [0.9.3] — 2026-08-08
 
 ### Added
