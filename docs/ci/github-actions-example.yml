@@ -1,13 +1,16 @@
 # FreeCrawl SEO — example GitHub Actions workflow
 #
-# Runs the headless CLI against your site on every push and on a daily
-# schedule, fails the build if more than N broken links are discovered,
-# and uploads the JSON / CSV crawl as a build artifact. Adapt
-# `TARGET_URL` and `BROKEN_LINK_THRESHOLD` to your site.
+# Crawls your site with the headless CLI on every push and on a daily
+# schedule, fails the build when broken links exceed a threshold, validates
+# the sitemap, and uploads the crawl as a build artifact. Adapt TARGET_URL
+# and the thresholds to your site.
 #
-# Save this file as `.github/workflows/freecrawl-audit.yml` in your
-# repo. No FreeCrawl install required on the runner — `npx` pulls the
-# CLI from the source clone.
+# Save this as `.github/workflows/freecrawl-audit.yml` in your own repo.
+# No FreeCrawl install is required on the runner — the workflow clones the
+# source and builds the CLI (plus its workspace packages) from it.
+#
+# See docs/ci/README.md for the CLI exit-code contract, a zero-tolerance
+# (no-script) gate variant, and how to add a regression-compare job.
 
 name: FreeCrawl SEO Audit
 
@@ -15,13 +18,13 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: "0 4 * * *" # 04:00 UTC daily
+    - cron: '0 4 * * *' # 04:00 UTC daily
   workflow_dispatch:
 
 env:
   TARGET_URL: https://example.com
-  MAX_URLS: "5000"
-  BROKEN_LINK_THRESHOLD: "10"
+  MAX_URLS: '5000'
+  BROKEN_LINK_THRESHOLD: '10'
 
 jobs:
   audit:
@@ -35,28 +38,49 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
           cache-dependency-path: freecrawl/package-lock.json
 
       - name: Install + build CLI
         working-directory: freecrawl
         run: |
-          npm ci
-          npm run build:cli
+          # --ignore-scripts skips the Playwright browser download; the CLI's
+          # default crawl is undici-based and needs no Chromium. Drop the flag
+          # only if you enable JS rendering through a --config file.
+          npm ci --ignore-scripts
+          # Build the CLI and its workspace deps (shared-types → db → core) in
+          # dependency order via project references. The heavy Electron desktop
+          # build is intentionally skipped — `npm run build:cli` alone would
+          # NOT build the packages the CLI imports and the crawl would fail.
+          npx tsc -b apps/cli
 
       - name: Crawl ${{ env.TARGET_URL }}
         working-directory: freecrawl
         run: |
+          # --json prints a machine-readable summary to stdout (captured for
+          # the gate); --out writes the full per-URL dump for the artifact.
+          # `|| true` hands pass/fail to the threshold gate below — the CLI
+          # itself exits 1 on ANY 4xx/5xx (see the zero-tolerance variant in
+          # docs/ci/README.md).
           node apps/cli/dist/index.js "$TARGET_URL" \
             --max "$MAX_URLS" \
-            --out "$GITHUB_WORKSPACE/crawl.json"
+            --json \
+            --out "$GITHUB_WORKSPACE/crawl.json" \
+            > "$GITHUB_WORKSPACE/summary.json" || true
+          cat "$GITHUB_WORKSPACE/summary.json"
 
-      - name: Fail on too many broken links
+      - name: Gate on broken links
         run: |
+          # Count 4xx/5xx from the summary's byStatus map — robust against the
+          # full dump's column layout, and cheap (no multi-MB file parse).
           BROKEN=$(node -e "
-            const r = require('$GITHUB_WORKSPACE/crawl.json');
-            const n = r.filter(u => u.statusCode >= 400 && u.statusCode < 600).length;
+            const s = require('$GITHUB_WORKSPACE/summary.json');
+            const by = (s.summary && s.summary.byStatus) || {};
+            let n = 0;
+            for (const [code, count] of Object.entries(by)) {
+              if (Number(code) >= 400) n += count;
+            }
             console.log(n);
           ")
           echo "Broken-URL count: $BROKEN (threshold: $BROKEN_LINK_THRESHOLD)"
@@ -65,9 +89,16 @@ jobs:
             exit 1
           fi
 
+      - name: Validate sitemap (non-blocking)
+        working-directory: freecrawl
+        continue-on-error: true
+        run: node apps/cli/dist/index.js validate-sitemap "$TARGET_URL/sitemap.xml"
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: freecrawl-audit-${{ github.run_number }}
-          path: crawl.json
+          path: |
+            crawl.json
+            summary.json
           retention-days: 30

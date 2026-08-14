@@ -993,13 +993,39 @@ export class ProjectDb {
   deleteByDomain(domain: string): { urlsDeleted: number; linksDeleted: number } {
     const target = domain.trim().toLowerCase();
     if (!target) return { urlsDeleted: 0, linksDeleted: 0 };
-    return this.runInTransaction(() => {
-      // Snapshot the URL ids we'll delete so we can fan out into the
-      // dependent tables before the parent rows vanish.
-      const ids = (
-        this.db
-          .prepare(
-            `SELECT id FROM urls
+    // Foreign-key enforcement is suspended for the wipe, mirroring reset().
+    // A FreeCrawl project is usually one crawled site, so "Delete Domain
+    // Data" for that domain touches the same tables at the same magnitude
+    // reset() does (reset measured 17.3 s → 0.31 s with FKs off on a
+    // 6.6K-URL / 820K-link project), and the per-row parent/child checks on
+    // the `urls`/`images` deletes are the dominant cost.
+    //
+    // Safe under the same invariant as reset(): every table carrying a
+    // foreign key to a deleted row is emptied of those rows in the *same*
+    // transaction before the parent is deleted — links / headers /
+    // url_sources / image_usages are cleared for the target url_ids below
+    // (the only four tables with an FK to `urls`), and orphan `images` are
+    // removed with a `NOT IN image_usages` guard (the only FK to `images`).
+    // Nothing relies on ON DELETE CASCADE being reached, so dropping the
+    // check cannot leave a dangling child. The url-keyed audit tables have
+    // no FK at all and are wiped by host match regardless.
+    //
+    // `PRAGMA foreign_keys` is a no-op inside a transaction, so it is
+    // toggled outside one; the restore is in `finally`. Only applied at the
+    // top level (`txDepth === 0`) — every caller is top-level today; were
+    // this ever nested in an outer transaction the pragma would silently do
+    // nothing and the delete would simply revert to its slower FK-on path,
+    // still correct.
+    const wasTopLevel = this.txDepth === 0;
+    if (wasTopLevel) this.db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      return this.runInTransaction(() => {
+        // Snapshot the URL ids we'll delete so we can fan out into the
+        // dependent tables before the parent rows vanish.
+        const ids = (
+          this.db
+            .prepare(
+              `SELECT id FROM urls
               WHERE LOWER(
                 SUBSTR(
                   url,
@@ -1011,44 +1037,44 @@ export class ProjectDb {
                   END
                 )
               ) = ?`,
-          )
-          .all(target) as { id: number }[]
-      ).map((r) => r.id);
+            )
+            .all(target) as { id: number }[]
+        ).map((r) => r.id);
 
-      if (ids.length === 0) return { urlsDeleted: 0, linksDeleted: 0 };
+        if (ids.length === 0) return { urlsDeleted: 0, linksDeleted: 0 };
 
-      // SQLite parameter limit: chunk the IN-list at 500 ids per delete.
-      const CHUNK = 500;
-      let linksDeleted = 0;
-      for (let i = 0; i < ids.length; i += CHUNK) {
-        const slice = ids.slice(i, i + CHUNK);
-        const placeholders = slice.map(() => '?').join(',');
-        // Links can reference these urls as `from_url_id` (page → link
-        // catalogue) or by url string in `to_url`. Wipe both directions.
-        const linkRes = this.db
-          .prepare(`DELETE FROM links WHERE from_url_id IN (${placeholders})`)
-          .run(...slice);
-        linksDeleted += Number(linkRes.changes);
-        this.db
-          .prepare(`DELETE FROM headers WHERE url_id IN (${placeholders})`)
-          .run(...slice);
-        this.db
-          .prepare(`DELETE FROM url_sources WHERE url_id IN (${placeholders})`)
-          .run(...slice);
-        this.db
-          .prepare(`DELETE FROM image_usages WHERE from_url_id IN (${placeholders})`)
-          .run(...slice);
-        this.db
-          .prepare(`DELETE FROM urls_issues WHERE url_id IN (${placeholders})`)
-          .run(...slice);
-      }
+        // SQLite parameter limit: chunk the IN-list at 500 ids per delete.
+        const CHUNK = 500;
+        let linksDeleted = 0;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const slice = ids.slice(i, i + CHUNK);
+          const placeholders = slice.map(() => '?').join(',');
+          // Links can reference these urls as `from_url_id` (page → link
+          // catalogue) or by url string in `to_url`. Wipe both directions.
+          const linkRes = this.db
+            .prepare(`DELETE FROM links WHERE from_url_id IN (${placeholders})`)
+            .run(...slice);
+          linksDeleted += Number(linkRes.changes);
+          this.db
+            .prepare(`DELETE FROM headers WHERE url_id IN (${placeholders})`)
+            .run(...slice);
+          this.db
+            .prepare(`DELETE FROM url_sources WHERE url_id IN (${placeholders})`)
+            .run(...slice);
+          this.db
+            .prepare(`DELETE FROM image_usages WHERE from_url_id IN (${placeholders})`)
+            .run(...slice);
+          this.db
+            .prepare(`DELETE FROM urls_issues WHERE url_id IN (${placeholders})`)
+            .run(...slice);
+        }
 
-      // Wipe `to_url` references in `links` that pointed AT the deleted
-      // URLs by host string. This is a separate pass because `to_url`
-      // is a string column, not a foreign key.
-      this.db
-        .prepare(
-          `DELETE FROM links
+        // Wipe `to_url` references in `links` that pointed AT the deleted
+        // URLs by host string. This is a separate pass because `to_url`
+        // is a string column, not a foreign key.
+        this.db
+          .prepare(
+            `DELETE FROM links
             WHERE LOWER(
               SUBSTR(
                 to_url,
@@ -1060,35 +1086,35 @@ export class ProjectDb {
                 END
               )
             ) = ?`,
-        )
-        .run(target);
+          )
+          .run(target);
 
-      // Finally the parent URL rows.
-      let urlsDeleted = 0;
-      for (let i = 0; i < ids.length; i += CHUNK) {
-        const slice = ids.slice(i, i + CHUNK);
-        const placeholders = slice.map(() => '?').join(',');
-        const res = this.db
-          .prepare(`DELETE FROM urls WHERE id IN (${placeholders})`)
-          .run(...slice);
-        urlsDeleted += Number(res.changes);
-      }
+        // Finally the parent URL rows.
+        let urlsDeleted = 0;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+          const slice = ids.slice(i, i + CHUNK);
+          const placeholders = slice.map(() => '?').join(',');
+          const res = this.db
+            .prepare(`DELETE FROM urls WHERE id IN (${placeholders})`)
+            .run(...slice);
+          urlsDeleted += Number(res.changes);
+        }
 
-      // Orphaned image rows (no remaining `image_usages` referencing
-      // them) are cleaned in a follow-up sweep.
-      this.db.exec(
-        `DELETE FROM images
+        // Orphaned image rows (no remaining `image_usages` referencing
+        // them) are cleaned in a follow-up sweep.
+        this.db.exec(
+          `DELETE FROM images
           WHERE id NOT IN (SELECT DISTINCT image_id FROM image_usages)`,
-      );
+        );
 
-      // The url-keyed audit tables (PageSpeed, CrUX, Search Console,
-      // Analytics, AI, SEO) have no FK to `urls`, so wipe them by the same
-      // host match — otherwise a GDPR delete leaves stale data that would
-      // re-attach if the URL is re-crawled later. Driven off
-      // `URL_KEYED_AUDIT_TABLES` so a newly-added audit table can never be
-      // silently missed here.
-      const hostMatchSql = (table: string): string =>
-        `DELETE FROM ${table}
+        // The url-keyed audit tables (PageSpeed, CrUX, Search Console,
+        // Analytics, AI, SEO) have no FK to `urls`, so wipe them by the same
+        // host match — otherwise a GDPR delete leaves stale data that would
+        // re-attach if the URL is re-crawled later. Driven off
+        // `URL_KEYED_AUDIT_TABLES` so a newly-added audit table can never be
+        // silently missed here.
+        const hostMatchSql = (table: string): string =>
+          `DELETE FROM ${table}
           WHERE LOWER(
             SUBSTR(
               url,
@@ -1100,12 +1126,15 @@ export class ProjectDb {
               END
             )
           ) = ?`;
-      for (const table of ProjectDb.URL_KEYED_AUDIT_TABLES) {
-        this.db.prepare(hostMatchSql(table)).run(target);
-      }
+        for (const table of ProjectDb.URL_KEYED_AUDIT_TABLES) {
+          this.db.prepare(hostMatchSql(table)).run(target);
+        }
 
-      return { urlsDeleted, linksDeleted };
-    });
+        return { urlsDeleted, linksDeleted };
+      });
+    } finally {
+      if (wasTopLevel) this.db.exec('PRAGMA foreign_keys = ON');
+    }
   }
 
   /**

@@ -1935,6 +1935,41 @@ function sweepStaleWorkingCopies(keep: ReadonlySet<string>): void {
 }
 
 /**
+ * Rebuild the crawl config to restore into the UI when a project opens, so
+ * the URL bar and mode reflect the crawl the project holds.
+ *
+ * Prefers the full `lastCrawlConfig` that the desktop / MCP launch path
+ * persists (`launchCrawl`). When that key is absent — a project crawled by the
+ * headless CLI, which drives the engine directly and never writes it, or one
+ * saved by a build that predates `lastCrawlConfig` persistence — fall back to
+ * the seed the crawler engine ALWAYS records under `startUrl`. Without this
+ * fallback such a project reopens with a blank URL bar even though its tables
+ * are full, because the restore only ever consulted `lastCrawlConfig`.
+ *
+ * List / sitemap crawls store a fingerprint under `startUrl` ("list:…" /
+ * "sitemap:…"), not a display URL, so only an `http(s)` seed is adopted —
+ * those modes are seeded from a file / sitemap, not a single URL-bar value.
+ *
+ * Returns null when nothing is recoverable (a fresh scratch project); callers
+ * then leave the current config untouched.
+ */
+function restoreProjectConfig(db: ProjectDb): CrawlConfig | null {
+  const raw = db.getMeta('lastCrawlConfig');
+  if (raw) {
+    try {
+      return mergeCrawlConfig(JSON.parse(raw) as Partial<CrawlConfig>);
+    } catch {
+      /* malformed JSON — fall through to the engine seed */
+    }
+  }
+  const seed = db.getMeta('startUrl');
+  if (seed && /^https?:\/\//i.test(seed)) {
+    return mergeCrawlConfig({ startUrl: seed });
+  }
+  return null;
+}
+
+/**
  * Materialise a project document into a working database this session
  * can write to, then swap the DB + worker pools onto it.
  *
@@ -2027,18 +2062,12 @@ async function openProjectAtPath(documentPath: string): Promise<void> {
   }
   // Rehydrate the crawl config from the project we just opened and push it
   // to the renderer so the UI reflects THIS project's saved settings
-  // (per-project settings). Null when the project has none saved yet — the
-  // renderer then keeps its current config.
-  let projectConfig: CrawlConfig | null = null;
-  try {
-    const raw = s.db.getMeta('lastCrawlConfig');
-    if (raw) {
-      projectConfig = mergeCrawlConfig(JSON.parse(raw) as Partial<CrawlConfig>);
-      s.lastCrawlConfig = projectConfig;
-    }
-  } catch {
-    /* malformed — leave config as-is */
-  }
+  // (per-project settings). Falls back to the engine's `startUrl` seed when
+  // `lastCrawlConfig` is absent (CLI-crawled or legacy project) so the URL
+  // bar isn't blank. Null when nothing is recoverable — the renderer then
+  // keeps its current config.
+  const projectConfig = restoreProjectConfig(s.db);
+  if (projectConfig) s.lastCrawlConfig = projectConfig;
   s.send(IPC.projectConfigChanged, projectConfig);
   fireDataChanged(s);
   // `fireDataChanged` marks the session dirty — but loading a document is
@@ -8039,10 +8068,10 @@ function registerIpc(): void {
   registerHandle(IPC.projectConfigGet, (): CrawlConfig | null => {
     if (!currentSession().currentProjectPath) return null;
     try {
-      const raw = getDb().getMeta('lastCrawlConfig');
-      return raw
-        ? mergeCrawlConfig(JSON.parse(raw) as Partial<CrawlConfig>)
-        : null;
+      // Same fallback as the open-project push: prefer `lastCrawlConfig`, else
+      // the engine's `startUrl` seed, so a CLI-crawled or legacy project still
+      // restores its URL bar on the renderer's cold-start pull.
+      return restoreProjectConfig(getDb());
     } catch {
       return null;
     }

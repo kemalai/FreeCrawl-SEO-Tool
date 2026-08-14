@@ -160,11 +160,30 @@ export function UrlsTab() {
         .filter((n) => n.trim().length > 0),
     [customExtractionRules],
   );
-  const [search, setSearch] = useState('');
-  const [sortBy, setSortBy] = useState<keyof CrawlUrlRow | undefined>(undefined);
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
-  const [filter, setFilter] = useState<AdvancedFilter | null>(null);
+  const setTabView = useAppStore((s) => s.setTabView);
+  // Seed search / sort / filter from this tab's saved view state (if the user
+  // set one earlier this session and came back). The [activeTab] effect below
+  // restores on later tab switches and its cleanup saves the outgoing tab's
+  // state; these lazy initialisers cover the fresh mount after a full unmount
+  // (e.g. returning from Visualization / PageSpeed). Read once from the store
+  // at mount — the initialisers only run then.
+  const [search, setSearch] = useState(
+    () => useAppStore.getState().tabView[activeTab]?.search ?? '',
+  );
+  const [sortBy, setSortBy] = useState<keyof CrawlUrlRow | undefined>(
+    () => useAppStore.getState().tabView[activeTab]?.sortBy,
+  );
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>(
+    () => useAppStore.getState().tabView[activeTab]?.sortDir ?? 'asc',
+  );
+  const [filter, setFilter] = useState<AdvancedFilter | null>(
+    () => useAppStore.getState().tabView[activeTab]?.filter ?? null,
+  );
   const [filterDialogOpen, setFilterDialogOpen] = useState(false);
+  // Mirror the live view state so the [activeTab] effect's cleanup can save
+  // the latest values for the tab being left without re-subscribing.
+  const viewStateRef = useRef({ search, sortBy, sortDir, filter });
+  viewStateRef.current = { search, sortBy, sortDir, filter };
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   /** View mode toggle — list (flat virtual table), tree (URL-path
    *  hierarchy), or cluster (Duplicates-tab-only near-duplicate cluster
@@ -372,18 +391,19 @@ export function UrlsTab() {
     setPinnedLeftOrderState(loadPinnedLeft(activeTab));
     setColumnOrderState(loadColumnOrder(activeTab));
     setColumnPickerOpen(false);
-    // Scope ephemeral view state (search box / sort column / advanced
-    // filter) to the active tab — these are intentionally NOT persisted
-    // because each tab has a different column / category vocabulary
-    // (a sort by "depth" on Internal makes no sense on Response Codes,
-    // a filter clause on `images_missing_alt` is meaningless outside
-    // Images, etc). Without these resets the filter chips of one tab
-    // would silently apply to every other tab the user visits — which
-    // is exactly the bug surfaced in 2026-06-01.
-    setSearch('');
-    setSortBy(undefined);
-    setSortDir('asc');
-    setFilter(null);
+    // Restore this tab's saved view state (search box / sort column /
+    // advanced filter) rather than blank it. This state is scoped PER TAB —
+    // a sort by "depth" on Internal makes no sense on Response Codes, a filter
+    // clause on `images_missing_alt` is meaningless outside Images — so it
+    // must never leak across tabs (the 2026-06-01 bug). Per-tab keying is what
+    // prevents that leak; blank-on-switch also threw the state away when the
+    // user merely left and returned to the SAME tab, which is the regression
+    // being fixed here. The cleanup below saves the outgoing tab's state.
+    const saved = useAppStore.getState().tabView[activeTab];
+    setSearch(saved?.search ?? '');
+    setSortBy(saved?.sortBy);
+    setSortDir(saved?.sortDir ?? 'asc');
+    setFilter(saved?.filter ?? null);
     setFilterDialogOpen(false);
     // Pick up the persisted view-mode for the new tab. Cluster mode is
     // duplicates-tab-only — switching to any other tab while it was the
@@ -393,7 +413,13 @@ export function UrlsTab() {
     if (stored === 'tree') setViewMode('tree');
     else if (stored === 'cluster' && activeTab === 'duplicates') setViewMode('cluster');
     else setViewMode('list');
-  }, [activeTab]);
+    // Save the outgoing tab's latest view state on the way out (tab switch or
+    // full unmount into a non-table view). `activeTab` here is captured as the
+    // tab being left; the ref carries its current search / sort / filter.
+    return () => {
+      setTabView(activeTab, viewStateRef.current);
+    };
+  }, [activeTab, setTabView]);
 
   // Persist viewMode whenever the user toggles it.
   useEffect(() => {

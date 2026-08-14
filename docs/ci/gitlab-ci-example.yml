@@ -1,17 +1,19 @@
 # FreeCrawl SEO — example GitLab CI/CD pipeline
 #
-# Runs the headless FreeCrawl CLI against your site, fails the
-# pipeline if more than `$BROKEN_LINK_THRESHOLD` URLs are broken, and
-# stores the JSON crawl as a job artifact. Adapt `TARGET_URL` and the
-# threshold to your project.
+# Crawls your site with the headless FreeCrawl CLI, fails the pipeline when
+# broken links exceed BROKEN_LINK_THRESHOLD, validates the sitemap, and stores
+# the crawl as a job artifact. Adapt TARGET_URL and the thresholds.
 #
-# Save this file as `.gitlab-ci.yml` (or include it as a template).
-# Schedule daily runs via GitLab CI/CD → Schedules.
+# Save this as `.gitlab-ci.yml` (or include it as a template). Schedule daily
+# runs via GitLab → CI/CD → Schedules.
+#
+# See docs/ci/README.md for the CLI exit-code contract, a zero-tolerance
+# (no-script) gate variant, and how to add a regression-compare job.
 
 variables:
-  TARGET_URL: "https://example.com"
-  MAX_URLS: "5000"
-  BROKEN_LINK_THRESHOLD: "10"
+  TARGET_URL: 'https://example.com'
+  MAX_URLS: '5000'
+  BROKEN_LINK_THRESHOLD: '10'
 
 stages:
   - audit
@@ -24,26 +26,43 @@ freecrawl-audit:
     - apt-get update -qq && apt-get install -y -qq git ca-certificates
     - git clone --depth 1 https://github.com/kemalai/FreeCrawl-SEO-Tool.git freecrawl
     - cd freecrawl
-    - npm ci
-    - npm run build:cli
+    # --ignore-scripts skips the Playwright browser download (the default
+    # undici crawl needs no Chromium). `tsc -b apps/cli` builds the CLI AND
+    # its workspace deps (shared-types → db → core) — `npm run build:cli`
+    # alone would not, and the crawl would fail to resolve its imports.
+    - npm ci --ignore-scripts
+    - npx tsc -b apps/cli
   script:
-    - node apps/cli/dist/index.js "$TARGET_URL"
-        --max "$MAX_URLS"
-        --out "$CI_PROJECT_DIR/crawl.json"
+    # --json → machine-readable summary on stdout (captured for the gate);
+    # --out → full per-URL dump for the artifact. `|| true` lets the gate
+    # below decide pass/fail (the CLI exits 1 on ANY 4xx/5xx on its own).
     - >-
+      node apps/cli/dist/index.js "$TARGET_URL"
+      --max "$MAX_URLS" --json
+      --out "$CI_PROJECT_DIR/crawl.json"
+      > "$CI_PROJECT_DIR/summary.json" || true
+    - cat "$CI_PROJECT_DIR/summary.json"
+    # Count 4xx/5xx from the summary's byStatus map (robust + cheap).
+    - |
       BROKEN=$(node -e "
-        const r = require('$CI_PROJECT_DIR/crawl.json');
-        const n = r.filter(u => u.statusCode >= 400 && u.statusCode < 600).length;
+        const s = require('$CI_PROJECT_DIR/summary.json');
+        const by = (s.summary && s.summary.byStatus) || {};
+        let n = 0;
+        for (const [code, count] of Object.entries(by)) {
+          if (Number(code) >= 400) n += count;
+        }
         console.log(n);
       ")
-    - echo "Broken-URL count $BROKEN (threshold $BROKEN_LINK_THRESHOLD)"
-    - >-
+      echo "Broken-URL count $BROKEN (threshold $BROKEN_LINK_THRESHOLD)"
       if [ "$BROKEN" -gt "$BROKEN_LINK_THRESHOLD" ]; then
         echo "Broken-URL count $BROKEN exceeds threshold $BROKEN_LINK_THRESHOLD" >&2
         exit 1
       fi
+    # Sitemap validation is advisory — never fails the pipeline.
+    - node apps/cli/dist/index.js validate-sitemap "$TARGET_URL/sitemap.xml" || true
   artifacts:
     paths:
       - crawl.json
+      - summary.json
     expire_in: 30 days
     when: always

@@ -12,8 +12,10 @@ interface Node {
   category?: UrlCategory;
   count?: number;
   /** Denominator for this node's "% of Total". Defaults to the tree-wide
-   *  total (internal URLs); image-level nodes override it with the total
-   *  image count so an image ÷ page ratio never shows a bogus %. */
+   *  total (internal URLs). Nodes whose count isn't internal-scoped override
+   *  it: image nodes use the total image count (so an image ÷ page ratio is
+   *  never bogus), and Response Codes / Security use internal+external (they
+   *  count external URLs, so an internal-only base would exceed 100%). */
   percentBase?: number;
   children?: Node[];
 }
@@ -273,6 +275,13 @@ const TreeNode = memo(function TreeNode({
 
 function buildTree(o: OverviewCounts | null): Node[] {
   if (!o) return [];
+  // Response Codes and Security deliberately count external URLs too (that's
+  // how a broken outbound link surfaces), so their numerators exceed the
+  // internal-only URL count. Their "% of Total" must therefore divide by the
+  // full crawled set (internal + external), not `totalInternalUrls` — else
+  // "All 6,657 / 6,555 = 109.30%" reads as a broken crawl. Every other group
+  // is internal-scoped and keeps the default (internal) base.
+  const allUrls = o.summary.totalInternalUrls + o.summary.totalExternalUrls;
   return [
     {
       key: 'summary',
@@ -333,37 +342,42 @@ function buildTree(o: OverviewCounts | null): Node[] {
       key: 'response-codes',
       label: 'Response Codes',
       children: [
-        { key: 'rc-all', label: 'All', count: o.responseCodes.all, category: 'all' },
+        { key: 'rc-all', label: 'All', count: o.responseCodes.all, category: 'all', percentBase: allUrls },
         {
           key: 'rc-blocked',
           label: 'Blocked by Robots',
           count: o.responseCodes.blockedRobots,
           category: 'status:blocked-robots',
+          percentBase: allUrls,
         },
         {
           key: 'rc-none',
           label: 'No Response',
           count: o.responseCodes.noResponse,
           category: 'status:no-response',
+          percentBase: allUrls,
         },
-        { key: 'rc-2xx', label: 'Success (2xx)', count: o.responseCodes.success2xx, category: 'status:2xx' },
+        { key: 'rc-2xx', label: 'Success (2xx)', count: o.responseCodes.success2xx, category: 'status:2xx', percentBase: allUrls },
         {
           key: 'rc-3xx',
           label: 'Redirection (3xx)',
           count: o.responseCodes.redirect3xx,
           category: 'status:3xx',
+          percentBase: allUrls,
         },
         {
           key: 'rc-4xx',
           label: 'Client Error (4xx)',
           count: o.responseCodes.clientError4xx,
           category: 'status:4xx',
+          percentBase: allUrls,
         },
         {
           key: 'rc-5xx',
           label: 'Server Error (5xx)',
           count: o.responseCodes.serverError5xx,
           category: 'status:5xx',
+          percentBase: allUrls,
         },
       ],
     },
@@ -376,8 +390,15 @@ function buildTree(o: OverviewCounts | null): Node[] {
           label: 'HTTPS URLs',
           count: o.security.https,
           category: 'security:https',
+          percentBase: allUrls,
         },
-        { key: 'sec-http', label: 'HTTP URLs', count: o.security.http, category: 'security:http' },
+        {
+          key: 'sec-http',
+          label: 'HTTP URLs',
+          count: o.security.http,
+          category: 'security:http',
+          percentBase: allUrls,
+        },
       ],
     },
     {

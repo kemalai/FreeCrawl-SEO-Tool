@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 import {
   DEFAULT_CRAWL_CONFIG,
+  type AdvancedFilter,
   type CrawlConfig,
   type CrawlProgress,
   type CrawlSummary,
+  type CrawlUrlRow,
   type OverviewCounts,
   type UrlCategory,
 } from '@freecrawl/shared-types';
@@ -339,6 +341,22 @@ export const TAB_QUICK_FILTERS: Partial<Record<TabKey, TabQuickFilter[]>> = {
   ],
 };
 
+/**
+ * Ephemeral per-tab view state for the URLs table (search box, sort column,
+ * advanced filter). Kept per-tab because a sort/filter built against one
+ * tab's column vocabulary is meaningless on another. Persisted in the store
+ * (not prefs) so it survives leaving and returning to a tab within a session
+ * — including the full unmount that happens when the user visits a non-table
+ * view (Visualization, PageSpeed, …) — but does NOT outlive the app or leak
+ * across projects (cleared on project open).
+ */
+export interface TabViewState {
+  search: string;
+  sortBy: keyof CrawlUrlRow | undefined;
+  sortDir: 'asc' | 'desc';
+  filter: AdvancedFilter | null;
+}
+
 interface AppState {
   config: CrawlConfig;
   progress: CrawlProgress | null;
@@ -361,6 +379,11 @@ interface AppState {
   settingsTarget: SettingsTarget | null;
   recentUrls: string[];
   dataVersion: number;
+  /** Saved view state (search / sort / advanced filter) per table tab, so
+   *  returning to a tab restores what the user had set there. */
+  tabView: Partial<Record<TabKey, TabViewState>>;
+  /** Save a tab's current view state (called when the user leaves the tab). */
+  setTabView: (tab: TabKey, view: TabViewState) => void;
   setConfig: (patch: Partial<CrawlConfig>) => void;
   /** Replace the whole config from a project's saved settings WITHOUT
    *  writing it back to the global default prefs (per-project settings). */
@@ -480,6 +503,9 @@ export const useAppStore = create<AppState>((set) => ({
   settingsTarget: null,
   recentUrls: loadRecentUrls(),
   dataVersion: 0,
+  tabView: {},
+  setTabView: (tab, view) =>
+    set((s) => ({ tabView: { ...s.tabView, [tab]: view } })),
   setConfig: (patch) =>
     set((state) => {
       const next = { ...state.config, ...patch };
@@ -497,8 +523,10 @@ export const useAppStore = create<AppState>((set) => ({
     // sitemap, not blank in Spider mode while its tables hold the data.
     // Also the resume path after an interrupted crawl. Deliberately does
     // NOT touch global prefs — opening a project must not overwrite the
-    // user's default settings.
-    set({ config }),
+    // user's default settings. Saved per-tab view state is dropped too: a
+    // different project has its own tables, so a filter/sort from the last
+    // one must not carry over.
+    set({ config, tabView: {} }),
   setProgress: (p) => set({ progress: p }),
   setSummary: (s) => set({ summary: s }),
   markCrawlFinished: () =>

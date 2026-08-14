@@ -170,7 +170,7 @@ npm run dev
 <br />
 
 ```bash
-npm run build:cli
+npx tsc -b apps/cli     # builds the CLI + its workspace packages
 node apps/cli/dist/index.js https://example.com --depth 2 --max 500 --out out.csv
 node apps/cli/dist/index.js --list urls.txt --out out.json     # list mode + JSON
 
@@ -181,7 +181,7 @@ node apps/cli/dist/index.js analyze-logs access.log --format iis-w3c --verify-bo
 
 > **Sample logs** ship in [`samples/`](samples/) (`apache-access.txt`, `iis-access.txt`) so you can try the Log File Analyzer immediately — in the desktop app, open **Log Analyzer → Open Log Analyzer Window…** and import one.
 
-**CI / CD recipes** — ready-to-use [GitHub Actions](docs/ci/github-actions-example.yml) and [GitLab CI](docs/ci/gitlab-ci-example.yml) examples that crawl your site on a schedule, fail the build when broken-URL count exceeds a threshold, and upload the crawl as an artifact.
+**CI / CD recipes** — ready-to-use [GitHub Actions](docs/ci/github-actions-example.yml) and [GitLab CI](docs/ci/gitlab-ci-example.yml) examples that crawl your site on a schedule, fail the build when broken-URL count exceeds a threshold, and upload the crawl as an artifact. See the [CI/CD guide](docs/ci/README.md) for the exit-code contract and a regression-gate recipe.
 
 </details>
 
@@ -405,13 +405,9 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development.** All 32 analysis tabs are working — the core set (Internal, External, Response Codes, URL, Page Titles, Meta Description, H1, H2, Content, Images, Canonicals, Directives, Redirects, Pagination, Hreflang, AMP, Structured Data, Meta Refresh, Custom Extraction, Custom Search, Security, Duplicates, Links, Broken Links, SERP) plus the integration tabs (**PageSpeed, CrUX, Spelling, Search Console, GA4, AI, SEO Authority**).
+> **Active development — feature-complete for daily SEO audits.** All 32 analysis tabs, 150+ issue checks, JavaScript rendering (screenshots, LCP candidate, Mobile Usability), multi-window projects, the link visualiser, every Google integration (Search Console / GA4 / PageSpeed / CrUX), LanguageTool spelling, AI per-URL prompts, SEO Authority providers, Google Sheets + BigQuery export, encrypted projects, the MCP server with live crawl control, and the standalone Log File Analyzer all ship today.
 >
-> Also shipping: 150+ issue checks, **JavaScript rendering** (Playwright — post-JS DOM, screenshots, LCP candidate, Mobile Usability audit), **multi-window projects** (independent per-window crawls), near/exact-duplicate detection, hreflang validation, **internal PageRank link scoring**, project compare, the **link visualiser** (WebGL 3D force-directed crawl tree and link graph, plus 2D Crawl Tree and Directory Tree with click-to-collapse branches, hover summary cards, LCP and link-score overlays, and a click-to-trace Crawl Path Report), **Basic / Digest / Bearer + form-based & browser-driven SPA login**, **HTTP / SOCKS5 proxy**, the **MCP server with live crawl control**, all **Google integrations** (Search Console / URL Inspection / GA4 / PageSpeed / CrUX), **LanguageTool spelling & grammar**, **AI per-URL prompts** (OpenAI / Anthropic / Ollama), **SEO Authority providers** (Ahrefs / Majestic / Moz / Semrush), **Google Sheets + BigQuery export**, **encrypted project snapshots** (AES-256-GCM), **RAM-only storage mode**, scheduled crawls, robots.txt validator, URL rewriting, EN + TR UI, and the **standalone Log File Analyzer** (Apache / Nginx / IIS access logs → bot hits, crawl budget, crawl × log orphans, 40+ bot detection, CSV / Excel export, and a headless `analyze-logs` CLI).
->
-> Cross-platform installers ship for Windows (`.exe` + portable), macOS (`.dmg`), and Linux (`.AppImage` / `.deb` / `.rpm`), with Playwright Chromium bundled so JS rendering works on first launch. The virtualized 1M-row table streams the **first row in ~1 s**.
->
-> **Apple Silicon tuning:** long crawls hold a power assertion so macOS App Nap can't throttle them in the background, concurrency scales down automatically as the thermal state rises (so a fanless MacBook Air degrades gracefully instead of stalling), heavy aggregates never run on the main thread, and every large read is batch-streamed to stay clear of Electron's hard per-process heap ceiling. macOS also gets the full Windows-style `Cmd`-key shortcut set.
+> Cross-platform installers ship for Windows (`.exe` + portable), macOS (`.dmg`, arm64 + x64), and Linux (`.AppImage` / `.deb` / `.rpm`), with Playwright Chromium bundled so JS rendering works on first launch. The virtualized 1M-row table streams the first row in ~1 s, and long crawls are tuned for Apple Silicon (see [docs](docs/macos-apple-silicon-performance.md)).
 >
 > **Upcoming:** Plugin system, Light theme, Code-signing + auto-update.
 
