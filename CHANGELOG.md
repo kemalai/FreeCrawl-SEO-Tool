@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.5] — 2026-08-15
+
+### Added
+- Ready-to-use GitHub Actions and GitLab CI templates that run a crawl as a build gate, with a setup guide.
+
+### Changed
+- "Delete Domain Data" now completes much faster on large single-domain projects.
+
+### Fixed
+- Opening a project crawled from the command line, or saved by an older build, now restores the start URL in the toolbar instead of coming up blank.
+- The table's search, sort, and advanced filter now stay set when you leave a tab and return, instead of resetting to empty.
+- The Overview sidebar no longer reports Response Codes and Security percentages above 100%.
+
 ## [0.9.4] — 2026-08-13
 
 ### Added
