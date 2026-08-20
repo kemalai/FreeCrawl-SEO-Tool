@@ -177,6 +177,7 @@ node apps/cli/dist/index.js --list urls.txt --out out.json     # list mode + JSO
 # Log file analysis — parse an access log into the project for crawl × log reporting
 node apps/cli/dist/index.js analyze-logs samples/apache-access.txt --project crawl.seoproject
 node apps/cli/dist/index.js analyze-logs access.log --format iis-w3c --verify-bots --json
+node apps/cli/dist/index.js analyze-logs access_log-Jul.gz              # gzipped logs work as-is
 ```
 
 > **Sample logs** ship in [`samples/`](samples/) (`apache-access.txt`, `iis-access.txt`) so you can try the Log File Analyzer immediately — in the desktop app, open **Log Analyzer → Open Log Analyzer Window…** and import one.

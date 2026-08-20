@@ -128,8 +128,19 @@ parentPort.on('message', async (msg: RequestMessage) => {
     if (typeof fn !== 'function') {
       throw new Error(`db-writer-worker: method '${method}' missing on ProjectDb`);
     }
-    const out = (fn as (...a: unknown[]) => unknown).apply(db, args ?? []);
-    const result = out instanceof Promise ? await out : out;
+    let result: unknown;
+    if (method === 'recomputeUrlsIssuesYielding' && watchdog) {
+      // Publish per-definition progress into the watchdog op slot so
+      // the pool's slow-call warner (and debug.txt) can distinguish
+      // "long pass, still advancing" from a genuinely wedged worker.
+      const defs = (args?.[0] ?? []) as ReadonlyArray<readonly [string, string]>;
+      result = await db.recomputeUrlsIssuesYielding(defs, (done, total) => {
+        watchdog.setWriterOp(`recomputeUrlsIssuesYielding ${done}/${total}`);
+      });
+    } else {
+      const out = (fn as (...a: unknown[]) => unknown).apply(db, args ?? []);
+      result = out instanceof Promise ? await out : out;
+    }
     parentPort!.postMessage({ requestId, ok: true, result });
   } catch (err) {
     parentPort!.postMessage({

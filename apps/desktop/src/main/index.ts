@@ -320,6 +320,7 @@ import {
   dbWriterPool,
   DbWriterPool,
   setWriterPoolResolver,
+  WriterUnavailableError,
 } from './db-writer-pool.js';
 import { freezeWatchdog } from './freeze-watchdog.js';
 import { parserPool } from './parser-pool.js';
@@ -1605,10 +1606,13 @@ async function parseHtmlViaPool(
 }
 
 /**
- * Dispatch a per-URL write batch to the writer worker. Same fall-back
- * pattern as the parser pool: when the worker is unhealthy we run
- * the write on the main-thread `ProjectDb` instance so the crawl
- * never silently drops data.
+ * Dispatch a per-URL write batch to the writer worker. Falls back to
+ * the main-thread `ProjectDb` ONLY on `WriterUnavailableError` — the
+ * worker's connection is dead, so the crawl never silently drops data
+ * and the fallback can't collide with a live worker. Any other error
+ * means the worker is alive and the write itself failed; re-running it
+ * on a second connection is the double-writer bug (`database is
+ * locked`) this pool exists to prevent, so it propagates instead.
  */
 async function writeFetchedUrlViaPool(
   session: ProjectSession,
@@ -1620,12 +1624,11 @@ async function writeFetchedUrlViaPool(
   try {
     return await session.writerPool.call<{ urlId: number }>('writeFetchedUrl', [payload]);
   } catch (err) {
+    if (!(err instanceof WriterUnavailableError)) throw err;
     logger.log(
       'warn',
       'main',
-      `db-writer dispatch failed (${
-        err instanceof Error ? err.message : String(err)
-      }) — falling back to main-thread writeFetchedUrl.`,
+      `db-writer unavailable (${err.message}) — falling back to main-thread writeFetchedUrl.`,
     );
     return session.getDb().writeFetchedUrl(payload);
   }
@@ -1648,12 +1651,17 @@ async function recomputeIssuesViaPool(
   try {
     await session.writerPool.call<void>('recomputeUrlsIssuesYielding', [definitions]);
   } catch (err) {
+    // Fall back ONLY when the worker is gone (crashed/terminated/
+    // swapped). The old any-error fallback fired on the 60 s dispatch
+    // timeout while the worker was STILL running the pass — two writer
+    // connections re-running the same DELETE+INSERT pipeline, which is
+    // exactly the "database is locked" + torn urls_issues failure this
+    // fix removes. A slow pass now simply finishes on the worker.
+    if (!(err instanceof WriterUnavailableError)) throw err;
     logger.log(
       'warn',
       'main',
-      `recomputeUrlsIssuesYielding dispatch failed (${
-        err instanceof Error ? err.message : String(err)
-      }) — falling back to main-thread recompute.`,
+      `db-writer unavailable (${err.message}) — falling back to main-thread recompute.`,
     );
     await session.getDb().recomputeUrlsIssuesYielding(definitions);
   }
@@ -1772,12 +1780,12 @@ async function runDbPassViaPool(
   try {
     await session.writerPool.call<void>(method, []);
   } catch (err) {
+    // WriterUnavailableError only — see recomputeIssuesViaPool.
+    if (!(err instanceof WriterUnavailableError)) throw err;
     logger.log(
       'warn',
       'main',
-      `${method} dispatch failed (${
-        err instanceof Error ? err.message : String(err)
-      }) — falling back to main-thread.`,
+      `db-writer unavailable (${err.message}) — running ${method} on main thread.`,
     );
     const db = session.getDb();
     const fn = (db as unknown as Record<string, unknown>)[method];
@@ -1811,12 +1819,12 @@ async function dbCallViaPool<T>(
   try {
     return await session.writerPool.call<T>(method, args);
   } catch (err) {
+    // WriterUnavailableError only — see recomputeIssuesViaPool.
+    if (!(err instanceof WriterUnavailableError)) throw err;
     logger.log(
       'warn',
       'main',
-      `dbCall(${method}) fell back to main-thread: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `dbCall(${method}) fell back to main-thread: ${err.message}`,
     );
     const db = session.getDb();
     const fn = (db as unknown as Record<string, unknown>)[method];
@@ -4236,6 +4244,8 @@ function registerIpc(): void {
           stripWww: input.stripWww,
           forceHttps: input.forceHttps,
           lowercasePath: input.lowercasePath,
+          sortQueryParams: input.sortQueryParams,
+          collapseDuplicateSlashes: input.collapseDuplicateSlashes,
           trailingSlash: input.trailingSlash,
           keepQueryParams: input.keepQueryParams,
           regexRewrites: compiled,
@@ -6730,7 +6740,15 @@ function registerIpc(): void {
     crawler.on('error', () => {
       void disposeBrowserPool(sess);
     });
-    void crawler.start();
+    // Safety net for anything start() might still throw: surface it
+    // through the normal 'error' listener path (log + crawlError IPC +
+    // lease release) and drop the power-save blocker, instead of dying
+    // as an unhandledRejection that leaves the UI pinned to "Running".
+    crawler.start().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      crawler.emit('error', `Crawl aborted by unexpected error: ${msg}`);
+      releaseCrawlPowerBlocker(crawler);
+    });
     // A new crawl joined the pool — reshare the global concurrency budget
     // across every live crawl so parallel agents don't oversubscribe.
     rebalanceGlobalConcurrency();
@@ -8984,7 +9002,13 @@ function registerIpc(): void {
       // Snapshot consumed — clear so a second click can't double-fire.
       sess.pendingRecoveryCheckpoint = [];
       crawler.enqueueCheckpointed(items);
-      void crawler.start();
+      // Same safety net as launchCrawl — never let a start() throw
+      // escape as an unhandledRejection.
+      crawler.start().catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        crawler.emit('error', `Crawl aborted by unexpected error: ${msg}`);
+        releaseCrawlPowerBlocker(crawler);
+      });
       // Hand the config back so the toolbar can adopt the crawl that is
       // now actually running. Without this the renderer keeps the blank
       // Spider defaults it booted with, and a Sitemap/List resume reads

@@ -259,6 +259,11 @@ const TR_LABELS: Record<string, string> = {
   'Canonical → Noindex': 'Canonical → Noindex',
   'Canonical → Redirect': 'Canonical → Yönlendirme',
   'Multiple Canonicals': 'Birden Çok Canonical',
+  'Conflicting Canonicals': 'Çelişen Canonical’ler',
+  'Canonical → Cross-Domain': 'Canonical → Farklı Alan Adı',
+  'Noindex + Canonical Conflict': 'Noindex + Canonical Çatışması',
+  'Redirect → Noindex': 'Yönlendirme → Noindex',
+  'Crawl Trap': 'Tarama Tuzağı',
   'Canonical Conflict': 'Canonical Çatışması',
 
   // Hreflang

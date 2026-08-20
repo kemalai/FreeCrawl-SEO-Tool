@@ -16,6 +16,8 @@
 
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
+import type { Readable } from 'node:stream';
+import { createGunzip } from 'node:zlib';
 import type { LogFormat, LogFormatChoice } from '@freecrawl/shared-types';
 import {
   createLogParser,
@@ -82,6 +84,28 @@ export interface LogAnalyzeOptions {
 const DEFAULT_MAX_URLS = 500_000;
 const DEFAULT_MAX_IPS = 200;
 
+/**
+ * Open a log file as a UTF-8 text stream, transparently decompressing
+ * `.gz` files on the fly. Access logs are very commonly shipped gzipped
+ * (`access_log-Jul-2026.gz`); without this the raw DEFLATE bytes would be
+ * decoded as text and every line would fail to parse (0 lines accepted).
+ *
+ * Errors on the underlying file read are forwarded onto the returned
+ * stream so the `for await` consumer rejects instead of hanging, and a
+ * corrupt gzip surfaces as a stream error caught by the caller.
+ */
+function openLogStream(filePath: string): Readable {
+  if (/\.gz$/i.test(filePath)) {
+    const source = createReadStream(filePath);
+    const gunzip = createGunzip();
+    source.on('error', (err) => gunzip.destroy(err));
+    source.pipe(gunzip);
+    gunzip.setEncoding('utf8');
+    return gunzip;
+  }
+  return createReadStream(filePath, { encoding: 'utf8' });
+}
+
 function emptyResult(format: LogFormat): LogAnalysisResult {
   return {
     format,
@@ -121,7 +145,7 @@ export async function analyzeLogFile(
   const maxIps = opts.maxIpsPerBot ?? DEFAULT_MAX_IPS;
 
   const rl = createInterface({
-    input: createReadStream(filePath, { encoding: 'utf8' }),
+    input: openLogStream(filePath),
     crlfDelay: Infinity,
   });
 
@@ -149,15 +173,16 @@ export async function analyzeLogFile(
 
 async function sniffFormat(filePath: string): Promise<LogFormat> {
   const sample: string[] = [];
-  const rl = createInterface({
-    input: createReadStream(filePath, { encoding: 'utf8' }),
-    crlfDelay: Infinity,
-  });
+  const input = openLogStream(filePath);
+  const rl = createInterface({ input, crlfDelay: Infinity });
   for await (const line of rl) {
     sample.push(line);
     if (sample.length >= 50) break;
   }
   rl.close();
+  // Break-early stops readline but leaves the file/gunzip stream open;
+  // destroy it so we don't leak a descriptor (and a paused gunzip) per sniff.
+  input.destroy();
   return detectLogFormat(sample);
 }
 

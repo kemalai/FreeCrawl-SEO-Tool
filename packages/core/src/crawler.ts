@@ -19,6 +19,7 @@ import {
   extractExtension,
   isInScope,
   isUrlMalformed,
+  detectUrlTrap,
   resolveStartUrl,
   compileUrlRegexRewrites,
   toEscapedFragmentUrl,
@@ -625,6 +626,8 @@ export class Crawler extends EventEmitter {
       lowercasePath: config.lowercasePath,
       trailingSlash: config.trailingSlash,
       keepQueryParams: config.keepQueryParams,
+      sortQueryParams: config.sortQueryParams,
+      collapseDuplicateSlashes: config.collapseDuplicateSlashes,
       regexRewrites: compiledRegexRewrites,
     };
   }
@@ -643,6 +646,37 @@ export class Crawler extends EventEmitter {
     if (this.includeRegexes.length === 0) return true;
     return this.includeRegexes.some((re) => re.test(url));
   }
+
+  /**
+   * Classify a URL against the crawl-trap shapes, for storage on its row.
+   * Returns the trap kind or null. Detection is independent of whether the
+   * crawler acts on it - a faceted or calendar URL is still crawled, and
+   * the flag is what makes it visible in the Crawl Trap filter.
+   */
+  private trapKind(url: string): string | null {
+    return detectUrlTrap(url, {
+      maxRepeatedSegments: this.config.maxRepeatedPathSegments,
+      maxQueryParams: this.config.maxQueryParams,
+    });
+  }
+
+  /**
+   * The only trap acted on at enqueue: a path segment repeated N+ times.
+   * That shape is produced by a relative-href bug walking `/a/a/a/...` and
+   * has no legitimate counterpart, so following it only burns budget on a
+   * loop. Every other kind is crawled and merely flagged, because real
+   * archive and filter pages are indistinguishable from the trap version.
+   *
+   * Drops are counted and reported once the crawl ends - never silent.
+   */
+  private isLoopTrap(url: string): boolean {
+    const max = this.config.maxRepeatedPathSegments;
+    if (!max || max <= 0) return false;
+    return detectUrlTrap(url, { maxRepeatedSegments: max }) === 'repeated-segment';
+  }
+
+  /** URLs dropped by `isLoopTrap`, reported at the end of the crawl. */
+  private loopTrapsDropped = 0;
 
   /**
    * Drop URLs whose path extension matches any user-configured exclude
@@ -979,6 +1013,16 @@ export class Crawler extends EventEmitter {
     // so IPC dispatch (logs:batch, progress, dataChanged) never starves.
     await this.runPostCrawlPasses();
     this.running = false;
+    // Say what the loop guard dropped. Silently shrinking a crawl is exactly
+    // the kind of invisible behaviour that makes a missing page impossible
+    // to explain afterwards.
+    if (this.loopTrapsDropped > 0) {
+      this.emit(
+        'info',
+        `Crawl trap guard: skipped ${this.loopTrapsDropped.toLocaleString()} URL(s) whose path repeated a ` +
+          `segment ${this.config.maxRepeatedPathSegments}+ times (link loop).`,
+      );
+    }
     this.stopMemoryMonitor();
     // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
     // heap that's no longer needed once the queue is drained.
@@ -2104,6 +2148,7 @@ export class Crawler extends EventEmitter {
         this.db.upsertUrl({
           url: this.config.startUrl,
           urlMalformed: isUrlMalformed(this.config.startUrl) ? 1 : 0,
+          urlTrap: this.trapKind(this.config.startUrl),
           contentKind: 'html',
           statusCode: null,
           statusText: 'fetching',
@@ -2639,6 +2684,13 @@ export class Crawler extends EventEmitter {
       return;
     }
     if (item.depth > this.config.maxDepth) return;
+    // Link-loop guard, before robots/filters so a runaway `/a/a/a/...` fan-out
+    // costs one cheap string check rather than a robots lookup per hop.
+    // The start URL is exempt - the user asked for it explicitly.
+    if (item.url !== this.config.startUrl && this.isLoopTrap(item.url)) {
+      this.loopTrapsDropped++;
+      return;
+    }
     if (this.robots && !this.robots.isAllowed(item.url)) return;
     if (!this.passesUrlFilter(item.url)) return;
     if (!this.passesExtensionFilter(item.url)) return;
@@ -2889,6 +2941,7 @@ export class Crawler extends EventEmitter {
             {
               url: item.url,
               urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+              urlTrap: this.trapKind(item.url),
               contentKind: 'other',
               statusCode: res.status,
               statusText: 'size-cap-exceeded',
@@ -3059,6 +3112,7 @@ export class Crawler extends EventEmitter {
           {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+            urlTrap: this.trapKind(item.url),
             contentKind: kind,
             statusCode,
             statusText: null,
@@ -3192,6 +3246,7 @@ export class Crawler extends EventEmitter {
           {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+            urlTrap: this.trapKind(item.url),
             contentKind: kind,
             statusCode,
             statusText: null,
@@ -3248,6 +3303,7 @@ export class Crawler extends EventEmitter {
           {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+            urlTrap: this.trapKind(item.url),
             contentKind: 'other',
             statusCode,
             statusText: 'size-cap-exceeded',
@@ -3376,10 +3432,7 @@ export class Crawler extends EventEmitter {
       } else if (headerNoindex) {
         indexability = 'non-indexable:noindex';
         reason = 'X-Robots-Tag: noindex';
-      } else if (
-        parsed.canonical &&
-        normalizeUrl(parsed.canonical, item.url, this.urlRewrites) !== item.url
-      ) {
+      } else if (parsed.canonicalResolved && parsed.canonicalResolved !== item.url) {
         indexability = 'non-indexable:canonical';
         reason = `canonical points to ${parsed.canonical}`;
       } else if (!parsed.canonical && canonicalHttp && canonicalHttp !== item.url) {
@@ -3468,6 +3521,7 @@ export class Crawler extends EventEmitter {
         upsert: {
           url: item.url,
           urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+          urlTrap: this.trapKind(item.url),
           contentKind: 'html',
           statusCode,
           statusText: null,
@@ -3488,7 +3542,13 @@ export class Crawler extends EventEmitter {
           // empties its tab without silently re-labelling pages as
           // indexable — the verdict and the evidence stay in agreement.
           canonical: this.config.storeCanonicals ? parsed.canonical : null,
+          canonicalResolved: this.config.storeCanonicals ? parsed.canonicalResolved : null,
           canonicalCount: this.config.storeCanonicals ? parsed.canonicalCount : 0,
+          canonicalDistinctCount: this.config.storeCanonicals
+            ? parsed.canonicalDistinctCount
+            : 0,
+          canonicalCrossDomain:
+            this.config.storeCanonicals && parsed.canonicalCrossDomain ? 1 : 0,
           canonicalHttp: this.config.storeCanonicals ? canonicalHttp : null,
           metaRobots: parsed.metaRobots,
           xRobotsTag,
@@ -3760,16 +3820,19 @@ export class Crawler extends EventEmitter {
         // canonicals as a signal, not a navigation hint.
         if (
           this.config.followCanonicals &&
-          parsed.canonical &&
-          parsed.canonical !== item.url
+          parsed.canonicalResolved &&
+          parsed.canonicalResolved !== item.url
         ) {
+          // Resolved, not raw: a relative canonical passed verbatim to
+          // isInScope/enqueue is not a URL and would either be dropped or
+          // fetched against the wrong base.
           const inScope = isInScope(
             this.config.startUrl,
-            parsed.canonical,
+            parsed.canonicalResolved,
             this.config.scope,
           );
           if (inScope || this.config.crawlExternal) {
-            this.enqueue({ url: parsed.canonical, depth: nextDepth });
+            this.enqueue({ url: parsed.canonicalResolved, depth: nextDepth });
           }
         }
         // Wave 3 — JS-style redirect follow. Currently covers
@@ -3839,6 +3902,7 @@ export class Crawler extends EventEmitter {
         {
           url: item.url,
           urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+          urlTrap: this.trapKind(item.url),
           contentKind: 'html',
           statusCode: null,
           statusText: detail,

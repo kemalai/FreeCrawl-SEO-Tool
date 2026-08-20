@@ -1305,6 +1305,8 @@ export interface UrlRewritePreviewInput {
   stripWww: boolean;
   forceHttps: boolean;
   lowercasePath: boolean;
+  sortQueryParams: boolean;
+  collapseDuplicateSlashes: boolean;
   trailingSlash: 'leave' | 'strip' | 'add';
   keepQueryParams: string[];
   urlRegexRewrites: Array<{ pattern: string; replacement: string; flags?: string }>;

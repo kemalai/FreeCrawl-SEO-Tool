@@ -33,6 +33,11 @@ const CRITICAL: UrlCategory[] = [
   'issues:canonical-mismatch',
   'issues:canonical-to-non-200',
   'issues:canonical-to-noindex',
+  // Canonicals that disagree with each other are discarded wholesale by
+  // search engines, and a noindex sitting on a canonicalised page cancels
+  // the consolidation outright — both break indexing, not just degrade it.
+  'issues:canonical-conflicting',
+  'issues:noindex-canonical-conflict',
   'issues:response-very-slow',
   'issues:mixed-content',
   'issues:redirect-loop',
@@ -117,6 +122,13 @@ const WARNING: UrlCategory[] = [
   'issues:og-image-not-absolute',
   'issues:twitter-image-not-absolute',
   'issues:canonical-not-absolute',
+  // Both are legitimate in some setups (syndication; a redirect that
+  // deliberately lands on a noindexed page), so they warn rather than fail.
+  'issues:canonical-cross-domain',
+  'issues:redirect-to-noindex',
+  // Faceted / calendar / session-ID URL spaces waste crawl budget on
+  // near-identical pages, but plenty of them are legitimate archive pages.
+  'issues:crawl-trap',
   'issues:title-single-word',
   'issues:internal-link-to-redirect',
   'issues:dead-external-domain',

@@ -124,6 +124,9 @@ interface UrlRowDb {
   canonical_count: number;
   word_count: number | null;
   canonical: string | null;
+  canonical_resolved: string | null;
+  canonical_distinct_count: number;
+  canonical_cross_domain: number;
   canonical_http: string | null;
   meta_robots: string | null;
   x_robots_tag: string | null;
@@ -259,6 +262,7 @@ interface UrlRowDb {
   images_responsive: number;
   picture_count: number;
   url_malformed: number;
+  url_trap: string | null;
   og_type: string | null;
   og_url: string | null;
   og_site_name: string | null;
@@ -331,6 +335,9 @@ export interface UpsertUrlInput {
   canonicalCount?: number;
   wordCount?: number | null;
   canonical?: string | null;
+  canonicalResolved?: string | null;
+  canonicalDistinctCount?: number;
+  canonicalCrossDomain?: number;
   canonicalHttp?: string | null;
   metaRobots?: string | null;
   xRobotsTag?: string | null;
@@ -423,6 +430,7 @@ export interface UpsertUrlInput {
   pictureCount?: number;
   /** 0/1 — set by the crawler via `isUrlMalformed(url)` from `@freecrawl/core/url-utils`. */
   urlMalformed?: number;
+  urlTrap?: string | null;
   ogType?: string | null;
   ogUrl?: string | null;
   ogSiteName?: string | null;
@@ -515,7 +523,8 @@ const UPSERT_URL_SQL = `
     url, content_kind, status_code, status_text, indexability, indexability_reason,
     title, title_length, meta_description, meta_description_length,
     h1, h1_length, h1_count, h2_count, h3_count, h4_count, h5_count, h6_count,
-    word_count, canonical, canonical_count, canonical_http, meta_robots, x_robots_tag,
+    word_count, canonical, canonical_resolved, canonical_distinct_count,
+    canonical_cross_domain, canonical_count, canonical_http, meta_robots, x_robots_tag,
     content_type, content_length, response_time_ms, depth, outlinks, redirect_target,
     images_count, images_missing_alt,
     lang, viewport, og_title, og_description, og_image,
@@ -546,7 +555,7 @@ const UPSERT_URL_SQL = `
     flesch_reading_ease, flesch_kincaid_grade, gunning_fog_index, sentence_count, complex_word_count,
     cors_allow_origin, cors_allow_credentials, cors_allow_methods, cors_allow_headers,
     images_responsive, picture_count,
-    url_malformed, og_type, og_url, og_site_name, og_locale, android_icon,
+    url_malformed, url_trap, og_type, og_url, og_site_name, og_locale, android_icon,
     landmark_main, skip_link_present, aria_invalid_roles,
     schema_duplicate_ids, schema_unknown_types, schema_missing_required,
     schema_missing_recommended,
@@ -556,7 +565,8 @@ const UPSERT_URL_SQL = `
     :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
     :h1, :h1_length, :h1_count, :h2_count, :h3_count, :h4_count, :h5_count, :h6_count,
-    :word_count, :canonical, :canonical_count, :canonical_http, :meta_robots, :x_robots_tag,
+    :word_count, :canonical, :canonical_resolved, :canonical_distinct_count,
+    :canonical_cross_domain, :canonical_count, :canonical_http, :meta_robots, :x_robots_tag,
     :content_type, :content_length, :response_time_ms, :depth, :outlinks, :redirect_target,
     :images_count, :images_missing_alt,
     :lang, :viewport, :og_title, :og_description, :og_image,
@@ -587,7 +597,7 @@ const UPSERT_URL_SQL = `
     :flesch_reading_ease, :flesch_kincaid_grade, :gunning_fog_index, :sentence_count, :complex_word_count,
     :cors_allow_origin, :cors_allow_credentials, :cors_allow_methods, :cors_allow_headers,
     :images_responsive, :picture_count,
-    :url_malformed, :og_type, :og_url, :og_site_name, :og_locale, :android_icon,
+    :url_malformed, :url_trap, :og_type, :og_url, :og_site_name, :og_locale, :android_icon,
     :landmark_main, :skip_link_present, :aria_invalid_roles,
     :schema_duplicate_ids, :schema_unknown_types, :schema_missing_required,
     :schema_missing_recommended,
@@ -614,6 +624,9 @@ const UPSERT_URL_SQL = `
     h6_count = excluded.h6_count,
     word_count = excluded.word_count,
     canonical = excluded.canonical,
+    canonical_resolved = excluded.canonical_resolved,
+    canonical_distinct_count = excluded.canonical_distinct_count,
+    canonical_cross_domain = excluded.canonical_cross_domain,
     canonical_count = excluded.canonical_count,
     canonical_http = excluded.canonical_http,
     meta_robots = excluded.meta_robots,
@@ -709,6 +722,7 @@ const UPSERT_URL_SQL = `
     images_responsive = excluded.images_responsive,
     picture_count = excluded.picture_count,
     url_malformed = excluded.url_malformed,
+    url_trap = excluded.url_trap,
     og_type = excluded.og_type,
     og_url = excluded.og_url,
     og_site_name = excluded.og_site_name,
@@ -787,6 +801,26 @@ const INTERNAL_HTML_SCOPE = "is_external = 0 AND content_kind = 'html'";
  */
 const INDEXABLE_HTML_SCOPE =
   INTERNAL_HTML_SCOPE + ' AND status_code >= 200 AND status_code < 300';
+
+/**
+ * The canonical value to *compare* with — resolved to an absolute URL at
+ * crawl time (migration 85), falling back to the raw href for rows crawled
+ * before that column existed.
+ *
+ * `urls.canonical` deliberately keeps the href exactly as the page authored
+ * it (the "Canonical Not Absolute" filter and the detail panel both want the
+ * literal value), but a relative `href="/x/"` never equals an absolute
+ * `urls.url`. Comparing raw made a correctly self-canonicalising page report
+ * as canonicalised away, and made every canonical→target join match nothing.
+ *
+ * Use this anywhere a canonical is matched against `url`, `canonical_http`,
+ * or another row's canonical. Use bare `canonical` only to test whether the
+ * page declared one at all, or to inspect its literal form.
+ */
+const CANONICAL_CMP = "COALESCE(NULLIF(canonical_resolved, ''), canonical)";
+/** Same value, qualified — for use inside a correlated subquery. */
+const CANONICAL_CMP_Q =
+  "COALESCE(NULLIF(urls.canonical_resolved, ''), urls.canonical)";
 
 export class ProjectDb {
   private readonly db: DatabaseSync;
@@ -1753,6 +1787,9 @@ export class ProjectDb {
       h6_count: input.h6Count ?? 0,
       word_count: input.wordCount ?? null,
       canonical: input.canonical ?? null,
+      canonical_resolved: input.canonicalResolved ?? null,
+      canonical_distinct_count: input.canonicalDistinctCount ?? 0,
+      canonical_cross_domain: input.canonicalCrossDomain ?? 0,
       canonical_count: input.canonicalCount ?? 0,
       canonical_http: input.canonicalHttp ?? null,
       meta_robots: input.metaRobots ?? null,
@@ -1851,6 +1888,7 @@ export class ProjectDb {
       images_responsive: input.imagesResponsive ?? 0,
       picture_count: input.pictureCount ?? 0,
       url_malformed: input.urlMalformed ?? 0,
+      url_trap: input.urlTrap ?? null,
       og_type: input.ogType ?? null,
       og_url: input.ogUrl ?? null,
       og_site_name: input.ogSiteName ?? null,
@@ -2001,14 +2039,41 @@ export class ProjectDb {
    * counters this is acceptable — momentary undercount for live
    * counters beats a 1–3 s UI freeze every 30 s. The post-crawl pass
    * still uses the atomic sync version for the final committed state.
+   *
+   * Runs are serialised per instance: because the pass yields between
+   * definitions, two concurrent invocations (the 30 s in-crawl tick
+   * still in flight when the post-crawl pass fires) would interleave —
+   * one's DELETE wiping the other's half-written INSERTs, leaving
+   * silently wrong issue counters. The chain makes the second caller
+   * wait for the first instead.
+   *
+   * `onProgress` fires after each definition — the desktop writer
+   * worker uses it to publish "n/total" into the freeze-watchdog op
+   * slot so a long pass is observably progressing, not wedged.
    */
   async recomputeUrlsIssuesYielding(
     definitions: ReadonlyArray<readonly [string, string]>,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<void> {
+    const run = this.issueRecomputeChain.then(() =>
+      this.recomputeUrlsIssuesYieldingInner(definitions, onProgress),
+    );
+    // Keep the chain alive on failure — the next caller must still run.
+    this.issueRecomputeChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private issueRecomputeChain: Promise<void> = Promise.resolve();
+
+  private async recomputeUrlsIssuesYieldingInner(
+    definitions: ReadonlyArray<readonly [string, string]>,
+    onProgress?: (done: number, total: number) => void,
   ): Promise<void> {
     // Atomic truncate so getIssueCounts can never see "old + new" rows.
     this.runInTransaction(() => {
       this.db.exec('DELETE FROM urls_issues');
     });
+    let done = 0;
     for (const [issueKey, where] of definitions) {
       // One transaction per definition keeps the writer lock window
       // short — other writes (the crawler's per-URL inserts) can
@@ -2022,6 +2087,8 @@ export class ProjectDb {
           )
           .run(issueKey);
       });
+      done++;
+      onProgress?.(done, definitions.length);
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
@@ -3193,7 +3260,8 @@ export class ProjectDb {
         const placeholders = slice.map(() => '?').join(',');
         const metaRows = this.db
           .prepare(
-            `SELECT url, status_code, indexability, canonical FROM urls
+            `SELECT url, status_code, indexability,
+                    ${CANONICAL_CMP} AS canonical FROM urls
               WHERE url IN (${placeholders})`,
           )
           .all(...slice) as {
@@ -5476,22 +5544,41 @@ export class ProjectDb {
          AND (canonical_http IS NULL OR canonical_http = '')`,
       ),
       canonicalSelfReferencing: countWhere(
-        `${html} AND canonical IS NOT NULL AND canonical = url`,
+        `${html} AND canonical IS NOT NULL AND ${CANONICAL_CMP} = url`,
       ),
       canonicalNonSelf: countWhere(
         `${html} AND canonical IS NOT NULL AND canonical != ''
-         AND canonical != url`,
+         AND ${CANONICAL_CMP} != url`,
       ),
       canonicalMismatch: countWhere(
         `${html}
          AND canonical IS NOT NULL AND canonical != ''
          AND canonical_http IS NOT NULL AND canonical_http != ''
-         AND canonical != canonical_http`,
+         AND ${CANONICAL_CMP} != canonical_http`,
+      ),
+      canonicalConflicting: countWhere(
+        `${html} AND canonical_distinct_count > 1`,
+      ),
+      canonicalCrossDomain: countWhere(
+        `${html} AND canonical_cross_domain = 1`,
+      ),
+      noindexCanonicalConflict: countWhere(
+        `${html} AND canonical IS NOT NULL AND canonical != ''
+         AND ${CANONICAL_CMP} != url
+         AND (meta_robots LIKE '%noindex%' OR x_robots_tag LIKE '%noindex%')`,
+      ),
+      redirectToNoindex: countWhere(
+        `${html} AND status_code >= 300 AND status_code < 400
+         AND redirect_final_url IS NOT NULL AND redirect_final_url != ''
+         AND EXISTS (
+           SELECT 1 FROM urls t WHERE t.url = urls.redirect_final_url
+             AND t.indexability = 'non-indexable:noindex'
+         )`,
       ),
       canonicalToNon200: countWhere(
         `${html} AND canonical IS NOT NULL AND canonical != ''
          AND EXISTS (
-           SELECT 1 FROM urls t WHERE t.url = urls.canonical
+           SELECT 1 FROM urls t WHERE t.url = ${CANONICAL_CMP_Q}
              AND t.status_code IS NOT NULL
              AND (t.status_code < 200 OR t.status_code >= 400)
          )`,
@@ -5499,14 +5586,14 @@ export class ProjectDb {
       canonicalToRedirect: countWhere(
         `${html} AND canonical IS NOT NULL AND canonical != ''
          AND EXISTS (
-           SELECT 1 FROM urls t WHERE t.url = urls.canonical
+           SELECT 1 FROM urls t WHERE t.url = ${CANONICAL_CMP_Q}
              AND t.status_code >= 300 AND t.status_code < 400
          )`,
       ),
       canonicalToNoindex: countWhere(
         `${html} AND canonical IS NOT NULL AND canonical != ''
          AND EXISTS (
-           SELECT 1 FROM urls t WHERE t.url = urls.canonical
+           SELECT 1 FROM urls t WHERE t.url = ${CANONICAL_CMP_Q}
              AND t.indexability = 'non-indexable:noindex'
          )`,
       ),
@@ -5635,7 +5722,8 @@ export class ProjectDb {
            WHERE u2.cluster_id = urls.cluster_id
              AND u2.is_external = 0 AND u2.content_kind = 'html'
              AND u2.canonical IS NOT NULL AND u2.canonical != ''
-             AND u2.canonical != urls.canonical
+             AND COALESCE(NULLIF(u2.canonical_resolved, ''), u2.canonical)
+                 != ${CANONICAL_CMP_Q}
              AND u2.url != urls.url
          )`,
       ),
@@ -5675,6 +5763,7 @@ export class ProjectDb {
         `${html} AND (INSTR(url, ' ') > 0 OR INSTR(url, '%20') > 0)`,
       ),
       urlMalformed: countWhere(`${html} AND url_malformed = 1`),
+      crawlTrap: countWhere(`${html} AND url_trap IS NOT NULL AND url_trap != ''`),
       // Image-level (was page-level `images_empty_alt > 0`): count distinct
       // images with an explicit `alt=""` so it's the same unit as Missing
       // Alt and matches the Images tab drill-down.
@@ -5875,7 +5964,7 @@ export class ProjectDb {
         `${html} AND ((pagination_next IS NOT NULL AND pagination_next != '')
                   OR (pagination_prev IS NOT NULL AND pagination_prev != ''))
          AND canonical IS NOT NULL AND canonical != ''
-         AND canonical != url`,
+         AND ${CANONICAL_CMP} != url`,
       ),
       schemaDuplicateId: countWhere(`${html} AND schema_duplicate_ids > 0`),
       schemaUnknownType: countWhere(`${html} AND schema_unknown_types > 0`),
@@ -8423,7 +8512,10 @@ export class ProjectDb {
     h6Count: r.h6_count,
     wordCount: r.word_count,
     canonical: r.canonical,
+    canonicalResolved: r.canonical_resolved,
     canonicalCount: r.canonical_count,
+    canonicalDistinctCount: r.canonical_distinct_count,
+    canonicalCrossDomain: r.canonical_cross_domain === 1,
     canonicalHttp: r.canonical_http,
     metaRobots: r.meta_robots,
     xRobotsTag: r.x_robots_tag,
@@ -8543,6 +8635,7 @@ export class ProjectDb {
     imagesResponsive: r.images_responsive ?? 0,
     pictureCount: r.picture_count ?? 0,
     urlMalformed: r.url_malformed ?? 0,
+    urlTrap: r.url_trap ?? null,
     ogType: r.og_type ?? null,
     ogUrl: r.og_url ?? null,
     ogSiteName: r.og_site_name ?? null,
@@ -8763,14 +8856,15 @@ export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string
     'issues:canonical-chain-multi-hop',
     `is_external = 0 AND content_kind = 'html'
      AND canonical IS NOT NULL AND canonical != ''
-     AND canonical != url
+     AND ${CANONICAL_CMP} != url
      AND EXISTS (
        SELECT 1 FROM urls c2
-        WHERE c2.url = urls.canonical
+        WHERE c2.url = ${CANONICAL_CMP_Q}
           AND c2.canonical IS NOT NULL
           AND c2.canonical != ''
-          AND c2.canonical != c2.url
-          AND c2.canonical != urls.canonical
+          AND COALESCE(NULLIF(c2.canonical_resolved, ''), c2.canonical) != c2.url
+          AND COALESCE(NULLIF(c2.canonical_resolved, ''), c2.canonical)
+              != ${CANONICAL_CMP_Q}
      )`,
   ],
 ];
@@ -9049,21 +9143,58 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // Informational filter: this page's canonical points back to
       // itself — the typical "good" state for a primary URL.
       return `is_external = 0 AND content_kind = 'html'
-              AND canonical IS NOT NULL AND canonical = url`;
+              AND canonical IS NOT NULL AND ${CANONICAL_CMP} = url`;
     case 'issues:canonical-non-self':
       // Page canonical points to a different URL — this page is
       // canonicalised to another. Often intentional (paginated /
       // duplicates) but always worth surfacing.
       return `is_external = 0 AND content_kind = 'html'
               AND canonical IS NOT NULL AND canonical != ''
-              AND canonical != url`;
+              AND ${CANONICAL_CMP} != url`;
     case 'issues:canonical-mismatch':
       // HTML and HTTP-header canonicals both exist but disagree —
       // Google picks one unpredictably. Always a misconfiguration.
+      // `canonical_http` is already absolute, so the HTML side has to be
+      // resolved too or every relative canonical reads as a mismatch.
       return `is_external = 0 AND content_kind = 'html'
               AND canonical IS NOT NULL AND canonical != ''
               AND canonical_http IS NOT NULL AND canonical_http != ''
-              AND canonical != canonical_http`;
+              AND ${CANONICAL_CMP} != canonical_http`;
+    case 'issues:canonical-conflicting':
+      // Two or more `<link rel="canonical">` elements resolving to
+      // DIFFERENT targets. `multiple-canonicals` only counts repeated
+      // tags — often a CMS and a plugin emitting the same href, which is
+      // harmless. Disagreeing targets are the real defect: search engines
+      // discard all of them and choose a canonical themselves.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical_distinct_count > 1`;
+    case 'issues:canonical-cross-domain':
+      // Canonical points at a different registrable domain. Legitimate
+      // for syndicated content, but far more often a migration or staging
+      // leak that hands the page's ranking signals to another site.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical_cross_domain = 1`;
+    case 'issues:noindex-canonical-conflict':
+      // The page says "don't index me" AND "the authoritative version is
+      // over there". Contradictory: the noindex wins, so the canonical's
+      // consolidation never happens and the target gains nothing — while
+      // a crawler following the canonical may propagate the noindex.
+      return `is_external = 0 AND content_kind = 'html'
+              AND canonical IS NOT NULL AND canonical != ''
+              AND ${CANONICAL_CMP} != url
+              AND (meta_robots LIKE '%noindex%' OR x_robots_tag LIKE '%noindex%')`;
+    case 'issues:redirect-to-noindex':
+      // A redirect whose final destination is noindexed — the redirect
+      // spends its link equity on a page that will never be indexed.
+      // Uses `redirect_final_url` (written by the post-crawl chain walk)
+      // so multi-hop chains are judged on their real terminus.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 300 AND status_code < 400
+              AND redirect_final_url IS NOT NULL AND redirect_final_url != ''
+              AND EXISTS (
+                SELECT 1 FROM urls t WHERE t.url = urls.redirect_final_url
+                  AND t.indexability = 'non-indexable:noindex'
+              )`;
     case 'issues:canonical-to-non-200':
       // Canonical points to a URL we crawled and it returned 4xx/5xx —
       // major SEO bug, the canonical is broken. 3xx is excluded here
@@ -9072,7 +9203,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND canonical IS NOT NULL AND canonical != ''
               AND EXISTS (
-                SELECT 1 FROM urls t WHERE t.url = urls.canonical
+                SELECT 1 FROM urls t WHERE t.url = ${CANONICAL_CMP_Q}
                   AND t.status_code IS NOT NULL
                   AND (t.status_code < 200 OR t.status_code >= 400)
               )`;
@@ -9083,7 +9214,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND canonical IS NOT NULL AND canonical != ''
               AND EXISTS (
-                SELECT 1 FROM urls t WHERE t.url = urls.canonical
+                SELECT 1 FROM urls t WHERE t.url = ${CANONICAL_CMP_Q}
                   AND t.status_code >= 300 AND t.status_code < 400
               )`;
     case 'issues:canonical-to-noindex':
@@ -9093,7 +9224,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND canonical IS NOT NULL AND canonical != ''
               AND EXISTS (
-                SELECT 1 FROM urls t WHERE t.url = urls.canonical
+                SELECT 1 FROM urls t WHERE t.url = ${CANONICAL_CMP_Q}
                   AND t.indexability = 'non-indexable:noindex'
               )`;
     case 'issues:high-boilerplate':
@@ -9125,7 +9256,8 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                 WHERE u2.cluster_id = urls.cluster_id
                   AND u2.is_external = 0 AND u2.content_kind = 'html'
                   AND u2.canonical IS NOT NULL AND u2.canonical != ''
-                  AND u2.canonical != urls.canonical
+                  AND COALESCE(NULLIF(u2.canonical_resolved, ''), u2.canonical)
+                      != ${CANONICAL_CMP_Q}
                   AND u2.url != urls.url
               )`;
     case 'issues:content-thin':
@@ -9385,6 +9517,16 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // multiple `?`/`#`, control chars, unescaped reserved chars,
       // double-encoding sequences (`%2520` etc).
       return "is_external = 0 AND content_kind = 'html' AND url_malformed = 1";
+    case 'issues:crawl-trap':
+      // Classified by `detectUrlTrap` at upsert time: faceted navigation
+      // (query-param count over the cap), a session-ID parameter, a
+      // calendar date navigator, or a repeated path segment. These URL
+      // spaces are unbounded, so they burn crawl budget on near-identical
+      // pages. Reported rather than blocked — legitimate archive and
+      // filter pages have the same shape — except the repeated-segment
+      // loop, which the crawler drops at enqueue.
+      return `is_external = 0 AND content_kind = 'html'
+              AND url_trap IS NOT NULL AND url_trap != ''`;
     case 'issues:image-empty-alt':
       // alt="" specifically. Decorative images use this intentionally, but
       // many sites apply it to content images by mistake.
@@ -9736,7 +9878,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               AND ((pagination_next IS NOT NULL AND pagination_next != '')
                 OR (pagination_prev IS NOT NULL AND pagination_prev != ''))
               AND canonical IS NOT NULL AND canonical != ''
-              AND canonical != url`;
+              AND ${CANONICAL_CMP} != url`;
     case 'issues:schema-duplicate-id':
       // Page has at least one `@id` appearing in two or more JSON-LD
       // entities. Two entities sharing an `@id` collide in Google's
@@ -9977,14 +10119,16 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // would also surface as a multi-hop chain on its own row.
       return `is_external = 0 AND content_kind = 'html'
               AND canonical IS NOT NULL AND canonical != ''
-              AND canonical != url
+              AND ${CANONICAL_CMP} != url
               AND EXISTS (
                 SELECT 1 FROM urls c2
-                 WHERE c2.url = urls.canonical
+                 WHERE c2.url = ${CANONICAL_CMP_Q}
                    AND c2.canonical IS NOT NULL
                    AND c2.canonical != ''
-                   AND c2.canonical != c2.url
-                   AND c2.canonical != urls.canonical
+                   AND COALESCE(NULLIF(c2.canonical_resolved, ''), c2.canonical)
+                       != c2.url
+                   AND COALESCE(NULLIF(c2.canonical_resolved, ''), c2.canonical)
+                       != ${CANONICAL_CMP_Q}
               )`;
     case 'issues:image-slow-loading':
       // Page loads at least one image > 200 KB AND the page hasn't

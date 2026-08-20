@@ -33,6 +33,42 @@ export interface UrlRewriteOptions {
    * up-front instead of on every URL.
    */
   regexRewrites?: readonly CompiledUrlRegexRewrite[];
+  /**
+   * Sort query parameters alphabetically by name. `?b=2&a=1` and
+   * `?a=1&b=2` are the same resource on virtually every stack, but the
+   * WHATWG parser preserves author order, so without this they occupy two
+   * rows and register as a false duplicate pair. Repeated keys keep their
+   * relative order (`sort` is stable), which matters for array-style
+   * params like `?tag=a&tag=b`.
+   *
+   * Opt-in: a small number of servers route on positional parameter
+   * order, and reordering those would fetch the wrong page.
+   */
+  sortQueryParams?: boolean;
+  /**
+   * Collapse runs of `/` in the path to a single slash (`/a//b` -> `/a/b`).
+   * Web servers serve these identically, so the duplicate-slash variant is
+   * a false duplicate - but it is not universally true (a few frameworks
+   * carry empty path segments as real data), so this is opt-in too.
+   */
+  collapseDuplicateSlashes?: boolean;
+}
+
+/**
+ * Uppercase the hex digits of every percent-escape (`%2f` -> `%2F`).
+ *
+ * RFC 3986 6.2.2.1 makes percent-encoding hex digits case-insensitive and
+ * names the uppercase form canonical, but the WHATWG URL parser preserves
+ * whatever case the author wrote. Left alone, `/a%2fb` and `/a%2Fb` are the
+ * same resource stored as two separate rows - a false duplicate that also
+ * splits the link graph and inflates crawl budget.
+ *
+ * Only the two hex digits are touched; the decoded value is unchanged, so
+ * `%2F` still stays distinct from a literal `/` (which is the whole point
+ * of encoding it). A bare `%` not followed by two hex digits is left as-is.
+ */
+function upperPercentEscapes(value: string): string {
+  return value.replace(/%([0-9a-fA-F]{2})/g, (_m, hex: string) => `%${hex.toUpperCase()}`);
 }
 
 const DEFAULT_TRACKING_PARAMS = [
@@ -109,6 +145,11 @@ export function normalizeUrl(
     if (rewrites.lowercasePath && u.pathname) {
       u.pathname = u.pathname.toLowerCase();
     }
+    // Before the trailing-slash policy, so `add`/`strip` sees the collapsed
+    // path and `/a//` doesn't survive as `/a//` after a strip.
+    if (rewrites.collapseDuplicateSlashes && u.pathname.includes('//')) {
+      u.pathname = u.pathname.replace(/\/{2,}/g, '/');
+    }
     if (rewrites.trailingSlash === 'strip' && u.pathname.length > 1 && u.pathname.endsWith('/')) {
       u.pathname = u.pathname.slice(0, -1);
     } else if (
@@ -119,6 +160,18 @@ export function normalizeUrl(
       const last = u.pathname.slice(u.pathname.lastIndexOf('/') + 1);
       if (!last.includes('.')) u.pathname += '/';
     }
+
+    // Sort last among the query mutations so it also orders whatever the
+    // keep-list / tracking strip above left behind.
+    if (rewrites.sortQueryParams && u.search !== '') {
+      u.searchParams.sort();
+    }
+
+    // RFC 3986 6.2.2.1 percent-escape case folding - always on. Applied to
+    // the path and query only: the host has no percent-escapes (IDN is
+    // punycoded by the parser) and the fragment is already stripped.
+    if (u.pathname.includes('%')) u.pathname = upperPercentEscapes(u.pathname);
+    if (u.search.includes('%')) u.search = upperPercentEscapes(u.search);
 
     let result = u.toString();
     if (rewrites.regexRewrites && rewrites.regexRewrites.length > 0) {
@@ -322,6 +375,122 @@ export function isUrlMalformed(url: string): boolean {
   // double-encoded URL bug (e.g. `%2520` = encoded `%20` = encoded space).
   if (/%25[0-9A-Fa-f]{2}/.test(url)) return true;
   return false;
+}
+
+/**
+ * Query parameters that carry a per-visit session identifier. Every request
+ * mints a new value, so a crawler following them sees an unbounded stream of
+ * URLs that all serve the same page - the classic infinite-duplicate trap.
+ * Matched case-insensitively on the parameter name.
+ */
+const SESSION_ID_PARAMS: ReadonlySet<string> = new Set([
+  'phpsessid',
+  'jsessionid',
+  'aspsessionid',
+  'sid',
+  'sessionid',
+  'session_id',
+  'cfid',
+  'cftoken',
+  'zenid',
+  'oscsid',
+]);
+
+/** Query parameters that drive date navigation on calendar widgets. */
+const CALENDAR_PARAMS: ReadonlySet<string> = new Set([
+  'year',
+  'month',
+  'day',
+  'date',
+  'cal_date',
+  'calendar',
+  'mini',
+  'from',
+  'to',
+  'start_date',
+  'end_date',
+]);
+
+/** Why a URL was judged a crawl trap. */
+export type UrlTrapKind = 'repeated-segment' | 'query-params' | 'session-id' | 'calendar';
+
+export interface UrlTrapOptions {
+  /**
+   * A single path segment appearing this many times or more marks the URL
+   * as a link loop (`/shop/cat/shop/cat/shop/cat`). 0 disables the check.
+   */
+  maxRepeatedSegments?: number;
+  /**
+   * Query-parameter count above which the URL is treated as faceted-
+   * navigation explosion. 0 disables the check.
+   */
+  maxQueryParams?: number;
+}
+
+/**
+ * Classify a URL against the four crawl-trap shapes that generate unbounded
+ * URL spaces on real sites. Returns the matched kind, or `null` when the URL
+ * looks ordinary.
+ *
+ * Ordered most- to least-certain, because only the first is safe to act on
+ * automatically:
+ *
+ *  1. `repeated-segment` - the same path segment repeated N+ times. Produced
+ *     by a relative-link bug (`href="shop/"` inside `/shop/`), which walks
+ *     `/shop/shop/shop/...` forever. Legitimate URLs essentially never do this.
+ *  2. `query-params`     - more parameters than the configured cap: faceted
+ *     navigation, whose URL count is the product of every filter combination.
+ *  3. `session-id`       - carries a per-visit session token, so every crawl
+ *     of the same page yields a brand-new URL.
+ *  4. `calendar`         - two or more date-navigation parameters, the shape
+ *     of a "next month" widget that recedes infinitely into the future.
+ *
+ * Kinds 2-4 routinely appear on legitimate archive and filter pages, so they
+ * are reported for the user to see rather than acted on by default.
+ */
+export function detectUrlTrap(
+  url: string,
+  opts: UrlTrapOptions = {},
+): UrlTrapKind | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+
+  const maxRepeat = opts.maxRepeatedSegments ?? 0;
+  if (maxRepeat > 0) {
+    const segments = u.pathname.split('/').filter((s) => s !== '');
+    if (segments.length >= maxRepeat) {
+      const seen = new Map<string, number>();
+      for (const seg of segments) {
+        // Case-fold: `/Shop/shop/SHOP/` is the same loop.
+        const key = seg.toLowerCase();
+        const n = (seen.get(key) ?? 0) + 1;
+        if (n >= maxRepeat) return 'repeated-segment';
+        seen.set(key, n);
+      }
+    }
+  }
+
+  const names: string[] = [];
+  for (const k of u.searchParams.keys()) names.push(k.toLowerCase());
+
+  if (names.some((n) => SESSION_ID_PARAMS.has(n))) return 'session-id';
+
+  const maxParams = opts.maxQueryParams ?? 0;
+  if (maxParams > 0 && names.length > maxParams) return 'query-params';
+
+  // Two or more calendar parameters together - one alone (`?year=2026`) is
+  // an ordinary archive page, but `?year=2026&month=03` is a date navigator.
+  let calendarHits = 0;
+  for (const n of names) {
+    if (CALENDAR_PARAMS.has(n)) calendarHits++;
+  }
+  if (calendarHits >= 2) return 'calendar';
+
+  return null;
 }
 
 /**

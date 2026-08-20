@@ -140,6 +140,10 @@ interface FormState {
   stripWww: boolean;
   forceHttps: boolean;
   lowercasePath: boolean;
+  sortQueryParams: boolean;
+  collapseDuplicateSlashes: boolean;
+  maxRepeatedPathSegments: string;
+  maxQueryParams: string;
   trailingSlash: 'leave' | 'strip' | 'add';
   keepQueryParamsText: string;
   urlRegexRewrites: Array<{ pattern: string; replacement: string; flags?: string }>;
@@ -555,6 +559,10 @@ function configToForm(c: CrawlConfig): FormState {
     stripWww: c.stripWww,
     forceHttps: c.forceHttps,
     lowercasePath: c.lowercasePath,
+    sortQueryParams: c.sortQueryParams,
+    collapseDuplicateSlashes: c.collapseDuplicateSlashes,
+    maxRepeatedPathSegments: String(c.maxRepeatedPathSegments),
+    maxQueryParams: String(c.maxQueryParams),
     trailingSlash: c.trailingSlash,
     keepQueryParamsText: (c.keepQueryParams ?? []).join('\n'),
     urlRegexRewrites: (c.urlRegexRewrites ?? []).map((r) => ({ ...r })),
@@ -848,6 +856,10 @@ export function SettingsDialog({ open, onClose }: Props) {
       stripWww: form.stripWww,
       forceHttps: form.forceHttps,
       lowercasePath: form.lowercasePath,
+      sortQueryParams: form.sortQueryParams,
+      collapseDuplicateSlashes: form.collapseDuplicateSlashes,
+      maxRepeatedPathSegments: Math.max(0, num(form.maxRepeatedPathSegments, config.maxRepeatedPathSegments)),
+      maxQueryParams: Math.max(0, num(form.maxQueryParams, config.maxQueryParams)),
       trailingSlash: form.trailingSlash,
       keepQueryParams: parseLines(form.keepQueryParamsText)
         .map((s) => s.trim())
@@ -1626,6 +1638,20 @@ function CrawlerPanel({ form, update }: PanelProps) {
           onChange={(v) => update('requestTimeoutMs', v)}
           info="Per-request abort threshold. Pages that take longer than this are recorded as network errors. Screaming Frog: 'Response Timeout (secs)' (Configuration → Spider → Advanced) — that one's in seconds, this is in milliseconds."
           example="20000 (20 s) for typical use; 5000 for fast spot checks; 60000 for slow APIs."
+        />
+        <Num
+          label={t('settingsPanels.crawler.maxRepeatedPathSegments', { defaultValue: 'Crawl trap: repeated path segments — 0 = off' })}
+          value={form.maxRepeatedPathSegments}
+          onChange={(v) => update('maxRepeatedPathSegments', v)}
+          info="A URL whose path repeats the same segment this many times or more (/shop/shop/shop/…) is treated as a link loop and skipped. This shape comes from a relative-href bug and has no legitimate counterpart. Skipped counts are reported when the crawl finishes."
+          example="3 is safe for every site; raise to 4–5 only if a real path legitimately repeats a segment; 0 disables the guard."
+        />
+        <Num
+          label={t('settingsPanels.crawler.maxQueryParams', { defaultValue: 'Crawl trap: max query parameters — 0 = off' })}
+          value={form.maxQueryParams}
+          onChange={(v) => update('maxQueryParams', v)}
+          info="URLs with more query parameters than this are flagged as faceted-navigation traps under Issues → URL → Crawl Trap. Detection only — the URLs are still crawled, because legitimate filter pages look the same."
+          example="4 surfaces most faceted-nav explosions; 0 disables the check."
         />
       </div>
 
@@ -2422,6 +2448,8 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
         stripWww: form.stripWww,
         forceHttps: form.forceHttps,
         lowercasePath: form.lowercasePath,
+        sortQueryParams: form.sortQueryParams,
+        collapseDuplicateSlashes: form.collapseDuplicateSlashes,
         trailingSlash: form.trailingSlash,
         keepQueryParams: keep,
         urlRegexRewrites: rewrites,
@@ -2469,6 +2497,22 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
           hint={t('settingsPanels.urlRewriting.lowercasePathHint', { defaultValue: 'Treat /Foo and /foo as the same URL' })}
           info="Lowercases the URL path component. Host is already case-insensitive per the URL spec, so this only affects the path."
           example="On if your CMS serves the same page at mixed casing (/Foo and /foo)."
+        />
+        <Bool
+          label={t('settingsPanels.urlRewriting.sortQueryParams', { defaultValue: 'Sort query parameters' })}
+          checked={form.sortQueryParams}
+          onChange={(v) => update('sortQueryParams', v)}
+          hint={t('settingsPanels.urlRewriting.sortQueryParamsHint', { defaultValue: 'Treat ?b=2&a=1 and ?a=1&b=2 as the same URL' })}
+          info="Sorts query parameters alphabetically at normalisation time. Repeated keys keep their relative order, so ?tag=a&tag=b is preserved. Without this the two orderings occupy separate rows and read as duplicates."
+          example="On for most sites; off if your server routes on positional parameter order."
+        />
+        <Bool
+          label={t('settingsPanels.urlRewriting.collapseDuplicateSlashes', { defaultValue: 'Collapse duplicate slashes' })}
+          checked={form.collapseDuplicateSlashes}
+          onChange={(v) => update('collapseDuplicateSlashes', v)}
+          hint={t('settingsPanels.urlRewriting.collapseDuplicateSlashesHint', { defaultValue: 'Treat /a//b and /a/b as the same URL' })}
+          info="Collapses runs of slashes in the path to a single slash. Applied before the trailing-slash policy. Web servers serve these identically, so the duplicate-slash variant is normally a false duplicate."
+          example="On if a template bug emits //  in links; off if your framework uses empty path segments as data."
         />
         <label className="flex flex-col gap-1">
           <FieldLabel

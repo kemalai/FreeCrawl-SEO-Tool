@@ -620,6 +620,24 @@ function buildTree(o: OverviewCounts | null): Node[] {
               category: 'issues:multiple-canonicals',
             },
             {
+              key: 'issues-canonicals-conflicting',
+              label: 'Conflicting Canonicals',
+              count: o.issues.canonicalConflicting,
+              category: 'issues:canonical-conflicting',
+            },
+            {
+              key: 'issues-canonicals-cross-domain',
+              label: 'Canonical → Cross-Domain',
+              count: o.issues.canonicalCrossDomain,
+              category: 'issues:canonical-cross-domain',
+            },
+            {
+              key: 'issues-canonicals-noindex-conflict',
+              label: 'Noindex + Canonical Conflict',
+              count: o.issues.noindexCanonicalConflict,
+              category: 'issues:noindex-canonical-conflict',
+            },
+            {
               key: 'issues-canonicals-non-200',
               label: 'Canonical → Non-200',
               count: o.issues.canonicalToNon200,
@@ -870,6 +888,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Malformed URL',
               count: o.issues.urlMalformed,
               category: 'issues:url-malformed',
+            },
+            {
+              key: 'issues-url-crawl-trap',
+              label: 'Crawl Trap',
+              count: o.issues.crawlTrap,
+              category: 'issues:crawl-trap',
             },
             {
               key: 'issues-url-query-too-long',
@@ -1176,6 +1200,12 @@ function buildTree(o: OverviewCounts | null): Node[] {
               label: 'Self-Redirect',
               count: o.issues.redirectSelf,
               category: 'issues:redirect-self',
+            },
+            {
+              key: 'issues-redirect-to-noindex',
+              label: 'Redirect → Noindex',
+              count: o.issues.redirectToNoindex,
+              category: 'issues:redirect-to-noindex',
             },
           ],
         },

@@ -2110,6 +2110,58 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 85,
+    name: 'add_canonical_resolved',
+    // `urls.canonical` stores the href exactly as authored, which is what
+    // the "Canonical Not Absolute" filter and the detail panel want. But
+    // roughly twenty predicates compare that raw value against `urls.url`
+    // (self-reference, canonical→redirect/noindex joins, chain walking),
+    // and a relative `href="/x/"` never equals an absolute URL — so a
+    // correctly self-canonicalising page was reported as canonicalised
+    // away, and canonical→target joins silently matched nothing.
+    //
+    // `canonical_resolved` holds the same href resolved against the page
+    // URL and normalised — the form a search engine actually compares.
+    // Comparisons read COALESCE(NULLIF(canonical_resolved,''), canonical)
+    // so projects crawled before this column existed keep their old
+    // behaviour instead of silently reporting zero.
+    //
+    // `canonical_distinct_count` counts *distinct* resolved targets, which
+    // separates a harmlessly repeated tag from canonicals that disagree;
+    // `canonical_cross_domain` flags a canonical pointing off-domain.
+    // Both default 0 — "nothing declared" for rows crawled earlier.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      const has = (n: string): boolean => cols.some((c) => c.name === n);
+      if (!has('canonical_resolved')) {
+        db.exec('ALTER TABLE urls ADD COLUMN canonical_resolved TEXT');
+      }
+      if (!has('canonical_distinct_count')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN canonical_distinct_count INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+      if (!has('canonical_cross_domain')) {
+        db.exec(
+          'ALTER TABLE urls ADD COLUMN canonical_cross_domain INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+      // Crawl-trap classification (`detectUrlTrap`): NULL/'' for ordinary
+      // URLs, otherwise the trap kind so the filter can explain *why* a URL
+      // was flagged rather than just that it was.
+      if (!has('url_trap')) {
+        db.exec('ALTER TABLE urls ADD COLUMN url_trap TEXT');
+      }
+      // The canonical→target EXISTS joins match on this column, so without
+      // an index they degrade to a scan per row on large projects.
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_urls_canonical_resolved ON urls(canonical_resolved)',
+      );
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

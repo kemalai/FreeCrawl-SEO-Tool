@@ -8,7 +8,12 @@ import type {
   LinkPathType,
   LinkPosition,
 } from '@freecrawl/shared-types';
-import { normalizeUrl, isSameHost, type UrlRewriteOptions } from './url-utils.js';
+import {
+  normalizeUrl,
+  isSameHost,
+  registrableDomain,
+  type UrlRewriteOptions,
+} from './url-utils.js';
 import { computeContentFingerprint } from './simhash.js';
 import { runExtractionRules } from './extraction.js';
 
@@ -55,8 +60,22 @@ export interface ParsedPage {
   h6Count: number;
   wordCount: number;
   canonical: string | null;
+  /**
+   * `canonical` resolved against the page URL and normalized - the form a
+   * search engine actually compares. Null when absent or unresolvable.
+   * Use this for every comparison; use `canonical` only to show the author's
+   * literal value.
+   */
+  canonicalResolved: string | null;
   /** Number of `<link rel="canonical">` elements declared. >1 is a confusion signal. */
   canonicalCount: number;
+  /**
+   * Distinct resolved canonical targets. >1 means the page's canonicals
+   * disagree with each other, which makes search engines discard all of them.
+   */
+  canonicalDistinctCount: number;
+  /** True when the resolved canonical points at a different registrable domain. */
+  canonicalCrossDomain: boolean;
   /**
    * Every `<meta name="robots">` content value on the page, lowercased
    * and joined with `, ` in document order. Multiple declarations are
@@ -530,6 +549,41 @@ export function parseHtml(
   const canonicalEls = $('link[rel="canonical"]');
   const canonical = (canonicalEls.first().attr('href') ?? '').trim() || null;
   const canonicalCount = canonicalEls.length;
+  // `canonical` above stays verbatim - the "Canonical Not Absolute" filter
+  // and the URL detail panel both want to show what the page actually
+  // shipped. Everything that *compares* a canonical (self-reference,
+  // canonical->redirect/noindex joins, cross-domain) needs it resolved
+  // against the page URL first, exactly as a search engine resolves it:
+  // `href="/x/"` on `https://a.com/y` is a self-canonical only after
+  // resolution. Same treatment `amphtml` already gets further down.
+  const canonicalResolved = canonical
+    ? normalizeUrl(canonical, pageUrl, opts.urlRewrites)
+    : null;
+  // Every declared canonical, resolved and deduped. `canonicalCount > 1`
+  // only says a page repeated the tag - often harmlessly identical (a CMS
+  // plus a plugin emitting the same href). More than one *distinct* target
+  // is the real defect: Google discards all of them and picks its own.
+  const canonicalTargets = new Set<string>();
+  canonicalEls.each((_, el) => {
+    const href = ($(el).attr('href') ?? '').trim();
+    if (!href) return;
+    const abs = normalizeUrl(href, pageUrl, opts.urlRewrites);
+    if (abs) canonicalTargets.add(abs);
+  });
+  const canonicalDistinctCount = canonicalTargets.size;
+  // Cross-domain canonical - legitimate for syndicated content, but far
+  // more often a migration or staging leak that deindexes the page, so it
+  // is worth surfacing on its own rather than hiding inside "non-self".
+  let canonicalCrossDomain = false;
+  if (canonicalResolved) {
+    try {
+      const target = registrableDomain(new URL(canonicalResolved).hostname);
+      const self = registrableDomain(new URL(pageUrl).hostname);
+      canonicalCrossDomain = target !== self;
+    } catch {
+      canonicalCrossDomain = false;
+    }
+  }
   // Robots directives — collected from EVERY `<meta name="robots">` in
   // the document, not just the first. Two details that a plain
   // `$('meta[name="robots"]').attr('content')` gets wrong on real sites:
@@ -1509,7 +1563,10 @@ export function parseHtml(
     h6Count,
     wordCount,
     canonical,
+    canonicalResolved,
     canonicalCount,
+    canonicalDistinctCount,
+    canonicalCrossDomain,
     metaRobots,
     lang,
     viewport,

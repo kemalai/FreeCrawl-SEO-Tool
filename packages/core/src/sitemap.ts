@@ -1,7 +1,35 @@
 import * as cheerio from 'cheerio';
+import { gunzipSync } from 'node:zlib';
 import { fetch as undiciFetch } from 'undici';
 import { normalizeUrl } from './url-utils.js';
 import { defaultRequestHeaders, formatFetchError } from './http-client.js';
+
+/**
+ * sitemaps.org protocol limits. A sitemap breaching either is still parsed
+ * (the data is useful and Google reads what it can), but the breach is
+ * reported as a warning so the user can fix the generator.
+ */
+const SITEMAP_MAX_URLS = 50_000;
+const SITEMAP_MAX_BYTES = 50 * 1024 * 1024;
+
+/**
+ * Content types a sitemap may legitimately arrive as. Servers are sloppy
+ * here — `text/plain` and `application/octet-stream` are common for `.xml`
+ * files on misconfigured hosts — so a mismatch is a warning, never a
+ * rejection: the body is still parsed and only flagged.
+ */
+const SITEMAP_OK_CONTENT_TYPES = [
+  'xml', // application/xml, text/xml, application/rss+xml, atom+xml
+  'gzip',
+  'x-gzip',
+  'octet-stream',
+  'text/plain',
+];
+
+/** Magic bytes every gzip member starts with (RFC 1952 §2.3.1). */
+function looksGzipped(buf: Uint8Array): boolean {
+  return buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+}
 
 export interface SitemapEntry {
   /** Absolute URL of the actual page (the sitemap's `<loc>` value). */
@@ -33,6 +61,12 @@ export interface SitemapDiscoveryResult {
   entries: SitemapEntry[];
   /** True if `maxUrls` cap was hit and additional entries were dropped. */
   truncated: boolean;
+  /**
+   * Non-fatal protocol breaches found while reading (sitemaps.org 50,000-URL
+   * / 50 MB caps, unexpected content types). The sitemap was still parsed —
+   * these are reported so the user can fix the generator.
+   */
+  warnings: { sitemap: string; warning: string }[];
 }
 
 /**
@@ -154,6 +188,7 @@ export async function fetchSitemaps(
     errors: [],
     entries: [],
     truncated: false,
+    warnings: [],
   };
   const visited = new Set<string>();
   type QueueItem = { url: string; depth: number };
@@ -188,27 +223,76 @@ export async function fetchSitemaps(
         continue;
       }
       const ct = (res.headers.get('content-type') ?? '').toLowerCase();
-      // Skip gzipped sitemaps for V1 — supporting them needs zlib stream
-      // handling which we'd rather not pull in until users actually need it.
-      if (ct.includes('gzip') || item.url.toLowerCase().endsWith('.gz')) {
-        result.errors.push({
+      // Read as bytes, not text: a `.xml.gz` sitemap arrives as raw gzip
+      // (Content-Type: application/gzip and NO Content-Encoding, so undici
+      // does not decompress it for us). Decoding those bytes as UTF-8 would
+      // yield mojibake that parses to zero URLs.
+      const raw = new Uint8Array(await res.arrayBuffer());
+
+      // Protocol size cap. Measured on the bytes actually served; the spec's
+      // 50 MB is the *uncompressed* limit, so for gzip we re-check after
+      // inflating below.
+      if (raw.byteLength > SITEMAP_MAX_BYTES) {
+        result.warnings.push({
           sitemap: item.url,
-          error: 'Gzipped sitemap — not yet supported',
+          warning: `Sitemap is ${(raw.byteLength / (1024 * 1024)).toFixed(1)} MB, over the sitemaps.org 50 MB limit.`,
         });
-        try {
-          await res.body?.cancel();
-        } catch {
-          /* ignore */
-        }
-        continue;
       }
-      const xml = await res.text();
+
+      // Gzip detection by magic bytes rather than by header or extension:
+      // plenty of servers mislabel `.xml.gz` as `text/xml`, and some serve a
+      // plain XML file from a `.gz` URL. The bytes are the ground truth.
+      let xml: string;
+      if (looksGzipped(raw)) {
+        try {
+          const inflated = gunzipSync(raw);
+          if (inflated.byteLength > SITEMAP_MAX_BYTES) {
+            result.warnings.push({
+              sitemap: item.url,
+              warning: `Sitemap is ${(inflated.byteLength / (1024 * 1024)).toFixed(1)} MB uncompressed, over the sitemaps.org 50 MB limit.`,
+            });
+          }
+          xml = inflated.toString('utf8');
+        } catch (err) {
+          result.errors.push({
+            sitemap: item.url,
+            error: `Corrupt gzip sitemap: ${err instanceof Error ? err.message : String(err)}`,
+          });
+          continue;
+        }
+      } else {
+        xml = Buffer.from(raw).toString('utf8');
+        // Only meaningful for non-gzip bodies — a gzipped sitemap that
+        // inflated cleanly is self-evidently a sitemap whatever the header
+        // claimed.
+        if (ct && !SITEMAP_OK_CONTENT_TYPES.some((ok) => ct.includes(ok))) {
+          result.warnings.push({
+            sitemap: item.url,
+            warning: `Unexpected Content-Type "${ct}" (expected an XML type).`,
+          });
+        }
+      }
+
       const parsed = parseSitemap(xml, item.url);
       if (parsed.type === 'unknown') {
         result.errors.push({ sitemap: item.url, error: 'Unrecognized sitemap format' });
         continue;
       }
       result.sitemapsParsed.push(item.url);
+      // Per-file URL cap (sitemapindex children are counted individually,
+      // which is exactly what the protocol limits).
+      if (parsed.entries.length > SITEMAP_MAX_URLS) {
+        result.warnings.push({
+          sitemap: item.url,
+          warning: `Sitemap declares ${parsed.entries.length.toLocaleString()} URLs, over the sitemaps.org 50,000 limit.`,
+        });
+      }
+      if (parsed.childSitemaps.length > SITEMAP_MAX_URLS) {
+        result.warnings.push({
+          sitemap: item.url,
+          warning: `Sitemap index references ${parsed.childSitemaps.length.toLocaleString()} sitemaps, over the sitemaps.org 50,000 limit.`,
+        });
+      }
       for (const entry of parsed.entries) {
         if (result.entries.length >= opts.maxUrls) {
           result.truncated = true;

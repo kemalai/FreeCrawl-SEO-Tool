@@ -72,6 +72,11 @@ export type UrlCategory =
   | 'issues:canonical-to-non-200'
   | 'issues:canonical-to-redirect'
   | 'issues:canonical-to-noindex'
+  | 'issues:crawl-trap'
+  | 'issues:canonical-conflicting'
+  | 'issues:canonical-cross-domain'
+  | 'issues:noindex-canonical-conflict'
+  | 'issues:redirect-to-noindex'
   | 'issues:content-thin'
   | 'issues:spelling-grammar'
   | 'issues:response-slow'
@@ -268,7 +273,16 @@ export interface CrawlUrlRow {
   h6Count: number;
   wordCount: number | null;
   canonical: string | null;
+  /**
+   * `canonical` resolved against the page URL and normalized — the form
+   * search engines compare. `canonical` keeps the literal authored href.
+   */
+  canonicalResolved: string | null;
   canonicalCount: number;
+  /** Distinct resolved canonical targets; >1 means the page's canonicals disagree. */
+  canonicalDistinctCount: number;
+  /** True when the canonical points at a different registrable domain. */
+  canonicalCrossDomain: boolean;
   /** `<URL>; rel="canonical"` parsed out of the `Link:` HTTP response header. */
   canonicalHttp: string | null;
   metaRobots: string | null;
@@ -305,6 +319,11 @@ export interface CrawlUrlRow {
   pictureCount: number;
   /** 0/1 — set when the canonical URL string is structurally suspect (multiple `?`/`#`, control chars, unescaped reserved chars, double-encoding). */
   urlMalformed: number;
+  /**
+   * Crawl-trap classification, or null for an ordinary URL:
+   * `repeated-segment` | `query-params` | `session-id` | `calendar`.
+   */
+  urlTrap: string | null;
   /** `og:type` (e.g. `website`, `article`, `product`), lowercased. */
   ogType: string | null;
   /** Raw `og:url` content, verbatim. */
@@ -773,6 +792,25 @@ export interface CrawlConfig {
   /** URLs matching any of these regexes are skipped during enqueue. */
   excludePatterns: string[];
   /**
+   * Crawl-trap guard. A single path segment repeated this many times or
+   * more (`/shop/shop/shop/…`) is a link loop — almost always a relative-
+   * href bug — and those URLs are dropped at enqueue so the crawl cannot
+   * run away. Every drop is counted and reported at the end of the crawl,
+   * never silently. 0 disables the guard.
+   *
+   * Only this shape is acted on automatically: it has no legitimate
+   * counterpart. The other trap kinds (faceted navigation, session IDs,
+   * calendar widgets) are detected and flagged as issues but still
+   * crawled, because real archive and filter pages look identical.
+   */
+  maxRepeatedPathSegments: number;
+  /**
+   * Flag URLs carrying more than this many query parameters as faceted-
+   * navigation traps. Detection only — the URLs are still crawled. 0
+   * disables the check.
+   */
+  maxQueryParams: number;
+  /**
    * On crawl start, discover sitemap.xml URLs from robots.txt + default
    * paths and persist their entries into `sitemap_urls`. Used for the
    * post-crawl Sitemap issue filters (non-indexable URLs declared in the
@@ -812,6 +850,19 @@ export interface CrawlConfig {
    * the legacy behaviour (strip only utm_* / fbclid / gclid / mc_*).
    */
   keepQueryParams: string[];
+  /**
+   * Sort query parameters alphabetically so `?b=2&a=1` and `?a=1&b=2`
+   * collapse to one URL instead of two rows that read as duplicates.
+   * Repeated keys keep their relative order. Off by default because a
+   * few servers route on positional parameter order.
+   */
+  sortQueryParams: boolean;
+  /**
+   * Collapse repeated slashes in the path (`/a//b` → `/a/b`). Servers
+   * serve these identically, so the variant is a false duplicate. Off by
+   * default — a few frameworks treat empty path segments as real data.
+   */
+  collapseDuplicateSlashes: boolean;
   /**
    * Regex rewrites applied to the fully-normalized URL string in order.
    * Each entry is `{pattern, replacement, flags?}` where `flags` defaults
@@ -1580,6 +1631,20 @@ export interface OverviewCounts {
     canonicalToNon200: number;
     canonicalToRedirect: number;
     canonicalToNoindex: number;
+    /**
+     * URLs matching a crawl-trap shape (faceted navigation, session ID,
+     * calendar navigation, repeated path segment). Detected and crawled —
+     * only the repeated-segment loop is dropped at enqueue.
+     */
+    crawlTrap: number;
+    /** Pages whose multiple canonicals resolve to *different* targets. */
+    canonicalConflicting: number;
+    /** Pages whose canonical points at another registrable domain. */
+    canonicalCrossDomain: number;
+    /** Pages declaring both noindex and a canonical to a different URL. */
+    noindexCanonicalConflict: number;
+    /** Redirects whose final destination is noindexed. */
+    redirectToNoindex: number;
     contentThin: number;
     /** Pages whose LanguageTool check returned ≥1 spelling/grammar match. */
     spellingGrammar: number;
@@ -2149,6 +2214,8 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   customHeaders: {},
   includePatterns: [],
   excludePatterns: [],
+  maxRepeatedPathSegments: 3,
+  maxQueryParams: 0,
   discoverSitemaps: true,
   customSearchTerms: [],
   stripWww: false,
@@ -2156,6 +2223,8 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   lowercasePath: false,
   trailingSlash: 'leave',
   keepQueryParams: [],
+  sortQueryParams: false,
+  collapseDuplicateSlashes: false,
   urlRegexRewrites: [],
   memoryLimitMb: 0,
   maxQueueSize: 0,
