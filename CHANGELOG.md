@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.6] — 2026-08-20
+
+### Added
+- Four new canonical checks — Conflicting Canonicals, Canonical → Cross-Domain, Noindex + Canonical Conflict, and Redirect → Noindex.
+- A Crawl Trap filter that flags faceted-navigation, session-ID, calendar, and repeating-path URLs which quietly drain crawl budget.
+- Optional URL normalisation settings to sort query parameters and collapse duplicate slashes, removing a common source of false duplicates.
+
+### Fixed
+- The Log Analyzer now reads gzipped `.gz` access logs, which previously imported as zero lines.
+- Relative canonicals such as `href="/page"` are now resolved before comparison, so self-referencing pages are no longer reported as canonicalised away.
+- Gzipped sitemaps are now read instead of skipped, and oversized or mislabelled sitemaps are reported as warnings.
+- URLs that differ only by percent-escape casing (`%2f` versus `%2F`) no longer appear as two separate rows.
+- Crawls no longer run away on link loops like `/shop/shop/shop/`, and any skipped URLs are reported when the crawl finishes.
+- Long post-crawl passes on large projects no longer hit a locked database or abort crawl teardown.
+
 ## [0.9.5] — 2026-08-15
 
 ### Added
