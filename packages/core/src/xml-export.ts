@@ -166,18 +166,25 @@ const XML_COLUMNS: (keyof CrawlUrlRow)[] = [
   'clusterSize',
 ];
 
+/** Drop the C0 control characters XML 1.0 forbids outright — everything
+ *  below 0x20 except tab (0x09), LF (0x0A) and CR (0x0D). Escaping does
+ *  not legalise these, and CDATA does not exempt them, so both text paths
+ *  have to strip. */
+export function stripXmlForbidden(raw: string): string {
+  // eslint-disable-next-line no-control-regex -- intentionally matching control chars to strip them
+  return raw.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+}
+
 /** Escape characters that are invalid inside XML element text bodies. */
 function xmlEscape(raw: string): string {
-  return raw
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;')
-    // XML 1.0 forbids most C0 control characters; strip everything below
-    // 0x20 except tab (0x09), LF (0x0A), and CR (0x0D).
-    // eslint-disable-next-line no-control-regex -- intentionally matching control chars to strip them
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+  return stripXmlForbidden(
+    raw
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;'),
+  );
 }
 
 function renderField(key: keyof CrawlUrlRow, value: unknown): string {
@@ -197,7 +204,13 @@ function renderField(key: keyof CrawlUrlRow, value: unknown): string {
   if (/[<>&]/.test(s) && s.length > 200) {
     // Long values likely contain HTML — CDATA preserves exact bytes.
     // We split on `]]>` to be safe; standard SAX/DOM parsers reassemble.
-    const safe = s.replace(/\]\]>/g, ']]]]><![CDATA[>');
+    //
+    // The control-char strip still has to run: CDATA exempts content from
+    // markup parsing, NOT from XML 1.0's legal-character set. A single
+    // forbidden byte inside a CDATA block makes the whole document
+    // unparseable — and unlike a markup error it isn't visible on
+    // inspection, so the file looks fine until a parser rejects all of it.
+    const safe = stripXmlForbidden(s).replace(/\]\]>/g, ']]]]><![CDATA[>');
     return `<${key}><![CDATA[${safe}]]></${key}>`;
   }
   return `<${key}>${xmlEscape(s)}</${key}>`;

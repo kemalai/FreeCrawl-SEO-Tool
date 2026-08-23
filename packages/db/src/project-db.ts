@@ -780,6 +780,20 @@ const DUPLICATE_ALT_PREDICATE = `alt IS NOT NULL AND alt != '' AND alt IN (
   SELECT alt FROM images WHERE alt IS NOT NULL AND alt != '' GROUP BY alt HAVING COUNT(*) > 1
 )`;
 
+// Per-usage duplicate-alt: a usage whose alt text is shared by >1 usage.
+// Operates on `image_usages.alt` to match the per-usage Images view.
+const USAGE_DUPLICATE_ALT_PREDICATE = `iu.alt IS NOT NULL AND iu.alt != '' AND iu.alt IN (
+  SELECT alt FROM image_usages WHERE alt IS NOT NULL AND alt != '' GROUP BY alt HAVING COUNT(*) > 1
+)`;
+
+// Missing / empty alt are computed from PER-USAGE truth (`image_usages.alt`):
+// the Images tab, its sidebar counters and the CSV export are all per-usage
+// (one row per image+page), so `images.alt` — a lossy first-non-null-wins
+// dedup across the whole site — is never consulted for alt correctness. See
+// `queryImages`, `iterateImages`, and the `imageMissingAlt`/`imageEmptyAlt`
+// counters. Legacy projects with no `image_usages` rows fall back to the
+// distinct-image `images.alt` inline in those sites.
+
 /**
  * Scope shared by every issue counter: only crawled internal HTML pages
  * are eligible. Kept module-level because `runOverviewBatch` splits the
@@ -817,6 +831,39 @@ const INDEXABLE_HTML_SCOPE =
  * or another row's canonical. Use bare `canonical` only to test whether the
  * page declared one at all, or to inspect its literal form.
  */
+/**
+ * "The URL contains an uppercase letter" — excluding percent-escapes.
+ *
+ * `normalizeUrl` uppercases escape hex digits per RFC 3986 §6.2.2.1, so the
+ * stored form of a perfectly lowercase Turkish slug is
+ * `/%C3%BCr%C3%BCnler/kad%C4%B1n-ayakkab%C4%B1`. A plain `GLOB '*[A-Z]*'`
+ * matched those escapes and flagged every non-ASCII URL on the site — so on
+ * a Turkish, German or Japanese site the "URL Uppercase" issue fired on
+ * essentially every page while none of them contain an uppercase letter.
+ *
+ * SQLite has no percent-decode and GLOB has no lookbehind, so this splits
+ * the two cases:
+ *   - no `%` in the URL → the original check is exactly right;
+ *   - otherwise → only G-Z, letters that can never be a hex digit.
+ *
+ * That removes the false positives completely. The residual is a false
+ * NEGATIVE for a URL whose only uppercase letters are A-F *and* which also
+ * contains an escape (`/ABC/%C3%BC`), which is rare and far less harmful
+ * than flagging every localized URL on the site. Fixing that last case
+ * exactly needs a column computed at write time.
+ */
+const URL_HAS_UPPERCASE =
+  "(CASE WHEN url GLOB '*[%]*' THEN url GLOB '*[G-Z]*' ELSE url GLOB '*[A-Z]*' END)";
+
+// "URL contains a non-ASCII character." `normalizeUrl` percent-encodes the
+// path and punycodes the host, so the stored `url` is always pure ASCII —
+// the old `LENGTH(CAST(url AS BLOB)) != LENGTH(url)` byte-vs-char test could
+// therefore never fire. A percent-escaped non-ASCII byte is `%` followed by
+// a hex pair whose first nibble is 8–F (byte >= 0x80: UTF-8 lead/continuation
+// bytes), which never occurs for percent-encoded ASCII. That is exactly the
+// signal we want.
+const URL_HAS_NON_ASCII = "url GLOB '*%[89ABCDEFabcdef][0-9A-Fa-f]*'";
+
 const CANONICAL_CMP = "COALESCE(NULLIF(canonical_resolved, ''), canonical)";
 /** Same value, qualified — for use inside a correlated subquery. */
 const CANONICAL_CMP_Q =
@@ -1653,6 +1700,7 @@ export class ProjectDb {
       contentType?: string | null;
       contentLength?: number | null;
       responseTimeMs?: number | null;
+      redirectTarget?: string | null;
     },
   ): void {
     // Re-classify the external stub's content_kind from the probed
@@ -1694,7 +1742,8 @@ export class ProjectDb {
            content_length = :content_length,
            response_time_ms = :response_time_ms,
            indexability = :indexability,
-           indexability_reason = :indexability_reason
+           indexability_reason = :indexability_reason,
+           redirect_target = COALESCE(:redirect_target, redirect_target)
          WHERE url = :url AND is_external = 1`,
       )
       .run({
@@ -1707,6 +1756,7 @@ export class ProjectDb {
         response_time_ms: patch.responseTimeMs ?? null,
         indexability,
         indexability_reason: indexabilityReason,
+        redirect_target: patch.redirectTarget ?? null,
       });
   }
 
@@ -2396,6 +2446,22 @@ export class ProjectDb {
 
     this.db.exec('BEGIN');
     try {
+      // Clear stale results first. This pass only UPDATEs rows that are
+      // currently 3xx, so a URL that WAS a redirect (or a loop) but now
+      // returns 200 on re-crawl kept its old redirect_loop / chain_length /
+      // final_url — and `issues:redirect-loop` has no status gate, so the
+      // fixed URL still showed up as a loop forever. Reset every non-3xx
+      // row to the "no redirect" state before recomputing the live ones.
+      this.db.exec(
+        `UPDATE urls
+            SET redirect_chain_length = 0,
+                redirect_final_url = NULL,
+                redirect_loop = 0
+          WHERE (status_code < 300 OR status_code >= 400 OR status_code IS NULL)
+            AND (redirect_chain_length != 0
+                 OR redirect_final_url IS NOT NULL
+                 OR redirect_loop != 0)`,
+      );
       for (const row of redirects) {
         const visited = new Set<string>();
         let current: string | null = row.url;
@@ -2474,11 +2540,20 @@ export class ProjectDb {
     // in `urls`) and self-loops are dropped.
     const outTargets: number[][] = Array.from({ length: n }, () => []);
     let edgeCount = 0;
+    // Streamed, not `.all()`. This runs automatically at the end of every
+    // crawl (`analyseLinkScore` defaults on), and materialising the whole
+    // edge set first meant one `{source, to_url}` object per unique internal
+    // link — each holding a distinct URL string — before a single edge was
+    // consumed. On a large site that is multi-GB against Electron's 4 GB
+    // heap cap, and an OOM here killed the writer worker, which then
+    // escalated to the main process via the fallback in `runDbPassViaPool`.
+    // Iterating keeps one row in the JS heap; SQLite does the DISTINCT
+    // dedup in its own (disk-backed) temp B-tree.
     const edgeRows = this.db
       .prepare(
         'SELECT DISTINCT from_url_id AS source, to_url FROM links WHERE is_internal = 1',
       )
-      .all() as { source: number; to_url: string }[];
+      .iterate() as Iterable<{ source: number; to_url: string }>;
     for (const e of edgeRows) {
       const si = indexById.get(e.source);
       if (si === undefined) continue;
@@ -5147,6 +5222,17 @@ export class ProjectDb {
     };
   }
 
+  /** True when the project has any per-usage image rows. Current crawls
+   *  always populate `image_usages`; only pre-per-usage legacy projects
+   *  don't, and those fall back to the deduped per-image view. */
+  private hasImageUsages(): boolean {
+    return (
+      (this.db.prepare('SELECT EXISTS(SELECT 1 FROM image_usages) AS e').get() as {
+        e: number;
+      }).e === 1
+    );
+  }
+
   queryImages(params: {
     limit: number;
     offset: number;
@@ -5156,20 +5242,68 @@ export class ProjectDb {
     duplicateAltOnly?: boolean;
     internalOnly?: boolean;
   }): { rows: ImageRow[]; total: number } {
+    // Per-usage view: one row per (image, page) so alt / missing / empty is
+    // accurate per page. An image with alt on one page and none on another
+    // becomes two rows — the alt'd one is NOT in Missing Alt, the bare one
+    // IS — which is what the sidebar count reflects too. Legacy projects
+    // with no `image_usages` fall back to the deduped per-image path below.
+    if (this.hasImageUsages()) {
+      const where: string[] = [];
+      const args: (string | number)[] = [];
+      if (params.internalOnly) where.push('i.is_internal = 1');
+      if (params.missingAltOnly) where.push('iu.alt IS NULL');
+      if (params.emptyAltOnly) where.push("iu.alt = ''");
+      if (params.duplicateAltOnly) where.push(USAGE_DUPLICATE_ALT_PREDICATE);
+      if (params.search) {
+        where.push('(i.src LIKE ? OR iu.alt LIKE ?)');
+        const like = `%${params.search}%`;
+        args.push(like, like);
+      }
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const total = (
+        this.db
+          .prepare(
+            `SELECT COUNT(*) AS c
+               FROM image_usages iu JOIN images i ON iu.image_id = i.id ${whereSql}`,
+          )
+          .get(...args) as { c: number }
+      ).c;
+      const rows = this.db
+        .prepare(
+          `SELECT i.id, i.src, iu.alt AS alt, i.width, i.height, i.is_internal,
+                  i.occurrences, u.url AS from_url
+             FROM image_usages iu
+             JOIN images i ON iu.image_id = i.id
+             LEFT JOIN urls u ON iu.from_url_id = u.id
+             ${whereSql}
+            ORDER BY i.occurrences DESC, i.id, iu.from_url_id
+            LIMIT ? OFFSET ?`,
+        )
+        .all(...args, params.limit, params.offset) as unknown as (ImageRowDb & {
+        from_url: string | null;
+      })[];
+      return {
+        total,
+        rows: rows.map((r) => ({
+          id: r.id,
+          src: r.src,
+          alt: r.alt,
+          width: r.width,
+          height: r.height,
+          isInternal: r.is_internal === 1,
+          occurrences: r.occurrences,
+          fromUrl: r.from_url ?? null,
+        })),
+      };
+    }
+
+    // Legacy fallback — per distinct image (no usage rows to expand).
     const where: string[] = [];
     const args: (string | number)[] = [];
-    if (params.internalOnly) {
-      where.push('is_internal = 1');
-    }
-    if (params.missingAltOnly) {
-      where.push('alt IS NULL');
-    }
-    if (params.emptyAltOnly) {
-      where.push("alt = ''");
-    }
-    if (params.duplicateAltOnly) {
-      where.push(DUPLICATE_ALT_PREDICATE);
-    }
+    if (params.internalOnly) where.push('is_internal = 1');
+    if (params.missingAltOnly) where.push('alt IS NULL');
+    if (params.emptyAltOnly) where.push("alt = ''");
+    if (params.duplicateAltOnly) where.push(DUPLICATE_ALT_PREDICATE);
     if (params.search) {
       where.push('(src LIKE ? OR alt LIKE ?)');
       const like = `%${params.search}%`;
@@ -5196,6 +5330,7 @@ export class ProjectDb {
         height: r.height,
         isInternal: r.is_internal === 1,
         occurrences: r.occurrences,
+        fromUrl: null,
       })),
     };
   }
@@ -5565,7 +5700,7 @@ export class ProjectDb {
       noindexCanonicalConflict: countWhere(
         `${html} AND canonical IS NOT NULL AND canonical != ''
          AND ${CANONICAL_CMP} != url
-         AND (meta_robots LIKE '%noindex%' OR x_robots_tag LIKE '%noindex%')`,
+         AND (meta_robots LIKE '%noindex%' OR meta_robots LIKE '%none%' OR x_robots_tag LIKE '%noindex%' OR x_robots_tag LIKE '%none%')`,
       ),
       redirectToNoindex: countWhere(
         `${html} AND status_code >= 300 AND status_code < 400
@@ -5597,7 +5732,7 @@ export class ProjectDb {
              AND t.indexability = 'non-indexable:noindex'
          )`,
       ),
-      contentThin: countWhere(`${html} AND word_count IS NOT NULL AND word_count < 300`),
+      contentThin: countWhere(`${indexable} AND word_count IS NOT NULL AND word_count < 300`),
       // Only a completed check yields a finding count — an unsupported or
       // language-mismatched page stores zero because nothing was collected.
       // Stating `status = 'ok'` keeps that explicit rather than leaning on
@@ -5612,12 +5747,12 @@ export class ProjectDb {
       responseVerySlow: countWhere(`${html} AND response_time_ms > 3000`),
       pageLarge: countWhere(`${html} AND content_length > 1048576`),
       urlTooLong: countWhere(`${html} AND LENGTH(url) > 2048`),
-      urlUppercase: countWhere(`${html} AND url GLOB '*[A-Z]*'`),
+      urlUppercase: countWhere(`${html} AND ${URL_HAS_UPPERCASE}`),
       urlUnderscore: countWhere(`${html} AND INSTR(url, '_') > 0`),
       urlMultipleSlashes: countWhere(
         `${html} AND INSTR(SUBSTR(url, INSTR(url, '://') + 3), '//') > 0`,
       ),
-      urlNonAscii: countWhere(`${html} AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)`),
+      urlNonAscii: countWhere(`${html} AND ${URL_HAS_NON_ASCII}`),
       langMissing: countWhere(`${indexable} AND (lang IS NULL OR lang = '')`),
       viewportMissing: countWhere(`${indexable} AND (viewport IS NULL OR viewport = '')`),
       ogMissing: countWhere(
@@ -5670,7 +5805,7 @@ export class ProjectDb {
       mixedContentPassive: countWhere(
         `${html} AND url LIKE 'https://%' AND mixed_content_passive > 0`,
       ),
-      faviconMissing: countWhere(`${html} AND (favicon IS NULL OR favicon = '')`),
+      faviconMissing: countWhere(`${indexable} AND (favicon IS NULL OR favicon = '')`),
       redirectLoop: countWhere(`${html} AND redirect_loop = 1`),
       redirectChainLong: countWhere(`${html} AND redirect_chain_length > 3`),
       redirectSelf: countWhere(
@@ -5692,7 +5827,11 @@ export class ProjectDb {
          AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`,
       ),
       imageMissingAlt: this.scalarCount(
-        'SELECT COUNT(*) AS c FROM images WHERE alt IS NULL',
+        // Per-usage to match the per-usage Images tab (count = table). Legacy
+        // projects with no usage rows fall back to the distinct-image count.
+        `SELECT (CASE WHEN EXISTS(SELECT 1 FROM image_usages)
+           THEN (SELECT COUNT(*) FROM image_usages WHERE alt IS NULL)
+           ELSE (SELECT COUNT(*) FROM images WHERE alt IS NULL) END) AS c`,
       ),
       // Distinct images sharing a non-empty alt with ≥1 other image —
       // non-descriptive / templated alt reuse. Counted image-level (the
@@ -5768,7 +5907,9 @@ export class ProjectDb {
       // images with an explicit `alt=""` so it's the same unit as Missing
       // Alt and matches the Images tab drill-down.
       imageEmptyAlt: this.scalarCount(
-        "SELECT COUNT(*) AS c FROM images WHERE alt = ''",
+        `SELECT (CASE WHEN EXISTS(SELECT 1 FROM image_usages)
+           THEN (SELECT COUNT(*) FROM image_usages WHERE alt = '')
+           ELSE (SELECT COUNT(*) FROM images WHERE alt = '') END) AS c`,
       ),
       linkEmptyAnchor: countWhere(`${html} AND empty_anchor_count > 0`),
       appleTouchIconMissing: countWhere(
@@ -5814,7 +5955,7 @@ export class ProjectDb {
            LOWER(title) IN ('untitled', 'untitled document', 'default title',
                              'new page', 'page', 'home', 'index', 'document',
                              'welcome', 'untitled-1', 'untitled 1', 'home page')
-           OR LOWER(title) LIKE 'page %'
+           OR LOWER(title) GLOB 'page [0-9]*'
            OR LOWER(title) LIKE 'untitled%'
          )`,
       ),
@@ -6404,6 +6545,15 @@ export class ProjectDb {
       if (seen.has(name)) continue;
       seen.add(name);
       let value = rawValue ?? '';
+      // Never persist the VALUE of secret headers. A logged-in crawl's
+      // `set-cookie` (session tokens) or an `authorization` echo would
+      // otherwise land in the .seoproject (a file users email around), the
+      // URL Details panel, and any connected MCP agent's reach. The header's
+      // presence is still recorded (name kept); `analyseCookies` derives the
+      // Secure/HttpOnly/SameSite flags the UI needs from its own pass.
+      if (name === 'set-cookie' || name === 'authorization' || name === 'proxy-authorization') {
+        value = '[redacted]';
+      }
       if (value.length > 4096) value = value.slice(0, 4093) + '...';
       list.push({ name, value });
     }
@@ -6723,10 +6873,14 @@ export class ProjectDb {
   }
 
   *iterateAllUrls(): IterableIterator<CrawlUrlRow> {
-    const rows = this.db.prepare('SELECT * FROM urls ORDER BY id').all() as unknown as UrlRowDb[];
-    for (const row of rows) {
-      yield this.rowFromDb(row);
-    }
+    // Delegates to the keyset-paginated walker rather than repeating a
+    // single `.all()` here. This looked like a streamer but wasn't: it
+    // materialised every row of a ~190-column table before yielding the
+    // first one, so a full-table CSV/JSON/XML export on a large crawl
+    // could exhaust Electron's 4 GB heap cap and take the process with
+    // it. `categoryWhereClause('all')` is null, so the row set and order
+    // are identical — only the memory profile changes.
+    yield* this.iterateUrlsByCategory('all');
   }
 
   /**
@@ -6750,6 +6904,44 @@ export class ProjectDb {
   } = {}): IterableIterator<ImageRow> {
     const where: string[] = [];
     const args: (string | number)[] = [];
+    // Per-usage export to match the per-usage Images tab (one row per page).
+    if (this.hasImageUsages()) {
+      if (options.missingAltOnly) where.push('iu.alt IS NULL');
+      if (options.emptyAltOnly) where.push("iu.alt = ''");
+      if (options.duplicateAltOnly) where.push(USAGE_DUPLICATE_ALT_PREDICATE);
+      if (options.search) {
+        where.push('(i.src LIKE ? OR iu.alt LIKE ?)');
+        const like = `%${options.search}%`;
+        args.push(like, like);
+      }
+      const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const rows = this.db
+        .prepare(
+          `SELECT i.id, i.src, iu.alt AS alt, i.width, i.height, i.is_internal,
+                  i.occurrences, u.url AS from_url
+             FROM image_usages iu
+             JOIN images i ON iu.image_id = i.id
+             LEFT JOIN urls u ON iu.from_url_id = u.id
+             ${whereSql}
+            ORDER BY i.occurrences DESC, i.id, iu.from_url_id`,
+        )
+        .all(...args) as unknown as (ImageRowDb & { from_url: string | null })[];
+      for (const r of rows) {
+        yield {
+          id: r.id,
+          src: r.src,
+          alt: r.alt,
+          width: r.width,
+          height: r.height,
+          isInternal: r.is_internal === 1,
+          occurrences: r.occurrences,
+          fromUrl: r.from_url ?? null,
+        };
+      }
+      return;
+    }
+
+    // Legacy fallback — per distinct image.
     if (options.missingAltOnly) where.push('alt IS NULL');
     if (options.emptyAltOnly) where.push("alt = ''");
     if (options.duplicateAltOnly) where.push(DUPLICATE_ALT_PREDICATE);
@@ -6760,9 +6952,7 @@ export class ProjectDb {
     }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = this.db
-      .prepare(
-        `SELECT * FROM images ${whereSql} ORDER BY occurrences DESC, id`,
-      )
+      .prepare(`SELECT * FROM images ${whereSql} ORDER BY occurrences DESC, id`)
       .all(...args) as unknown as ImageRowDb[];
     for (const r of rows) {
       yield {
@@ -6773,16 +6963,26 @@ export class ProjectDb {
         height: r.height,
         isInternal: r.is_internal === 1,
         occurrences: r.occurrences,
+        fromUrl: null,
       };
     }
   }
 
   *iterateBrokenLinks(
     internal: 'all' | 'internal' | 'external' = 'all',
+    search?: string,
   ): IterableIterator<BrokenLinkRow> {
     const where: string[] = ['t.status_code >= 400 AND t.status_code < 600'];
     if (internal === 'internal') where.push('l.is_internal = 1');
     else if (internal === 'external') where.push('l.is_internal = 0');
+    // Same search predicate as `queryBrokenLinks` so the export mirrors the
+    // filtered Broken Links grid rather than the whole crawl.
+    const args: string[] = [];
+    if (search) {
+      where.push('(f.url LIKE ? OR l.to_url LIKE ?)');
+      const like = `%${search}%`;
+      args.push(like, like);
+    }
     const rows = this.db
       .prepare(
         `SELECT f.url AS from_url, f.status_code AS from_status,
@@ -6794,7 +6994,12 @@ export class ProjectDb {
          WHERE ${where.join(' AND ')}
          ORDER BY t.status_code DESC, f.id, l.id`,
       )
-      .all() as unknown as {
+      // Streamed, not `.all()`. This is a generator by signature but used
+      // to materialise everything first, and the row count here is
+      // broken_targets × linking_pages — a single dead link in a site-wide
+      // footer produces one row per page, so a large site turns one broken
+      // URL into hundreds of thousands of rows held in memory at once.
+      .iterate(...args) as unknown as Iterable<{
       from_url: string;
       from_status: number | null;
       to_url: string;
@@ -6802,7 +7007,7 @@ export class ProjectDb {
       anchor: string | null;
       rel: string | null;
       is_internal: number;
-    }[];
+    }>;
     for (const r of rows) {
       yield {
         fromUrl: r.from_url,
@@ -6857,6 +7062,37 @@ export class ProjectDb {
     let lastId = 0;
     for (;;) {
       const rows = stmt.all(lastId, BATCH) as unknown as UrlRowDb[];
+      if (rows.length === 0) return;
+      for (const row of rows) {
+        lastId = row.id;
+        yield this.rowFromDb(row);
+      }
+      if (rows.length < BATCH) return;
+    }
+  }
+
+  /**
+   * Yield every URL row matching a full table query — category + search +
+   * advanced filter — via the SAME `buildUrlsWhere` the on-screen table
+   * uses, keyset-paginated so it streams. The category-only
+   * `iterateUrlsByCategory` made the export ignore the active search box and
+   * advanced filter, so an export silently contained different rows than the
+   * user was looking at. Use this for any export that must match the grid.
+   */
+  *iterateUrlsByQuery(params: {
+    category?: UrlCategory;
+    search?: string;
+    filter?: AdvancedFilter;
+  }): IterableIterator<CrawlUrlRow> {
+    const { whereSql, args: baseArgs } = buildUrlsWhere(params);
+    const BATCH = 2000;
+    const sql = whereSql
+      ? `SELECT * FROM urls ${whereSql} AND id > ? ORDER BY id LIMIT ?`
+      : 'SELECT * FROM urls WHERE id > ? ORDER BY id LIMIT ?';
+    const stmt = this.db.prepare(sql);
+    let lastId = 0;
+    for (;;) {
+      const rows = stmt.all(...baseArgs, lastId, BATCH) as unknown as UrlRowDb[];
       if (rows.length === 0) return;
       for (const row of rows) {
         lastId = row.id;
@@ -8213,10 +8449,14 @@ export class ProjectDb {
    * `url_sources.body` aggregate would be hundreds of MB and the SEO
    * signal is well concentrated in the title-meta-h1 trio anyway.
    *
-   * Returns an array because the consumer (main process) feeds it into
-   * `aggregateTopWords` which expects an iterable.
+   * Streams rather than returning an array. `aggregateTopWords` only ever
+   * iterates it, and the previous version ran `.all()` over the whole
+   * matching table and then built a SECOND full-size `string[]` while the
+   * rows were still live — two complete copies of the corpus on the main
+   * thread (this handler doesn't use the reader pool). Yielding keeps one
+   * row alive at a time and leaves the counting cost unchanged.
    */
-  seoTextCorpus(): string[] {
+  *seoTextCorpus(): IterableIterator<string> {
     const rows = this.db
       .prepare(
         `SELECT title, meta_description, h1
@@ -8226,16 +8466,18 @@ export class ProjectDb {
             AND status_code BETWEEN 200 AND 299
             AND indexability = 'indexable'`,
       )
-      .all() as { title: string | null; meta_description: string | null; h1: string | null }[];
-    const out: string[] = [];
+      .iterate() as Iterable<{
+      title: string | null;
+      meta_description: string | null;
+      h1: string | null;
+    }>;
     for (const r of rows) {
       const parts: string[] = [];
       if (r.title) parts.push(r.title);
       if (r.meta_description) parts.push(r.meta_description);
       if (r.h1) parts.push(r.h1);
-      if (parts.length > 0) out.push(parts.join(' '));
+      if (parts.length > 0) yield parts.join(' ');
     }
-    return out;
   }
 
   /**
@@ -9182,7 +9424,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND canonical IS NOT NULL AND canonical != ''
               AND ${CANONICAL_CMP} != url
-              AND (meta_robots LIKE '%noindex%' OR x_robots_tag LIKE '%noindex%')`;
+              AND (meta_robots LIKE '%noindex%' OR meta_robots LIKE '%none%' OR x_robots_tag LIKE '%noindex%' OR x_robots_tag LIKE '%none%')`;
     case 'issues:redirect-to-noindex':
       // A redirect whose final destination is noindexed — the redirect
       // spends its link equity on a page that will never be indexed.
@@ -9261,7 +9503,9 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                   AND u2.url != urls.url
               )`;
     case 'issues:content-thin':
-      return "is_external = 0 AND content_kind = 'html' AND word_count IS NOT NULL AND word_count < 300";
+      // 2xx only — a text/html 404 template is short by design and was
+      // being counted as thin content.
+      return `${INDEXABLE_HTML_SCOPE} AND word_count IS NOT NULL AND word_count < 300`;
     case 'issues:spelling-grammar':
       return `is_external = 0 AND content_kind = 'html' AND EXISTS (
                 SELECT 1 FROM spelling_results s
@@ -9277,7 +9521,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return "is_external = 0 AND content_kind = 'html' AND LENGTH(url) > 2048";
     case 'issues:url-uppercase':
       // GLOB with [A-Z] is case-sensitive — unlike LIKE which isn't.
-      return "is_external = 0 AND content_kind = 'html' AND url GLOB '*[A-Z]*'";
+      return `is_external = 0 AND content_kind = 'html' AND ${URL_HAS_UPPERCASE}`;
     case 'issues:url-underscore':
       return "is_external = 0 AND content_kind = 'html' AND INSTR(url, '_') > 0";
     case 'issues:url-multiple-slashes':
@@ -9287,7 +9531,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     case 'issues:url-non-ascii':
       // Byte-length (BLOB cast) > character length only when the string
       // contains multi-byte UTF-8, i.e. any non-ASCII code point.
-      return "is_external = 0 AND content_kind = 'html' AND LENGTH(CAST(url AS BLOB)) != LENGTH(url)";
+      return `is_external = 0 AND content_kind = 'html' AND ${URL_HAS_NON_ASCII}`;
     case 'issues:lang-missing':
       return `is_external = 0 AND content_kind = 'html'
               AND status_code >= 200 AND status_code < 300
@@ -9365,7 +9609,10 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND url LIKE 'https://%' AND mixed_content_count > 0`;
     case 'issues:favicon-missing':
-      return `is_external = 0 AND content_kind = 'html'
+      // 2xx only — a 3xx redirect or a text/html error page carries no
+      // favicon by nature, so scoping to INTERNAL_HTML alone reported every
+      // redirect and error template as "favicon missing".
+      return `${INDEXABLE_HTML_SCOPE}
               AND (favicon IS NULL OR favicon = '')`;
     case 'issues:redirect-loop':
       return "is_external = 0 AND content_kind = 'html' AND redirect_loop = 1";
@@ -9425,12 +9672,17 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               AND amp_validation_errors IS NOT NULL
               AND amp_validation_errors != ''
               AND amp_validation_errors != '[]'`;
-    // Broken-link categories drive the BrokenLinksTab view; they never
-    // filter the URL table itself.
+    // Broken-link categories drive the BrokenLinksTab view (via
+    // `queryBrokenLinks`); they describe LINK rows, not URL rows, so they
+    // can't be expressed as a `urls` predicate. Returning null used to mean
+    // "no clause" — so when the Links tab quick-filter offered "Broken
+    // Internal" it dropped the filter entirely and displayed the WHOLE
+    // crawl under that label. Match nothing instead: an empty table is
+    // obviously not "every URL is a broken link".
     case 'issues:broken-links-all':
     case 'issues:broken-links-internal':
     case 'issues:broken-links-external':
-      return null;
+      return '1 = 0';
     case 'issues:near-duplicate':
       // SimHash cluster size > 1 means at least one other crawled page
       // landed within the configured Hamming-distance threshold of this
@@ -9656,7 +9908,7 @@ function categoryWhereClause(cat: UrlCategory): string | null {
                 LOWER(title) IN ('untitled', 'untitled document', 'default title',
                                   'new page', 'page', 'home', 'index', 'document',
                                   'welcome', 'untitled-1', 'untitled 1', 'home page')
-                OR LOWER(title) LIKE 'page %'
+                OR LOWER(title) GLOB 'page [0-9]*'
                 OR LOWER(title) LIKE 'untitled%'
               )`;
     case 'issues:analytics-missing':

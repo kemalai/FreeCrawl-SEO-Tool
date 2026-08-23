@@ -149,9 +149,18 @@ export interface BrowserPoolOptions {
   prerenderJs?: string;
 }
 
+/** Cap on automatic Chromium relaunches after a `disconnected` event.
+ *  Enough to ride out a one-off crash; low enough that a permanently
+ *  broken install doesn't pay a launch attempt on every URL. */
+const MAX_RELAUNCHES = 3;
+
 interface Slot {
   page: Page;
   busy: boolean;
+  /** Slot lost its page and could not get a replacement. It will never
+   *  serve another render, so it must not be counted as capacity that a
+   *  waiter can eventually be handed. */
+  dead?: boolean;
 }
 
 interface Waiter {
@@ -180,6 +189,8 @@ export class BrowserPool {
   private opts: BrowserPoolOptions;
   private starting: Promise<void> | null = null;
   private closed = false;
+  /** How many times Chromium has been relaunched after dying on us. */
+  private relaunches = 0;
 
   constructor(opts: BrowserPoolOptions) {
     this.opts = opts;
@@ -228,6 +239,31 @@ export class BrowserPool {
 
     const chromium = await loadChromium();
     this.browser = await chromium.launch(launchOpts);
+    // Chromium can die on its own — OOM-killed, crashed, or killed by the
+    // OS. Nothing polls for that, so without this the pool keeps handing
+    // out pages that belong to a process that is gone: every render fails,
+    // every replacement `newPage()` fails, and callers park in `acquire()`
+    // forever. Fail the slots once, loudly, and let the crawler record the
+    // renders as failed instead of stalling on them.
+    this.browser.on('disconnected', () => {
+      if (this.closed) return;
+      // Fail the parked callers FIRST, while the slots still exist — they
+      // are holding pages from a dead process and can never be served.
+      for (const slot of this.slots) {
+        slot.dead = true;
+        slot.busy = true;
+      }
+      this.failIfExhausted(new Error('browser disconnected'));
+      // Then clear the pool so the next `acquire()` relaunches instead of
+      // handing out corpses. Bounded, because a Chromium that dies on
+      // every launch would otherwise cost a relaunch attempt per URL for
+      // the rest of the crawl.
+      if (this.relaunches >= MAX_RELAUNCHES) return;
+      this.relaunches++;
+      this.browser = null;
+      this.context = null;
+      this.slots = [];
+    });
     this.context = await this.browser.newContext({
       viewport: this.opts.viewport,
       userAgent: this.opts.userAgent,
@@ -283,10 +319,19 @@ export class BrowserPool {
 
   private takeSlot(): Promise<Slot> {
     return new Promise<Slot>((resolve, reject) => {
-      const free = this.slots.find((s) => !s.busy);
+      const free = this.slots.find((s) => !s.busy && !s.dead);
       if (free) {
         free.busy = true;
         resolve(free);
+        return;
+      }
+      // Nothing free — but if nothing is even *alive*, waiting is futile.
+      if (!this.slots.some((s) => !s.dead)) {
+        reject(
+          new Error(
+            'BrowserPool: no usable pages left (the browser could not create a new page)',
+          ),
+        );
         return;
       }
       this.waiters.push({
@@ -297,6 +342,22 @@ export class BrowserPool {
         reject,
       });
     });
+  }
+
+  /** Reject everyone parked in `acquire()` once no slot can ever serve
+   *  them again. Without this a dead pool is indistinguishable from a
+   *  busy one and the crawl hangs instead of failing its renders. */
+  private failIfExhausted(cause: unknown): void {
+    if (this.slots.some((s) => !s.dead)) return;
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    const waiters = this.waiters.splice(0);
+    for (const w of waiters) {
+      try {
+        w.reject(new Error(`BrowserPool: all pages lost (${detail})`));
+      } catch {
+        /* swallow — waiter cleanup */
+      }
+    }
   }
 
   private releaseSlot(slot: Slot, replace: boolean): void {
@@ -314,14 +375,23 @@ export class BrowserPool {
           try {
             const fresh = await this.context.newPage();
             slot.page = fresh;
-          } catch {
-            // Couldn't make a fresh page — mark the slot stale by
-            // leaving it busy. The pool degrades by one slot until
-            // close().
+          } catch (err) {
+            // Couldn't make a fresh page — this slot is gone for good.
+            // Leaving it `busy` and returning here used to strand every
+            // queued waiter: nothing else ever resolves them, `takeSlot`
+            // has no timeout, so `acquire()` never settled, the crawler's
+            // task never finished and `queue.onIdle()` never resolved —
+            // the crawl sat at "Running" with 0 URL/s until the user hit
+            // Stop. When the whole pool dies this way (a crashed or
+            // disconnected Chromium fails every slot identically) the
+            // waiters must be failed, not forgotten.
             slot.busy = true;
+            slot.dead = true;
+            this.failIfExhausted(err);
             return;
           }
           slot.busy = false;
+          slot.dead = false;
           const next = this.waiters.shift();
           if (next) next.resolve(slot);
         });

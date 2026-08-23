@@ -89,6 +89,20 @@ interface WorkerSlot {
   worker: Worker | null;
   pending: number;
   restartTimes: number[];
+  /** Slot burned through MAX_RESTARTS and will not respawn on its own.
+   *  Once every slot is in this state the pool can never recover, so
+   *  `isInitialized()` reports false and heavy reads stop waiting for a
+   *  worker that is never coming back. */
+  gaveUp: boolean;
+}
+
+function freshSlots(): WorkerSlot[] {
+  return Array.from({ length: POOL_SIZE }, () => ({
+    worker: null,
+    pending: 0,
+    restartTimes: [],
+    gaveUp: false,
+  }));
 }
 
 export class DbReaderPool {
@@ -107,13 +121,24 @@ export class DbReaderPool {
     }
     this.freezeWatchdogSab = freezeWatchdogSab;
     if (this.dbPath === dbPath && this.slots.some((s) => s.worker !== null)) return;
+    // Re-pointing at a different file replaces the slot array. Terminate
+    // whatever it still holds first — dropping the array on the floor
+    // would leak a live worker per slot, each keeping a SQLite handle and
+    // a 250 ms interval alive for the rest of the process.
+    this.disposeSlots();
     this.dbPath = dbPath;
-    this.slots = Array.from({ length: POOL_SIZE }, () => ({
-      worker: null,
-      pending: 0,
-      restartTimes: [],
-    }));
+    this.slots = freshSlots();
     for (let i = 0; i < POOL_SIZE; i++) this.spawn(i);
+  }
+
+  /** Terminate every live worker without touching `dbPath`/`terminated`. */
+  private disposeSlots(): void {
+    for (const slot of this.slots) {
+      const w = slot.worker;
+      if (!w) continue;
+      slot.worker = null;
+      void w.terminate().catch(() => undefined);
+    }
   }
 
   /** Switch the pool to a different .seoproject file. */
@@ -123,11 +148,7 @@ export class DbReaderPool {
     this.failPendingWith('reader-swapped');
     this.dbPath = newPath;
     if (this.slots.length === 0) {
-      this.slots = Array.from({ length: POOL_SIZE }, () => ({
-        worker: null,
-        pending: 0,
-        restartTimes: [],
-      }));
+      this.slots = freshSlots();
     }
     for (let i = 0; i < POOL_SIZE; i++) this.spawn(i);
   }
@@ -148,6 +169,23 @@ export class DbReaderPool {
   /** True while at least one worker is up and ready. */
   isReady(): boolean {
     return !this.terminated && this.slots.some((s) => s.worker !== null);
+  }
+
+  /**
+   * True while workers are still a viable execution path for this
+   * session — i.e. the pool was pointed at a project file AND at least
+   * one slot can still come back. Lets `callReaderOrFallback` tell a
+   * *recoverable* outage (workers crashed but will respawn → protect the
+   * main thread, retry next tick) from one with no recovery at all:
+   *   - RAM-only mode, where the pools are never spawned,
+   *   - a failed `init()`,
+   *   - every slot having burned through MAX_RESTARTS.
+   * In those cases the main thread is the only place a read can run, so
+   * heavy methods must fall back rather than reject forever.
+   */
+  isInitialized(): boolean {
+    if (this.dbPath === null) return false;
+    return this.slots.some((s) => !s.gaveUp);
   }
 
   /**
@@ -237,9 +275,13 @@ export class DbReaderPool {
       w.on('error', (err) => {
         logger.log('error', 'db-reader', `worker[${slotIdx}] error: ${err.message}`);
       });
-      w.on('exit', (code) => this.handleExit(slotIdx, code));
+      // Pass the worker itself: the exit of the worker this one REPLACED
+      // arrives after we have already installed `w`, and must not be
+      // allowed to null out the live slot (see `handleExit`).
+      w.on('exit', (code) => this.handleExit(slotIdx, code, w));
       slot.worker = w;
       slot.pending = 0;
+      slot.gaveUp = false;
       logger.log('info', 'db-reader', `worker[${slotIdx}] spawned for ${this.dbPath}`);
     } catch (err) {
       logger.log(
@@ -268,9 +310,16 @@ export class DbReaderPool {
     }
   }
 
-  private handleExit(slotIdx: number, code: number): void {
+  private handleExit(slotIdx: number, code: number, worker?: Worker): void {
     const slot = this.slots[slotIdx];
     if (!slot) return;
+    // A replaced worker (Open Project → `swap`, or a respawn) exits well
+    // after its successor is installed. Without this identity check that
+    // late event nulls the LIVE worker — orphaning a thread that keeps a
+    // SQLite handle and a 250 ms interval running for the rest of the
+    // process — and counts the deliberate replacement as a crash, so a
+    // handful of Open Projects exhausts MAX_RESTARTS and kills the pool.
+    if (worker && slot.worker !== worker) return;
     slot.worker = null;
     if (this.terminated) return;
     // Reject only this slot's in-flight requests.
@@ -286,6 +335,7 @@ export class DbReaderPool {
     const now = Date.now();
     slot.restartTimes = slot.restartTimes.filter((t) => now - t < RESTART_WINDOW_MS);
     if (slot.restartTimes.length >= MAX_RESTARTS) {
+      slot.gaveUp = true;
       logger.log(
         'error',
         'db-reader',
@@ -349,7 +399,16 @@ export async function callReaderOrFallback<T>(
   const pool = resolveReaderPool();
   const heavy = HEAVY_METHODS.has(method);
   if (!pool.isReady()) {
-    if (heavy) {
+    // Heavy methods skip the main thread ONLY when a real worker pool
+    // exists but is momentarily down (all workers crashed/restarting):
+    // re-running a multi-second aggregate on the main thread would stall
+    // every IPC, and the next poll retries against the respawned worker.
+    // When the pool was never initialised at all — RAM-only storage mode,
+    // or a failed init — there is no worker to protect and no next-tick
+    // recovery; the main thread is the only place these reads can run, so
+    // fall back even for heavy methods (the RAM-only path already runs
+    // every other query this way).
+    if (heavy && pool.isInitialized()) {
       throw new Error(`reader-unavailable: '${method}' skips main-thread fallback`);
     }
     return fallback();

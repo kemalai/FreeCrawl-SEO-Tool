@@ -86,6 +86,10 @@ const ALLOWED_METHODS = new Set<string>([
   'getUrlHeaders',
   'pageImagesDetailed',
   'topAnchorTexts',
+  // Visualization tab — all three walk `links`/`urls` and used to run on
+  // the main thread, freezing the UI for the duration on large projects.
+  'graphSnapshot',
+  'crawlPath',
   'topUrlsBy',
   'externalDomainHealth',
   'analyticsCoverage',

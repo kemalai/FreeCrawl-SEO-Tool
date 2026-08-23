@@ -21,7 +21,11 @@ const POLL_MS_RUNNING = 5000;
 
 type FilterMode = 'all' | 'with-data' | 'without-data';
 type RangeDays = 7 | 28 | 90;
-type Stage = 'loading' | 'unconfigured' | 'disconnected' | 'ready';
+// 'error' exists because every writer that moves `stage` off 'loading'
+// sits after an `await`. A rejected bootstrap call used to leave the tab
+// spinning forever with no message and no retry — the effect is
+// mount-only, so nothing ever tried again.
+type Stage = 'loading' | 'unconfigured' | 'disconnected' | 'ready' | 'error';
 
 /** Engagement-rate bands → cell colour. Higher is better. */
 function engagementClass(v: number): string {
@@ -71,6 +75,8 @@ export function AnalyticsTab() {
   const [connecting, setConnecting] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped by the error screen's Retry — re-runs the bootstrap effect. */
+  const [retryNonce, setRetryNonce] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const loadProperties = useCallback(async (account?: string) => {
@@ -104,38 +110,46 @@ export function AnalyticsTab() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [integrations, auth, ga4Settings] = await Promise.all([
-        window.freecrawl.integrationsGetAll(),
-        window.freecrawl.googleAuthStatus('ga4'),
-        window.freecrawl.integrationSettingsGet('ga4'),
-      ]);
-      if (cancelled) return;
-      setAuthState(auth);
-      setAccounts(auth.accounts);
-      // Seed from the stored per-project settings; a stored account that
-      // has since been unlinked falls back to the first one.
-      const s = { ...defaultGa4Settings(), ...(ga4Settings ?? {}) };
-      const account =
-        auth.accounts.find((a) => a.accountId === s.accountId)?.accountId ??
-        auth.accounts[0]?.accountId ??
-        '';
-      setAccountId(account);
-      setDays(s.days);
-      if (s.property) setPropertyId(s.property);
-      const configured = integrations['ga4']?.configured ?? false;
-      if (!configured) {
-        setStage('unconfigured');
-      } else if (!auth.connected) {
-        setStage('disconnected');
-      } else {
-        setStage('ready');
-        void loadProperties(account);
+      try {
+        const [integrations, auth, ga4Settings] = await Promise.all([
+          window.freecrawl.integrationsGetAll(),
+          window.freecrawl.googleAuthStatus('ga4'),
+          window.freecrawl.integrationSettingsGet('ga4'),
+        ]);
+        if (cancelled) return;
+        setAuthState(auth);
+        setAccounts(auth.accounts);
+        // Seed from the stored per-project settings; a stored account that
+        // has since been unlinked falls back to the first one.
+        const s = { ...defaultGa4Settings(), ...(ga4Settings ?? {}) };
+        const account =
+          auth.accounts.find((a) => a.accountId === s.accountId)?.accountId ??
+          auth.accounts[0]?.accountId ??
+          '';
+        setAccountId(account);
+        setDays(s.days);
+        if (s.property) setPropertyId(s.property);
+        const configured = integrations['ga4']?.configured ?? false;
+        if (!configured) {
+          setStage('unconfigured');
+        } else if (!auth.connected) {
+          setStage('disconnected');
+        } else {
+          setStage('ready');
+          void loadProperties(account);
+        }
+      } catch (e) {
+        if (cancelled) return;
+        // `integrationSettingsGet` reaches `getDb()` in the main process
+        // and can genuinely reject. Show it instead of spinning forever.
+        setError(e instanceof Error ? e.message : String(e));
+        setStage('error');
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [loadProperties]);
+  }, [loadProperties, retryNonce]);
 
   const reload = useCallback(async () => {
     const res = await window.freecrawl.ga4Query({
@@ -243,6 +257,30 @@ export function AnalyticsTab() {
       <div className="flex h-full items-center justify-center bg-surface-950 text-[12px] text-surface-500">
         <Loader2 size={14} className="mr-2 animate-spin" />
         {t('ga4Tab.loading', { defaultValue: 'Loading…' })}
+      </div>
+    );
+  }
+
+  if (stage === 'error') {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 bg-surface-950 px-6 text-center">
+        <div className="text-[13px] font-semibold text-rose-300">
+          {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
+        </div>
+        {error && (
+          <div className="max-w-md break-words text-[11px] text-surface-500">{error}</div>
+        )}
+        <button
+          type="button"
+          className="mt-1 rounded border border-surface-700 px-3 py-1 text-[12px] text-surface-200 hover:bg-surface-800"
+          onClick={() => {
+            setError(null);
+            setStage('loading');
+            setRetryNonce((n) => n + 1);
+          }}
+        >
+          {t('common.retry', { defaultValue: 'Retry' })}
+        </button>
       </div>
     );
   }

@@ -16,7 +16,10 @@
     "setupGuideTitle": "Step-by-step setup walkthrough — OAuth client, test users, API enable, common errors.",
     "saved": "Saved.",
     "cleared": "Removed.",
-    "confirmClear": "Remove all stored credentials for this integration?"
+    "confirmClear": "Remove all stored credentials for this integration?",
+    "loadFailed": "Could not read stored credentials: {{detail}}",
+    "saveFailed": "Could not save: {{detail}}",
+    "clearFailed": "Could not remove credentials: {{detail}}"
   },
   "integrationGuide": {
     "title": "{{name}} — Setup Guide",
@@ -43,7 +46,11 @@
     "loading": "Loading…",
     "noData": "No data",
     "search": "Search…",
-    "language": "Language"
+    "language": "Language",
+    "loadFailedTitle": "Couldn't load this view",
+    "loadFailedBody": "The query failed, so results are missing rather than empty. Retrying automatically.",
+    "loadFailedStale": "Showing the last successful result — the latest refresh failed.",
+    "retry": "Retry"
   },
   "topbar": {
     "urlPlaceholder": "https://example.com",
@@ -92,7 +99,8 @@
     "device": {
       "desktop": "Desktop crawl",
       "mobile": "Mobile crawl — crawl the site’s mobile version (mobile User-Agent)"
-    }
+    },
+    "controlFailed": "{{action}} failed: {{detail}}"
   },
   "browserInstall": {
     "downloading": "Browser",
@@ -262,7 +270,8 @@
     "errorNoColumn": "Pick at least one column.",
     "errorNoTable": "Pick at least one table.",
     "successMsg": "Exported {{count}} row(s) to {{path}}",
-    "failedPrefix": "Export failed"
+    "failedPrefix": "Export failed",
+    "gridFailed": "Export failed: {{detail}}"
   },
   "app": {
     "dropMissingPath": "Couldn't read the dropped path for {{name}}. Use File → Open Project instead.",
@@ -274,7 +283,8 @@
     "deleteDomainPrompt": "GDPR Domain Wipe — enter the host to delete (case-insensitive, exact match).\n\nExamples: example.com  ·  blog.example.com\n\nThis cannot be undone. Save Project As… first to keep a backup.",
     "deleteDomainConfirm": "Delete every URL hosted on \"{{host}}\", along with its links, headers, images, and source snapshots?\n\nThis action cannot be undone.",
     "deleteDomainResult": "Deleted {{urls}} URL row(s) from {{host}} (and {{links}} associated link(s)).",
-    "clearAllConfirm": "Clear ALL data in the active project?\n\nEvery URL, link, image, header, source snapshot, sitemap, and issue will be wiped. This cannot be undone — Save Project As… first if you want a backup."
+    "clearAllConfirm": "Clear ALL data in the active project?\n\nEvery URL, link, image, header, source snapshot, sitemap, and issue will be wiped. This cannot be undone — Save Project As… first if you want a backup.",
+    "clearFailed": "Could not clear the crawl: {{detail}}"
   },
   "infoTip": {
     "moreInfo": "More info",
@@ -632,7 +642,8 @@
       "passSelector": "Password selector",
       "passValue": "Password",
       "submitSelector": "Submit selector",
-      "successSelector": "Logged-in selector (optional)"
+      "successSelector": "Logged-in selector (optional)",
+      "allowInsecureTls": "Allow invalid HTTPS certificate"
     },
     "network": {
       "intro": "Network-level controls: proxy override, file-extension exclusion, redirect hop cap.",
@@ -1484,7 +1495,8 @@
     "totalLabel": "Total rows",
     "noBrokenLinks": "No broken links",
     "noBrokenLinksHint": "Run a crawl that includes external links to see broken links.",
-    "cellsSelected": "{{n}} cell(s) selected"
+    "cellsSelected": "{{n}} cell(s) selected",
+    "noBrokenLinksBody": "Every link in the crawl resolves to a healthy response."
   },
   "urlsTab": {
     "searchPlaceholder": "Search URLs / titles…",
@@ -1601,7 +1613,8 @@
       "telemetryLabel": "Send anonymous usage telemetry (opt-in)",
       "telemetryHelp": "Off by default. When on, aggregated counts of feature use (e.g. \"export ran\", \"report opened\") may be sent — never URLs, project contents, or crawl results.",
       "statusNote": "No telemetry endpoint is currently wired up. Toggling this preference is recorded but nothing is transmitted in the current build. The toggle is exposed now so consent state persists across upgrades when a future build adds an endpoint."
-    }
+    },
+    "chooseDefaultProjectFolder": "Choose Default Project Folder"
   },
   "logAnalyzer": {
     "title": "Log File Analyzer",
@@ -1684,7 +1697,9 @@
     "seeded": "Seeded {{n}} URL(s) into the active crawl",
     "seedNoActive": "No active crawl — start a crawl first, then seed.",
     "seedNoOrigin": "No crawled URLs yet to derive a base origin from.",
-    "seedNone": "Nothing new to seed."
+    "seedNone": "Nothing new to seed.",
+    "clearFailed": "Could not clear log data: {{detail}}",
+    "exportFailed": "Export failed: {{detail}}"
   },
   "detailExport": {
     "label": "Export",

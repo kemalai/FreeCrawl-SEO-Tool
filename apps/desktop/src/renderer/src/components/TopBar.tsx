@@ -34,6 +34,7 @@ export function TopBar() {
   const progressDiscovered = useAppStore((s) => s.progress?.discovered ?? 0);
   const progressCrawled = useAppStore((s) => s.progress?.crawled ?? 0);
   const setProgress = useAppStore((s) => s.setProgress);
+  const markCrawlFinished = useAppStore((s) => s.markCrawlFinished);
   const summaryTotal = useAppStore((s) => s.summary?.total ?? 0);
   const overviewInternalTotal = useAppStore(
     (s) => s.overview?.summary.totalInternalUrls ?? 0,
@@ -118,19 +119,58 @@ export function TopBar() {
       await window.freecrawl.crawlStart(config);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      // The optimistic "Running" above has to be rolled back by hand. If
+      // the start throws before the crawler emits its first progress
+      // frame, no terminal frame is ever sent — and Stop is a no-op in
+      // that state — so without this the whole toolbar (Start, mode, URL,
+      // scope, Clear, Settings) stays disabled until the app is restarted.
+      markCrawlFinished();
+    }
+  }
+
+  /** Crawl-control actions must never fail silently: the button appears to
+   *  do nothing and the user is left believing they stopped or paused a
+   *  crawl that is in fact still running. */
+  async function runControl(
+    action: () => Promise<unknown>,
+    labelKey: string,
+    fallbackLabel: string,
+  ) {
+    try {
+      await action();
+    } catch (e) {
+      setError(
+        t('topbar.controlFailed', {
+          defaultValue: '{{action}} failed: {{detail}}',
+          action: t(labelKey, { defaultValue: fallbackLabel }),
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     }
   }
 
   async function stop() {
-    await window.freecrawl.crawlStop();
+    await runControl(
+      () => window.freecrawl.crawlStop(),
+      'topbar.stop',
+      'Stop',
+    );
   }
 
   async function pauseCrawl() {
-    await window.freecrawl.crawlPause();
+    await runControl(
+      () => window.freecrawl.crawlPause(),
+      'topbar.pause',
+      'Pause',
+    );
   }
 
   async function resumeCrawl() {
-    await window.freecrawl.crawlResume();
+    await runControl(
+      () => window.freecrawl.crawlResume(),
+      'topbar.resume',
+      'Resume',
+    );
   }
 
   async function clearCrawl() {

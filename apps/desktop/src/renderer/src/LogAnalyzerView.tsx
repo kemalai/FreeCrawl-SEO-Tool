@@ -127,20 +127,44 @@ export function LogAnalyzerView() {
     if (!window.confirm(t('logAnalyzer.clearConfirm', { defaultValue: 'Clear all ingested log data from this project?' }))) {
       return;
     }
-    await window.freecrawl.logClear();
+    try {
+      await window.freecrawl.logClear();
+    } catch (e) {
+      // Destructive and previously silent: on failure the refresh below
+      // still ran, so the view could look cleared while the project kept
+      // a partially-deleted log set.
+      showToast(
+        t('logAnalyzer.clearFailed', {
+          defaultValue: 'Could not clear log data: {{detail}}',
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
+      return;
+    }
     refreshOverview();
     setVersion((v) => v + 1);
-  }, [refreshOverview, t]);
+  }, [refreshOverview, showToast, t]);
 
   const onExport = useCallback(
     async (format: 'csv' | 'xlsx') => {
-      const r = await window.freecrawl.logExport({ format });
-      if (r.filePath) {
+      try {
+        const r = await window.freecrawl.logExport({ format });
+        if (r.filePath) {
+          showToast(
+            t('logAnalyzer.exported', {
+              defaultValue: 'Exported {{size}} KB → {{path}}',
+              size: Math.max(1, Math.round(r.bytesWritten / 1024)),
+              path: r.filePath,
+            }),
+          );
+        }
+      } catch (e) {
+        // Without this the export just produced no toast and no file —
+        // indistinguishable from never having clicked the button.
         showToast(
-          t('logAnalyzer.exported', {
-            defaultValue: 'Exported {{size}} KB → {{path}}',
-            size: Math.max(1, Math.round(r.bytesWritten / 1024)),
-            path: r.filePath,
+          t('logAnalyzer.exportFailed', {
+            defaultValue: 'Export failed: {{detail}}',
+            detail: e instanceof Error ? e.message : String(e),
           }),
         );
       }

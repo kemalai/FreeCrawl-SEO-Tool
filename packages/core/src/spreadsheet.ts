@@ -50,7 +50,18 @@ export function sanitizeFormulaPrefix(str: string): string {
 
 export function escapeCsv(value: unknown): string {
   if (value === null || value === undefined) return '';
-  const str = sanitizeFormulaPrefix(String(value));
+  // Numbers and booleans cannot be formulas, and prefixing them turns real
+  // data into text: Excel then skips the column in AVERAGE() and sorts it
+  // lexicographically. Negative values are ordinary here — Flesch reading
+  // ease is clamped to [-50, 120] and Flesch-Kincaid grade to [-2, 30] —
+  // so `-33.4` was being written as `'-33.4`.
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  // NUL is legal in a JS string but not in a CSV consumer: pandas raises
+  // `ValueError: embedded null byte` and Excel truncates the cell. It
+  // reaches us through numeric HTML entities (`&#0;`) in page titles.
+  const str = sanitizeFormulaPrefix(String(value).replace(/\0/g, ''));
   if (/[",\n\r]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }

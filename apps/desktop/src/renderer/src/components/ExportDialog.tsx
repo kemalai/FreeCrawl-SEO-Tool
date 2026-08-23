@@ -2,9 +2,25 @@ import { useEffect, useMemo, useState } from 'react';
 import { X, Loader2, ChevronRight, ChevronDown } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
-import type { CrawlUrlRow, ExportTabularSection, UrlCategory } from '@freecrawl/shared-types';
+import type {
+  AdvancedFilter,
+  CrawlUrlRow,
+  ExportTabularSection,
+  UrlCategory,
+} from '@freecrawl/shared-types';
 import { TAB_ORDER, type TabKey } from '../store.js';
-import { COLUMN_SPECS, columnId } from '../tabs/columns.js';
+import { COLUMN_SPECS, columnId, type ColumnSpec } from '../tabs/columns.js';
+
+/** The CrawlUrlRow field an export column writes. Most columns use
+ *  `spec.key`, but the two indexability columns share key `'indexability'`
+ *  while displaying different things — "Indexability" is the raw eligibility,
+ *  "Indexability Status" is the specific reason (`indexabilityReason`). Keying
+ *  the export by `spec.key` alone collapsed them into one duplicate column and
+ *  dropped the status entirely; give the status column its own accessor. */
+function exportKeyFor(spec: ColumnSpec): string {
+  if (columnId(spec) === 'indexability-status') return 'indexabilityReason';
+  return spec.key as string;
+}
 import { translateLabel } from '../i18n/labels.js';
 
 type Format = 'csv' | 'xlsx' | 'json' | 'xml';
@@ -158,6 +174,10 @@ interface ExportDialogProps {
   defaultTab: TabKey;
   /** Row ids selected in the current table; falsy → export the whole filter set. */
   selectedIds?: number[];
+  /** Active table search term — forwarded so the export matches the grid. */
+  search?: string;
+  /** Active advanced filter — forwarded so the export matches the grid. */
+  filter?: AdvancedFilter;
 }
 
 export function ExportDialog({
@@ -165,6 +185,8 @@ export function ExportDialog({
   onClose,
   defaultTab,
   selectedIds,
+  search,
+  filter,
 }: ExportDialogProps) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -200,10 +222,12 @@ export function ExportDialog({
     return new Set(node && node.children.length > 0 ? [node.key] : []);
   });
 
+  // Keyed by column ID (columnId), not spec.key — two columns can share a
+  // key (indexability / indexability-status) and must toggle independently.
   const [pickedColumns, setPickedColumns] = useState<Set<string>>(() => {
     const node = tree.find((n) => n.tabKey === initialTabKey);
     const specs = node ? COLUMN_SPECS[node.tabKey] : [];
-    return new Set(specs.map((s) => s.key as string));
+    return new Set(specs.map((s) => columnId(s)));
   });
   const [useSelection, setUseSelection] = useState<boolean>(selectionCount > 0);
   const [busy, setBusy] = useState(false);
@@ -242,7 +266,7 @@ export function ExportDialog({
 
   const offeredColumns = useMemo(() => {
     const seen = new Set<string>();
-    const out: { key: string; header: string; tab: TabKey }[] = [];
+    const out: { id: string; key: string; header: string; tab: TabKey }[] = [];
     for (const node of tree) {
       if (!pickedTabKeys.has(node.tabKey)) continue;
       const specs = COLUMN_SPECS[node.tabKey];
@@ -250,14 +274,14 @@ export function ExportDialog({
         const id = columnId(spec);
         if (seen.has(id)) continue;
         seen.add(id);
-        out.push({ key: spec.key as string, header: spec.header, tab: node.tabKey });
+        out.push({ id, key: exportKeyFor(spec), header: spec.header, tab: node.tabKey });
       }
     }
     return out;
   }, [pickedTabKeys, tree]);
 
   const orderedColumnList = useMemo(
-    () => offeredColumns.filter((c) => pickedColumns.has(c.key)).map((c) => c.key),
+    () => offeredColumns.filter((c) => pickedColumns.has(c.id)).map((c) => c.key),
     [offeredColumns, pickedColumns],
   );
 
@@ -302,10 +326,10 @@ export function ExportDialog({
     if (state !== 'all') {
       setPickedColumns((prev) => {
         const specs = COLUMN_SPECS[node.tabKey] ?? [];
-        const hasAny = specs.some((spec) => prev.has(spec.key as string));
+        const hasAny = specs.some((spec) => prev.has(columnId(spec)));
         if (hasAny) return prev;
         const next = new Set(prev);
-        for (const spec of specs) next.add(spec.key as string);
+        for (const spec of specs) next.add(columnId(spec));
         return next;
       });
     }
@@ -322,10 +346,10 @@ export function ExportDialog({
     // Bug #12 — same conditional auto-add as toggleParent.
     setPickedColumns((prev) => {
       const specs = COLUMN_SPECS[node.tabKey] ?? [];
-      const hasAny = specs.some((spec) => prev.has(spec.key as string));
+      const hasAny = specs.some((spec) => prev.has(columnId(spec)));
       if (hasAny) return prev;
       const next = new Set(prev);
-      for (const spec of specs) next.add(spec.key as string);
+      for (const spec of specs) next.add(columnId(spec));
       return next;
     });
   };
@@ -367,7 +391,7 @@ export function ExportDialog({
   };
 
   const checkAllColumns = () => {
-    setPickedColumns(new Set(offeredColumns.map((c) => c.key)));
+    setPickedColumns(new Set(offeredColumns.map((c) => c.id)));
   };
 
   const uncheckAllColumns = () => {
@@ -443,15 +467,17 @@ export function ExportDialog({
           }
         }
       }
+      const usingSelection = useSelection && !!selectedIds && selectedIds.length > 0;
       const result = await window.freecrawl.exportTabular({
         format,
         sections,
         columns: orderedColumnList,
         csvBom: format === 'csv' ? csvBom : undefined,
-        selectedIds:
-          useSelection && selectedIds && selectedIds.length > 0
-            ? selectedIds
-            : undefined,
+        selectedIds: usingSelection ? selectedIds : undefined,
+        // Mirror the on-screen grid — but only when NOT exporting an explicit
+        // selection (a selection already pins exact rows).
+        search: usingSelection ? undefined : search || undefined,
+        filter: usingSelection ? undefined : filter,
       });
       if (!result.filePath) {
         setBusy(false);
@@ -648,10 +674,10 @@ export function ExportDialog({
                     </div>
                   ) : (
                     offeredColumns.map((c) => {
-                      const checked = pickedColumns.has(c.key);
+                      const checked = pickedColumns.has(c.id);
                       return (
                         <label
-                          key={c.key}
+                          key={c.id}
                           className={clsx(
                             'flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-[12px]',
                             checked
@@ -663,7 +689,7 @@ export function ExportDialog({
                             type="checkbox"
                             className="h-3.5 w-3.5"
                             checked={checked}
-                            onChange={() => toggleColumn(c.key)}
+                            onChange={() => toggleColumn(c.id)}
                           />
                           <span className="truncate">{translateLabel(c.header, lang)}</span>
                           <span className="ml-auto truncate font-mono text-[10px] text-surface-500">

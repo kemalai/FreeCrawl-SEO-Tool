@@ -69,15 +69,20 @@ interface MinimalRow {
   response_time_ms: number | null;
 }
 
-function loadAll(db: ProjectDb): MinimalRow[] {
+function loadAll(db: ProjectDb): Iterable<MinimalRow> {
   // Pull only the fields the diff needs — keeps memory bounded at 1M
   // URLs (~120 MB for the seven columns vs ~600 MB for the full table).
   // Reaches into the underlying DatabaseSync via ProjectDb.exec for the
   // raw SELECT — no public iterator covers exactly this projection and
   // the diff is a one-shot operation, so we keep the helper here.
+  //
+  // Streams rather than returning an array: the caller only ever funnels
+  // these into a Map, and `.all()` meant the full row array and the Map
+  // built from it were both live at peak — two copies per side, four in
+  // total, all on the main thread.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rawDb = (db as any).db as {
-    prepare: (sql: string) => { all: () => unknown };
+    prepare: (sql: string) => { iterate: () => Iterable<unknown> };
   };
   return rawDb
     .prepare(
@@ -86,7 +91,7 @@ function loadAll(db: ProjectDb): MinimalRow[] {
          FROM urls
         WHERE is_external = 0 AND content_kind = 'html'`,
     )
-    .all() as MinimalRow[];
+    .iterate() as Iterable<MinimalRow>;
 }
 
 const EMPTY_COUNTS: Record<CompareCategory, number> = {
@@ -109,13 +114,11 @@ export function compareCrawls(
   const limit = options.perCategoryLimit ?? 5000;
   const rtThreshold = options.responseTimeThresholdMs ?? 500;
 
-  const rowsA = loadAll(a);
-  const rowsB = loadAll(b);
-
+  // Consume each side straight into its Map — no intermediate array.
   const mapA = new Map<string, MinimalRow>();
-  for (const r of rowsA) mapA.set(r.url, r);
+  for (const r of loadAll(a)) mapA.set(r.url, r);
   const mapB = new Map<string, MinimalRow>();
-  for (const r of rowsB) mapB.set(r.url, r);
+  for (const r of loadAll(b)) mapB.set(r.url, r);
 
   const counts: Record<CompareCategory, number> = { ...EMPTY_COUNTS };
   const samples: CompareDiffRow[] = [];
@@ -225,8 +228,10 @@ export function compareCrawls(
   }
 
   return {
-    totalA: rowsA.length,
-    totalB: rowsB.length,
+    // `urls.url` is `NOT NULL UNIQUE`, so one Map entry per row — these
+    // are the same totals the intermediate arrays used to report.
+    totalA: mapA.size,
+    totalB: mapB.size,
     counts,
     samples,
   };

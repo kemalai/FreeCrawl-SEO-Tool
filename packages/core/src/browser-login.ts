@@ -30,6 +30,8 @@ export interface BrowserLoginInput {
   submitSelector: string;
   successSelector?: string;
   waitMs?: number;
+  /** Accept invalid TLS certs on the login page — opt-in, default false. */
+  allowInsecureTls?: boolean;
 }
 
 export interface BrowserLoginOptions {
@@ -108,7 +110,9 @@ export async function runBrowserLogin(
       extraHTTPHeaders: opts.acceptLanguage
         ? { 'Accept-Language': opts.acceptLanguage }
         : undefined,
-      ignoreHTTPSErrors: true,
+      // Verify TLS by default — the user types real credentials here, so an
+      // unverifiable cert must not be silently accepted. Opt-in per crawl.
+      ignoreHTTPSErrors: cfg.allowInsecureTls === true,
     });
     const page = await context.newPage();
     page.setDefaultTimeout(timeout);

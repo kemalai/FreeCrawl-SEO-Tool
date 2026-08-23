@@ -506,6 +506,27 @@ export function parseHtml(
     decodeEntities: false,
   });
 
+  // Document base URL. Per the HTML spec a `<base href>` sets the base
+  // against which EVERY relative URL on the page resolves — links,
+  // canonical, images, hreflang, everything. We were resolving all of
+  // them against `pageUrl` and ignoring `<base>` entirely, so on a page at
+  // `/shop/cat/page.html` carrying `<base href="https://site/">`, a link
+  // `products/widget` became `/shop/cat/products/widget` (a phantom 404 in
+  // Broken Links) and a relative canonical pointed at a URL that doesn't
+  // exist (page wrongly flagged canonicalised-away). `<base>` changes only
+  // relative RESOLUTION, never the page's own identity, so `pageUrl` still
+  // drives self-reference and host checks below. An absolute or malformed
+  // base falls back to the page URL, matching browser behaviour.
+  const baseHref = ($('base[href]').first().attr('href') ?? '').trim();
+  let baseUrl = pageUrl;
+  if (baseHref) {
+    try {
+      baseUrl = new URL(baseHref, pageUrl).toString();
+    } catch {
+      baseUrl = pageUrl;
+    }
+  }
+
   // We parse with decodeEntities:false for speed, so extracted strings
   // contain raw entities like `&#39;` or `&amp;`. Decode them before
   // storing so UI / CSV export / search see human-readable text.
@@ -557,7 +578,7 @@ export function parseHtml(
   // `href="/x/"` on `https://a.com/y` is a self-canonical only after
   // resolution. Same treatment `amphtml` already gets further down.
   const canonicalResolved = canonical
-    ? normalizeUrl(canonical, pageUrl, opts.urlRewrites)
+    ? normalizeUrl(canonical, baseUrl, opts.urlRewrites)
     : null;
   // Every declared canonical, resolved and deduped. `canonicalCount > 1`
   // only says a page repeated the tag - often harmlessly identical (a CMS
@@ -567,7 +588,7 @@ export function parseHtml(
   canonicalEls.each((_, el) => {
     const href = ($(el).attr('href') ?? '').trim();
     if (!href) return;
-    const abs = normalizeUrl(href, pageUrl, opts.urlRewrites);
+    const abs = normalizeUrl(href, baseUrl, opts.urlRewrites);
     if (abs) canonicalTargets.add(abs);
   });
   const canonicalDistinctCount = canonicalTargets.size;
@@ -599,9 +620,21 @@ export function parseHtml(
   //     pages as indexable. The contents are joined (comma-separated, in
   //     document order) into one value: the UI's Meta Robots column then
   //     shows the conflict instead of hiding half of it.
+  // Bot-specific names count too. Google honours `<meta name="googlebot">`
+  // exactly like `name="robots"` and it overrides the generic tag, so a page
+  // carrying only `<meta name="googlebot" content="noindex">` was being
+  // reported as Indexable — the single most consequential thing this column
+  // can get wrong.
+  const ROBOTS_META_NAMES = new Set([
+    'robots',
+    'googlebot',
+    'googlebot-news',
+    'bingbot',
+  ]);
   const robotsMetaContents: string[] = [];
   $('meta').each((_, el) => {
-    if (($(el).attr('name') ?? '').trim().toLowerCase() !== 'robots') return;
+    const name = ($(el).attr('name') ?? '').trim().toLowerCase();
+    if (!ROBOTS_META_NAMES.has(name)) return;
     const content = ($(el).attr('content') ?? '').trim().toLowerCase();
     if (content) robotsMetaContents.push(content);
   });
@@ -790,7 +823,7 @@ export function parseHtml(
   const addResource = (raw: string | undefined, kind: ContentKind): void => {
     const trimmed = (raw ?? '').trim();
     if (!trimmed || trimmed.startsWith('data:')) return;
-    const normalized = normalizeUrl(trimmed, pageUrl, opts.urlRewrites);
+    const normalized = normalizeUrl(trimmed, baseUrl, opts.urlRewrites);
     if (!normalized) return;
     if (!/^https?:/.test(normalized)) return;
     if (resourceMap.has(normalized)) return;
@@ -838,7 +871,7 @@ export function parseHtml(
   $('iframe[src]').each((_, el) => {
     const raw = ($(el).attr('src') ?? '').trim();
     if (!raw || raw.startsWith('data:') || raw.startsWith('about:')) return;
-    const normalized = normalizeUrl(raw, pageUrl, opts.urlRewrites);
+    const normalized = normalizeUrl(raw, baseUrl, opts.urlRewrites);
     if (!normalized || !/^https?:/.test(normalized)) return;
     if (iframeMap.has(normalized)) return;
     iframeMap.set(normalized, {
@@ -858,7 +891,7 @@ export function parseHtml(
     if (($el.attr('hreflang') ?? '').trim()) return;
     const media = ($el.attr('media') ?? '').toLowerCase();
     if (!/max-(device-)?width/.test(media)) return;
-    const href = normalizeUrl(($el.attr('href') ?? '').trim(), pageUrl, opts.urlRewrites);
+    const href = normalizeUrl(($el.attr('href') ?? '').trim(), baseUrl, opts.urlRewrites);
     if (href && /^https?:/.test(href)) mobileAlternate = href;
   });
 
@@ -867,8 +900,8 @@ export function parseHtml(
   // we crawl and store.
   const paginationNextRaw = ($('link[rel="next"]').attr('href') ?? '').trim();
   const paginationPrevRaw = ($('link[rel="prev"]').attr('href') ?? '').trim();
-  const paginationNext = paginationNextRaw ? normalizeUrl(paginationNextRaw, pageUrl, opts.urlRewrites) : null;
-  const paginationPrev = paginationPrevRaw ? normalizeUrl(paginationPrevRaw, pageUrl, opts.urlRewrites) : null;
+  const paginationNext = paginationNextRaw ? normalizeUrl(paginationNextRaw, baseUrl, opts.urlRewrites) : null;
+  const paginationPrev = paginationPrevRaw ? normalizeUrl(paginationPrevRaw, baseUrl, opts.urlRewrites) : null;
 
   // Hreflang — `<link rel="alternate" hreflang="…" href="…">`. We dedupe
   // by lang+href because some sites repeat tags accidentally.
@@ -878,7 +911,7 @@ export function parseHtml(
     const lang = ($(el).attr('hreflang') ?? '').trim();
     const rawHref = ($(el).attr('href') ?? '').trim();
     if (!lang || !rawHref) return;
-    const href = normalizeUrl(rawHref, pageUrl, opts.urlRewrites);
+    const href = normalizeUrl(rawHref, baseUrl, opts.urlRewrites);
     if (!href) return;
     const key = `${lang}|${href}`;
     if (hreflangSet.has(key)) return;
@@ -909,21 +942,21 @@ export function parseHtml(
     let rawSrc = ($v.attr('src') ?? '').trim();
     if (!rawSrc) rawSrc = ($v.find('source[src]').first().attr('src') ?? '').trim();
     if (!rawSrc) return;
-    const contentLoc = normalizeUrl(rawSrc, pageUrl, opts.urlRewrites);
+    const contentLoc = normalizeUrl(rawSrc, baseUrl, opts.urlRewrites);
     if (!contentLoc) return;
     const posterRaw = ($v.attr('poster') ?? '').trim();
-    const thumbnail = posterRaw ? normalizeUrl(posterRaw, pageUrl, opts.urlRewrites) : null;
+    const thumbnail = posterRaw ? normalizeUrl(posterRaw, baseUrl, opts.urlRewrites) : null;
     pushVideo(contentLoc, null, thumbnail);
   });
   $('iframe[src]').each((_, el) => {
-    const embed = parseVideoEmbed(($(el).attr('src') ?? '').trim(), pageUrl, opts.urlRewrites);
+    const embed = parseVideoEmbed(($(el).attr('src') ?? '').trim(), baseUrl, opts.urlRewrites);
     if (embed) pushVideo(null, embed.playerLoc, embed.thumbnail);
   });
 
   // AMP variant — `<link rel="amphtml">` points to the AMP version of
   // the current page, when one exists.
   const amphtmlRaw = ($('link[rel="amphtml"]').attr('href') ?? '').trim();
-  const amphtml = amphtmlRaw ? normalizeUrl(amphtmlRaw, pageUrl, opts.urlRewrites) : null;
+  const amphtml = amphtmlRaw ? normalizeUrl(amphtmlRaw, baseUrl, opts.urlRewrites) : null;
 
   // AMP smoke validation — pages that declare themselves AMP via
   // `<html ⚡>` / `<html amp>` get a hand-rolled subset of Google's
@@ -942,7 +975,7 @@ export function parseHtml(
   const faviconRaw =
     ($('link[rel="icon"]').first().attr('href') ?? '').trim() ||
     ($('link[rel="shortcut icon"]').first().attr('href') ?? '').trim();
-  const favicon = faviconRaw ? normalizeUrl(faviconRaw, pageUrl, opts.urlRewrites) : null;
+  const favicon = faviconRaw ? normalizeUrl(faviconRaw, baseUrl, opts.urlRewrites) : null;
 
   // Apple touch icon — iOS/iPadOS home-screen icon. Multiple sizes can be
   // declared; we surface the first to keep the column simple.
@@ -950,7 +983,7 @@ export function parseHtml(
     ($('link[rel="apple-touch-icon"]').first().attr('href') ?? '').trim() ||
     ($('link[rel="apple-touch-icon-precomposed"]').first().attr('href') ?? '').trim();
   const appleTouchIcon = appleTouchRaw
-    ? normalizeUrl(appleTouchRaw, pageUrl, opts.urlRewrites)
+    ? normalizeUrl(appleTouchRaw, baseUrl, opts.urlRewrites)
     : null;
 
   // Android Chrome / PWA icon — `<link rel="icon" sizes="192x192">` (or
@@ -979,14 +1012,14 @@ export function parseHtml(
     if (!qualifies) return;
     const href = ($(el).attr('href') ?? '').trim();
     if (!href) return;
-    const resolved = normalizeUrl(href, pageUrl, opts.urlRewrites);
+    const resolved = normalizeUrl(href, baseUrl, opts.urlRewrites);
     if (resolved) androidIcon = resolved;
   });
 
   // Web app manifest — PWA support signal.
   const manifestRaw = ($('link[rel="manifest"]').first().attr('href') ?? '').trim();
   const manifestUrl = manifestRaw
-    ? normalizeUrl(manifestRaw, pageUrl, opts.urlRewrites)
+    ? normalizeUrl(manifestRaw, baseUrl, opts.urlRewrites)
     : null;
 
   // RSS / Atom feed — `<link rel="alternate" type="application/rss+xml">` or
@@ -999,7 +1032,7 @@ export function parseHtml(
     (
       $('link[rel="alternate"][type="application/atom+xml"]').first().attr('href') ?? ''
     ).trim();
-  const feedUrl = feedRaw ? normalizeUrl(feedRaw, pageUrl, opts.urlRewrites) : null;
+  const feedUrl = feedRaw ? normalizeUrl(feedRaw, baseUrl, opts.urlRewrites) : null;
 
   // Meta refresh — `<meta http-equiv="refresh" content="N; url=…">`.
   // Even when the URL is absent (pure auto-reload) we still capture the
@@ -1018,7 +1051,7 @@ export function parseHtml(
     // optional and we strip them defensively.
     const urlMatch = metaRefresh.match(/[;,]\s*url\s*=\s*['"]?([^'"\s;,]+)['"]?/i);
     if (urlMatch && urlMatch[1]) {
-      metaRefreshUrl = normalizeUrl(urlMatch[1], pageUrl, opts.urlRewrites);
+      metaRefreshUrl = normalizeUrl(urlMatch[1], baseUrl, opts.urlRewrites);
     }
   }
 
@@ -1223,7 +1256,7 @@ export function parseHtml(
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href');
     if (!href) return;
-    const normalized = normalizeUrl(href, pageUrl, opts.urlRewrites);
+    const normalized = normalizeUrl(href, baseUrl, opts.urlRewrites);
     if (!normalized || !/^https?:/.test(normalized)) {
       const raw = href.trim();
       if (
@@ -1236,10 +1269,31 @@ export function parseHtml(
       }
       return;
     }
-    if (linkMap.has(normalized)) return;
-
     const $el = $(el);
     const rel = ($el.attr('rel') ?? '').trim().toLowerCase() || null;
+
+    // Same target linked more than once (a nav/footer link that also
+    // appears in the body). Keep the MOST permissive occurrence rather
+    // than the first: a `rel="nofollow"` nav link followed by a plain
+    // content link to the same page used to record the target as nofollow,
+    // and with `storeNofollowLinks` off (the default) the crawler then
+    // dropped it entirely — so the page lost an inlink and, if that was its
+    // only link, was never crawled and reported as an orphan. If any
+    // occurrence is followable, the link is followable.
+    const existing = linkMap.get(normalized);
+    if (existing) {
+      if (existing.rel?.includes('nofollow') && !rel?.includes('nofollow')) {
+        existing.rel = rel;
+        // A followable content link also carries the more useful anchor
+        // text than an icon-only nav link, so take it when we had none.
+        if (!existing.anchor) {
+          const upgradedAnchor =
+            $el.text().replace(/\s+/g, ' ').trim().slice(0, 200) || null;
+          if (upgradedAnchor) existing.anchor = decodeEntities(upgradedAnchor);
+        }
+      }
+      return;
+    }
     const target = ($el.attr('target') ?? '').trim() || null;
     const rawAnchor = $el.text().replace(/\s+/g, ' ').trim().slice(0, 200) || null;
     const anchor = rawAnchor ? decodeEntities(rawAnchor) : null;
@@ -1436,7 +1490,7 @@ export function parseHtml(
   ): void => {
     if (!rawUrl) return;
     if (rawUrl.startsWith('data:')) return;
-    const normalized = normalizeUrl(rawUrl, pageUrl, opts.urlRewrites);
+    const normalized = normalizeUrl(rawUrl, baseUrl, opts.urlRewrites);
     if (!normalized) return;
     if (!/^https?:/.test(normalized)) return;
     if (imageMap.has(normalized)) return;
@@ -1462,7 +1516,7 @@ export function parseHtml(
     // Skip inline data URIs — they're not "web resources" in the crawler
     // sense and would bloat the images table fast on any CMS.
     if (rawSrc.startsWith('data:')) return;
-    const normalized = normalizeUrl(rawSrc, pageUrl, opts.urlRewrites);
+    const normalized = normalizeUrl(rawSrc, baseUrl, opts.urlRewrites);
     if (!normalized) return;
     if (!/^https?:/.test(normalized)) return;
 
@@ -1537,7 +1591,7 @@ export function parseHtml(
   // will fill `byte_size` automatically post-crawl.
   for (const ogish of [ogImage, twitterImage]) {
     if (!ogish) continue;
-    const normalized = normalizeUrl(ogish, pageUrl, opts.urlRewrites);
+    const normalized = normalizeUrl(ogish, baseUrl, opts.urlRewrites);
     if (!normalized) continue;
     if (!/^https?:/.test(normalized)) continue;
     if (imageMap.has(normalized)) continue;

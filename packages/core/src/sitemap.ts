@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 import { gunzipSync } from 'node:zlib';
 import { fetch as undiciFetch } from 'undici';
-import { normalizeUrl } from './url-utils.js';
+import { normalizeUrl, type UrlRewriteOptions } from './url-utils.js';
 import { defaultRequestHeaders, formatFetchError } from './http-client.js';
 
 /**
@@ -11,6 +11,21 @@ import { defaultRequestHeaders, formatFetchError } from './http-client.js';
  */
 const SITEMAP_MAX_URLS = 50_000;
 const SITEMAP_MAX_BYTES = 50 * 1024 * 1024;
+/**
+ * Hard ceiling on what a gzipped sitemap may inflate to.
+ *
+ * `SITEMAP_MAX_BYTES` above is the sitemaps.org limit, and breaching it is
+ * deliberately only a warning — the data is still useful. But that check
+ * ran *after* `gunzipSync` had already materialised the whole buffer, so
+ * a decompression bomb (a few KB inflating to gigabytes) allocated all of
+ * it first and could take the process down. Sitemaps are fetched with no
+ * user action at all (`discoverSitemaps` defaults on), so the input is not
+ * something the user chose to trust.
+ *
+ * 4× the protocol limit: no real sitemap comes close, and a bomb is orders
+ * of magnitude past it.
+ */
+const SITEMAP_MAX_INFLATED_BYTES = SITEMAP_MAX_BYTES * 4;
 
 /**
  * Content types a sitemap may legitimately arrive as. Servers are sloppy
@@ -169,6 +184,15 @@ interface FetchOpts {
   maxUrls: number;
   /** Max sitemap-index nesting (1 = root only, 2 = root + children, …). */
   maxDepth: number;
+  /**
+   * The crawl's URL-rewrite policy. Sitemap entries MUST be normalised with
+   * the same rewrites the crawler applies to page URLs — otherwise the
+   * stored `sitemap_urls.url` (e.g. `…/about/`) never equals the crawled
+   * `urls.url` (`…/about` under Trailing Slash = Strip), and every
+   * sitemap↔crawl join silently reports "crawled but not in sitemap" for
+   * every page and "sitemap orphan" for every sitemap entry.
+   */
+  rewrites?: UrlRewriteOptions;
 }
 
 /**
@@ -245,7 +269,11 @@ export async function fetchSitemaps(
       let xml: string;
       if (looksGzipped(raw)) {
         try {
-          const inflated = gunzipSync(raw);
+          // `maxOutputLength` makes zlib abort mid-inflation instead of
+          // allocating the whole bomb and checking its size afterwards.
+          const inflated = gunzipSync(raw, {
+            maxOutputLength: SITEMAP_MAX_INFLATED_BYTES,
+          });
           if (inflated.byteLength > SITEMAP_MAX_BYTES) {
             result.warnings.push({
               sitemap: item.url,
@@ -298,7 +326,7 @@ export async function fetchSitemaps(
           result.truncated = true;
           break;
         }
-        const norm = normalizeUrl(entry.url);
+        const norm = normalizeUrl(entry.url, undefined, opts.rewrites);
         if (!norm) continue;
         result.entries.push({ ...entry, url: norm });
       }

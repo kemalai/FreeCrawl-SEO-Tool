@@ -474,8 +474,11 @@ function flushConfigPersist(): void {
   try {
     window.freecrawl?.prefsSet('crawl-config', cfg);
     // No-ops in main when on the default scratch DB, so global prefs stay
-    // the source of truth there.
-    void window.freecrawl?.projectConfigSet(cfg);
+    // the source of truth there. `void` detaches the promise, so the
+    // enclosing try/catch never sees a rejection — it needs its own.
+    window.freecrawl?.projectConfigSet(cfg).catch(() => {
+      /* best-effort persistence */
+    });
   } catch {
     // best-effort persistence
   }
@@ -630,8 +633,7 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
   if (
     cat === 'issues:broken-links-all' ||
     cat === 'issues:broken-links-internal' ||
-    cat === 'issues:broken-links-external' ||
-    cat === 'issues:link-empty-anchor'
+    cat === 'issues:broken-links-external'
   ) {
     return 'broken-links';
   }
@@ -727,7 +729,14 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
     cat === 'issues:outlinks-zero' ||
     cat === 'issues:internal-link-to-redirect' ||
     cat === 'issues:dead-external-domain' ||
-    cat === 'issues:js-only-navigation'
+    cat === 'issues:js-only-navigation' ||
+    // Empty-anchor is a link-level issue whose count is page-level; it was
+    // routed to the Broken Links tab, which runs `queryBrokenLinks` (4xx/5xx
+    // targets only) and never applied the empty-anchor clause — so the
+    // drill-down showed unrelated broken links instead of the pages the
+    // count referred to. The Links tab filters the URL table by category,
+    // which uses the correct `issues:link-empty-anchor` predicate.
+    cat === 'issues:link-empty-anchor'
   ) {
     return 'links';
   }

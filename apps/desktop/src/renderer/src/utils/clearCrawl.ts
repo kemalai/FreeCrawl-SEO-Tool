@@ -1,3 +1,6 @@
+import i18n from '../i18n/index.js';
+import { useAppStore } from '../store.js';
+
 const SKIP_KEY = 'clear:skip-confirm';
 
 /**
@@ -22,6 +25,25 @@ export async function clearCrawlWithConfirm(): Promise<boolean> {
   } catch {
     /* ignore */
   }
-  await window.freecrawl.crawlClear();
+  try {
+    await window.freecrawl.crawlClear();
+  } catch (e) {
+    // Handled here rather than at each call site so every entry point —
+    // the toolbar button, File → Clear, New Project, New from Template —
+    // is covered. A destructive operation that fails silently is the
+    // worst case: `reset()` would still run and the UI would look wiped
+    // while the database kept a half-deleted crawl, indistinguishable
+    // from success. Returning false leaves the UI untouched.
+    const detail = e instanceof Error ? e.message : String(e);
+    useAppStore
+      .getState()
+      .setError(
+        i18n.t('app.clearFailed', {
+          defaultValue: 'Could not clear the crawl: {{detail}}',
+          detail,
+        }),
+      );
+    return false;
+  }
   return true;
 }

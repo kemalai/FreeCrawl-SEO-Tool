@@ -14,6 +14,7 @@ import type { ProjectDb } from '@freecrawl/db';
 import type {
   BulkExportFile,
   BulkExportResult,
+  CrawlUrlRow,
   UrlCategory,
 } from '@freecrawl/shared-types';
 import { exportUrlsToCsv } from './csv-export.js';
@@ -22,7 +23,24 @@ export interface BulkExportTask {
   label: string;
   file: string;
   category: UrlCategory;
+  /** Column override for topic files whose whole point is a field the
+   *  generic column set omits (extraction results, hreflang, security
+   *  headers). When set these are appended to the base columns. */
+  columns?: (keyof CrawlUrlRow)[];
 }
+
+/** Base columns every bulk file carries (mirrors csv-export's CSV_COLUMNS). */
+const BULK_BASE_COLUMNS: (keyof CrawlUrlRow)[] = [
+  'url',
+  'statusCode',
+  'contentKind',
+  'indexability',
+  'indexabilityReason',
+  'title',
+  'inlinks',
+  'outlinks',
+  'depth',
+];
 
 /** Every category/issue family the bulk dump emits, in display order. */
 export const BULK_EXPORT_TASKS: BulkExportTask[] = [
@@ -62,7 +80,12 @@ export const BULK_EXPORT_TASKS: BulkExportTask[] = [
   { label: 'All Pagination', file: 'all-pagination.csv', category: 'tab:pagination' },
   { label: 'Pagination — Sequence Break', file: 'pagination-sequence-break.csv', category: 'issues:pagination-sequence-break' },
   { label: 'Pagination — Canonical Conflict', file: 'pagination-canonical-conflict.csv', category: 'issues:pagination-canonical-conflict' },
-  { label: 'Hreflang — All', file: 'hreflang-all.csv', category: 'tab:hreflang' },
+  {
+    label: 'Hreflang — All',
+    file: 'hreflang-all.csv',
+    category: 'tab:hreflang',
+    columns: [...BULK_BASE_COLUMNS, 'hreflangs'],
+  },
   { label: 'Hreflang — x-default Missing', file: 'hreflang-x-default-missing.csv', category: 'issues:hreflang-x-default-missing' },
   { label: 'Hreflang — Invalid Language Code', file: 'hreflang-invalid-code.csv', category: 'issues:hreflang-invalid-code' },
   { label: 'Hreflang — Self-Ref Missing', file: 'hreflang-self-ref-missing.csv', category: 'issues:hreflang-self-ref-missing' },
@@ -70,8 +93,18 @@ export const BULK_EXPORT_TASKS: BulkExportTask[] = [
   { label: 'Hreflang — Inconsistent Language', file: 'hreflang-inconsistent-lang.csv', category: 'issues:hreflang-inconsistent-lang' },
   { label: 'Duplicate Pages', file: 'duplicate-pages.csv', category: 'tab:duplicates' },
   { label: 'Duplicate Content — Exact', file: 'duplicate-content-exact.csv', category: 'issues:duplicate-content-exact' },
-  { label: 'Custom Extraction Results', file: 'custom-extraction.csv', category: 'tab:custom-extraction' },
-  { label: 'Custom Search Hits', file: 'custom-search.csv', category: 'tab:custom-search' },
+  {
+    label: 'Custom Extraction Results',
+    file: 'custom-extraction.csv',
+    category: 'tab:custom-extraction',
+    columns: [...BULK_BASE_COLUMNS, 'extractionResults'],
+  },
+  {
+    label: 'Custom Search Hits',
+    file: 'custom-search.csv',
+    category: 'tab:custom-search',
+    columns: [...BULK_BASE_COLUMNS, 'customSearchHits'],
+  },
   { label: 'Structured Data — Missing', file: 'structured-data-missing.csv', category: 'issues:structured-data-missing' },
   { label: 'Structured Data — Invalid', file: 'structured-data-invalid.csv', category: 'issues:structured-data-invalid' },
   { label: 'Structured Data — Duplicate @id', file: 'structured-data-duplicate-id.csv', category: 'issues:schema-duplicate-id' },
@@ -81,7 +114,18 @@ export const BULK_EXPORT_TASKS: BulkExportTask[] = [
   { label: 'Image — Empty Alt', file: 'image-empty-alt.csv', category: 'issues:image-empty-alt' },
   { label: 'Image — Too Large', file: 'image-too-large.csv', category: 'issues:image-too-large' },
   { label: 'Image — Broken Src', file: 'image-broken-src.csv', category: 'issues:image-broken-src' },
-  { label: 'Security Audit', file: 'security-audit.csv', category: 'tab:security' },
+  {
+    label: 'Security Audit',
+    file: 'security-audit.csv',
+    category: 'tab:security',
+    columns: [
+      ...BULK_BASE_COLUMNS,
+      'hsts',
+      'csp',
+      'xFrameOptions',
+      'xContentTypeOptions',
+    ],
+  },
   { label: 'Mixed Content — Active', file: 'mixed-content-active.csv', category: 'issues:mixed-content-active' },
   { label: 'Mixed Content — Passive', file: 'mixed-content-passive.csv', category: 'issues:mixed-content-passive' },
   { label: 'HSTS Missing', file: 'security-hsts-missing.csv', category: 'issues:hsts-missing' },
@@ -107,6 +151,7 @@ export async function runBulkExport(
     try {
       const { rowsWritten } = await exportUrlsToCsv(db, filePath, {
         category: task.category,
+        columns: task.columns,
       });
       if (rowsWritten === 0) {
         await unlink(filePath).catch(() => undefined);

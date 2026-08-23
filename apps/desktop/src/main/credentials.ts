@@ -22,7 +22,7 @@
  */
 import { app, safeStorage } from 'electron';
 import { join } from 'node:path';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import {
   INTEGRATIONS,
   getIntegration,
@@ -67,10 +67,33 @@ function load(): CredentialFile {
 
 function persist(): void {
   try {
-    writeFileSync(filePath(), JSON.stringify(cache ?? {}, null, 2), 'utf8');
+    const p = filePath();
+    // 0600: on Linux with no OS keyring the values fall back to base64
+    // (`pt:` prefix), so the file must not be world-readable. Mirrors the
+    // MCP bridge discovery-file pattern (mcp-bridge.ts).
+    writeFileSync(p, JSON.stringify(cache ?? {}, null, 2), { encoding: 'utf8', mode: 0o600 });
+    if (process.platform !== 'win32') {
+      try {
+        chmodSync(p, 0o600);
+      } catch {
+        /* best-effort — a pre-existing file keeps its mode otherwise */
+      }
+    }
   } catch (err) {
     logger.log('error', 'main', `credentials store write failed: ${(err as Error).message}`);
   }
+}
+
+/** Encrypt an arbitrary string for at-rest storage outside this module
+ *  (e.g. crawl-config secrets in preferences.json / project meta). Reuses
+ *  the same safeStorage-with-base64-fallback scheme as credential values. */
+export function encryptString(value: string): string {
+  return encrypt(value);
+}
+
+/** Reverse of {@link encryptString}. Returns '' on any failure. */
+export function decryptString(stored: string): string {
+  return decrypt(stored);
 }
 
 /** Encrypt a value for storage. Falls back to base64 when the OS has no keyring. */

@@ -53,6 +53,12 @@ const MONITOR_INTERVAL_MS = 15_000;
  *  long WITH a request pending means the thread has executed no JS at
  *  all for 10 minutes — treat as wedged and recycle the worker. */
 const WEDGE_TIMEOUT_MS = 10 * 60_000;
+/** Fallback wedge threshold when there is no freeze-watchdog SAB to read a
+ *  heartbeat from: recycle a worker whose oldest pending call has been
+ *  outstanding this long. Set generously (2×) above the heartbeat threshold
+ *  because without the heartbeat we can't tell a wedged thread from a
+ *  legitimately very slow query, so we err toward patience. */
+const NO_SAB_WEDGE_TIMEOUT_MS = 20 * 60_000;
 
 /**
  * Rejection type for "the worker cannot run this job at all" —
@@ -231,7 +237,22 @@ export class DbWriterPool {
         );
       }
     }
-    if (!this.worker || !this.watchdogState) return;
+    if (!this.worker) return;
+    if (!this.watchdogState) {
+      // No SAB heartbeat available — fall back to a plain outstanding-time
+      // check so a genuinely wedged worker still gets recycled instead of
+      // hanging every pending write forever. Coarser (no per-op detail) and
+      // more patient to avoid killing a slow-but-live query.
+      if (now - oldestStartedAt >= NO_SAB_WEDGE_TIMEOUT_MS) {
+        logger.log(
+          'error',
+          'main',
+          `db-writer worker appears wedged: oldest of ${this.pending.size} pending call(s) outstanding for ${Math.round((now - oldestStartedAt) / 1000)}s (no heartbeat available) — terminating and respawning`,
+        );
+        void this.worker.terminate().catch(() => undefined);
+      }
+      return;
+    }
     const heartbeatAge = now - this.watchdogState.readWriterHeartbeatMs();
     if (heartbeatAge >= WEDGE_TIMEOUT_MS && now - oldestStartedAt >= WEDGE_TIMEOUT_MS) {
       const op = this.watchdogState.readWriterOp();
@@ -263,8 +284,12 @@ export class DbWriterPool {
   private handleExit(code: number): void {
     this.worker = null;
     if (this.terminated) return;
-    if (code === 0) return;
+    // Settle in-flight writes BEFORE the clean-exit early return. The pool
+    // has no request timeout, so a worker that exits with code 0 while
+    // holding pending calls would leave those promises unsettled forever —
+    // and every caller awaiting one hangs with it.
     this.failPendingWith('writer-crashed');
+    if (code === 0) return;
     const now = Date.now();
     this.restartTimes = this.restartTimes.filter((t) => now - t < RESTART_WINDOW_MS);
     if (this.restartTimes.length >= MAX_RESTARTS) {

@@ -51,7 +51,14 @@ let session: Session | null = null;
 
 function openProject(projectPath: string): Session {
   if (!fs.existsSync(projectPath)) {
-    throw new Error(`Project file does not exist: ${projectPath}`);
+    throw new Error(
+      `Project file does not exist: ${projectPath}\n` +
+        'If the desktop app is open, it may be running in RAM-only storage ' +
+        'mode, which keeps the project in memory and never writes this file. ' +
+        'Switch to Disk mode in Settings → Storage, use Save As and point at ' +
+        'the saved file with set_project, or create an isolated headless ' +
+        'session with session_create.',
+    );
   }
   const db = new ProjectDb(projectPath, { readOnly: true });
   return { projectPath, db };

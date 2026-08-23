@@ -17,26 +17,45 @@ export function Ga4SettingsSection() {
   const { t } = useTranslation();
   const [settings, setSettings] = useState<Ga4IntegrationSettings | null>(null);
   const [accounts, setAccounts] = useState<GoogleAccount[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [stored, list] = await Promise.all([
-        window.freecrawl.integrationSettingsGet('ga4'),
-        window.freecrawl.googleAccountsList('ga4'),
-      ]);
-      if (cancelled) return;
-      setAccounts(list);
-      setSettings({
-        ...defaultGa4Settings(),
-        ...(stored ?? {}),
-      } as Ga4IntegrationSettings);
+      try {
+        const [stored, list] = await Promise.all([
+          window.freecrawl.integrationSettingsGet('ga4'),
+          window.freecrawl.googleAccountsList('ga4'),
+        ]);
+        if (cancelled) return;
+        setAccounts(list);
+        setSettings({
+          ...defaultGa4Settings(),
+          ...(stored ?? {}),
+        } as Ga4IntegrationSettings);
+      } catch (e) {
+        if (cancelled) return;
+        // See GscSettingsSection — an unguarded rejection removed this
+        // section from Settings entirely. Report it instead, and do not
+        // substitute defaults for settings we could not read.
+        setLoadError(e instanceof Error ? e.message : String(e));
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
 
+  if (loadError) {
+    return (
+      <div className="text-[11px]">
+        <div className="font-semibold text-rose-300">
+          {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
+        </div>
+        <div className="mt-0.5 break-words text-surface-500">{loadError}</div>
+      </div>
+    );
+  }
   if (!settings) return null;
 
   const update = <K extends keyof Ga4IntegrationSettings>(

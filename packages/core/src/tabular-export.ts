@@ -4,8 +4,18 @@ import { Readable } from 'node:stream';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import type { ProjectDb } from '@freecrawl/db';
-import type { CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
+import type { CrawlUrlRow, UrlCategory, AdvancedFilter } from '@freecrawl/shared-types';
 import { ensureHeapHeadroom } from './heap-guard.js';
+import { escapeCsv } from './spreadsheet.js';
+
+/** How a section selects its rows. `selectedIds` wins; otherwise category is
+ *  narrowed by the active search/filter so the export matches the grid. */
+interface RowQuery {
+  category: UrlCategory;
+  selectedIds?: number[];
+  search?: string;
+  filter?: AdvancedFilter;
+}
 
 export interface TabularSection {
   label: string;
@@ -26,6 +36,11 @@ export interface TabularExportOptions {
   columns: string[];
   /** When provided AND non-empty, restrict every section to these row ids. */
   selectedIds?: number[];
+  /** Active URL-table search — applied to every section (ignored when
+   *  `selectedIds` is set) so the export matches the filtered grid. */
+  search?: string;
+  /** Active advanced filter — same rationale as `search`. */
+  filter?: AdvancedFilter;
   /** Prefix CSV files with a UTF-8 BOM so Excel-for-Windows opens them
    *  in the correct charset. Ignored for non-CSV formats. Default true. */
   csvBom?: boolean;
@@ -48,55 +63,75 @@ export interface TabularExportResult {
  * canonical CSV-injection mitigation per OWASP. The apostrophe is
  * visible in Excel only when the user is editing the cell.
  */
-function sanitizeFormulaPrefix(str: string): string {
-  if (!str) return str;
-  const first = str.charCodeAt(0);
-  // 0x09 TAB, 0x0D CR — both can start a formula in some parsers.
-  if (first === 0x3d || first === 0x2b || first === 0x2d || first === 0x40 || first === 0x09 || first === 0x0d) {
-    return `'${str}`;
+/**
+ * Excel's hard limit on characters in one cell. Exceed it and Excel
+ * declares the workbook corrupt ("We found a problem with some content…")
+ * and silently drops the record when the user clicks Repair — so the cell
+ * that mattered most is the one that disappears. Reachable today from the
+ * Structured Data grid export, which writes whole raw JSON-LD blocks.
+ */
+const XLSX_MAX_CELL_CHARS = 32_767;
+
+/** Render one text cell for a worksheet.
+ *
+ *  No formula guard here, deliberately. In SpreadsheetML a cell is a
+ *  formula only if it carries an `<f>` child; `t="inlineStr"` content is
+ *  never evaluated. Prefixing it with `'` therefore protected nothing and
+ *  corrupted real values — a title like `-50% İndirim Fırsatı` reached the
+ *  user as `'-50% İndirim Fırsatı`. (XLSX being inert this way is exactly
+ *  why it is the recommended mitigation for CSV injection.)
+ *
+ *  `xml:space="preserve"` keeps leading/trailing spaces, which Excel
+ *  otherwise trims — and padded anchor text is itself a finding this tool
+ *  reports, so silently trimming it destroys the evidence.
+ */
+function inlineStrCell(cellRef: string, value: unknown): string {
+  let text = String(value);
+  if (text.length > XLSX_MAX_CELL_CHARS) {
+    text = text.slice(0, XLSX_MAX_CELL_CHARS - 1) + '…';
   }
-  return str;
+  const preserve = /^\s|\s$/.test(text) ? ' xml:space="preserve"' : '';
+  return `<c r="${cellRef}" t="inlineStr"><is><t${preserve}>${xmlEscape(text)}</t></is></c>`;
 }
 
-function escapeCsv(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  const str = sanitizeFormulaPrefix(String(value));
-  if (/[",\n\r]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
-
-function rowSource(
-  db: ProjectDb,
-  category: UrlCategory,
-  selectedIds: number[] | undefined,
-): Iterable<CrawlUrlRow> {
-  if (selectedIds && selectedIds.length > 0) {
+function rowSource(db: ProjectDb, q: RowQuery): Iterable<CrawlUrlRow> {
+  if (q.selectedIds && q.selectedIds.length > 0) {
     // Apply selectedIds first, then narrow by category client-side. The
     // sidebar's category predicates can be expensive; for export the
-    // selection is always the small side.
-    const ids = new Set(selectedIds);
+    // selection is always the small side. (An explicit selection overrides
+    // the search/filter — the user picked exact rows.)
+    const ids = new Set(q.selectedIds);
     return (function* () {
-      for (const row of db.iterateUrlsByCategory(category)) {
+      for (const row of db.iterateUrlsByCategory(q.category)) {
         if (ids.has(row.id)) yield row;
       }
     })();
   }
-  return db.iterateUrlsByCategory(category);
+  // Honour the active search / advanced filter so the export mirrors the
+  // on-screen grid rather than the whole category.
+  if (q.search || q.filter) {
+    return db.iterateUrlsByQuery({
+      category: q.category,
+      search: q.search,
+      filter: q.filter,
+    });
+  }
+  return db.iterateUrlsByCategory(q.category);
 }
 
 async function writeCsvFile(
   db: ProjectDb,
   filePath: string,
   columns: string[],
-  category: UrlCategory,
-  selectedIds: number[] | undefined,
+  query: RowQuery,
   withBom: boolean,
 ): Promise<number> {
   let rowsWritten = 0;
-  const header = columns.join(',') + '\n';
-  const source = rowSource(db, category, selectedIds);
+  // Escape the header row too: a column label containing a comma, quote or
+  // leading `=`/`+`/`-`/`@` would otherwise break the CSV or inject a
+  // formula. The data rows below already go through escapeCsv.
+  const header = columns.map((c) => escapeCsv(c)).join(',') + '\n';
+  const source = rowSource(db, query);
   const generator = async function* (): AsyncGenerator<string> {
     if (withBom) yield '﻿' + header;
     else yield header;
@@ -118,12 +153,22 @@ async function writeCsvFile(
 
 function escapeXml(value: unknown): string {
   if (value === null || value === undefined) return '';
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+  return (
+    String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;')
+      // Characters XML 1.0 forbids outright — escaping does NOT make them
+      // legal. One page whose title carries an interior control char (they
+      // arrive via numeric HTML entities and survive `.trim()`) made the
+      // whole document unparseable, so every consumer saw zero rows from a
+      // single bad page. `xmlEscape` below already strips these; this
+      // escaper was simply missing it.
+      // eslint-disable-next-line no-control-regex -- intentionally matching control chars to strip them
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+  );
 }
 
 function xmlSafeTag(name: string): string {
@@ -138,11 +183,10 @@ async function writeJsonFile(
   db: ProjectDb,
   filePath: string,
   columns: string[],
-  category: UrlCategory,
-  selectedIds: number[] | undefined,
+  query: RowQuery,
 ): Promise<number> {
   let rowsWritten = 0;
-  const source = rowSource(db, category, selectedIds);
+  const source = rowSource(db, query);
   const generator = async function* (): AsyncGenerator<string> {
     yield '[';
     let first = true;
@@ -168,12 +212,11 @@ async function writeXmlFile(
   db: ProjectDb,
   filePath: string,
   columns: string[],
-  category: UrlCategory,
-  selectedIds: number[] | undefined,
+  query: RowQuery,
   sectionLabel: string,
 ): Promise<number> {
   let rowsWritten = 0;
-  const source = rowSource(db, category, selectedIds);
+  const source = rowSource(db, query);
   const rootTag = xmlSafeTag(sectionLabel) || 'export';
   const cols = columns.map((c) => ({ key: c, tag: xmlSafeTag(c) }));
   const generator = async function* (): AsyncGenerator<string> {
@@ -197,17 +240,36 @@ async function writeXmlFile(
   return rowsWritten;
 }
 
+// Windows reserved device names — writing to `con.csv` etc. targets the
+// console/printer device, not a file. Rejected in both helpers.
+const WINDOWS_DEVICE_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+function sanitizeSegment(seg: string): string {
+  const cleaned = seg
+    // eslint-disable-next-line no-control-regex -- deliberately stripping control chars from a filename
+    .replace(/[\\/?*[\]:<>|"\x00-\x1f]/g, '_')
+    .replace(/\s+/g, '-')
+    .toLowerCase();
+  return WINDOWS_DEVICE_NAMES.test(cleaned) ? `_${cleaned}` : cleaned;
+}
+
 function sanitizeFilename(label: string): string {
-  return label.replace(/[\\/?*[\]:<>|"]/g, '_').replace(/\s+/g, '-').toLowerCase();
+  const cleaned = sanitizeSegment(label);
+  // A bare `.`/`..` (or one that sanitised down to that) must never become a
+  // filename — strip leading/trailing dots.
+  const stripped = cleaned.replace(/^\.+|\.+$/g, '');
+  return stripped.length > 0 ? stripped : 'export';
 }
 
 function sanitizeSubdir(subdir: string): string {
   // Sanitize each path segment individually so a hierarchical export like
   // 'crawl-data/internal' stays nested rather than collapsing into one
-  // filename component.
+  // filename component. `.`/`..` segments are dropped so a caller-supplied
+  // `../../etc` cannot escape the chosen output root (path traversal).
   return subdir
     .split(/[\\/]+/)
-    .map((seg) => seg.replace(/[\\/?*[\]:<>|"]/g, '_').replace(/\s+/g, '-').toLowerCase())
+    .filter((seg) => seg !== '.' && seg !== '..')
+    .map(sanitizeSegment)
     .filter((seg) => seg.length > 0)
     .join(path.sep);
 }
@@ -296,10 +358,7 @@ function buildSheetXmlFromCells(
       } else if (typeof v === 'boolean') {
         parts.push(`<c r="${cellRef}" t="b"><v>${v ? 1 : 0}</v></c>`);
       } else {
-        const safe = sanitizeFormulaPrefix(String(v));
-        parts.push(
-          `<c r="${cellRef}" t="inlineStr"><is><t>${xmlEscape(safe)}</t></is></c>`,
-        );
+        parts.push(inlineStrCell(cellRef, v));
       }
     });
     parts.push('</row>');
@@ -339,13 +398,7 @@ function buildSheetXml(
       } else if (typeof v === 'boolean') {
         parts.push(`<c r="${cellRef}" t="b"><v>${v ? 1 : 0}</v></c>`);
       } else {
-        // Bug #9 — neutralise leading formula triggers; Excel auto-runs
-        // `=cmd|...` if the cell isn't sanitised. Apostrophe prefix is
-        // the canonical guard (OWASP CSV-injection guidance).
-        const safe = sanitizeFormulaPrefix(String(v));
-        parts.push(
-          `<c r="${cellRef}" t="inlineStr"><is><t>${xmlEscape(safe)}</t></is></c>`,
-        );
+        parts.push(inlineStrCell(cellRef, v));
       }
     });
     parts.push('</row>');
@@ -543,6 +596,13 @@ export async function exportTabular(
 ): Promise<TabularExportResult> {
   const { format, sections, columns, selectedIds } = options;
   const csvBom = options.csvBom !== false;
+  // Build the per-section query once: an explicit selection overrides the
+  // search/filter (the user picked exact rows), otherwise the active grid
+  // search + advanced filter apply so the export mirrors the view.
+  const queryFor = (category: UrlCategory): RowQuery =>
+    selectedIds && selectedIds.length > 0
+      ? { category, selectedIds }
+      : { category, search: options.search, filter: options.filter };
   if (sections.length === 0) {
     throw new Error('exportTabular: at least one section is required');
   }
@@ -561,7 +621,7 @@ export async function exportTabular(
     let total = 0;
     const sheets = sections.map((section) => {
       const rows: CrawlUrlRow[] = [];
-      for (const row of rowSource(db, section.category, selectedIds)) {
+      for (const row of rowSource(db, queryFor(section.category))) {
         rows.push(row);
         if (rows.length % 50_000 === 0) {
           ensureHeapHeadroom('XLSX export', 128 * 1024 * 1024);
@@ -595,13 +655,14 @@ export async function exportTabular(
     : outputPath;
 
   const writeOne = async (filePath: string, section: TabularSection): Promise<number> => {
+    const query = queryFor(section.category);
     if (format === 'csv') {
-      return writeCsvFile(db, filePath, columns, section.category, selectedIds, csvBom);
+      return writeCsvFile(db, filePath, columns, query, csvBom);
     }
     if (format === 'json') {
-      return writeJsonFile(db, filePath, columns, section.category, selectedIds);
+      return writeJsonFile(db, filePath, columns, query);
     }
-    return writeXmlFile(db, filePath, columns, section.category, selectedIds, section.label);
+    return writeXmlFile(db, filePath, columns, query, section.label);
   };
 
   if (singleFlat) {

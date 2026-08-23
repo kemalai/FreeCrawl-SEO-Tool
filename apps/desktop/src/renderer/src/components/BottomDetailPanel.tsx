@@ -599,16 +599,27 @@ function SpellingView({
   const { t } = useTranslation();
   const [data, setData] = useState<SpellingMatchesResult | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const dataVersion = useAppStore((s) => s.dataVersion);
 
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
-    void window.freecrawl.spellingMatches(pageUrl).then((res) => {
-      if (cancelled) return;
-      setData(res);
-      setLoaded(true);
-    });
+    setLoadError(null);
+    void window.freecrawl
+      .spellingMatches(pageUrl)
+      .then((res) => {
+        if (cancelled) return;
+        setData(res);
+        setLoaded(true);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        // `setLoaded(true)` lived only in `then`, so a rejection left this
+        // panel on "Loading…" for as long as the URL stayed selected.
+        setLoadError(e instanceof Error ? e.message : String(e));
+        setLoaded(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -618,6 +629,18 @@ function SpellingView({
     return (
       <div className="p-3 text-[11px] text-surface-500">
         {t('spelling.loading', { defaultValue: 'Loading…' })}
+      </div>
+    );
+  }
+  if (loadError) {
+    // Distinct from "not checked yet" below, which is a statement about
+    // the page rather than about the lookup having failed.
+    return (
+      <div className="p-3 text-[11px]">
+        <div className="font-semibold text-rose-300">
+          {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
+        </div>
+        <div className="mt-0.5 break-words text-surface-500">{loadError}</div>
       </div>
     );
   }
@@ -813,16 +836,27 @@ function AnalyticsView({
   const { t } = useTranslation();
   const [data, setData] = useState<UrlAnalyticsDetail | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const dataVersion = useAppStore((s) => s.dataVersion);
 
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
-    void window.freecrawl.urlAnalyticsGet(pageUrl).then((res) => {
-      if (cancelled) return;
-      setData(res);
-      setLoaded(true);
-    });
+    setLoadError(null);
+    void window.freecrawl
+      .urlAnalyticsGet(pageUrl)
+      .then((res) => {
+        if (cancelled) return;
+        setData(res);
+        setLoaded(true);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        // This handler also resolves a Google account in the main process,
+        // which can reject. Without a catch the panel spun forever.
+        setLoadError(e instanceof Error ? e.message : String(e));
+        setLoaded(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -832,6 +866,16 @@ function AnalyticsView({
     return (
       <div className="flex h-full items-center justify-center text-[12px] text-surface-500">
         {t('analyticsView.loading', { defaultValue: 'Loading…' })}
+      </div>
+    );
+  }
+  if (loadError) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-1 px-6 text-center">
+        <div className="text-[12px] font-semibold text-rose-300">
+          {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
+        </div>
+        <div className="max-w-md break-words text-[11px] text-surface-500">{loadError}</div>
       </div>
     );
   }
@@ -3410,6 +3454,27 @@ interface JsonLdBlock {
  * the page declares — supplements the per-URL `schema_types` summary with
  * the underlying JSON the parser saw.
  */
+/** Collect the `@type` values a single parsed JSON-LD block declares,
+ *  walking `@graph` and arrays. Used for the per-block "Types" export column,
+ *  which previously repeated the page-level type list on every row. */
+function blockSchemaTypes(parsed: unknown): string[] {
+  const out = new Set<string>();
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const n of node) visit(n);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const obj = node as Record<string, unknown>;
+    const t = obj['@type'];
+    if (typeof t === 'string') out.add(t);
+    else if (Array.isArray(t)) for (const v of t) if (typeof v === 'string') out.add(v);
+    if (Array.isArray(obj['@graph'])) visit(obj['@graph']);
+  };
+  visit(parsed);
+  return [...out];
+}
+
 function extractJsonLdBlocks(html: string): JsonLdBlock[] {
   const blocks: JsonLdBlock[] = [];
   const re =
@@ -3512,7 +3577,9 @@ function StructuredDataView({
             rows: blocks.map((b) => [
               b.index + 1,
               b.ok,
-              types.join(', '),
+              // This block's own @type(s), not the page-level list — the
+              // old code repeated the whole page's types on every row.
+              blockSchemaTypes(b.parsed).join(', '),
               b.raw,
             ]),
           })}

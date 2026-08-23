@@ -32,6 +32,7 @@ export function SerpTab() {
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
   const [sortMode, setSortMode] = useState<SortMode>('inlinks');
+  const [loadError, setLoadError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -46,17 +47,26 @@ export function SerpTab() {
               ? 'titleLength'
               : 'metaDescriptionLength';
       const sortDir: 'asc' | 'desc' = sortMode === 'url' ? 'asc' : 'desc';
-      const res = await window.freecrawl.urlsQuery({
-        limit: PAGE_SIZE,
-        offset: 0,
-        category: 'tab:serp',
-        search: search || undefined,
-        sortBy,
-        sortDir,
-      });
-      if (cancelled) return;
-      setRows(res.rows);
-      setTotal(res.total);
+      try {
+        const res = await window.freecrawl.urlsQuery({
+          limit: PAGE_SIZE,
+          offset: 0,
+          category: 'tab:serp',
+          search: search || undefined,
+          sortBy,
+          sortDir,
+        });
+        if (cancelled) return;
+        setRows(res.rows);
+        setTotal(res.total);
+        setLoadError(null);
+      } catch (e) {
+        if (cancelled) return;
+        // Keep the last good rows and say the refresh failed, rather than
+        // falling through to "no indexable pages yet" — which reads as a
+        // finding about the site instead of a failure of the query.
+        setLoadError(e instanceof Error ? e.message : String(e));
+      }
     };
     void load();
     const cadence = progress?.running ? POLL_MS_RUNNING : POLL_MS_IDLE;
@@ -108,6 +118,19 @@ export function SerpTab() {
           </select>
         </label>
         <div className="ml-auto text-[11px] text-surface-500">
+          {/* Rows are on screen, so the list itself isn't misleading — but
+              the counts are stale, and saying so beats silence. */}
+          {loadError && rows.length > 0 && (
+            <span
+              className="mr-2 text-rose-300"
+              title={loadError}
+            >
+              {t('common.loadFailedStale', {
+                defaultValue:
+                  'Showing the last successful result — the latest refresh failed.',
+              })}
+            </span>
+          )}
           {t('serpTab.summary', {
             defaultValue: '{{shown}} of {{total}} indexable pages',
             shown: rows.length.toLocaleString(),
@@ -121,7 +144,23 @@ export function SerpTab() {
         ref={scrollRef}
         className="flex-1 overflow-y-auto bg-surface-950 px-6 py-4"
       >
-        {rows.length === 0 && (
+        {/* A failed query must not be reported as "this crawl has no
+            indexable pages" — that is a claim about the site. */}
+        {loadError && rows.length === 0 && (
+          <div className="flex h-full flex-col items-center justify-center gap-1 px-6 text-center">
+            <div className="text-[13px] font-semibold text-rose-300">
+              {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
+            </div>
+            <div className="text-[12px] text-surface-500">
+              {t('common.loadFailedBody', {
+                defaultValue:
+                  'The query failed, so results are missing rather than empty. Retrying automatically.',
+              })}
+            </div>
+            <div className="break-words text-[11px] text-surface-600">{loadError}</div>
+          </div>
+        )}
+        {!loadError && rows.length === 0 && (
           <div className="flex h-full items-center justify-center text-[12px] text-surface-500">
             {total === 0
               ? t('serpTab.emptyNoData', { defaultValue: 'No indexable HTML pages with a title yet — run a crawl to populate SERP previews.' })

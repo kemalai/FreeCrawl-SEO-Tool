@@ -276,6 +276,28 @@ export function detectHttpProtocol(altSvcHeader: string | null): string | null {
  *   fetch failed -> UNABLE_TO_GET_ISSUER_CERT_LOCALLY (TLS root not trusted — check antivirus / corporate proxy)
  *   fetch failed -> ECONNREFUSED
  */
+/**
+ * Strip header values that undici echoes back inside its own error text.
+ *
+ * When a header value contains a character the spec forbids, undici throws
+ * `Headers.append: "<the entire value>" is an invalid header value.` If that
+ * header is `Authorization` — or a custom one like `X-Api-Key` — the secret
+ * is now inside an Error message. A trailing newline or tab is exactly what
+ * you get pasting a token out of a terminal or a .env file, so this is a
+ * routine mistake, not a contrived one.
+ *
+ * That message does not stay in memory: it is emitted as a crawler warning
+ * (disk log + in-app Logs window) and written to the database as both
+ * `statusText` and `indexabilityReason` — and `indexabilityReason` is a CSV
+ * export column, so the token would travel with any exported report.
+ */
+export function redactHeaderValues(text: string): string {
+  return text.replace(
+    /(Headers\.(?:append|set): )"[^"]*"( is an invalid header (?:value|name))/gi,
+    '$1"[redacted]"$2',
+  );
+}
+
 export function formatFetchError(err: unknown): string {
   const parts: string[] = [];
   const seen = new Set<unknown>();
@@ -293,7 +315,7 @@ export function formatFetchError(err: unknown): string {
       break;
     }
   }
-  const chain = parts.join(' -> ');
+  const chain = redactHeaderValues(parts.join(' -> '));
   // Friendly hints for the most common packaged-app failure modes.
   // ORDER MATTERS — more specific patterns must come first. DNS-layer
   // errors (queryA / queryAAAA / EDESTRUCTION) frequently surface as
@@ -387,6 +409,21 @@ export function collectNetworkDiagnostics(opts: { proxyOverride?: string } = {})
  * if the user configured them themselves they don't want them appearing in
  * the in-app log window.
  */
+/**
+ * Reduce a URL to its origin for logging, dropping userinfo and the path.
+ *
+ * For an incoming-webhook URL the PATH is the secret — a Slack or Discord
+ * webhook is bearer-equivalent, so `https://hooks.slack.com/services/T00/B00/XXXX`
+ * must never appear in a log file that users are asked to share.
+ */
+export function redactUrlSecrets(url: string): string {
+  try {
+    return `${new URL(url).origin}/…`;
+  } catch {
+    return '[unparseable url]';
+  }
+}
+
 function redactProxyCreds(url: string): string {
   try {
     const u = new URL(url);

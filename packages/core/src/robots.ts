@@ -12,7 +12,41 @@ const NOOP: RobotsChecker = {
   getCrawlDelay: () => undefined,
 };
 
-export async function loadRobots(origin: string, userAgent: string): Promise<RobotsChecker> {
+/**
+ * Reduce a User-Agent *header* to the product token robots.txt groups are
+ * written against.
+ *
+ * `robots-parser` expects a token, not a header: internally it lowercases
+ * the value and truncates at the first `/`. Handing it the full preset
+ * header `Mozilla/5.0 (compatible; Googlebot/2.1; +http://…)` therefore
+ * matched against `mozilla`, which appears in no robots.txt — so NO
+ * crawler-specific group ever applied and everything silently fell through
+ * to `User-agent: *`. A site with `User-agent: Googlebot / Disallow: /`
+ * was crawled in full and every page reported Indexable.
+ *
+ * `compatible; <token>` is the conventional place a bot names itself; when
+ * it is absent, the leading product token is the right answer
+ * (`FreeCrawlSEO/0.1 (+…)` → `FreeCrawlSEO`).
+ */
+export function robotsUserAgentToken(userAgent: string): string {
+  const compat = /compatible;\s*([A-Za-z0-9._*-]+)/i.exec(userAgent);
+  if (compat?.[1]) return compat[1];
+  const leading = userAgent.trim().split(/[/\s;(]/)[0];
+  return leading && leading.length > 0 ? leading : userAgent;
+}
+
+export async function loadRobots(
+  origin: string,
+  userAgent: string,
+  /** Optional notice sink. Called when robots.txt returns a server error
+   *  (5xx): RFC 9309 says a crawler SHOULD then treat the whole site as
+   *  disallowed, but we keep crawling (allow-all) so a transient 503 — very
+   *  common behind Cloudflare — doesn't silently nuke the entire crawl. The
+   *  caller surfaces this so the choice is visible rather than hidden. */
+  onNotice?: (message: string) => void,
+): Promise<RobotsChecker> {
+  // The header goes on the wire; only the token goes to the matcher.
+  const uaToken = robotsUserAgentToken(userAgent);
   const robotsUrl = new URL('/robots.txt', origin).toString();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
@@ -26,9 +60,14 @@ export async function loadRobots(origin: string, userAgent: string): Promise<Rob
       const body = await res.text();
       const parser = robotsParser(robotsUrl, body);
       return {
-        isAllowed: (url: string) => parser.isAllowed(url, userAgent) ?? true,
-        getCrawlDelay: () => parser.getCrawlDelay(userAgent),
+        isAllowed: (url: string) => parser.isAllowed(url, uaToken) ?? true,
+        getCrawlDelay: () => parser.getCrawlDelay(uaToken),
       };
+    }
+    if (res.status >= 500 && onNotice) {
+      onNotice(
+        `robots.txt for ${origin} returned HTTP ${res.status}. Per RFC 9309 a 5xx should be treated as "disallow all", but FreeCrawl continues crawling to avoid a transient server error blocking the whole run — verify the site is reachable if results look off.`,
+      );
     }
   } catch {
     // ignore — default allow
@@ -73,6 +112,11 @@ export async function testUrlAgainstRobots(
   // `gamesatis.com`, `www.example.com/foo`, or `//host/path`. Prepend
   // `https://` when the scheme is missing so `new URL()` succeeds.
   const probedUrl = normalizeRobotsTestInput(url);
+  // Same split as `loadRobots`: the full header identifies us on the wire,
+  // the product token is what robots.txt groups are matched against. The
+  // tester has to use the identical rule or it would report "allowed" for
+  // URLs the crawler actually blocks, and vice versa.
+  const uaToken = robotsUserAgentToken(userAgent);
   let origin = '';
   let robotsUrl = '';
   try {
@@ -110,8 +154,8 @@ export async function testUrlAgainstRobots(
       robotsUrl: '<custom>',
       status: 0,
       body,
-      allowed: parser.isAllowed(probedUrl, userAgent) ?? true,
-      crawlDelay: parser.getCrawlDelay(userAgent) ?? null,
+      allowed: parser.isAllowed(probedUrl, uaToken) ?? true,
+      crawlDelay: parser.getCrawlDelay(uaToken) ?? null,
       sitemaps,
       error: null,
     };
@@ -138,8 +182,12 @@ export async function testUrlAgainstRobots(
       } catch {
         /* ignore */
       }
-      // Per the robots.txt RFC: any non-success makes the site "allow all"
-      // for crawlers. Reflect that explicitly.
+      // RFC 9309 distinguishes the two: a 4xx ("unavailable") means allow
+      // all; a 5xx ("unreachable") means a crawler SHOULD treat the site as
+      // fully disallowed. FreeCrawl still crawls on a 5xx (so a transient
+      // 503 doesn't nuke the run) but the message must not claim the RFC
+      // says "allow" — state what actually happens per status.
+      const is5xx = status !== null && status >= 500;
       return {
         url: probedUrl,
         robotsUrl,
@@ -148,7 +196,9 @@ export async function testUrlAgainstRobots(
         allowed: true,
         crawlDelay: null,
         sitemaps: [],
-        error: `robots.txt returned HTTP ${status} — defaulting to allow.`,
+        error: is5xx
+          ? `robots.txt returned HTTP ${status}. Per RFC 9309 a 5xx means "disallow all"; FreeCrawl still crawls to survive transient server errors, but a compliant crawler (Googlebot) would stop.`
+          : `robots.txt returned HTTP ${status} (4xx = unavailable) — allow all, per RFC 9309.`,
       };
     }
   } catch (err) {
@@ -179,8 +229,8 @@ export async function testUrlAgainstRobots(
     robotsUrl,
     status,
     body,
-    allowed: parser.isAllowed(probedUrl, userAgent) ?? true,
-    crawlDelay: parser.getCrawlDelay(userAgent) ?? null,
+    allowed: parser.isAllowed(probedUrl, uaToken) ?? true,
+    crawlDelay: parser.getCrawlDelay(uaToken) ?? null,
     sitemaps,
     error: null,
   };

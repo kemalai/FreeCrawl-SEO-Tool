@@ -17,7 +17,7 @@ const POLL_MS_RUNNING = 3000;
 const POLL_MS_IDLE = 30_000;
 const PAGE_SIZE = 5000;
 
-type SortKey = 'src' | 'alt' | 'width' | 'height' | 'occurrences';
+type SortKey = 'src' | 'alt' | 'width' | 'height' | 'occurrences' | 'fromUrl';
 
 export function ImagesTab() {
   const { t, i18n } = useTranslation();
@@ -31,6 +31,7 @@ export function ImagesTab() {
   const [sortBy, setSortBy] = useState<SortKey>('occurrences');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [exporting, setExporting] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Alt-issue filters are driven by the Overview sidebar's Issues section —
@@ -43,17 +44,27 @@ export function ImagesTab() {
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      const res = await window.freecrawl.imagesQuery({
-        limit: PAGE_SIZE,
-        offset: 0,
-        search: search || undefined,
-        missingAltOnly,
-        emptyAltOnly,
-        duplicateAltOnly,
-      });
-      if (cancelled) return;
-      setRows(res.rows);
-      setTotal(res.total);
+      try {
+        const res = await window.freecrawl.imagesQuery({
+          limit: PAGE_SIZE,
+          offset: 0,
+          search: search || undefined,
+          missingAltOnly,
+          emptyAltOnly,
+          duplicateAltOnly,
+        });
+        if (cancelled) return;
+        setRows(res.rows);
+        setTotal(res.total);
+        setLoadError(null);
+      } catch (e) {
+        if (cancelled) return;
+        // A rejected query used to leave `rows` empty, which the empty
+        // state below rendered as "No images" — presenting a failed
+        // lookup as an authoritative clean result. Keep whatever we last
+        // loaded and say plainly that the refresh failed instead.
+        setLoadError(e instanceof Error ? e.message : String(e));
+      }
     };
     void load();
     const cadence = progress?.running ? POLL_MS_RUNNING : POLL_MS_IDLE;
@@ -85,7 +96,12 @@ export function ImagesTab() {
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 30,
-    getItemKey: (index) => sorted[index]?.id ?? index,
+    // Composite key: the tab is per-usage, so the same image id can appear
+    // on several rows (one per page). Keying by id alone would collide.
+    getItemKey: (index) => {
+      const r = sorted[index];
+      return r ? `${r.id}:${r.fromUrl ?? ''}` : index;
+    },
   });
 
   // Export every image row (not just the loaded page) to CSV. The
@@ -159,6 +175,13 @@ export function ImagesTab() {
       align: 'right',
       info: 'How many distinct pages reference this image. High values typically indicate site-wide assets (logos, icons).',
       example: '47',
+    },
+    {
+      key: 'fromUrl',
+      label: 'Page',
+      width: 460,
+      info: 'The page this image usage is on. The same image on several pages appears once per page, so its alt is accurate for each page.',
+      example: 'https://example.com/products/widget',
     },
   ];
   const colsWidth = columns.reduce((n, c) => n + c.width, 0);
@@ -361,6 +384,22 @@ export function ImagesTab() {
                       {row.occurrences.toLocaleString()}
                     </span>
                   </div>
+                  <div
+                    className="overflow-hidden px-2"
+                    style={{
+                      width: columns[5]!.width,
+                      minWidth: columns[5]!.width,
+                      flex: `0 0 ${columns[5]!.width}px`,
+                    }}
+                  >
+                    {row.fromUrl ? (
+                      <span className="block truncate font-mono text-surface-400" title={row.fromUrl}>
+                        {row.fromUrl}
+                      </span>
+                    ) : (
+                      <span className="text-surface-700">—</span>
+                    )}
+                  </div>
                   <div className="flex-1" />
                 </div>
               );
@@ -368,24 +407,52 @@ export function ImagesTab() {
           </div>
         </div>
 
-        {total === 0 && (
+        {/* An error must win over the empty state: "no images" and "the
+            query failed" look identical to the user otherwise, and only
+            one of them means the site is clean. */}
+        {loadError ? (
           <div
             className="pointer-events-none absolute inset-0 flex items-center justify-center"
             style={{ top: HEADER_HEIGHT }}
           >
             <div className="max-w-md text-center">
-              <div className="mb-1 text-sm font-semibold text-surface-300">{t('imagesTab.noImages', { defaultValue: 'No images' })}</div>
-              <div className="text-xs text-surface-500">
-                {missingAltOnly
-                  ? t('imagesTab.emptyMissingAlt', { defaultValue: 'No images without alt text.' })
-                  : emptyAltOnly
-                    ? t('imagesTab.emptyEmptyAlt', { defaultValue: 'No images with an empty alt="".' })
-                    : duplicateAltOnly
-                      ? t('imagesTab.emptyDuplicateAlt', { defaultValue: 'No images share the same alt text.' })
-                      : t('imagesTab.emptyDefault', { defaultValue: 'Crawl a site to discover images.' })}
+              <div className="mb-1 text-sm font-semibold text-rose-300">
+                {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
               </div>
+              <div className="text-xs text-surface-500">
+                {total > 0
+                  ? t('common.loadFailedStale', {
+                      defaultValue:
+                        'Showing the last successful result — the latest refresh failed.',
+                    })
+                  : t('common.loadFailedBody', {
+                      defaultValue:
+                        'The query failed, so results are missing rather than empty. Retrying automatically.',
+                    })}
+              </div>
+              <div className="mt-1 break-words text-[11px] text-surface-600">{loadError}</div>
             </div>
           </div>
+        ) : (
+          total === 0 && (
+            <div
+              className="pointer-events-none absolute inset-0 flex items-center justify-center"
+              style={{ top: HEADER_HEIGHT }}
+            >
+              <div className="max-w-md text-center">
+                <div className="mb-1 text-sm font-semibold text-surface-300">{t('imagesTab.noImages', { defaultValue: 'No images' })}</div>
+                <div className="text-xs text-surface-500">
+                  {missingAltOnly
+                    ? t('imagesTab.emptyMissingAlt', { defaultValue: 'No images without alt text.' })
+                    : emptyAltOnly
+                      ? t('imagesTab.emptyEmptyAlt', { defaultValue: 'No images with an empty alt="".' })
+                      : duplicateAltOnly
+                        ? t('imagesTab.emptyDuplicateAlt', { defaultValue: 'No images share the same alt text.' })
+                        : t('imagesTab.emptyDefault', { defaultValue: 'Crawl a site to discover images.' })}
+                </div>
+              </div>
+            </div>
+          )
         )}
       </div>
 

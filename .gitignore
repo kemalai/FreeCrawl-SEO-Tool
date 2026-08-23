@@ -49,9 +49,26 @@ pnpm-debug.log*
 Thumbs.db
 desktop.ini
 
-# Testing
+# Testing — kept local, never published (CLAUDE.md rule 1.12).
+# Tests still run on the dev machine via `npm test`; they just don't
+# ship in the repo, which holds only what builds and runs the product.
 coverage/
 .nyc_output/
+tests/
+__tests__/
+__mocks__/
+__fixtures__/
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+vitest.config.ts
+vitest.workspace.ts
+# Scratch / debug helpers
+debug-*.mjs
+debug-*.ts
+scratch-*.mjs
+scratch-*.ts
 
 # Cache
 .cache/

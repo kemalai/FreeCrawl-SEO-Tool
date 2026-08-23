@@ -47,6 +47,14 @@ export interface SitemapOptions {
    * useful when individual entries are large (image variant).
    */
   splitAtUrlCount?: number;
+  /**
+   * Absolute base URL (origin) the sharded sitemap-index `<loc>` entries are
+   * built from, e.g. `https://example.com`. The protocol requires index
+   * `<loc>` values to be fully-qualified URLs; without this they fell back
+   * to bare filenames and Search Console rejected the index. When omitted,
+   * the origin is derived from the first crawled URL.
+   */
+  baseUrl?: string;
 }
 
 export interface SitemapExportResult {
@@ -63,12 +71,21 @@ export interface SitemapExportResult {
 const HARD_URL_LIMIT = 50_000;
 
 function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+  return (
+    s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;')
+      // XML 1.0 forbids these regardless of escaping. They reach the news
+      // variant through page titles and the image variant through `alt`
+      // (which, unlike title, isn't trimmed), and one occurrence makes the
+      // whole sitemap unreadable — Search Console reports "Sitemap could
+      // not be read" with no indication of which URL caused it.
+      // eslint-disable-next-line no-control-regex -- intentionally matching control chars to strip them
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+  );
 }
 
 function formatLastmod(crawledAt: string): string {
@@ -385,10 +402,25 @@ export async function exportSitemap(
   }
 
   const indexPath = gzip && !filePath.endsWith('.gz') ? `${filePath}.gz` : filePath;
-  // Index references parts by basename; the user typically uploads the
-  // whole directory side-by-side with the index. Absolute URLs are the
-  // user's responsibility (typically prepended via post-processing).
-  await writeIndex(indexPath, partFiles.map((p) => path.basename(p)), gzip);
+  // The sitemap protocol requires index <loc> values to be fully-qualified
+  // URLs — a bare filename makes Search Console reject the index. Resolve
+  // the part filenames against the crawl origin (explicit baseUrl, else the
+  // first crawled URL's origin). If no origin can be derived we fall back to
+  // basenames rather than failing the export.
+  let origin = '';
+  const rawBase = (options.baseUrl ?? entries[0]?.url ?? '').trim();
+  if (rawBase) {
+    try {
+      origin = new URL(rawBase).origin;
+    } catch {
+      origin = '';
+    }
+  }
+  const locFor = (p: string): string => {
+    const name = path.basename(p);
+    return origin ? `${origin}/${name}` : name;
+  };
+  await writeIndex(indexPath, partFiles.map(locFor), gzip);
   files.unshift(indexPath);
 
   return {

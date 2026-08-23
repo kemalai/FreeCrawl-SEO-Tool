@@ -277,6 +277,8 @@ import {
   setCredentials as setIntegrationCredentials,
   clearCredentials as clearIntegrationCredentials,
   resolveCredentials,
+  encryptString,
+  decryptString,
 } from './credentials.js';
 import { runPagespeedBatch, type PagespeedBatchItem } from './pagespeed.js';
 import { runCruxBatch, type CruxBatchItem } from './crux.js';
@@ -323,7 +325,7 @@ import {
   WriterUnavailableError,
 } from './db-writer-pool.js';
 import { freezeWatchdog } from './freeze-watchdog.js';
-import { parserPool } from './parser-pool.js';
+import { parserPool, ParserTimeoutError } from './parser-pool.js';
 import { parseHtml as inlineParseHtml } from '@freecrawl/core';
 import {
   startMcpBridge,
@@ -538,9 +540,8 @@ class ProjectSession {
     try {
       const raw = database.getMeta('lastCrawlConfig');
       if (raw) {
-        this.lastCrawlConfig = mergeCrawlConfig(
-          JSON.parse(raw) as Partial<CrawlConfig>,
-        );
+        const parsed = parseConfigWithEncryptedSecrets(raw);
+        if (parsed) this.lastCrawlConfig = mergeCrawlConfig(parsed);
       }
     } catch {
       /* malformed JSON or missing key — recovery just won't fire */
@@ -549,6 +550,20 @@ class ProjectSession {
       this.pendingRecoveryCheckpoint = database.loadQueueCheckpoint();
     } catch {
       this.pendingRecoveryCheckpoint = [];
+    }
+    // Wiping the scratch DB is correct on a cold start, but catastrophic if
+    // we somehow got here *after* teardown: at that point the session's DB
+    // was closed and nulled, so any late IPC re-enters this cold-start path
+    // and would erase results the user can still see on screen. Reopen
+    // read-as-is instead — a post-shutdown caller never wants a fresh
+    // database, and any code that reaches here then is racing the quit.
+    if (shutdownComplete) {
+      logger.log(
+        'warn',
+        'main',
+        'getDb() re-entered after shutdown — reopening without reset to protect crawl data.',
+      );
+      return database;
     }
     database.reset();
     // The scratch database is wiped on every launch, so the PNGs the last
@@ -562,6 +577,22 @@ class ProjectSession {
       /* best-effort — a locked file just means it is cleaned next launch */
     }
     if (ramMode) {
+      // Drop the on-disk scratch database this session is NOT going to
+      // write. The MCP server resolves reads to `<userData>/projects/
+      // default.seoproject` and has no way to know the desktop is holding
+      // its project in memory — so a file left over from an earlier
+      // disk-mode session made every MCP read return that crawl instead,
+      // silently reporting a completely different site as if it were the
+      // live one. Removing it turns a wrong answer into a clear "project
+      // file does not exist". Nothing durable is lost: disk mode wipes
+      // this same file on every cold start (`database.reset()` above).
+      for (const suffix of ['', '-wal', '-shm']) {
+        try {
+          rmSync(`${path}${suffix}`, { force: true });
+        } catch {
+          /* locked by another instance — it will be swept next launch */
+        }
+      }
       logger.log(
         'info',
         'main',
@@ -669,6 +700,18 @@ defaultSession.label = 'Primary';
  *  default session is also registered here once its window is created. */
 const sessionsByWc = new Map<number, ProjectSession>();
 
+/**
+ * Popup windows (Visualization) → the project session that opened them.
+ *
+ * Deliberately separate from `sessionsByWc`: several checks use
+ * `sessionsByWc.has(wcId)` to mean "is this a project window", and putting
+ * a popup in there would misclassify it. Without this map a popup's
+ * `webContents.id` matched nothing and `sessionFor` fell through to
+ * `defaultSession` — so opening Visualization from a second project window
+ * graphed the PRIMARY window's project, which is usually empty.
+ */
+const popupSessionsByWc = new Map<number, ProjectSession>();
+
 /** Headless MCP-agent sessions (Issue #12), keyed by bridge session id. These
  *  have no window and are addressed only over the localhost bridge. Kept
  *  separate from `sessionsByWc` (which is webContents-keyed) so the two
@@ -692,7 +735,9 @@ const sessionStore = new AsyncLocalStorage<ProjectSession>();
 
 /** Session that owns a given renderer, or the default session. */
 function sessionFor(wc: WebContents): ProjectSession {
-  return sessionsByWc.get(wc.id) ?? defaultSession;
+  return (
+    sessionsByWc.get(wc.id) ?? popupSessionsByWc.get(wc.id) ?? defaultSession
+  );
 }
 
 /** Resolve the session for the currently-running code path: the calling
@@ -1273,6 +1318,56 @@ function prefsFilePath(): string {
   return join(app.getPath('userData'), 'preferences.json');
 }
 
+/** Prefs key holding the last crawl config. Its credential fields are
+ *  encrypted at rest (see prefsForDisk / hydration below) so they never sit
+ *  in plaintext in preferences.json. */
+const CRAWL_CONFIG_PREF_KEY = 'crawl-config';
+
+/** Build the on-disk prefs object: identical to the in-memory cache except
+ *  the crawl-config's secrets are split out and encrypted. The cache itself
+ *  stays plaintext so the renderer's sync `prefsGetAllSync` is unaffected. */
+function prefsForDisk(): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...prefsCache };
+  const cfg = out[CRAWL_CONFIG_PREF_KEY];
+  if (cfg && typeof cfg === 'object' && !Array.isArray(cfg)) {
+    const { clean, secrets } = splitConfigSecrets(cfg as CrawlConfig);
+    out[CRAWL_CONFIG_PREF_KEY] =
+      Object.keys(secrets).length > 0
+        ? { __fcEnc: 1, config: clean, secretsEnc: encryptString(JSON.stringify(secrets)) }
+        : clean;
+  }
+  return out;
+}
+
+/** Reverse of prefsForDisk for the crawl-config key, mutating the cache so
+ *  the renderer receives a plaintext config. Tolerates the legacy bare
+ *  (unencrypted) shape. */
+function hydrateCrawlConfigInCache(): void {
+  const cfg = prefsCache[CRAWL_CONFIG_PREF_KEY];
+  if (
+    cfg &&
+    typeof cfg === 'object' &&
+    !Array.isArray(cfg) &&
+    (cfg as { __fcEnc?: number }).__fcEnc === 1
+  ) {
+    const env = cfg as { config: CrawlConfig; secretsEnc?: string };
+    const plain = env.config;
+    if (env.secretsEnc) {
+      try {
+        const secrets = JSON.parse(decryptString(env.secretsEnc)) as Record<string, string>;
+        applyConfigSecrets(plain, secrets);
+      } catch {
+        /* undecryptable — keep the blanked config */
+      }
+    }
+    prefsCache[CRAWL_CONFIG_PREF_KEY] = plain;
+  }
+}
+
+function writePrefsToDisk(): void {
+  writeFileSync(prefsFilePath(), JSON.stringify(prefsForDisk(), null, 2), 'utf8');
+}
+
 function loadPrefs(): void {
   if (prefsLoaded) return;
   const path = prefsFilePath();
@@ -1282,6 +1377,7 @@ function loadPrefs(): void {
       const parsed = JSON.parse(raw) as unknown;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         prefsCache = parsed as Record<string, unknown>;
+        hydrateCrawlConfigInCache();
       }
     }
   } catch {
@@ -1296,7 +1392,7 @@ function schedulePrefsWrite(): void {
   prefsWriteTimer = setTimeout(() => {
     prefsWriteTimer = null;
     try {
-      writeFileSync(prefsFilePath(), JSON.stringify(prefsCache, null, 2), 'utf8');
+      writePrefsToDisk();
     } catch {
       // ignore — best-effort persistence
     }
@@ -1314,7 +1410,7 @@ function flushPrefs(): void {
   // `{}` here would clobber the running first instance's saved prefs.
   if (!prefsLoaded) return;
   try {
-    writeFileSync(prefsFilePath(), JSON.stringify(prefsCache, null, 2), 'utf8');
+    writePrefsToDisk();
   } catch {
     // ignore
   }
@@ -1594,6 +1690,22 @@ async function parseHtmlViaPool(
   try {
     return await parserPool.parse(html, pageUrl, opts);
   } catch (err) {
+    if (err instanceof ParserTimeoutError) {
+      // Do NOT re-parse inline. This document already pinned a worker
+      // thread for a full minute; running the same synchronous cheerio
+      // pass on the main thread would freeze the entire app — UI, IPC,
+      // crawler scheduling — for at least as long. Reject instead: the
+      // crawler records the URL as failed with this reason, the rest of
+      // the crawl proceeds, and the pool has already recycled the worker.
+      logger.log(
+        'warn',
+        'main',
+        `parser-pool timed out on ${pageUrl} — recording it as failed rather than blocking the main thread.`,
+      );
+      throw err;
+    }
+    // Pool not ready or the worker crashed — the document itself is not
+    // implicated, so parsing it inline is safe and keeps the crawl whole.
     logger.log(
       'warn',
       'main',
@@ -1767,11 +1879,22 @@ function applyCurrentThermalState(crawler: Crawler): void {
   }
 }
 
+/** Post-crawl passes whose peak memory scales with the whole link graph
+ *  rather than with a bounded batch. If the writer worker dies partway
+ *  through one of these, the most likely cause is that the pass exhausted
+ *  the worker's heap — and re-running the identical work on the main thread
+ *  then takes the entire app down with `FatalProcessOutOfMemory`, losing the
+ *  crawl the user just paid for. Same reasoning as `HEAVY_METHODS` in
+ *  db-reader-pool.ts: contain the failure instead of escalating it. */
+const MEMORY_HEAVY_PASSES = new Set<string>(['recomputeLinkScore']);
+
 async function runDbPassViaPool(
   session: ProjectSession,
   method: string,
 ): Promise<void> {
   if (!session.writerPool.isReady()) {
+    // No worker pool at all (RAM-only mode, or init failed) — the main
+    // thread is the only place this can run, heavy or not.
     const db = session.getDb();
     const fn = (db as unknown as Record<string, unknown>)[method];
     if (typeof fn === 'function') (fn as () => void).call(db);
@@ -1782,6 +1905,18 @@ async function runDbPassViaPool(
   } catch (err) {
     // WriterUnavailableError only — see recomputeIssuesViaPool.
     if (!(err instanceof WriterUnavailableError)) throw err;
+    if (MEMORY_HEAVY_PASSES.has(method)) {
+      // Skip rather than escalate. The affected column keeps its previous
+      // values, which is recoverable; a dead main process is not.
+      logger.log(
+        'error',
+        'main',
+        `db-writer died during ${method} (${err.message}) — skipping this pass ` +
+          'rather than re-running it on the main thread. Results are complete ' +
+          'apart from this metric; re-crawl or reopen the project to retry.',
+      );
+      return;
+    }
     logger.log(
       'warn',
       'main',
@@ -1881,6 +2016,126 @@ function getDb(): ProjectDb {
   return currentSession().getDb();
 }
 
+// ── Crawl-config secret handling ───────────────────────────────────────────
+//
+// `CrawlConfig` carries credentials — HTTP-auth password/token, the browser
+// form-login password, and a proxy URL that can embed `user:pass@`. These
+// must not sit in plaintext in preferences.json or the .seoproject, nor be
+// handed to a colleague in a shared settings-export. `configSecretFields`
+// enumerates them; the helpers below either blank them (export) or split
+// them out for at-rest encryption (prefs / project meta).
+
+/** Return the secret values from a config as a flat record, and a deep-ish
+ *  copy of the config with those values blanked. */
+function splitConfigSecrets(config: CrawlConfig): {
+  clean: CrawlConfig;
+  secrets: Record<string, string>;
+} {
+  const clean: CrawlConfig = JSON.parse(JSON.stringify(config)) as CrawlConfig;
+  const secrets: Record<string, string> = {};
+  if (clean.auth) {
+    if (clean.auth.password) {
+      secrets['auth.password'] = clean.auth.password;
+      clean.auth.password = '';
+    }
+    if (clean.auth.token) {
+      secrets['auth.token'] = clean.auth.token;
+      clean.auth.token = '';
+    }
+  }
+  const pv = clean.formLogin?.browser?.passwordValue;
+  if (pv) {
+    secrets['formLogin.browser.passwordValue'] = pv;
+    clean.formLogin!.browser!.passwordValue = '';
+  }
+  if (clean.proxyUrl) {
+    secrets['proxyUrl'] = clean.proxyUrl;
+    clean.proxyUrl = '';
+  }
+  return { clean, secrets };
+}
+
+/** Re-apply previously split secrets onto a (cleaned) config, in place. */
+function applyConfigSecrets(
+  config: CrawlConfig,
+  secrets: Record<string, string>,
+): CrawlConfig {
+  if (secrets['auth.password'] !== undefined && config.auth) {
+    config.auth.password = secrets['auth.password'];
+  }
+  if (secrets['auth.token'] !== undefined && config.auth) {
+    config.auth.token = secrets['auth.token'];
+  }
+  if (
+    secrets['formLogin.browser.passwordValue'] !== undefined &&
+    config.formLogin?.browser
+  ) {
+    config.formLogin.browser.passwordValue = secrets['formLogin.browser.passwordValue'];
+  }
+  if (secrets['proxyUrl'] !== undefined) {
+    config.proxyUrl = secrets['proxyUrl'];
+  }
+  return config;
+}
+
+/** A copy of the config with every secret blanked — for the shareable
+ *  settings-export, which must never carry credentials. Accepts a loose
+ *  record because the export IPC types its payload as `Record<string,
+ *  unknown>`; the JSON round-trip inside `splitConfigSecrets` tolerates
+ *  partial/extra fields. */
+function redactConfigSecrets(config: Record<string, unknown>): Record<string, unknown> {
+  return splitConfigSecrets(config as unknown as CrawlConfig).clean as unknown as Record<
+    string,
+    unknown
+  >;
+}
+
+/** Serialize a config for at-rest storage: secrets are pulled out and the
+ *  whole secret bundle is encrypted into one field, the rest stays plain
+ *  (and human-diffable). Returns the JSON string to persist. */
+function serializeConfigWithEncryptedSecrets(config: CrawlConfig): string {
+  const { clean, secrets } = splitConfigSecrets(config);
+  const payload: { config: CrawlConfig; secretsEnc?: string } = { config: clean };
+  if (Object.keys(secrets).length > 0) {
+    payload.secretsEnc = encryptString(JSON.stringify(secrets));
+  }
+  return JSON.stringify(payload);
+}
+
+/** Reverse of {@link serializeConfigWithEncryptedSecrets}. Accepts both the
+ *  new `{config, secretsEnc}` envelope and a legacy bare-config JSON string
+ *  (pre-encryption projects) so old files still load. Returns null on parse
+ *  failure. */
+function parseConfigWithEncryptedSecrets(raw: string): Partial<CrawlConfig> | null {
+  try {
+    const parsed = JSON.parse(raw) as
+      | { config?: Partial<CrawlConfig>; secretsEnc?: string }
+      | Partial<CrawlConfig>;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'config' in parsed &&
+      (parsed as { config?: unknown }).config
+    ) {
+      const env = parsed as { config: Partial<CrawlConfig>; secretsEnc?: string };
+      const cfg = env.config;
+      if (env.secretsEnc) {
+        try {
+          const secrets = JSON.parse(decryptString(env.secretsEnc)) as Record<string, string>;
+          applyConfigSecrets(cfg as CrawlConfig, secrets);
+        } catch {
+          /* corrupt/undecryptable secrets — load the rest without them */
+        }
+      }
+      return cfg;
+    }
+    // Legacy: the whole thing is a bare config object.
+    return parsed as Partial<CrawlConfig>;
+  } catch {
+    return null;
+  }
+}
+
 /** Monotonic suffix so each open gets its own working file. */
 let workingDbCounter = 0;
 
@@ -1901,7 +2156,32 @@ function newWorkingDbPath(): string {
   return join(dir, `work-${process.pid}-${workingDbCounter}.seoproject`);
 }
 
-/** Delete working copies orphaned by a crash (never the live one). */
+/**
+ * Every working copy a live session in this process is currently using.
+ *
+ * Both sweeps must honour ALL of them. The mid-session sweep on Open
+ * Project used to pass only the path it had just created, so opening a
+ * project in one window deleted the live database of every OTHER window
+ * and of every headless agent session. On Windows the unlink fails with a
+ * sharing violation and is swallowed, but on macOS and Linux it succeeds:
+ * the other window keeps running against an unlinked inode until one of
+ * its SQLite connections reopens, then silently starts answering from a
+ * fresh empty file — and its crawl is gone at restart.
+ */
+function liveWorkingPaths(extra?: string): ReadonlySet<string> {
+  const live = new Set<string>();
+  if (extra) live.add(extra);
+  for (const s of [
+    defaultSession,
+    ...sessionsByWc.values(),
+    ...headlessSessions.values(),
+  ]) {
+    if (s.scratchPath) live.add(s.scratchPath);
+  }
+  return live;
+}
+
+/** Delete working copies orphaned by a crash (never a live one). */
 function sweepStaleWorkingCopies(keep: ReadonlySet<string>): void {
   try {
     const dir = join(app.getPath('userData'), 'projects');
@@ -1964,11 +2244,8 @@ function sweepStaleWorkingCopies(keep: ReadonlySet<string>): void {
 function restoreProjectConfig(db: ProjectDb): CrawlConfig | null {
   const raw = db.getMeta('lastCrawlConfig');
   if (raw) {
-    try {
-      return mergeCrawlConfig(JSON.parse(raw) as Partial<CrawlConfig>);
-    } catch {
-      /* malformed JSON — fall through to the engine seed */
-    }
+    const parsed = parseConfigWithEncryptedSecrets(raw);
+    if (parsed) return mergeCrawlConfig(parsed);
   }
   const seed = db.getMeta('startUrl');
   if (seed && /^https?:\/\//i.test(seed)) {
@@ -2066,7 +2343,7 @@ async function openProjectAtPath(documentPath: string): Promise<void> {
   updateWindowTitle(s);
   // The database we just replaced is nobody's now — reclaim its disk.
   if (previousWorking && previousWorking !== workingPath) {
-    sweepStaleWorkingCopies(new Set([workingPath]));
+    sweepStaleWorkingCopies(liveWorkingPaths(workingPath));
   }
   // Rehydrate the crawl config from the project we just opened and push it
   // to the renderer so the UI reflects THIS project's saved settings
@@ -2197,7 +2474,19 @@ async function saveProjectDocument(
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rawDb = (database as any).db as { exec: (sql: string) => void };
-    rawDb.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
+    // `VACUUM INTO` rewrites the whole database in one synchronous call, so
+    // the window is unresponsive for its duration — seconds on a large
+    // crawl. It stays on the main thread deliberately: it must run on the
+    // connection that holds the data, and in RAM-only mode that is the ONLY
+    // connection (no writer worker exists). Tell the freeze watchdog what
+    // is happening so this shows up in debug.txt as a known save stall
+    // rather than an unattributed hang.
+    freezeWatchdog.setMainOp('save:vacuum');
+    try {
+      rawDb.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
+    } finally {
+      freezeWatchdog.setMainOp('idle');
+    }
     const result = await packProject(tmpPath, documentPath);
     s.currentProjectPath = documentPath;
     s.dirty = false;
@@ -2345,7 +2634,13 @@ function attachUnsavedGuard(win: BrowserWindow): void {
         cancelId: 2,
         noLink: true,
       });
-      if (res.response === 2) return; // Cancel — stay open.
+      if (res.response === 2) {
+        // Cancel — stay open, and disarm any quit that was waiting on this
+        // prompt so the app doesn't tear itself down the moment the last
+        // other window closes.
+        cancelPendingQuit();
+        return;
+      }
       if (res.response === 0) {
         const target = s.currentProjectPath;
         const saved = target
@@ -2358,7 +2653,10 @@ function attachUnsavedGuard(win: BrowserWindow): void {
             )
           : (await runSaveProjectAs()) !== null;
         // A failed or cancelled save must not throw the data away.
-        if (!saved) return;
+        if (!saved) {
+          cancelPendingQuit();
+          return;
+        }
       }
       allowClose = true;
       s.dirty = false;
@@ -2755,7 +3053,10 @@ async function downloadAndRevealInstaller(asset: GitHubReleaseAsset): Promise<vo
   } catch {
     /* getPath('downloads') always exists on Win/macOS but be defensive */
   }
-  const savePath = join(downloadsDir, asset.name);
+  // `asset.name` comes from the GitHub Releases API — basename it so a
+  // crafted name can't traverse out of the downloads directory. (The feed
+  // URL is hardcoded + TLS, so this is defence in depth.)
+  const savePath = join(downloadsDir, basename(asset.name));
 
   await new Promise<void>((resolve) => {
     const handler = (
@@ -3144,6 +3445,13 @@ function createWindow(): void {
     title: `FreeCrawl SEO Tool v${app.getVersion()}`,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
+      // sandbox stays false: enabling it was tried and blanks the renderer —
+      // under a sandboxed preload `window.freecrawl` is never exposed (the
+      // bundled preload isn't sandbox-compatible as built), so the React app
+      // dies on its first IPC call while the native menu still renders. The
+      // OS-sandbox loss is mitigated by contextIsolation:true plus the
+      // app-wide window-open / will-navigate policy (installWebContentsPolicy),
+      // which stops untrusted crawled content from ever loading in a frame.
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
@@ -3444,6 +3752,36 @@ function validateProjectPath(
 }
 
 /**
+ * Validate an MCP-supplied export file path. The agent driving the bridge
+ * reads crawled page content, so a prompt-injected `filePath` must not be
+ * able to write into the app install dir or the app's own data dir
+ * (preferences.json, credential stores, project working copies, the
+ * mcp-bridge discovery file). Requires an absolute path outside both.
+ * Returns the resolved path or throws with a clear message.
+ */
+function assertMcpExportPath(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.trim() === '') {
+    throw new Error('filePath is required (MCP cannot open dialogs).');
+  }
+  const trimmed = raw.trim();
+  if (!isAbsolute(trimmed)) {
+    throw new Error(`filePath must be an absolute path (got '${trimmed}').`);
+  }
+  const normalized = resolvePath(trimmed);
+  const lower = normalized.toLowerCase();
+  const denied = [resolvePath(app.getAppPath()), resolvePath(app.getPath('userData'))];
+  for (const dir of denied) {
+    const d = dir.toLowerCase();
+    if (lower === d || lower.startsWith(d + pathSep.toLowerCase())) {
+      throw new Error(
+        'filePath must be outside the application and application-data directories.',
+      );
+    }
+  }
+  return normalized;
+}
+
+/**
  * Whether a `ProjectSession` is worth advertising to MCP `session_list`.
  * Build the wire shape from a live session.
  */
@@ -3493,6 +3831,56 @@ function isSafeExternalUrl(raw: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Apply the window-opening and navigation policy to EVERY renderer, current
+ * and future.
+ *
+ * This used to be set only on `mainWindow`, and there was no `will-navigate`
+ * guard anywhere. The renderer opens crawled URLs in ten places — the
+ * broken-link context menu, several detail-panel tables, and the standalone
+ * Visualization window's node menus — all of them `window.open(url,
+ * '_blank')` on a URL that came from the crawled site. In any window other
+ * than the main one (File → New Project Window, or the Visualization
+ * window) Electron's default action is `allow`, so that opened a real
+ * BrowserWindow on the attacker's page. `window.open(…, '_blank')` does not
+ * imply `noopener`, so the child kept a live `window.opener` and could
+ * navigate this app's window off `file://`. The preload re-runs on the new
+ * document, which would hand an attacker origin the entire `window.freecrawl`
+ * IPC surface — arbitrary file read via `logAnalyze`, arbitrary write via the
+ * export handlers, credential writes via `integrationsSet`.
+ *
+ * Registering on `web-contents-created` means no future window can forget.
+ */
+function installWebContentsPolicy(): void {
+  app.on('web-contents-created', (_event, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      // Hand real web/mail links to the OS browser; never let Electron
+      // open a window of its own, which would carry our preload.
+      if (isSafeExternalUrl(url)) void shell.openExternal(url);
+      return { action: 'deny' };
+    });
+
+    contents.on('will-navigate', (event, url) => {
+      // The renderer only ever legitimately navigates within its own
+      // bundle (file:// in production, the Vite dev server in development).
+      // Anything else is either a hijack attempt or an accident; send real
+      // web links to the OS browser instead.
+      const devUrl = process.env['ELECTRON_RENDERER_URL'];
+      const allowed =
+        url.startsWith('file://') || (devUrl ? url.startsWith(devUrl) : false);
+      if (allowed) return;
+      event.preventDefault();
+      if (isSafeExternalUrl(url)) void shell.openExternal(url);
+    });
+
+    // Nothing here needs camera, microphone, geolocation or notifications.
+    // Deny by default so a page that somehow loads can't prompt for them.
+    contents.session.setPermissionRequestHandler((_wc, _permission, cb) => {
+      cb(false);
+    });
+  });
 }
 
 /**
@@ -3619,8 +4007,16 @@ function openLogsWindow(ownerWcId: number): void {
  * Keeps the visualization off the main tab strip and gives it its own
  * OS window the user can move to a second monitor.
  */
-function openVisualizationWindow(): void {
+function openVisualizationWindow(ownerWcId?: number): void {
+  // Bind the popup to the project window that asked for it, the way
+  // `openLogsWindow` does. Without this its IPC resolved to the default
+  // session and it graphed the wrong project entirely.
+  const ownerSession =
+    (ownerWcId !== undefined ? sessionsByWc.get(ownerWcId) : undefined) ??
+    defaultSession;
   if (visualizationWindow && !visualizationWindow.isDestroyed()) {
+    // Re-point the singleton at whoever is asking now.
+    popupSessionsByWc.set(visualizationWindow.webContents.id, ownerSession);
     visualizationWindow.show();
     visualizationWindow.focus();
     return;
@@ -3645,7 +4041,9 @@ function openVisualizationWindow(): void {
   win.setMenu(null);
   win.on('ready-to-show', () => win.show());
   win.on('page-title-updated', (e) => e.preventDefault());
+  popupSessionsByWc.set(win.webContents.id, ownerSession);
   win.on('closed', () => {
+    popupSessionsByWc.delete(win.webContents.id);
     if (visualizationWindow === win) visualizationWindow = null;
   });
   // Mirror the main window's dev-tools lockdown.
@@ -3743,6 +4141,20 @@ function openLogAnalyzerWindow(): void {
  */
 function ingestLogResult(filePath: string, result: LogAnalysisResult): LogImportSummary {
   const fileName = basename(filePath);
+  // Snapshot the URL aggregate ONCE. `urlStats` and `urlBots` below both
+  // walked `result.urlStats.values()` independently, so two full-size
+  // arrays existed alongside the still-live `result` — at the analyzer's
+  // 500K-path cap that is a lot of main-thread heap for no reason.
+  const urlAggregates = Array.from(result.urlStats.values());
+  // The bot breakdown fans out to one row per (path, bot) pair, so it is
+  // the term that actually scales. Fail with a clear message instead of
+  // an OOM abort — the log export path 20 lines down already does this.
+  let botRowEstimate = 0;
+  for (const u of urlAggregates) botRowEstimate += u.botCounts.size;
+  ensureHeapHeadroom(
+    'log analysis ingest',
+    urlAggregates.length * 256 + botRowEstimate * 128,
+  );
   const payload: LogIngestInput = {
     file: {
       filePath,
@@ -3754,7 +4166,7 @@ function ingestLogResult(filePath: string, result: LogAnalysisResult): LogImport
       minTs: result.minTs,
       maxTs: result.maxTs,
     },
-    urlStats: Array.from(result.urlStats.values()).map((u) => ({
+    urlStats: urlAggregates.map((u) => ({
       path: u.path,
       totalHits: u.totalHits,
       botHits: u.botHits,
@@ -3784,7 +4196,7 @@ function ingestLogResult(filePath: string, result: LogAnalysisResult): LogImport
       verifiedIps: agg.verifiedIps,
       verifiable: agg.verifiable,
     })),
-    urlBots: Array.from(result.urlStats.values()).flatMap((u) =>
+    urlBots: urlAggregates.flatMap((u) =>
       Array.from(u.botCounts.entries()).map(([bot, hits]) => ({ path: u.path, bot, hits })),
     ),
   };
@@ -4030,7 +4442,9 @@ function registerIpc(): void {
     // Renderer button in a project window — own the Logs popup by that window.
     openLogsWindow(currentSession().logTag ?? mainWindow?.webContents.id ?? 0),
   );
-  registerHandle(IPC.visualizationOpenWindow, () => openVisualizationWindow());
+  registerHandle(IPC.visualizationOpenWindow, (e) =>
+    openVisualizationWindow(e.sender.id),
+  );
 
   // ── V2 Faz 2 — Log File Analyzer IPC surface ───────────────────────
   registerHandle(IPC.logAnalyzerOpenWindow, () => openLogAnalyzerWindow());
@@ -4690,8 +5104,9 @@ function registerIpc(): void {
   // Top Words — pull the title+meta+H1 corpus from the active DB then
   // aggregate via core's `aggregateTopWords` (kept in core because the
   // db package isn't allowed to depend on core per the monorepo
-  // dependency graph). Aggregation is sync + cheap so we don't need
-  // the reader pool's worker offload here.
+  // dependency graph). The aggregation itself is sync + cheap; the corpus
+  // is now streamed (`seoTextCorpus` yields), so neither half holds the
+  // whole table in memory and the main thread stays usable.
   registerHandle(
     IPC.reportsTopWords,
     (_e, input: TopWordsInput): TopWordsRow[] => {
@@ -4724,7 +5139,9 @@ function registerIpc(): void {
         format: 'freecrawl/settings',
         version: 1,
         exportedAt: new Date().toISOString(),
-        config: input.config,
+        // Strip credentials — this file is meant to be shared with a
+        // colleague. Import tolerates the blanked fields.
+        config: redactConfigSecrets(input.config),
       };
       const json = JSON.stringify(payload, null, 2);
       writeFileSync(filePath, json, 'utf8');
@@ -6468,7 +6885,7 @@ function registerIpc(): void {
     // without the user re-entering anything. Stored as JSON in
     // `project_meta` since the table is keyed by string.
     try {
-      database.setMeta('lastCrawlConfig', JSON.stringify(config));
+      database.setMeta('lastCrawlConfig', serializeConfigWithEncryptedSecrets(config));
     } catch {
       /* never fatal */
     }
@@ -6911,11 +7328,8 @@ function registerIpc(): void {
     if (!config) {
       const stored = db.getMeta('lastCrawlConfig');
       if (stored) {
-        try {
-          config = JSON.parse(stored) as CrawlConfig;
-        } catch {
-          /* corrupt meta — fall through to defaults */
-        }
+        const parsed = parseConfigWithEncryptedSecrets(stored);
+        if (parsed) config = parsed as CrawlConfig;
       }
     }
     const seed = db.getMeta('startUrl') ?? urls[0]!;
@@ -7053,37 +7467,39 @@ function registerIpc(): void {
 
     'export-csv': async (input) => {
       const i = input as ExportCsvInput;
-      if (!i.filePath) throw new Error('filePath is required (MCP cannot open dialogs).');
-      const { rowsWritten } = await exportUrlsToCsv(getDb(), i.filePath, {
+      const filePath = assertMcpExportPath(i.filePath);
+      const { rowsWritten } = await exportUrlsToCsv(getDb(), filePath, {
         selectedIds: i.selectedIds,
+        category: i.category,
       });
-      return { filePath: i.filePath, rowsWritten };
+      return { filePath, rowsWritten };
     },
 
     'export-json': async (input) => {
       const i = input as ExportJsonInput;
-      if (!i.filePath) throw new Error('filePath is required.');
-      const { rowsWritten } = await exportUrlsToJson(getDb(), i.filePath, {
+      const filePath = assertMcpExportPath(i.filePath);
+      const { rowsWritten } = await exportUrlsToJson(getDb(), filePath, {
         selectedIds: i.selectedIds,
         pretty: i.pretty,
+        category: i.category,
       });
-      return { filePath: i.filePath, rowsWritten };
+      return { filePath, rowsWritten };
     },
 
     'export-xml': async (input) => {
       const i = input as ExportXmlInput;
-      if (!i.filePath) throw new Error('filePath is required.');
-      const { rowsWritten } = await exportUrlsToXml(getDb(), i.filePath, {
+      const filePath = assertMcpExportPath(i.filePath);
+      const { rowsWritten } = await exportUrlsToXml(getDb(), filePath, {
         selectedIds: i.selectedIds,
         category: i.category,
       });
-      return { filePath: i.filePath, rowsWritten };
+      return { filePath, rowsWritten };
     },
 
     'export-html-report': async (input) => {
       const i = input as ExportHtmlReportInput;
-      if (!i.filePath) throw new Error('filePath is required.');
-      const result = await exportHtmlReport(getDb(), i.filePath, {
+      const filePath = assertMcpExportPath(i.filePath);
+      const result = await exportHtmlReport(getDb(), filePath, {
         startUrl: getDb().getMeta('lastStartUrl') ?? '',
       });
       return { filePath: result.filePath, bytesWritten: result.bytesWritten };
@@ -7091,11 +7507,12 @@ function registerIpc(): void {
 
     'sitemap-generate': async (input) => {
       const i = input as SitemapGenerateInput;
-      if (!i.filePath) throw new Error('filePath is required.');
-      return exportSitemap(getDb(), i.filePath, {
+      const filePath = assertMcpExportPath(i.filePath);
+      return exportSitemap(getDb(), filePath, {
         variant: i.variant,
         gzip: i.gzip,
         splitAtUrlCount: i.splitAtUrlCount,
+        baseUrl: getDb().getMeta('lastStartUrl') ?? undefined,
       });
     },
 
@@ -7156,7 +7573,9 @@ function registerIpc(): void {
     'compare-load': async (input) => {
       const i = input as CompareLoadInput;
       if (!i.filePath) throw new Error('filePath is required (MCP cannot open dialogs).');
-      const otherDb = new ProjectDb(i.filePath);
+      // read-only: never create or mutate the compared file (see the IPC
+      // compare-load handler for the full rationale).
+      const otherDb = new ProjectDb(i.filePath, { readOnly: true });
       try {
         const summary = compareCrawls(getDb(), otherDb);
         return {
@@ -7228,12 +7647,17 @@ function registerIpc(): void {
     },
 
     'export-broken-links': async (input) => {
-      const i = input as { filePath?: string; internal?: 'all' | 'internal' | 'external' };
-      if (!i.filePath) throw new Error('filePath is required.');
-      const { rowsWritten } = await exportBrokenLinksToCsv(getDb(), i.filePath, {
+      const i = input as {
+        filePath?: string;
+        internal?: 'all' | 'internal' | 'external';
+        search?: string;
+      };
+      const filePath = assertMcpExportPath(i.filePath);
+      const { rowsWritten } = await exportBrokenLinksToCsv(getDb(), filePath, {
         internal: i.internal ?? 'all',
+        search: i.search,
       });
-      return { filePath: i.filePath, rowsWritten };
+      return { filePath, rowsWritten };
     },
 
     'export-images': async (input) => {
@@ -7244,24 +7668,26 @@ function registerIpc(): void {
         duplicateAltOnly?: boolean;
         search?: string;
       };
-      if (!i.filePath) throw new Error('filePath is required.');
-      const { rowsWritten } = await exportImagesToCsv(getDb(), i.filePath, {
+      const filePath = assertMcpExportPath(i.filePath);
+      const { rowsWritten } = await exportImagesToCsv(getDb(), filePath, {
         missingAltOnly: i.missingAltOnly,
         emptyAltOnly: i.emptyAltOnly,
         duplicateAltOnly: i.duplicateAltOnly,
         search: i.search,
       });
-      return { filePath: i.filePath, rowsWritten };
+      return { filePath, rowsWritten };
     },
 
     'export-tabular': async (input) => {
       const i = input as ExportTabularInput;
-      if (!i.filePath) throw new Error('filePath is required.');
-      return exportTabular(getDb(), i.filePath, {
+      const filePath = assertMcpExportPath(i.filePath);
+      return exportTabular(getDb(), filePath, {
         format: i.format,
         sections: i.sections,
         columns: i.columns,
         selectedIds: i.selectedIds,
+        search: i.search,
+        filter: i.filter,
       });
     },
 
@@ -7286,7 +7712,10 @@ function registerIpc(): void {
       }
       currentSession().lastCrawlConfig = { ...DEFAULT_CRAWL_CONFIG, ...cfg };
       try {
-        getDb().setMeta('lastCrawlConfig', JSON.stringify(currentSession().lastCrawlConfig));
+        getDb().setMeta(
+          'lastCrawlConfig',
+          serializeConfigWithEncryptedSecrets(currentSession().lastCrawlConfig!),
+        );
       } catch {
         /* non-fatal — config still set in memory */
       }
@@ -8098,7 +8527,7 @@ function registerIpc(): void {
   registerHandle(IPC.projectConfigSet, (_e, config: CrawlConfig): void => {
     if (!currentSession().currentProjectPath) return;
     try {
-      getDb().setMeta('lastCrawlConfig', JSON.stringify(config));
+      getDb().setMeta('lastCrawlConfig', serializeConfigWithEncryptedSecrets(config));
       currentSession().lastCrawlConfig = config;
     } catch (err) {
       logger.log(
@@ -8718,6 +9147,7 @@ function registerIpc(): void {
       }
       const { rowsWritten } = await exportUrlsToCsv(getDb(), filePath, {
         selectedIds: input.selectedIds,
+        category: input.category,
       });
       return { filePath, rowsWritten };
     },
@@ -8741,6 +9171,7 @@ function registerIpc(): void {
       const { rowsWritten } = await exportUrlsToJson(getDb(), filePath, {
         selectedIds: input.selectedIds,
         pretty: input.pretty,
+        category: input.category,
       });
       return { filePath, rowsWritten };
     },
@@ -8788,6 +9219,7 @@ function registerIpc(): void {
       }
       const { rowsWritten } = await exportBrokenLinksToCsv(getDb(), filePath, {
         internal: input.internal,
+        search: input.search,
       });
       return { filePath, rowsWritten };
     },
@@ -8864,6 +9296,7 @@ function registerIpc(): void {
     IPC.exportTabular,
     async (_e, input: ExportTabularInput): Promise<ExportTabularResult> => {
       const { format, sections, columns, selectedIds, csvBom } = input;
+      const { search, filter } = input;
       let outputPath = input.filePath ?? '';
       const isSelection = (selectedIds?.length ?? 0) > 0;
       const multiSection = sections.length > 1;
@@ -8907,6 +9340,8 @@ function registerIpc(): void {
         sections,
         columns,
         selectedIds,
+        search,
+        filter,
         csvBom,
       });
       return result;
@@ -9138,6 +9573,7 @@ function registerIpc(): void {
         variant,
         gzip,
         splitAtUrlCount: input.splitAtUrlCount,
+        baseUrl: getDb().getMeta('lastStartUrl') ?? undefined,
       });
       if (mainWindow) {
         const detail = result.sharded
@@ -9202,10 +9638,13 @@ function registerIpc(): void {
         }
         filePath = res.filePaths[0]!;
       }
-      // Open the *other* project read-only — never mutate. The
-      // ProjectDb constructor opens the file in default mode; that's
-      // fine because we never call write methods on it during the diff.
-      const otherDb = new ProjectDb(filePath);
+      // Open the *other* project read-only. Passing no options opened it in
+      // WRITER mode: node:sqlite CREATES a missing file (an arbitrary-file
+      // -create primitive reachable from the renderer/MCP) and, on an
+      // existing file, runs migrations + takes a write lock — silently
+      // rewriting a project the user only meant to diff against. readOnly
+      // requires the file to exist and never mutates it.
+      const otherDb = new ProjectDb(filePath, { readOnly: true });
       try {
         const summary = compareCrawls(getDb(), otherDb);
         return {
@@ -9223,22 +9662,31 @@ function registerIpc(): void {
 
   registerHandle(
     IPC.crawlPath,
-    (_e, input: CrawlPathInput): CrawlPathResult => {
-      return getDb().crawlPath(input.urlId);
-    },
+    async (_e, input: CrawlPathInput): Promise<CrawlPathResult> =>
+      callReaderOrFallback<CrawlPathResult>('crawlPath', [input.urlId], () =>
+        getDb().crawlPath(input.urlId),
+      ),
   );
 
   registerHandle(
     IPC.graphSnapshot,
-    (_e, input: GraphSnapshotInput): GraphSnapshotResult => {
-      return getDb().graphSnapshot(input.nodeLimit ?? 1000);
+    async (_e, input: GraphSnapshotInput): Promise<GraphSnapshotResult> => {
+      const nodeLimit = input.nodeLimit ?? 1000;
+      return callReaderOrFallback<GraphSnapshotResult>(
+        'graphSnapshot',
+        [nodeLimit],
+        () => getDb().graphSnapshot(nodeLimit),
+      );
     },
   );
 
   registerHandle(
     IPC.topAnchorTexts,
-    (_e, limit: number | undefined): AnchorTextRow[] => {
-      return getDb().topAnchorTexts(limit ?? 200);
+    async (_e, limit: number | undefined): Promise<AnchorTextRow[]> => {
+      const n = limit ?? 200;
+      return callReaderOrFallback<AnchorTextRow[]>('topAnchorTexts', [n], () =>
+        getDb().topAnchorTexts(n),
+      );
     },
   );
 }
@@ -9248,6 +9696,10 @@ function registerIpc(): void {
 // captured in the in-app log window.
 logger.installGlobalHooks();
 logger.log('info', 'main', `App bootstrap — Node ${process.version} on ${process.platform}`);
+
+// Before any window exists, so every renderer this process ever creates is
+// covered — including the popups and any window added later.
+installWebContentsPolicy();
 
 // Single-instance guard. Without this, double-clicking the launcher
 // shortcut while the app is already open spawns a second Electron
@@ -9640,11 +10092,7 @@ void app.whenReady().then(async () => {
   // live session is using is passed in as `keep`; on a cold start the
   // only live one is whatever the default session already resolved.
   try {
-    const live = new Set<string>();
-    for (const s of [defaultSession, ...sessionsByWc.values()]) {
-      if (s.scratchPath) live.add(s.scratchPath);
-    }
-    sweepStaleWorkingCopies(live);
+    sweepStaleWorkingCopies(liveWorkingPaths());
   } catch (err) {
     logger.log('warn', 'main', `startup working-copy sweep failed: ${(err as Error).message}`);
   }
@@ -9759,7 +10207,45 @@ function performShutdown(): void {
   logger.flushFileLogging();
 }
 
-app.on('before-quit', () => {
+/** Every windowed session that still holds unsaved crawl results. Headless
+ *  agent sessions are excluded: they own no document and are disposed by
+ *  `performShutdown` itself. */
+function anyUnsavedWindowSession(): boolean {
+  const windowed = new Set<ProjectSession>([defaultSession, ...sessionsByWc.values()]);
+  for (const s of windowed) if (s.dirty) return true;
+  return false;
+}
+
+/** A quit was requested and is waiting on the unsaved-changes prompts. */
+let quitRequested = false;
+
+/** Called by `attachUnsavedGuard` when the user declines to close, so a
+ *  cancelled Cmd/Ctrl+Q doesn't leave a quit armed behind it. */
+function cancelPendingQuit(): void {
+  quitRequested = false;
+}
+
+app.on('before-quit', (event) => {
+  // The unsaved-changes prompt lives on each window's `close` handler, and
+  // Electron runs those AFTER `before-quit`. Tearing the backend down here
+  // first meant a user who answered "Cancel" was left with a running app
+  // whose DB was closed and whose worker pools were permanently terminated:
+  // the next DB touch re-entered `getDb()`'s cold-start path and `reset()`
+  // wiped the crawl — and answering "Save" instead vacuumed that freshly
+  // emptied database over the user's `.seoproject`.
+  //
+  // So when anything is unsaved, cancel this quit without touching a thing
+  // and let the windows run their own guard. If the user accepts, the guard
+  // clears `dirty` and closes the window; `window-all-closed` then re-quits
+  // and this handler falls through to the real teardown.
+  if (!shutdownComplete && anyUnsavedWindowSession()) {
+    event.preventDefault();
+    quitRequested = true;
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.close();
+    }
+    return;
+  }
   performShutdown();
 });
 
@@ -9768,5 +10254,8 @@ app.on('window-all-closed', () => {
   // worker pools alive so macOS reopen-from-dock works. The full
   // teardown happens in `before-quit`.
   currentSession().activeCrawler?.stop();
-  if (process.platform !== 'darwin') app.quit();
+  // `quitRequested` covers macOS, where closing the last window normally
+  // leaves the app resident — but here the user did ask to quit, and the
+  // windows only closed because they cleared the unsaved-changes prompt.
+  if (process.platform !== 'darwin' || quitRequested) app.quit();
 });

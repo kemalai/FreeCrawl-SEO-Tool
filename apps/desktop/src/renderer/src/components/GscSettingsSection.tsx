@@ -17,26 +17,47 @@ export function GscSettingsSection() {
   const { t } = useTranslation();
   const [settings, setSettings] = useState<GscIntegrationSettings | null>(null);
   const [accounts, setAccounts] = useState<GoogleAccount[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [stored, list] = await Promise.all([
-        window.freecrawl.integrationSettingsGet('gsc'),
-        window.freecrawl.googleAccountsList('gsc'),
-      ]);
-      if (cancelled) return;
-      setAccounts(list);
-      setSettings({
-        ...defaultGscSettings(),
-        ...(stored ?? {}),
-      } as GscIntegrationSettings);
+      try {
+        const [stored, list] = await Promise.all([
+          window.freecrawl.integrationSettingsGet('gsc'),
+          window.freecrawl.googleAccountsList('gsc'),
+        ]);
+        if (cancelled) return;
+        setAccounts(list);
+        setSettings({
+          ...defaultGscSettings(),
+          ...(stored ?? {}),
+        } as GscIntegrationSettings);
+      } catch (e) {
+        if (cancelled) return;
+        // `settings` is the sole gate on rendering, so a rejection made
+        // this whole section vanish from Settings with no spinner and no
+        // message. Deliberately do NOT fall back to defaults: rendering
+        // blank fields over settings we failed to read invites the user
+        // to save them away.
+        setLoadError(e instanceof Error ? e.message : String(e));
+      }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
 
+  if (loadError) {
+    return (
+      <div className="text-[11px]">
+        <div className="font-semibold text-rose-300">
+          {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
+        </div>
+        <div className="mt-0.5 break-words text-surface-500">{loadError}</div>
+      </div>
+    );
+  }
   if (!settings) return null;
 
   const update = <K extends keyof GscIntegrationSettings>(

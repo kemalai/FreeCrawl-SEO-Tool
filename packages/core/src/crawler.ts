@@ -18,6 +18,7 @@ import {
   isSameHost,
   extractExtension,
   isInScope,
+  isPrivateHost,
   isUrlMalformed,
   detectUrlTrap,
   resolveStartUrl,
@@ -27,7 +28,7 @@ import {
 } from './url-utils.js';
 import { parseHtml, estimatePixelWidth, type ParsedPage } from './html-parser.js';
 import { analyseCookies, extractSetCookies } from './cookies.js';
-import { loadRobots, type RobotsChecker } from './robots.js';
+import { loadRobots, robotsUserAgentToken, type RobotsChecker } from './robots.js';
 import {
   BROWSER_FALLBACK_UA,
   buildDigestAuthHeader,
@@ -40,6 +41,7 @@ import {
   initHttpClient,
   MOBILE_USER_AGENT,
   parseDigestChallenge,
+  redactUrlSecrets,
 } from './http-client.js';
 import { setActiveDnsHook } from './dns-resolver.js';
 import { discoverSitemapUrls, fetchSitemaps, type SitemapEntry } from './sitemap.js';
@@ -97,6 +99,19 @@ interface QueueItem {
 }
 
 const EXT_TO_KIND: Record<string, ContentKind> = {
+  // HTML-ish page extensions. Reached only when the response carried no
+  // usable Content-Type (WAF/CDN block pages, some misconfigured origins);
+  // without these entries a `/urun.php` or `/page.html` with a missing
+  // Content-Type fell to `'other'` and vanished from every
+  // content_kind='html' issue filter — the page silently disappeared from
+  // the audit.
+  html: 'html',
+  htm: 'html',
+  xhtml: 'html',
+  php: 'html',
+  asp: 'html',
+  aspx: 'html',
+  jsp: 'html',
   css: 'css',
   js: 'js',
   mjs: 'js',
@@ -119,9 +134,89 @@ const EXT_TO_KIND: Record<string, ContentKind> = {
 // HEAD 403 / GET 200). Retry these — plus any 5xx or transport failure —
 // with GET before recording, so the status matches what a visitor sees.
 // Module-scope so the external-probe hot path doesn't rebuild it per URL.
+/** Memory-watchdog samples (2 s apart) to wait for RSS to fall back below
+ *  the resume threshold before concluding it never will — 5 minutes. */
+const MEMORY_STUCK_SAMPLES = 150;
+
 const HEAD_UNRELIABLE_STATUSES = new Set([
   400, 401, 403, 405, 406, 409, 429, 501,
 ]);
+
+// Known X-Robots-Tag directive keywords. Anything else appearing before a
+// colon is a bot name (`googlebot: noindex`), not a directive — but a real
+// directive can ALSO carry a colon (`unavailable_after: <date>`,
+// `max-snippet: -1`), so "has a colon → bot-scoped" is wrong. Membership
+// here is how we tell the two apart.
+const X_ROBOTS_DIRECTIVES = new Set([
+  'all',
+  'noindex',
+  'index',
+  'nofollow',
+  'follow',
+  'none',
+  'noarchive',
+  'nosnippet',
+  'noimageindex',
+  'notranslate',
+  'unavailable_after',
+  'max-snippet',
+  'max-image-preview',
+  'max-video-preview',
+  'indexifembedded',
+]);
+
+/**
+ * Which of `noindex` / `nofollow` an `X-Robots-Tag` header applies to US.
+ *
+ * The header may scope directives to a specific bot
+ * (`X-Robots-Tag: bingbot: noindex`), which only that bot honours. The old
+ * check was `header.includes('noindex')`, so a `bingbot: noindex` marked a
+ * page non-indexable that Google indexes fine. Honour a directive only when
+ * it is un-scoped (applies to every bot) or scoped to a bot we model: the
+ * crawl's own UA token, or Googlebot (the indexer the Indexability column
+ * fundamentally represents — consistent with the meta-robots handling).
+ *
+ * `none` is the shorthand for `noindex, nofollow`.
+ */
+export function xRobotsTagDirectives(
+  header: string,
+  uaToken: string,
+): { noindex: boolean; nofollow: boolean } {
+  const ua = uaToken.toLowerCase();
+  let noindex = false;
+  let nofollow = false;
+  const apply = (directives: string): void => {
+    if (/\bnone\b/.test(directives)) {
+      noindex = true;
+      nofollow = true;
+      return;
+    }
+    if (/\bnoindex\b/.test(directives)) noindex = true;
+    if (/\bnofollow\b/.test(directives)) nofollow = true;
+  };
+  for (const rawSegment of header.split(',')) {
+    const segment = rawSegment.trim().toLowerCase();
+    if (!segment) continue;
+    const colon = segment.indexOf(':');
+    if (colon > 0) {
+      const head = segment.slice(0, colon).trim();
+      // `head` is a bot name only if it isn't itself a directive keyword
+      // (which would mean this is a valued directive like `max-snippet: 5`).
+      if (!X_ROBOTS_DIRECTIVES.has(head)) {
+        if (head !== 'googlebot' && head !== ua) continue; // other bot
+        apply(segment.slice(colon + 1));
+        continue;
+      }
+    }
+    apply(segment); // un-scoped
+  }
+  return { noindex, nofollow };
+}
+
+/** Back-compat convenience wrapper. */
+export function xRobotsTagNoindex(header: string, uaToken: string): boolean {
+  return xRobotsTagDirectives(header, uaToken).noindex;
+}
 
 const CERT_VERIFY_ERROR_RE =
   /UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|DEPTH_ZERO_SELF_SIGNED_CERT|CERT_UNTRUSTED/;
@@ -174,6 +269,17 @@ export class Crawler extends EventEmitter {
    *  sequence, replayed on every request. Null when form login is off. */
   private sessionJar: SessionCookieJar | null = null;
   private robots: RobotsChecker | null = null;
+  /**
+   * robots.txt checker per ORIGIN. A single start-origin checker was wrong
+   * for cross-protocol (http vs https of the same host) and subdomain /
+   * all-subdomains crawls: robots-parser returns `undefined` for a URL whose
+   * origin doesn't match the file it parsed, which `?? true` turned into
+   * "allowed", so those URLs bypassed robots entirely. Each origin now gets
+   * its own checker, loaded lazily and cached.
+   */
+  private robotsByOrigin = new Map<string, RobotsChecker>();
+  /** Origins whose robots.txt fetch is in flight (load-once guard). */
+  private robotsLoadingOrigins = new Set<string>();
   /** robots.txt `Crawl-delay` for the start origin, in ms (0 = none). */
   private robotsCrawlDelayMs = 0;
   /** Monotonic dispatch clock for the maxRps gate (see acquireRateSlot). */
@@ -840,9 +946,14 @@ export class Crawler extends EventEmitter {
     // loaded. Both promises are awaited at end-of-crawl so post-crawl
     // recompute and sitemap-derived issue counts use the full data set.
     const robotsPromise = this.config.respectRobotsTxt
-      ? loadRobots(origin, this.config.userAgent).then((r) => {
+      ? loadRobots(origin, this.config.userAgent, (msg) => {
+          if (!this.stopped) this.emit('warn', msg);
+        }).then((r) => {
           if (!this.stopped) {
             this.robots = r;
+            // Seed the per-origin cache so the start origin uses the same
+            // checker (and its Crawl-delay) as every other origin.
+            this.robotsByOrigin.set(origin, r);
             // robots.txt `Crawl-delay` (seconds). Cached once — the start
             // origin's directive applies for the crawl, matching the single
             // robots checker used for allow/deny.
@@ -898,6 +1009,15 @@ export class Crawler extends EventEmitter {
     // behaviour.
     if (this.config.memoryLimitMb > 0) {
       let autoPaused = false;
+      // Samples spent waiting for RSS to fall back under `resumeAt`.
+      // Pausing stops new fetches but releases nothing already retained —
+      // the SQLite page cache, the worker isolates and `seen` dominate RSS
+      // and do not shrink. So the resume condition can simply never be met,
+      // and because a paused PQueue keeps `size > 0`, `queue.onIdle()` in
+      // `start()` never resolves: the crawl sat at "Running" forever with
+      // no way out but Stop. Give the spike a fair window, then finish the
+      // crawl with what we have instead of hanging on it.
+      let stuckSamples = 0;
       const limit = this.config.memoryLimitMb;
       const resumeAt = Math.floor(limit * 0.8);
       this.memoryWatchdogTimer = setInterval(() => {
@@ -910,6 +1030,7 @@ export class Crawler extends EventEmitter {
               `Will resume automatically once RSS drops below ${resumeAt} MB.`,
           );
           autoPaused = true;
+          stuckSamples = 0;
           this.pause();
         } else if (autoPaused && this.paused && rssMb < resumeAt) {
           this.emit(
@@ -917,7 +1038,26 @@ export class Crawler extends EventEmitter {
             `Memory dropped to ${rssMb} MB (< ${resumeAt} MB) — resuming crawler.`,
           );
           autoPaused = false;
+          stuckSamples = 0;
           this.resume();
+        } else if (autoPaused && this.paused) {
+          stuckSamples++;
+          if (stuckSamples >= MEMORY_STUCK_SAMPLES) {
+            this.emit(
+              'error',
+              `Memory stayed at ${rssMb} MB (≥ ${resumeAt} MB) for ` +
+                `${Math.round((MEMORY_STUCK_SAMPLES * 2000) / 60000)} minutes after the ` +
+                'memory-limit pause. Most of it is memory the crawler cannot release ' +
+                'while running, so waiting longer will not help — finishing the crawl ' +
+                'with the URLs collected so far. Raise or clear the memory limit to ' +
+                'crawl further.',
+            );
+            // Resume so the queue can drain to the terminal state, then
+            // stop: leaving it paused would keep `onIdle()` unresolved.
+            autoPaused = false;
+            this.resume();
+            this.stop();
+          }
         }
       }, 2000);
     }
@@ -1202,7 +1342,14 @@ export class Crawler extends EventEmitter {
     void import('./webhook.js').then(({ postCrawlCompleteWebhook }) =>
       postCrawlCompleteWebhook(url, payload).then((res) => {
         if (res.ok) {
-          this.emit('info', `Webhook posted to ${url} (${res.status} in ${res.durationMs} ms)`);
+          // Origin only. A Slack / Discord / Zapier incoming-webhook URL is
+          // bearer-equivalent — anyone holding it can post as the user — and
+          // this line lands in the on-disk log, the very file users are told
+          // to send to support.
+          this.emit(
+            'info',
+            `Webhook posted to ${redactUrlSecrets(url)} (${res.status} in ${res.durationMs} ms)`,
+          );
         } else {
           this.emit(
             'info',
@@ -1273,7 +1420,6 @@ export class Crawler extends EventEmitter {
     let probed = 0;
     let large = 0;
     const threshold = Math.max(1, this.config.largeImageBytes);
-    const userAgent = this.config.userAgent;
 
     const worker = async (): Promise<void> => {
       while (!this.stopped) {
@@ -1281,6 +1427,15 @@ export class Crawler extends EventEmitter {
         if (idx >= unprobed.length) return;
         const entry = unprobed[idx];
         if (!entry) return;
+        // SSRF guard — same as probeExternal: an image `src` can point at an
+        // internal address just as a link can.
+        if (isPrivateHost(entry.src) && !isPrivateHost(this.config.startUrl)) {
+          this.db.setImageSize(entry.id, null, 0);
+          continue;
+        }
+        // Only send the crawl's auth/custom headers to in-scope image hosts;
+        // third-party / CDN image URLs must not receive the start site's creds.
+        const imgInScope = isInScope(this.config.startUrl, entry.src, this.config.scope);
         const controller = new AbortController();
         const timeout = setTimeout(
           () => controller.abort(),
@@ -1292,8 +1447,8 @@ export class Crawler extends EventEmitter {
             headers: defaultRequestHeaders(
               this.resolveUserAgent(entry.src),
               this.config.acceptLanguage,
-              this.config.customHeaders,
-              this.config.auth,
+              imgInScope ? this.config.customHeaders : {},
+              imgInScope ? this.config.auth : undefined,
             ),
             redirect: 'follow',
             signal: controller.signal,
@@ -1765,6 +1920,7 @@ export class Crawler extends EventEmitter {
         timeoutMs: this.config.requestTimeoutMs,
         maxUrls: sitemapMaxUrls,
         maxDepth: 3,
+        rewrites: this.urlRewrites,
       });
       entries = result.entries;
       this.emit(
@@ -1970,6 +2126,7 @@ export class Crawler extends EventEmitter {
           timeoutMs: this.config.requestTimeoutMs,
           maxUrls: sitemapMaxUrls,
           maxDepth: 3,
+          rewrites: this.urlRewrites,
         };
 
         // (1) Auto-discovered sitemaps — recorded only.
@@ -2210,6 +2367,32 @@ export class Crawler extends EventEmitter {
 
   private async probeExternal(url: string): Promise<void> {
     if (this.stopped) return;
+
+    // SSRF guard: never fetch an internal/loopback/link-local address on
+    // behalf of a crawled page (e.g. `http://169.254.169.254/…` cloud
+    // metadata, `http://192.168.x/admin`). Skip unless the START host is
+    // itself private — an intranet crawl legitimately targets private space.
+    if (isPrivateHost(url) && !isPrivateHost(this.config.startUrl)) {
+      await this.dbCall<void>('updateExternalProbe', [
+        url,
+        {
+          statusCode: null,
+          statusText: 'Skipped: private/internal address (SSRF guard)',
+          responseTimeMs: 0,
+        },
+      ]);
+      return;
+    }
+
+    // Only attach the crawl's Authorization / custom headers when the probe
+    // host is within the crawl's own scope. Sending the start site's Basic
+    // auth or a bypass header (`X-Vercel-Protection-Bypass`, …) to an
+    // arbitrary third-party host is a credential leak — the fetch spec only
+    // strips auth on cross-origin REDIRECTS, not on a direct fetch.
+    const inScope = isInScope(this.config.startUrl, url, this.config.scope);
+    const probeAuth = inScope ? this.config.auth : undefined;
+    const probeHeaders = inScope ? this.config.customHeaders : {};
+
     const t0 = Date.now();
     const cfgUa = this.resolveUserAgent(url);
 
@@ -2230,10 +2413,17 @@ export class Crawler extends EventEmitter {
           headers: defaultRequestHeaders(
             ua,
             this.config.acceptLanguage,
-            this.config.customHeaders,
-            this.config.auth,
+            probeHeaders,
+            probeAuth,
           ),
-          redirect: this.config.followRedirects ? 'follow' : 'manual',
+          // Always manual for external outlinks: an external link IS its
+          // own response, so we report the link's immediate status. Under
+          // 'follow' the recorded status was the FINAL hop's — so a working
+          // `/old` (301 → 404 `/new`) was reported as 404 against `/old`,
+          // and the user "fixed" the wrong link. Manual makes external
+          // links consistent with how internal redirects are recorded
+          // (30x + redirect target).
+          redirect: 'manual',
           signal: controller.signal,
           ...(dispatcher ? { dispatcher } : {}),
         });
@@ -2291,6 +2481,13 @@ export class Crawler extends EventEmitter {
       } catch {
         /* ignore */
       }
+      // On a 3xx, resolve the Location so the row shows "→ target" the way
+      // internal redirects do, instead of a bare status.
+      let redirectTarget: string | null = null;
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get('location');
+        if (loc) redirectTarget = normalizeUrl(loc, url) ?? loc;
+      }
       await this.dbCall<void>('updateExternalProbe', [
         url,
         {
@@ -2299,6 +2496,7 @@ export class Crawler extends EventEmitter {
           contentType: res.headers.get('content-type'),
           contentLength: parseIntSafe(res.headers.get('content-length')),
           responseTimeMs,
+          redirectTarget,
         },
       ]);
     } else {
@@ -2669,6 +2867,35 @@ export class Crawler extends EventEmitter {
    */
   private resourceAdmitted = 0;
 
+  /**
+   * Is `url` allowed by the robots.txt of ITS OWN origin? Caller guards on
+   * `respectRobotsTxt`. Loads and caches a per-origin checker on first sight;
+   * while a fetch is in flight the URL is allowed optimistically — the same
+   * window the start origin already has before its own robots.txt finishes
+   * loading (see `start`), so behaviour is consistent, just now correct for
+   * additional origins instead of skipping them entirely.
+   */
+  private robotsAllows(url: string): boolean {
+    let origin: string;
+    try {
+      origin = new URL(url).origin;
+    } catch {
+      return true;
+    }
+    const checker = this.robotsByOrigin.get(origin);
+    if (checker) return checker.isAllowed(url);
+    if (!this.robotsLoadingOrigins.has(origin)) {
+      this.robotsLoadingOrigins.add(origin);
+      void loadRobots(origin, this.config.userAgent)
+        .then((r) => {
+          if (!this.stopped) this.robotsByOrigin.set(origin, r);
+        })
+        .catch(() => undefined)
+        .finally(() => this.robotsLoadingOrigins.delete(origin));
+    }
+    return true;
+  }
+
   private enqueue(item: QueueItem): void {
     if (this.stopped) return;
     if (this.seen.has(item.url)) return;
@@ -2691,7 +2918,33 @@ export class Crawler extends EventEmitter {
       this.loopTrapsDropped++;
       return;
     }
-    if (this.robots && !this.robots.isAllowed(item.url)) return;
+    if (this.config.respectRobotsTxt && !this.robotsAllows(item.url)) {
+      // Record it instead of dropping it silently. This is the whole point
+      // of the "Blocked by robots.txt" counter — which was permanently 0
+      // because the disallowed URL was never written anywhere. Mark it seen
+      // so it is recorded exactly once, then persist a lightweight row.
+      // Fire-and-forget to keep enqueue synchronous, matching the other
+      // write paths.
+      if (!this.seen.has(item.url) && this.seen.size < this.config.maxUrls) {
+        this.seen.add(item.url);
+        void this.dbCall<number>('upsertUrl', [
+          {
+            url: item.url,
+            urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+            urlTrap: this.trapKind(item.url),
+            contentKind: 'html',
+            statusCode: null,
+            statusText: null,
+            indexability: 'non-indexable:robots-blocked',
+            indexabilityReason: 'Blocked by robots.txt',
+            depth: item.depth,
+          },
+        ]).catch(() => {
+          /* best-effort — a failed record must not break the crawl */
+        });
+      }
+      return;
+    }
     if (!this.passesUrlFilter(item.url)) return;
     if (!this.passesExtensionFilter(item.url)) return;
     // Hard cap on the in-memory pending queue. Beyond this we drop new
@@ -3297,7 +3550,9 @@ export class Crawler extends EventEmitter {
         this.failed++;
         this.emit(
           'warn',
-          `Skipped ${item.url}: streamed body exceeded maxFileSizeBytes ${this.config.maxFileSizeBytes}`,
+          `Skipped ${item.url}: streamed body exceeded the ${effectiveBodyCap(
+            this.config.maxFileSizeBytes,
+          )} byte body cap`,
         );
         await this.dbCall<number>('upsertUrl', [
           {
@@ -3308,7 +3563,9 @@ export class Crawler extends EventEmitter {
             statusCode,
             statusText: 'size-cap-exceeded',
             indexability: 'non-indexable:client-error',
-            indexabilityReason: `Body skipped — streamed size exceeds maxFileSizeBytes ${this.config.maxFileSizeBytes}`,
+            indexabilityReason: `Body skipped — streamed size exceeds the ${effectiveBodyCap(
+              this.config.maxFileSizeBytes,
+            )} byte body cap`,
             responseTimeMs,
             depth: item.depth,
           },
@@ -3416,13 +3673,12 @@ export class Crawler extends EventEmitter {
         if (m && m[1]) charset = m[1];
       }
 
-      const xRobotsLower = xRobotsTag?.toLowerCase() ?? '';
-      // Same `none` shorthand as the meta tag, plus the header's optional
-      // `<bot>: <directives>` form (`X-Robots-Tag: googlebot: none`) — the
-      // colon is a token separator here, not part of a directive.
-      const headerNoindex =
-        xRobotsLower.includes('noindex') ||
-        xRobotsLower.split(/[\s,;:]+/).includes('none');
+      // Honour bot-scoped directives correctly: `X-Robots-Tag: bingbot:
+      // noindex` must NOT mark a page Google indexes as non-indexable.
+      const headerDirectives = xRobotsTag
+        ? xRobotsTagDirectives(xRobotsTag, robotsUserAgentToken(this.config.userAgent))
+        : { noindex: false, nofollow: false };
+      const headerNoindex = headerDirectives.noindex;
 
       let indexability: Indexability = 'indexable';
       let reason: string | null = null;
@@ -3761,7 +4017,14 @@ export class Crawler extends EventEmitter {
         this.enqueueResources(parsed, item.depth);
       }
 
-      if (parsed.hasNofollow || indexability === 'non-indexable:noindex') {
+      // Follow the page's links unless the page itself says nofollow —
+      // from meta robots OR the X-Robots-Tag header. `noindex` alone does
+      // NOT stop link following: `noindex, follow` is the standard
+      // pattern for paginated archives ("don't index this list page, but
+      // do crawl through to the items"), and gating on noindex here meant
+      // every product/article reachable only from page 2+ was never
+      // fetched and then reported as an orphan.
+      if (parsed.hasNofollow || headerDirectives.nofollow) {
         return;
       }
 
@@ -4196,6 +4459,7 @@ export class Crawler extends EventEmitter {
           submitSelector: b.submitSelector,
           successSelector: b.successSelector,
           waitMs: b.waitMs,
+          allowInsecureTls: b.allowInsecureTls,
         },
         {
           headless: jr?.headless ?? true,
@@ -4578,6 +4842,28 @@ function parseIntSafe(v: string | null | undefined): number | null {
 }
 
 /**
+ * Absolute ceiling on a single response body, applied even when the user
+ * has set no limit of their own.
+ *
+ * `maxFileSizeBytes` defaults to 0, and 0 meant "unbounded" — which
+ * disabled the very protection `readBodyCapped` was written to provide.
+ * An extension-less URL with no Content-Type is typed as `html`
+ * (`contentKindFor`), so something like `/download/backup` was buffered
+ * whole, and at concurrency 20 that is gigabytes in flight against
+ * Electron's 4 GB heap cap. `Buffer.concat` then doubles the peak.
+ *
+ * 64 MB is far beyond any real HTML/CSS/JS document while still bounding
+ * the worst case. A user-configured limit always wins — this only fills
+ * in when there isn't one.
+ */
+const ABSOLUTE_BODY_CAP_BYTES = 64 * 1024 * 1024;
+
+/** The byte cap actually enforced: the user's, or the safety ceiling. */
+function effectiveBodyCap(configured: number): number {
+  return configured > 0 ? configured : ABSOLUTE_BODY_CAP_BYTES;
+}
+
+/**
  * Read a fetch Response body as raw bytes with a hard byte cap. undici streams
  * the DECODED body (content-encoding already stripped), so this bounds the
  * actual memory a single page can consume. Content-Length is only advisory and
@@ -4591,9 +4877,13 @@ async function readBodyCapped(
   res: Response,
   capBytes: number,
 ): Promise<{ overCap: false; bytes: Buffer } | { overCap: true; bytes: null }> {
-  if (capBytes <= 0 || !res.body) {
+  const cap = effectiveBodyCap(capBytes);
+  if (!res.body) {
+    // No stream to meter. `arrayBuffer()` is still bounded in practice by
+    // the Content-Length pre-check upstream.
     return { overCap: false, bytes: Buffer.from(await res.arrayBuffer()) };
   }
+  capBytes = cap;
   const reader = (res.body as ReadableStream<Uint8Array>).getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;

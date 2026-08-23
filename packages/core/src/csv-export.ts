@@ -3,6 +3,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import type { ProjectDb } from '@freecrawl/db';
 import type { CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
+import { escapeCsv } from './spreadsheet.js';
 
 const CSV_COLUMNS: (keyof CrawlUrlRow)[] = [
   'url',
@@ -31,22 +32,30 @@ const CSV_COLUMNS: (keyof CrawlUrlRow)[] = [
   'crawledAt',
 ];
 
-function escapeCsv(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  const str = String(value);
-  if (/[",\n\r]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
+// Deliberately the shared implementation, not a local copy. This file had
+// its own `escapeCsv` with no formula guard, so a crawled `<title>` or
+// anchor text beginning with `=`, `+`, `-` or `@` — both fully controlled
+// by the crawled site — was written verbatim and executed by Excel /
+// LibreOffice / Sheets on open. Every bulk-export file and every
+// context-menu "Export as CSV" went through here, while the Export As…
+// dialog used the guarded copy: two writers reachable from one grid, only
+// one of them safe.
 
 export async function exportUrlsToCsv(
   db: ProjectDb,
   filePath: string,
-  options: { selectedIds?: number[]; category?: UrlCategory } = {},
+  options: {
+    selectedIds?: number[];
+    category?: UrlCategory;
+    /** Column override — appended/replaced per topic so a bulk export's
+     *  custom-extraction / hreflang / security files carry their own fields
+     *  instead of only the generic column set. Defaults to CSV_COLUMNS. */
+    columns?: (keyof CrawlUrlRow)[];
+  } = {},
 ): Promise<{ rowsWritten: number }> {
   let rowsWritten = 0;
-  const header = CSV_COLUMNS.join(',') + '\n';
+  const cols = options.columns && options.columns.length > 0 ? options.columns : CSV_COLUMNS;
+  const header = cols.map((c) => escapeCsv(c)).join(',') + '\n';
 
   const source: Iterable<CrawlUrlRow> =
     options.selectedIds && options.selectedIds.length > 0
@@ -58,7 +67,7 @@ export async function exportUrlsToCsv(
   const generator = async function* (): AsyncGenerator<string> {
     yield '﻿' + header;
     for (const row of source) {
-      const line = CSV_COLUMNS.map((col) => escapeCsv(row[col])).join(',') + '\n';
+      const line = cols.map((col) => escapeCsv(row[col])).join(',') + '\n';
       rowsWritten++;
       yield line;
     }
@@ -145,14 +154,14 @@ const BROKEN_LINK_CSV_HEADER = [
 export async function exportBrokenLinksToCsv(
   db: ProjectDb,
   filePath: string,
-  options: { internal?: 'all' | 'internal' | 'external' } = {},
+  options: { internal?: 'all' | 'internal' | 'external'; search?: string } = {},
 ): Promise<{ rowsWritten: number }> {
   let rowsWritten = 0;
   const header = BROKEN_LINK_CSV_HEADER.join(',') + '\n';
 
   const generator = async function* (): AsyncGenerator<string> {
     yield '﻿' + header;
-    for (const row of db.iterateBrokenLinks(options.internal ?? 'all')) {
+    for (const row of db.iterateBrokenLinks(options.internal ?? 'all', options.search)) {
       const cells = [
         row.fromUrl,
         row.fromStatusCode,

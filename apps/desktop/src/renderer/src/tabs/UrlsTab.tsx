@@ -1685,6 +1685,8 @@ export function UrlsTab() {
             onClose={() => setExportDialogOpen(false)}
             defaultTab={activeTab}
             selectedIds={selectedIds.size > 0 ? [...selectedIds] : undefined}
+            search={search || undefined}
+            filter={filter ?? undefined}
           />
         )}
       </ErrorBoundary>

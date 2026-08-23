@@ -2,13 +2,17 @@ import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import type { ProjectDb } from '@freecrawl/db';
-import type { CrawlUrlRow } from '@freecrawl/shared-types';
+import type { CrawlUrlRow, UrlCategory } from '@freecrawl/shared-types';
 
 export interface JsonExportOptions {
   /** When set, export only these URL ids (used by "Export Selected"). */
   selectedIds?: number[];
   /** Pretty-print with 2-space indent. Default `false` — newline-delimited compact JSON. */
   pretty?: boolean;
+  /** Restrict to a sidebar category (e.g. `issues:title-missing`). Ignored
+   *  when `selectedIds` is set. Without it the export was the whole crawl
+   *  even when the caller asked for a category. */
+  category?: UrlCategory;
 }
 
 /**
@@ -35,7 +39,9 @@ export async function exportUrlsToJson(
   const source: Iterable<CrawlUrlRow> =
     options.selectedIds && options.selectedIds.length > 0
       ? db.iterateUrlsByIds(options.selectedIds)
-      : db.iterateAllUrls();
+      : options.category
+        ? db.iterateUrlsByCategory(options.category)
+        : db.iterateAllUrls();
 
   const generator = async function* (): AsyncGenerator<string> {
     yield '[' + lead;

@@ -16,7 +16,10 @@
     "setupGuideTitle": "Adım adım kurulum rehberi — OAuth client, test user, API enable, sık karşılaşılan hatalar.",
     "saved": "Kaydedildi.",
     "cleared": "Kaldırıldı.",
-    "confirmClear": "Bu entegrasyonun saklanan tüm kimlik bilgileri kaldırılsın mı?"
+    "confirmClear": "Bu entegrasyonun saklanan tüm kimlik bilgileri kaldırılsın mı?",
+    "loadFailed": "Saklı kimlik bilgileri okunamadı: {{detail}}",
+    "saveFailed": "Kaydedilemedi: {{detail}}",
+    "clearFailed": "Kimlik bilgileri kaldırılamadı: {{detail}}"
   },
   "integrationGuide": {
     "title": "{{name}} — Kurulum Rehberi",
@@ -43,7 +46,11 @@
     "loading": "Yükleniyor…",
     "noData": "Veri yok",
     "search": "Ara…",
-    "language": "Dil"
+    "language": "Dil",
+    "loadFailedTitle": "Bu görünüm yüklenemedi",
+    "loadFailedBody": "Sorgu başarısız oldu; sonuçlar boş değil, eksik. Otomatik olarak yeniden denenecek.",
+    "loadFailedStale": "Son başarılı sonuç gösteriliyor — en son yenileme başarısız oldu.",
+    "retry": "Yeniden dene"
   },
   "topbar": {
     "urlPlaceholder": "https://ornek.com",
@@ -92,7 +99,8 @@
     "device": {
       "desktop": "Masaüstü tarama",
       "mobile": "Mobil tarama — sitenin mobil sürümünü tara (mobil User-Agent)"
-    }
+    },
+    "controlFailed": "{{action}} başarısız: {{detail}}"
   },
   "browserInstall": {
     "downloading": "Tarayıcı",
@@ -262,7 +270,8 @@
     "errorNoColumn": "En az bir kolon seç.",
     "errorNoTable": "En az bir tablo seç.",
     "successMsg": "{{count}} satır {{path}} konumuna aktarıldı",
-    "failedPrefix": "Dışa aktarım başarısız"
+    "failedPrefix": "Dışa aktarım başarısız",
+    "gridFailed": "Dışa aktarma başarısız: {{detail}}"
   },
   "app": {
     "dropMissingPath": "{{name}} için bırakılan yol okunamadı. Bunun yerine Dosya → Proje Aç kullan.",
@@ -274,7 +283,8 @@
     "deleteDomainPrompt": "GDPR Alan Temizleme — silinecek host'u gir (büyük/küçük harf duyarsız, tam eşleşme).\n\nÖrnek: example.com  ·  blog.example.com\n\nGeri alınamaz. Yedek istiyorsan önce Projeyi Farklı Kaydet.",
     "deleteDomainConfirm": "\"{{host}}\" üzerindeki tüm URL'leri, linklerini, başlıklarını, görsellerini ve kaynak snapshot'larını sil?\n\nBu işlem geri alınamaz.",
     "deleteDomainResult": "{{host}} alanından {{urls}} URL satırı silindi (ve {{links}} bağlı link).",
-    "clearAllConfirm": "Aktif projedeki TÜM veriler temizlensin mi?\n\nHer URL, link, görsel, başlık, kaynak snapshot, sitemap ve issue silinecek. Geri alınamaz — yedek istiyorsan önce Projeyi Farklı Kaydet."
+    "clearAllConfirm": "Aktif projedeki TÜM veriler temizlensin mi?\n\nHer URL, link, görsel, başlık, kaynak snapshot, sitemap ve issue silinecek. Geri alınamaz — yedek istiyorsan önce Projeyi Farklı Kaydet.",
+    "clearFailed": "Tarama temizlenemedi: {{detail}}"
   },
   "infoTip": {
     "moreInfo": "Daha fazla bilgi",
@@ -632,7 +642,8 @@
       "passSelector": "Parola seçici",
       "passValue": "Parola",
       "submitSelector": "Gönder seçici",
-      "successSelector": "Giriş yapıldı seçici (opsiyonel)"
+      "successSelector": "Giriş yapıldı seçici (opsiyonel)",
+      "allowInsecureTls": "Geçersiz HTTPS sertifikasına izin ver"
     },
     "network": {
       "intro": "Ağ seviyesi kontroller: proxy override, dosya-uzantısı hariç tutma, yönlendirme hop limiti.",
@@ -1484,7 +1495,8 @@
     "totalLabel": "Toplam satır",
     "noBrokenLinks": "Kırık link yok",
     "noBrokenLinksHint": "Kırık linkleri görmek için harici linkleri de içeren bir crawl çalıştır.",
-    "cellsSelected": "{{n}} hücre seçili"
+    "cellsSelected": "{{n}} hücre seçili",
+    "noBrokenLinksBody": "Taramadaki her bağlantı sağlıklı bir yanıt döndürüyor."
   },
   "urlsTab": {
     "searchPlaceholder": "URL / başlık ara…",
@@ -1601,7 +1613,8 @@
       "telemetryLabel": "Anonim kullanım telemetrisi gönder (opt-in)",
       "telemetryHelp": "Varsayılan olarak kapalı. Açıkken, özellik kullanımının toplulaştırılmış sayıları (örn. \"dışa aktarım çalıştı\", \"rapor açıldı\") gönderilebilir — URL, proje içeriği veya crawl sonuçları asla gönderilmez.",
       "statusNote": "Şu anda herhangi bir telemetri uç noktası kablolanmamıştır. Bu tercihi açıp kapatmak kaydedilir ancak mevcut sürümde hiçbir şey iletilmez. İlerideki bir sürüm uç nokta eklediğinde rıza durumunun korunması için bu toggle şimdi gösteriliyor."
-    }
+    },
+    "chooseDefaultProjectFolder": "Varsayılan Proje Klasörünü Seç"
   },
   "logAnalyzer": {
     "title": "Log Dosyası Analizi",
@@ -1684,7 +1697,9 @@
     "seeded": "{{n}} URL aktif crawl'a eklendi",
     "seedNoActive": "Aktif crawl yok — önce bir crawl başlatın, sonra ekleyin.",
     "seedNoOrigin": "Temel origin türetmek için henüz taranmış URL yok.",
-    "seedNone": "Eklenecek yeni bir şey yok."
+    "seedNone": "Eklenecek yeni bir şey yok.",
+    "clearFailed": "Log verisi temizlenemedi: {{detail}}",
+    "exportFailed": "Dışa aktarma başarısız: {{detail}}"
   },
   "detailExport": {
     "label": "Dışa Aktar",

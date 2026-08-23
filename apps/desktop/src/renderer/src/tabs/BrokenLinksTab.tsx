@@ -134,6 +134,7 @@ export function BrokenLinksTab() {
   // sizes, unlike the row `total` which scales with how many pages the
   // crawl reached.
   const [uniqueTargets, setUniqueTargets] = useState(0);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [exporting, setExporting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -171,13 +172,24 @@ export function BrokenLinksTab() {
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      const res = await window.freecrawl.brokenLinksQuery({
-        limit: PAGE_SIZE,
-        offset: 0,
-        search: search || undefined,
-        internal,
-      });
+      let res: Awaited<ReturnType<typeof window.freecrawl.brokenLinksQuery>>;
+      try {
+        res = await window.freecrawl.brokenLinksQuery({
+          limit: PAGE_SIZE,
+          offset: 0,
+          search: search || undefined,
+          internal,
+        });
+      } catch (e) {
+        if (cancelled) return;
+        // Without this the table stayed empty and rendered "No broken
+        // links" — a failed query presented as a clean audit result, which
+        // is the single most misleading thing this tab can do.
+        setLoadError(e instanceof Error ? e.message : String(e));
+        return;
+      }
       if (cancelled) return;
+      setLoadError(null);
       // A live-crawl poll can insert / reorder broken-link rows. The
       // cell selection is index-keyed ("rowIdx:colIdx"), so once the row
       // set shifts the old keys point at different rows — drop the
@@ -275,7 +287,10 @@ export function BrokenLinksTab() {
     if (total === 0 || exporting) return;
     setExporting(true);
     try {
-      await window.freecrawl.exportBrokenLinks({ internal });
+      await window.freecrawl.exportBrokenLinks({
+        internal,
+        search: search || undefined,
+      });
     } finally {
       setExporting(false);
     }
@@ -478,18 +493,48 @@ export function BrokenLinksTab() {
           </div>
         </div>
 
-        {total === 0 && (
+        {/* The error state must take precedence: "no broken links" is a
+            clean bill of health, and a failed query must never be shown
+            as one. */}
+        {loadError ? (
           <div
             className="pointer-events-none absolute inset-0 flex items-center justify-center"
             style={{ top: HEADER_HEIGHT }}
           >
             <div className="max-w-md text-center">
-              <div className="mb-1 text-sm font-semibold text-surface-300">{t('brokenTab.noBrokenLinks', { defaultValue: 'No broken links' })}</div>
-              <div className="text-xs text-surface-500">
-                Every link in the crawl resolves to a healthy response.
+              <div className="mb-1 text-sm font-semibold text-rose-300">
+                {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
               </div>
+              <div className="text-xs text-surface-500">
+                {total > 0
+                  ? t('common.loadFailedStale', {
+                      defaultValue:
+                        'Showing the last successful result — the latest refresh failed.',
+                    })
+                  : t('common.loadFailedBody', {
+                      defaultValue:
+                        'The query failed, so results are missing rather than empty. Retrying automatically.',
+                    })}
+              </div>
+              <div className="mt-1 break-words text-[11px] text-surface-600">{loadError}</div>
             </div>
           </div>
+        ) : (
+          total === 0 && (
+            <div
+              className="pointer-events-none absolute inset-0 flex items-center justify-center"
+              style={{ top: HEADER_HEIGHT }}
+            >
+              <div className="max-w-md text-center">
+                <div className="mb-1 text-sm font-semibold text-surface-300">{t('brokenTab.noBrokenLinks', { defaultValue: 'No broken links' })}</div>
+                <div className="text-xs text-surface-500">
+                  {t('brokenTab.noBrokenLinksBody', {
+                    defaultValue: 'Every link in the crawl resolves to a healthy response.',
+                  })}
+                </div>
+              </div>
+            </div>
+          )
         )}
       </div>
 

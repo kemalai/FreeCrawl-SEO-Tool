@@ -593,6 +593,7 @@ function configToForm(c: CrawlConfig): FormState {
       submitSelector: c.formLogin?.browser?.submitSelector ?? '',
       successSelector: c.formLogin?.browser?.successSelector ?? '',
       waitMs: c.formLogin?.browser?.waitMs ?? 0,
+      allowInsecureTls: c.formLogin?.browser?.allowInsecureTls ?? false,
     },
     proxyUrl: c.proxyUrl ?? '',
     excludeExtensionsText: (c.excludeExtensions ?? []).join(', '),
@@ -909,6 +910,7 @@ export function SettingsDialog({ open, onClose }: Props) {
           submitSelector: form.formLoginBrowser.submitSelector.trim(),
           successSelector: (form.formLoginBrowser.successSelector ?? '').trim(),
           waitMs: Math.max(0, num(String(form.formLoginBrowser.waitMs ?? 0), 0)),
+          allowInsecureTls: form.formLoginBrowser.allowInsecureTls === true,
         },
       },
       proxyUrl: form.proxyUrl.trim(),
@@ -3206,6 +3208,16 @@ function FormLoginEditor({ form, update }: PanelProps) {
               placeholder="a[href*='logout']"
             />
           </div>
+          <div className="mt-2">
+            <Bool
+              label={t('settingsPanels.formLogin.allowInsecureTls', {
+                defaultValue: 'Allow invalid HTTPS certificate',
+              })}
+              checked={browser.allowInsecureTls === true}
+              onChange={(v) => updateBrowser({ allowInsecureTls: v })}
+              info="Off by default: verify the login page's TLS certificate before typing credentials into it. Enable only for a trusted internal host with a self-signed certificate — an unverifiable certificate on a login page is a man-in-the-middle risk."
+            />
+          </div>
         </div>
       )}
 
@@ -4545,8 +4557,21 @@ function IntegrationPage({ id }: { id: string }) {
   const [accountsVersion, setAccountsVersion] = useState(0);
 
   useEffect(() => {
-    void window.freecrawl.integrationsGetAll().then(setState);
-  }, []);
+    window.freecrawl
+      .integrationsGetAll()
+      .then(setState)
+      .catch((e: unknown) => {
+        // Silently leaving `state` empty made every integration render as
+        // "not configured" — telling the user no credentials are stored
+        // when they may well be, which invites them to re-enter secrets.
+        setNotice(
+          t('integrations.loadFailed', {
+            defaultValue: 'Could not read stored credentials: {{detail}}',
+            detail: e instanceof Error ? e.message : String(e),
+          }),
+        );
+      });
+  }, [t]);
 
   // Switching provider must not carry the previous page's draft or
   // "Saved." notice across.
@@ -4566,6 +4591,16 @@ function IntegrationPage({ id }: { id: string }) {
       setState(await window.freecrawl.integrationsSet(def.id, draft));
       setDraft({});
       setNotice(t('integrations.saved', { defaultValue: 'Saved.' }));
+    } catch (e) {
+      // `finally` alone re-enabled the button and said nothing, so a
+      // failed credential save was indistinguishable from a successful
+      // one. Keep the draft so the user doesn't have to retype it.
+      setNotice(
+        t('integrations.saveFailed', {
+          defaultValue: 'Could not save: {{detail}}',
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setBusy(false);
     }
@@ -4580,6 +4615,15 @@ function IntegrationPage({ id }: { id: string }) {
       setState(await window.freecrawl.integrationsClear(def.id));
       setDraft({});
       setNotice(t('integrations.cleared', { defaultValue: 'Removed.' }));
+    } catch (e) {
+      // Destructive: reporting nothing would leave the user believing the
+      // credentials were removed while they are still on disk.
+      setNotice(
+        t('integrations.clearFailed', {
+          defaultValue: 'Could not remove credentials: {{detail}}',
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
     } finally {
       setBusy(false);
     }
@@ -5081,7 +5125,9 @@ function StoragePanel() {
 
   async function browse() {
     const chosen = await window.freecrawl.pickDirectory({
-      title: 'Choose Default Project Folder',
+      title: t('settings.chooseDefaultProjectFolder', {
+        defaultValue: 'Choose Default Project Folder',
+      }),
       defaultPath: resolved || undefined,
     });
     if (!chosen) return;

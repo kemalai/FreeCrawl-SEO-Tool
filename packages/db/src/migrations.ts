@@ -2162,6 +2162,28 @@ const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 86,
+    name: 'add_links_anchor_index',
+    // The Visualization tab's anchor-text panel runs
+    // `GROUP BY anchor` over `links` filtered on `is_internal = 1`. The
+    // table had indexes on `from_url_id`, `to_url` and `(to_url,
+    // is_internal)` — nothing on `anchor` — so the grouping fell back to a
+    // full scan plus a temp B-tree sort every time the tab was opened (and
+    // again on every `dataVersion` bump). `LIMIT 200` bounds the rows
+    // returned, not the work done.
+    //
+    // Partial index: rows with no anchor text are excluded by the same
+    // predicate the query uses, which keeps the index small on sites whose
+    // internal links are mostly images.
+    up: (db) => {
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS idx_links_anchor
+           ON links(anchor)
+         WHERE is_internal = 1 AND anchor IS NOT NULL AND anchor != ''`,
+      );
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

@@ -572,6 +572,9 @@ export interface ExportBrokenLinksInput {
   filePath?: string;
   /** Scope filter — matches the Broken Links tab's sidebar filter. */
   internal?: 'all' | 'internal' | 'external';
+  /** Search term — matches the tab's search box so the export mirrors the
+   *  filtered grid rather than the whole crawl. */
+  search?: string;
 }
 
 export interface ExportBrokenLinksResult {
@@ -632,6 +635,12 @@ export interface ExportTabularInput {
   filePath?: string;
   /** When set, restrict every section to these row ids. */
   selectedIds?: number[];
+  /** Active URL-table search term — applied to every section so the export
+   *  mirrors the filtered grid. Ignored when `selectedIds` is set. */
+  search?: string;
+  /** Active advanced filter — applied to every section, same rationale as
+   *  `search`. Ignored when `selectedIds` is set. */
+  filter?: AdvancedFilter;
   /** When true, CSV files are written with a UTF-8 BOM so Excel for Windows
    *  opens them in the correct charset. Ignored for non-CSV formats. */
   csvBom?: boolean;

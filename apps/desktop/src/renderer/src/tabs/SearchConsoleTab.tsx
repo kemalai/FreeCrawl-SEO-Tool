@@ -27,7 +27,9 @@ const POLL_MS_RUNNING = 5000;
 const INSPECT_BATCH = 100;
 
 /** What the tab is currently showing — drives the three-way render. */
-type Stage = 'loading' | 'unconfigured' | 'disconnected' | 'ready';
+// See AnalyticsTab — 'error' exists so a rejected bootstrap surfaces as a
+// message with a Retry instead of an unending spinner.
+type Stage = 'loading' | 'unconfigured' | 'disconnected' | 'ready' | 'error';
 
 /** Quick-filter presets, mirroring Screaming Frog's GSC filter dropdown.
  *  `needsInspection` entries only match once URL Inspection has been run. */
@@ -88,6 +90,8 @@ export function SearchConsoleTab() {
   const [inspecting, setInspecting] = useState(false);
   const [inspectProgress, setInspectProgress] = useState<GscInspectProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped by the error screen's Retry — re-runs the bootstrap effect. */
+  const [retryNonce, setRetryNonce] = useState(0);
   /** After a pull: how many GSC URLs were missing from the crawl, and
    *  whether they were auto-queued (crawl-new-urls setting on). */
   const [newUrls, setNewUrls] = useState<{ count: number; queued: number } | null>(null);
@@ -129,39 +133,48 @@ export function SearchConsoleTab() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [integrations, auth, gscSettings] = await Promise.all([
-        window.freecrawl.integrationsGetAll(),
-        window.freecrawl.googleAuthStatus('gsc'),
-        window.freecrawl.integrationSettingsGet('gsc'),
-      ]);
-      if (cancelled) return;
-      setAuthState(auth);
-      setAccounts(auth.accounts);
-      // Seed the toolbar from the stored per-project GSC settings so the
-      // account + property + date range persist across sessions. A stored
-      // account that has since been unlinked falls back to the first one.
-      const s = { ...defaultGscSettings(), ...(gscSettings ?? {}) };
-      const account =
-        auth.accounts.find((a) => a.accountId === s.accountId)?.accountId ??
-        auth.accounts[0]?.accountId ??
-        '';
-      setAccountId(account);
-      setDateRange(s.dateRange);
-      if (s.property) setProperty(s.property);
-      const configured = integrations['gsc']?.configured ?? false;
-      if (!configured) {
-        setStage('unconfigured');
-      } else if (!auth.connected) {
-        setStage('disconnected');
-      } else {
-        setStage('ready');
-        void loadSites(account);
+      try {
+        const [integrations, auth, gscSettings] = await Promise.all([
+          window.freecrawl.integrationsGetAll(),
+          window.freecrawl.googleAuthStatus('gsc'),
+          window.freecrawl.integrationSettingsGet('gsc'),
+        ]);
+        if (cancelled) return;
+        setAuthState(auth);
+        setAccounts(auth.accounts);
+        // Seed the toolbar from the stored per-project GSC settings so the
+        // account + property + date range persist across sessions. A stored
+        // account that has since been unlinked falls back to the first one.
+        const s = { ...defaultGscSettings(), ...(gscSettings ?? {}) };
+        const account =
+          auth.accounts.find((a) => a.accountId === s.accountId)?.accountId ??
+          auth.accounts[0]?.accountId ??
+          '';
+        setAccountId(account);
+        setDateRange(s.dateRange);
+        if (s.property) setProperty(s.property);
+        const configured = integrations['gsc']?.configured ?? false;
+        if (!configured) {
+          setStage('unconfigured');
+        } else if (!auth.connected) {
+          setStage('disconnected');
+        } else {
+          setStage('ready');
+          void loadSites(account);
+        }
+      } catch (e) {
+        if (cancelled) return;
+        // Every setStage above sits after the await, so a rejection here
+        // used to pin the tab on its spinner permanently — the effect is
+        // mount-only and never retried.
+        setError(e instanceof Error ? e.message : String(e));
+        setStage('error');
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [loadSites]);
+  }, [loadSites, retryNonce]);
 
   const reload = useCallback(async () => {
     const res = await window.freecrawl.gscQuery({
@@ -331,6 +344,30 @@ export function SearchConsoleTab() {
       <div className="flex h-full items-center justify-center bg-surface-950 text-[12px] text-surface-500">
         <Loader2 size={14} className="mr-2 animate-spin" />
         {t('gscTab.loading', { defaultValue: 'Loading…' })}
+      </div>
+    );
+  }
+
+  if (stage === 'error') {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 bg-surface-950 px-6 text-center">
+        <div className="text-[13px] font-semibold text-rose-300">
+          {t('common.loadFailedTitle', { defaultValue: "Couldn't load this view" })}
+        </div>
+        {error && (
+          <div className="max-w-md break-words text-[11px] text-surface-500">{error}</div>
+        )}
+        <button
+          type="button"
+          className="mt-1 rounded border border-surface-700 px-3 py-1 text-[12px] text-surface-200 hover:bg-surface-800"
+          onClick={() => {
+            setError(null);
+            setStage('loading');
+            setRetryNonce((n) => n + 1);
+          }}
+        >
+          {t('common.retry', { defaultValue: 'Retry' })}
+        </button>
       </div>
     );
   }

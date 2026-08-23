@@ -1441,6 +1441,11 @@ export interface BrowserLoginConfig {
   successSelector?: string;
   /** Extra settle time after submit, ms (for slow SPA redirects). */
   waitMs?: number;
+  /** Opt-in: accept invalid/self-signed TLS certificates on the login
+   *  page. OFF by default — typing real credentials into a page whose
+   *  certificate can't be verified is a MITM risk, so the user must
+   *  explicitly allow it (e.g. for an internal staging host). */
+  allowInsecureTls?: boolean;
 }
 
 export interface FormLoginConfig {
@@ -2056,11 +2061,19 @@ export interface DiscoveredResource {
 export interface ImageRow {
   id: number;
   src: string;
+  /** The alt for THIS usage (this page). The Images tab is per-usage: the
+   *  same image on two pages is two rows, so alt/missing/empty is accurate
+   *  per page rather than a lossy site-wide dedup. */
   alt: string | null;
   width: number | null;
   height: number | null;
   isInternal: boolean;
+  /** Total pages this image appears on (same for every usage row of it). */
   occurrences: number;
+  /** The page this usage is on. Null only for legacy projects with no
+   *  `image_usages` rows (pre-per-usage crawls), which fall back to one
+   *  row per distinct image. */
+  fromUrl: string | null;
 }
 
 /** Columns that the Advanced Filter dialog exposes for querying. */

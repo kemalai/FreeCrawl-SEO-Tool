@@ -18,21 +18,42 @@ import * as logger from './logger.js';
  *     while leaving the main thread headroom for IPC and queue
  *     scheduling.
  *
- * Round-robin dispatch is sufficient: parse durations are roughly
- * proportional to body size, and the crawler's URL mix makes it
- * unlikely that long-tail pages all land on the same worker. A
- * least-loaded scheduler would add complexity for marginal gain.
+ * Dispatch is least-busy with a round-robin tie-break. Blind round-robin
+ * was not sufficient in practice: it hands out work without looking at
+ * what a worker is already carrying, so with concurrency 20 against as
+ * few as 2 workers (a 4-core machine) several slow pages stack on the
+ * same thread and push each other past the parse timeout — and a worker
+ * that has already blown the timeout kept receiving more work.
+ *
+ * A timed-out worker is recycled rather than reused: the parse is a
+ * synchronous cheerio call inside the worker that cannot be cancelled,
+ * so the only way to stop it burning a core is to terminate the thread
+ * and spawn a replacement.
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.join(__dirname, 'parser-worker.js');
 const REQUEST_TIMEOUT_MS = 60_000;
 
+/** Thrown when a parse exceeds REQUEST_TIMEOUT_MS. Distinguished from a
+ *  crash/not-ready failure because the caller must NOT retry it inline on
+ *  the main thread — a document heavy enough to wedge a worker will freeze
+ *  the whole app there. */
+export class ParserTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`parser-pool: timeout > ${ms}ms`);
+    this.name = 'ParserTimeoutError';
+  }
+}
+
 type ParseHtmlArgs = Parameters<typeof parseHtml>;
 type ParseOpts = ParseHtmlArgs[2];
 type ParseResult = ReturnType<typeof parseHtml>;
 
 interface PendingRequest {
+  /** Which worker is carrying this request — needed to release its load
+   *  counter and to fail everything queued on a wedged thread. */
+  worker: Worker;
   resolve: (v: ParseResult) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -48,6 +69,8 @@ interface ResponseMessage {
 class ParserPool {
   private workers: Worker[] = [];
   private pending = new Map<number, PendingRequest>();
+  /** In-flight parse count per worker, for least-busy dispatch. */
+  private inFlight = new Map<Worker, number>();
   private nextRequestId = 1;
   private nextWorkerIdx = 0;
   private terminated = false;
@@ -114,14 +137,19 @@ class ParserPool {
       return Promise.reject(new Error('parser-pool: not ready'));
     }
     const requestId = this.nextRequestId++;
-    const worker = this.workers[this.nextWorkerIdx % this.workers.length]!;
-    this.nextWorkerIdx++;
+    const worker = this.pickWorker();
+    this.inFlight.set(worker, (this.inFlight.get(worker) ?? 0) + 1);
     return new Promise<ParseResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error(`parser-pool: timeout > ${REQUEST_TIMEOUT_MS}ms`));
+        this.releaseWorker(worker);
+        reject(new ParserTimeoutError(REQUEST_TIMEOUT_MS));
+        // Recycle AFTER rejecting this caller: the worker is stuck inside a
+        // synchronous parse that can't be interrupted, so leaving it in the
+        // pool means it keeps a core pinned and keeps being handed work.
+        this.recycleWedged(worker);
       }, REQUEST_TIMEOUT_MS);
-      this.pending.set(requestId, { resolve, reject, timer });
+      this.pending.set(requestId, { worker, resolve, reject, timer });
       worker.postMessage({ requestId, html, pageUrl, opts });
     });
   }
@@ -133,12 +161,63 @@ class ParserPool {
       p.reject(new Error('parser-pool: terminated'));
     }
     this.pending.clear();
+    this.inFlight.clear();
     const workers = this.workers;
     this.workers = [];
     await Promise.allSettled(workers.map((w) => w.terminate()));
   }
 
   // ── private ──────────────────────────────────────────────────────
+
+  /** Least in-flight requests wins; ties rotate so equally-idle workers
+   *  don't all receive the next batch on the same thread. */
+  private pickWorker(): Worker {
+    const n = this.workers.length;
+    let best = this.workers[this.nextWorkerIdx % n]!;
+    let bestLoad = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < n; i++) {
+      const w = this.workers[(this.nextWorkerIdx + i) % n]!;
+      const load = this.inFlight.get(w) ?? 0;
+      if (load < bestLoad) {
+        best = w;
+        bestLoad = load;
+      }
+    }
+    this.nextWorkerIdx = (this.nextWorkerIdx + 1) % n;
+    return best;
+  }
+
+  private releaseWorker(w: Worker): void {
+    const cur = this.inFlight.get(w) ?? 0;
+    if (cur <= 1) this.inFlight.delete(w);
+    else this.inFlight.set(w, cur - 1);
+  }
+
+  /** Drop a worker that blew the parse timeout and put a fresh one in its
+   *  place. Anything else queued behind it is failed rather than left to
+   *  hang, since the thread is about to be terminated mid-parse. */
+  private recycleWedged(w: Worker): void {
+    const slot = this.workers.indexOf(w);
+    if (slot < 0) return; // already recycled or removed
+    // Remove it first so its own 'exit' handler treats it as replaced and
+    // doesn't respawn a second time.
+    this.workers.splice(slot, 1);
+    this.inFlight.delete(w);
+    for (const [id, p] of this.pending) {
+      if (p.worker !== w) continue;
+      clearTimeout(p.timer);
+      this.pending.delete(id);
+      p.reject(new ParserTimeoutError(REQUEST_TIMEOUT_MS));
+    }
+    logger.log(
+      'warn',
+      'main',
+      `parser-worker exceeded ${REQUEST_TIMEOUT_MS}ms on a single document — terminating and respawning it.`,
+    );
+    void w.terminate().catch(() => undefined);
+    const fresh = this.tryRespawn();
+    if (fresh) this.workers.push(fresh);
+  }
 
   private spawnWorker(): Worker {
     const w = new Worker(WORKER_PATH);
@@ -154,6 +233,15 @@ class ParserPool {
       // would point at the wrong slot (or past the end).
       const slot = this.workers.indexOf(w);
       if (slot < 0) return; // already replaced / removed
+      this.inFlight.delete(w);
+      // Fail this worker's in-flight parses now instead of letting each one
+      // sit out the full 60 s timeout for an answer that can never arrive.
+      for (const [id, p] of this.pending) {
+        if (p.worker !== w) continue;
+        clearTimeout(p.timer);
+        this.pending.delete(id);
+        p.reject(new Error(`parser-worker exited (code=${code})`));
+      }
       if (code === 0) {
         // Clean exit — drop the slot so `parse()` never dispatches to it.
         this.workers.splice(slot, 1);
@@ -196,6 +284,7 @@ class ParserPool {
     if (!pending) return;
     this.pending.delete(msg.requestId);
     clearTimeout(pending.timer);
+    this.releaseWorker(pending.worker);
     if (msg.ok && msg.result !== undefined) {
       pending.resolve(msg.result);
     } else {

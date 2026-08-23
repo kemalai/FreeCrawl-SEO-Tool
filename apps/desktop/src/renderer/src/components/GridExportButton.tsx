@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Download } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
+import { useAppStore } from '../store.js';
 
 export interface GridExportData {
   headers: string[];
@@ -45,9 +46,19 @@ export function GridExportButton({
       const { headers, rows } = getData();
       if (headers.length === 0) return;
       await window.freecrawl.exportGrid({ fileName, sheetName, headers, rows });
-    } catch {
-      // The main process logs the cause; a failed export must not take
-      // the panel down with it.
+    } catch (e) {
+      // A failed export must not take the panel down — but swallowing it
+      // outright meant the spinner just stopped and no file appeared, with
+      // nothing on screen to say why. The cause is in the main log; put it
+      // in front of the user too.
+      useAppStore
+        .getState()
+        .setError(
+          t('export.gridFailed', {
+            defaultValue: 'Export failed: {{detail}}',
+            detail: e instanceof Error ? e.message : String(e),
+          }),
+        );
     } finally {
       setBusy(false);
     }

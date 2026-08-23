@@ -27,7 +27,7 @@ import { app, safeStorage, shell } from 'electron';
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs';
 import type { GoogleAccount, GoogleAuthState } from '@freecrawl/shared-types';
 import { apiFetch } from './api-fetch.js';
 import { resolveCredentials } from './credentials.js';
@@ -167,7 +167,17 @@ function newAccountId(): string {
 
 function persist(): void {
   try {
-    writeFileSync(filePath(), JSON.stringify(cache ?? {}, null, 2), 'utf8');
+    const p = filePath();
+    // 0600 — refresh tokens live here (base64 fallback with no keyring), so
+    // the file must not be world-readable. Same pattern as credentials.ts.
+    writeFileSync(p, JSON.stringify(cache ?? {}, null, 2), { encoding: 'utf8', mode: 0o600 });
+    if (process.platform !== 'win32') {
+      try {
+        chmodSync(p, 0o600);
+      } catch {
+        /* best-effort */
+      }
+    }
   } catch (err) {
     logger.log('error', 'main', `google token store write failed: ${(err as Error).message}`);
   }

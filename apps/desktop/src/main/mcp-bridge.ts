@@ -394,6 +394,23 @@ async function handleRequest(
   token: string,
   deps: McpBridgeDeps,
 ): Promise<void> {
+  // 0) Host allow-list — DNS-rebinding defence. The server binds to
+  //    127.0.0.1, but a malicious page could point a hostname that resolves
+  //    to 127.0.0.1 at this port; the browser would then send that hostname
+  //    in the Host header. Reject anything whose host is not loopback so a
+  //    rebinding attempt never reaches auth or routing.
+  const hostHdr = (req.headers['host'] ?? '').toLowerCase();
+  const hostName = hostHdr.replace(/:\d+$/, '');
+  if (
+    hostName !== '127.0.0.1' &&
+    hostName !== 'localhost' &&
+    hostName !== '[::1]' &&
+    hostName !== '::1'
+  ) {
+    send(res, 403, { error: 'forbidden-host' });
+    return;
+  }
+
   // 1) Method + path gate — only the small allow-listed routes.
   const url = req.url ?? '';
   const method = req.method ?? 'GET';
