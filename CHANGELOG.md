@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.9.7] — 2026-08-23
+
+### Added
+- Images tab now lists each image per page it appears on, with a Page column, so Missing/Empty Alt is accurate for every page.
+- Opt-in "Allow invalid HTTPS certificate" for browser form-login — off by default so credentials aren't typed into an unverified page.
+
+### Changed
+- Crawl credentials (auth, proxy, custom headers) are now encrypted at rest and stripped from shared settings exports.
+- Exports now honour the active search and advanced filter, so the file matches exactly what the table shows.
+- robots.txt is now evaluated per origin, so cross-protocol and subdomain URLs are checked correctly.
+- URLs blocked by robots.txt are now recorded, so the "Blocked by robots.txt" count is no longer always zero.
+
+### Fixed
+- Fixed the Overview panel staying blank in RAM-only storage mode.
+- Fixed several crashes, freezes, and out-of-memory cases on large crawls, exports, and log imports.
+- Fixed quitting with unsaved changes (Ctrl/Cmd+Q) wiping the crawl.
+- Fixed tabs falsely reporting "no broken links / no images" and detail panels stuck on "Loading…" when a query failed.
+- Fixed relative links and canonicals resolving wrongly when a page declares a `<base>` tag.
+- Fixed robots.txt user-agent matching, X-Robots-Tag per-bot rules, and `noindex, follow` pages not being crawled through.
+- Fixed sitemap comparisons, favicon/thin-content flags on redirects, and the non-ASCII and uppercase URL checks.
+- Fixed Missing/Empty Alt being judged site-wide instead of per page, and external links reporting a redirect's final status.
+- Fixed crawl-control buttons and destructive actions failing silently instead of reporting the error.
+- Hardened against credential leaks in logs and exports, CSV formula injection, path traversal, and untrusted-content navigation.
+- Various stability, correctness, and UI refinements.
+
 ## [0.9.6] — 2026-08-20
 
 ### Added
