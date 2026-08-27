@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.9.8] — 2026-08-27
+
+### Added
+- New "Suspicious Requests" tab in the Log Analyzer flags SQL-injection, XSS, and scanner probes in your access logs with the sender IP and the decoded payload.
+- Export (CSV/Excel) buttons on every integration tab, and all integration tables added to the "Export Crawl Data" dialog.
+- Optional adaptive crawl speed that automatically slows down when a site returns 429 / Retry-After and speeds back up once it recovers.
+- Richer `debug.txt` diagnostics so a remote user's issue can be pinpointed from a single file.
+
+### Changed
+- Removed the Privacy settings page — FreeCrawl keeps no telemetry, so the opt-in served no purpose.
+
+### Fixed
+- Fixed the detail panel showing no Inlinks/Outlinks for a selected URL.
+- Fixed crawl freezes and sidebar filters hanging on large sites, caused by slow issue queries.
+- Fixed the crawl appearing stuck during the post-crawl image probe by pacing it and reporting progress.
+- Fixed the Copy button in the Logs window.
+- Fixed the Log Analyzer showing old sample data after a fresh crawl.
+- Fixed the red "—" status badge shown for URLs blocked by robots.txt.
+- Various performance, stability, and UI refinements.
+
 ## [0.9.7] — 2026-08-23
 
 ### Added
