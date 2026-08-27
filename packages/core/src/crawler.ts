@@ -12,7 +12,7 @@ import type {
   DiscoveredLink,
   Indexability,
 } from '@freecrawl/shared-types';
-import { type ProjectDb, EXPENSIVE_ISSUE_DEFINITIONS } from '@freecrawl/db';
+import { type ProjectDb, type ProbeWrite, EXPENSIVE_ISSUE_DEFINITIONS } from '@freecrawl/db';
 import {
   normalizeUrl,
   isSameHost,
@@ -234,6 +234,53 @@ function isHardTransportError(err: unknown): boolean {
   return HARD_TRANSPORT_ERROR_RE.test(formatFetchError(err));
 }
 
+/**
+ * Collects post-crawl probe results and hands them to the writer in
+ * batches — see `ProjectDb.applyProbeWrites` for why they are not
+ * written one row at a time on the crawler's own connection.
+ *
+ * Flushes are chained so batches reach the writer in order and never
+ * overlap; the final `flush()` awaits everything still in flight, which
+ * is what lets a probe phase report "complete" only once its rows are on
+ * disk. A rejected batch is reported through `onError` and dropped
+ * rather than left to poison the chain for every batch after it.
+ */
+export class ProbeWriteBuffer {
+  private pending: ProbeWrite[] = [];
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly write: (writes: ProbeWrite[]) => Promise<void>,
+    private readonly onError: (err: unknown) => void,
+    private readonly batchSize = 200,
+  ) {}
+
+  push(write: ProbeWrite): void {
+    this.pending.push(write);
+    if (this.pending.length >= this.batchSize) void this.flush();
+  }
+
+  flush(): Promise<void> {
+    if (this.pending.length > 0) {
+      const batch = this.pending;
+      this.pending = [];
+      this.chain = this.chain.then(() => this.write(batch)).catch(this.onError);
+    }
+    return this.chain;
+  }
+}
+
+/** Pacing + progress bookkeeping for one post-crawl probe phase. */
+interface ProbeProgress {
+  /** Human-readable phase name, used verbatim in the progress line. */
+  label: string;
+  total: number;
+  /** Items dispatched so far — slightly ahead of items finished, by at
+   *  most the worker count, which is what a progress line wants. */
+  started: number;
+  lastEmitAt: number;
+}
+
 export class Crawler extends EventEmitter {
   private config: CrawlConfig;
   private readonly db: ProjectDb;
@@ -288,27 +335,37 @@ export class Crawler extends EventEmitter {
   private memoryWatchdogTimer: NodeJS.Timeout | null = null;
   /** Periodic post-crawl-style recompute of expensive issue counters
    * while the crawl is still running, so the sidebar number is < 30 s
-   * stale instead of "0 until crawl ends". The recompute is dispatched
-   * to the writer-worker via the injected `recomputeIssues` hook, so
-   * it does NOT block the main thread — the freezes that an earlier
-   * version produced were a result of running the recompute inline on
-   * the main-thread writer connection, which has since been fixed. */
+   * stale instead of "0 until crawl ends". The desktop host routes the
+   * pass to the writer worker through the injected `recomputeIssues`
+   * hook; in RAM-only storage mode there is no worker and it runs on
+   * this thread. Either way a slow pass must not be re-issued every
+   * 30 s regardless: the next tick waits at least
+   * `ISSUE_RECOMPUTE_DUTY_DIVISOR` × the previous pass's duration, so
+   * the recompute can never occupy more than a fixed share of wall
+   * time — on the main thread that share is the freeze budget. */
   private issueRecomputeTimer: NodeJS.Timeout | null = null;
   private static readonly ISSUE_RECOMPUTE_INTERVAL_MS = 30_000;
+  private static readonly ISSUE_RECOMPUTE_MAX_INTERVAL_MS = 5 * 60_000;
+  private static readonly ISSUE_RECOMPUTE_DUTY_DIVISOR = 4;
   private issueRecomputeInFlight = false;
   private startIssueRecomputeTimer(): void {
+    this.scheduleIssueRecompute(Crawler.ISSUE_RECOMPUTE_INTERVAL_MS);
+  }
+  private scheduleIssueRecompute(delayMs: number): void {
     if (this.issueRecomputeTimer) return;
-    this.issueRecomputeTimer = setInterval(() => {
-      if (this.stopped || !this.running || this.paused) return;
-      // Drop overlapping ticks — on a 1M-URL DB the recompute can run
-      // longer than the 30 s tick, and piling RPCs on the writer worker
-      // would starve per-URL writes behind a queue of issue passes.
-      if (this.issueRecomputeInFlight) return;
+    this.issueRecomputeTimer = setTimeout(() => {
+      this.issueRecomputeTimer = null;
+      if (this.stopped || !this.running) return;
+      // Skip while paused or while a previous pass is still running —
+      // on a 1M-URL DB the recompute can outlive its own interval, and
+      // piling RPCs on the writer worker would starve per-URL writes
+      // behind a queue of issue passes.
+      if (this.paused || this.issueRecomputeInFlight) {
+        this.scheduleIssueRecompute(Crawler.ISSUE_RECOMPUTE_INTERVAL_MS);
+        return;
+      }
       this.issueRecomputeInFlight = true;
-      // The injected hook routes through the writer worker in the
-      // desktop host, so this is off-thread; main stays free to
-      // service IPC and pump the crawl queue. CLI fallback runs the
-      // yielding variant inline, which is fine for that context.
+      const startedAt = Date.now();
       void this.recomputeIssues(EXPENSIVE_ISSUE_DEFINITIONS)
         .catch((err) => {
           this.emit(
@@ -318,12 +375,27 @@ export class Crawler extends EventEmitter {
         })
         .finally(() => {
           this.issueRecomputeInFlight = false;
+          const tookMs = Date.now() - startedAt;
+          const nextMs = Math.min(
+            Crawler.ISSUE_RECOMPUTE_MAX_INTERVAL_MS,
+            Math.max(
+              Crawler.ISSUE_RECOMPUTE_INTERVAL_MS,
+              tookMs * Crawler.ISSUE_RECOMPUTE_DUTY_DIVISOR,
+            ),
+          );
+          if (nextMs > Crawler.ISSUE_RECOMPUTE_INTERVAL_MS) {
+            this.emit(
+              'debug',
+              `issue counter recompute took ${Math.round(tookMs / 1000)} s — next pass in ${Math.round(nextMs / 1000)} s`,
+            );
+          }
+          if (!this.stopped && this.running) this.scheduleIssueRecompute(nextMs);
         });
-    }, Crawler.ISSUE_RECOMPUTE_INTERVAL_MS);
+    }, delayMs);
   }
   private stopIssueRecomputeTimer(): void {
     if (this.issueRecomputeTimer) {
-      clearInterval(this.issueRecomputeTimer);
+      clearTimeout(this.issueRecomputeTimer);
       this.issueRecomputeTimer = null;
     }
   }
@@ -1397,6 +1469,50 @@ export class Crawler extends EventEmitter {
    * bounded by the same setting as the main crawl; failures are silent
    * (probe_status stays null and the issue check skips them).
    */
+  /**
+   * Shared pacing + progress for the post-crawl probe phases.
+   *
+   * Each of these loops fires one network request per row over a fixed
+   * worker pool, and every one of them used to do so with no spacing and
+   * no output between "Probing N…" and "complete". On a site with 16 k
+   * images that is a half-hour of silence during which the URL counters
+   * cannot move — the crawl reads as wedged — and the burst (up to 20
+   * concurrent with zero delay, ignoring the crawl's own `maxRps`) is
+   * what makes the host start timing those requests out in the first
+   * place, which is what made the phase take half an hour.
+   *
+   * Call once per item, right after the bounds check: it honours the
+   * configured rate limit and emits a progress line on a fixed cadence.
+   */
+  private static readonly PROBE_PROGRESS_INTERVAL_MS = 15_000;
+
+  private async probeTick(state: ProbeProgress): Promise<void> {
+    state.started++;
+    const now = Date.now();
+    if (now - state.lastEmitAt >= Crawler.PROBE_PROGRESS_INTERVAL_MS) {
+      state.lastEmitAt = now;
+      this.emit('info', `${state.label}: ${state.started}/${state.total}…`);
+    }
+    // Same gate the crawl loop uses. `maxRps` is a politeness setting the
+    // user configured for this host; a probe is a request like any other.
+    await this.acquireRateSlot();
+  }
+
+  private newProbeWriteBuffer(): ProbeWriteBuffer {
+    return new ProbeWriteBuffer(
+      (writes) => this.dbCall<void>('applyProbeWrites', [writes]),
+      (err) =>
+        this.emit(
+          'debug',
+          `probe result batch not stored: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+    );
+  }
+
+  private newProbeProgress(label: string, total: number): ProbeProgress {
+    return { label, total, started: 0, lastEmitAt: Date.now() };
+  }
+
   private async runImageSizeProbes(): Promise<void> {
     if (!this.config.probeImageSizes) return;
     if (this.stopped) return;
@@ -1421,16 +1537,19 @@ export class Crawler extends EventEmitter {
     let large = 0;
     const threshold = Math.max(1, this.config.largeImageBytes);
 
+    const writes = this.newProbeWriteBuffer();
+    const progress = this.newProbeProgress('Image probe', unprobed.length);
     const worker = async (): Promise<void> => {
       while (!this.stopped) {
         const idx = cursor++;
         if (idx >= unprobed.length) return;
         const entry = unprobed[idx];
         if (!entry) return;
+        await this.probeTick(progress);
         // SSRF guard — same as probeExternal: an image `src` can point at an
         // internal address just as a link can.
         if (isPrivateHost(entry.src) && !isPrivateHost(this.config.startUrl)) {
-          this.db.setImageSize(entry.id, null, 0);
+          writes.push({ method: 'setImageSize', args: [entry.id, null, 0] });
           continue;
         }
         // Only send the crawl's auth/custom headers to in-scope image hosts;
@@ -1455,11 +1574,14 @@ export class Crawler extends EventEmitter {
           });
           const lenStr = res.headers.get('content-length');
           const len = lenStr !== null ? Number.parseInt(lenStr, 10) : null;
-          this.db.setImageSize(
-            entry.id,
-            Number.isFinite(len) && len !== null && len >= 0 ? len : null,
-            res.status,
-          );
+          writes.push({
+            method: 'setImageSize',
+            args: [
+              entry.id,
+              Number.isFinite(len) && len !== null && len >= 0 ? len : null,
+              res.status,
+            ],
+          });
           if (Number.isFinite(len) && len !== null && len > threshold) {
             large++;
           }
@@ -1472,11 +1594,7 @@ export class Crawler extends EventEmitter {
           }
         } catch {
           // Mark with status 0 so we don't re-probe on the next crawl.
-          try {
-            this.db.setImageSize(entry.id, null, 0);
-          } catch {
-            /* ignore */
-          }
+          writes.push({ method: 'setImageSize', args: [entry.id, null, 0] });
         } finally {
           clearTimeout(timeout);
         }
@@ -1486,6 +1604,7 @@ export class Crawler extends EventEmitter {
     const workers: Promise<void>[] = [];
     for (let i = 0; i < concurrency; i++) workers.push(worker());
     await Promise.all(workers);
+    await writes.flush();
     this.emit(
       'info',
       `Image probe complete: ${probed} sized, ${large} > ${(threshold / 1024).toFixed(0)} KB`,
@@ -1530,12 +1649,15 @@ export class Crawler extends EventEmitter {
     let probed = 0;
     let failed = 0;
 
+    const writes = this.newProbeWriteBuffer();
+    const progress = this.newProbeProgress('Manifest probe', urls.length);
     const worker = async (): Promise<void> => {
       while (!this.stopped) {
         const idx = cursor++;
         if (idx >= urls.length) return;
         const url = urls[idx];
         if (!url) return;
+        await this.probeTick(progress);
         try {
           const result = await probeManifest(url, {
             userAgent: this.resolveUserAgent(url),
@@ -1543,14 +1665,19 @@ export class Crawler extends EventEmitter {
             customHeaders: this.config.customHeaders,
             auth: this.config.auth,
           });
-          this.db.setManifestForReferrers({
-            manifestUrl: url,
-            rawJson: result.error ? null : result.rawJson,
-            themeColor: result.themeColor,
-            shortName: result.shortName,
-            display: result.display,
-            scope: result.scope,
-            iconCount: result.iconCount,
+          writes.push({
+            method: 'setManifestForReferrers',
+            args: [
+              {
+                manifestUrl: url,
+                rawJson: result.error ? null : result.rawJson,
+                themeColor: result.themeColor,
+                shortName: result.shortName,
+                display: result.display,
+                scope: result.scope,
+                iconCount: result.iconCount,
+              },
+            ],
           });
           if (result.error) failed++;
           probed++;
@@ -1563,6 +1690,7 @@ export class Crawler extends EventEmitter {
     const workers: Promise<void>[] = [];
     for (let i = 0; i < concurrency; i++) workers.push(worker());
     await Promise.all(workers);
+    await writes.flush();
     this.emit(
       'info',
       `Manifest probe complete: ${probed - failed}/${probed} parsed, ${failed} failed`,
@@ -1600,12 +1728,15 @@ export class Crawler extends EventEmitter {
     let cursor = 0;
     let decoded = 0;
 
+    const writes = this.newProbeWriteBuffer();
+    const progress = this.newProbeProgress('Social image probe', urls.length);
     const worker = async (): Promise<void> => {
       while (!this.stopped) {
         const idx = cursor++;
         if (idx >= urls.length) return;
         const src = urls[idx];
         if (!src) return;
+        await this.probeTick(progress);
         let dims: { width: number; height: number } | null = null;
         try {
           dims = await probeSocialImageDimensions(src, {
@@ -1617,17 +1748,12 @@ export class Crawler extends EventEmitter {
         } catch {
           dims = null;
         }
-        try {
-          // 0×0 marks "probed but undecodable" so the row leaves the
-          // unprobed set and we don't re-fetch a broken image next crawl.
-          this.db.setSocialImageDimsForReferrers({
-            src,
-            width: dims?.width ?? 0,
-            height: dims?.height ?? 0,
-          });
-        } catch {
-          /* ignore — best-effort */
-        }
+        // 0×0 marks "probed but undecodable" so the row leaves the
+        // unprobed set and we don't re-fetch a broken image next crawl.
+        writes.push({
+          method: 'setSocialImageDimsForReferrers',
+          args: [{ src, width: dims?.width ?? 0, height: dims?.height ?? 0 }],
+        });
         if (dims) decoded++;
       }
     };
@@ -1635,6 +1761,7 @@ export class Crawler extends EventEmitter {
     const workers: Promise<void>[] = [];
     for (let i = 0; i < concurrency; i++) workers.push(worker());
     await Promise.all(workers);
+    await writes.flush();
     this.emit(
       'info',
       `Social-image probe complete: ${decoded}/${urls.length} dimensions read`,
@@ -1674,12 +1801,15 @@ export class Crawler extends EventEmitter {
     let withMeta = 0;
     let failed = 0;
 
+    const writes = this.newProbeWriteBuffer();
+    const progress = this.newProbeProgress('PDF probe', urls.length);
     const worker = async (): Promise<void> => {
       while (!this.stopped) {
         const idx = cursor++;
         if (idx >= urls.length) return;
         const url = urls[idx];
         if (!url) return;
+        await this.probeTick(progress);
         try {
           const result = await probePdfMetadata(url, {
             userAgent: this.resolveUserAgent(url),
@@ -1695,32 +1825,38 @@ export class Crawler extends EventEmitter {
             result.producer !== null;
           // 1 = metadata found, 0 = probed-but-empty, -1 = fetch/parse error.
           const status = result.error ? -1 : hasMeta ? 1 : 0;
-          this.db.setPdfMetadata({
-            url,
-            title: result.title,
-            author: result.author,
-            pageCount: result.pageCount,
-            creationDate: result.creationDate,
-            producer: result.producer,
-            status,
+          writes.push({
+            method: 'setPdfMetadata',
+            args: [
+              {
+                url,
+                title: result.title,
+                author: result.author,
+                pageCount: result.pageCount,
+                creationDate: result.creationDate,
+                producer: result.producer,
+                status,
+              },
+            ],
           });
           if (result.error) failed++;
           else if (hasMeta) withMeta++;
         } catch {
-          // Couldn't even fetch/record — mark errored so we don't loop on it.
-          try {
-            this.db.setPdfMetadata({
-              url,
-              title: null,
-              author: null,
-              pageCount: null,
-              creationDate: null,
-              producer: null,
-              status: -1,
-            });
-          } catch {
-            /* best-effort */
-          }
+          // Couldn't even fetch — mark errored so we don't loop on it.
+          writes.push({
+            method: 'setPdfMetadata',
+            args: [
+              {
+                url,
+                title: null,
+                author: null,
+                pageCount: null,
+                creationDate: null,
+                producer: null,
+                status: -1,
+              },
+            ],
+          });
           failed++;
         }
       }
@@ -1729,6 +1865,7 @@ export class Crawler extends EventEmitter {
     const workers: Promise<void>[] = [];
     for (let i = 0; i < concurrency; i++) workers.push(worker());
     await Promise.all(workers);
+    await writes.flush();
     this.emit(
       'info',
       `PDF metadata probe complete: ${withMeta}/${urls.length} with metadata, ${failed} failed`,
@@ -1795,32 +1932,40 @@ export class Crawler extends EventEmitter {
     let expired = 0;
     let expiringSoon = 0;
 
+    const writes = this.newProbeWriteBuffer();
+    const progress = this.newProbeProgress('TLS probe', hosts.length);
     const worker = async (): Promise<void> => {
       while (!this.stopped) {
         const idx = cursor++;
         if (idx >= hosts.length) return;
         const host = hosts[idx];
         if (!host) return;
+        await this.probeTick(progress);
         try {
           const info = await probeTlsCert(
             host,
             443,
             Math.max(2_000, this.config.requestTimeoutMs / 2),
           );
-          this.db.setHostCert({
-            host,
-            port: 443,
-            validFrom: info.validFrom,
-            validTo: info.validTo,
-            daysUntilExpiry: info.daysUntilExpiry,
-            issuer: info.issuer,
-            subject: info.subject,
-            signatureAlgorithm: info.signatureAlgorithm,
-            protocol: info.protocol,
-            chainLength: info.chainLength,
-            chainSubjects: info.chainSubjects,
-            probeStatus: info.error ? 0 : 200,
-            probeError: info.error,
+          writes.push({
+            method: 'setHostCert',
+            args: [
+              {
+                host,
+                port: 443,
+                validFrom: info.validFrom,
+                validTo: info.validTo,
+                daysUntilExpiry: info.daysUntilExpiry,
+                issuer: info.issuer,
+                subject: info.subject,
+                signatureAlgorithm: info.signatureAlgorithm,
+                protocol: info.protocol,
+                chainLength: info.chainLength,
+                chainSubjects: info.chainSubjects,
+                probeStatus: info.error ? 0 : 200,
+                probeError: info.error,
+              },
+            ],
           });
           if (info.daysUntilExpiry !== null) {
             if (info.daysUntilExpiry < 0) expired++;
@@ -1828,25 +1973,26 @@ export class Crawler extends EventEmitter {
           }
           probed++;
         } catch (err) {
-          try {
-            this.db.setHostCert({
-              host,
-              port: 443,
-              validFrom: null,
-              validTo: null,
-              daysUntilExpiry: null,
-              issuer: null,
-              subject: null,
-              signatureAlgorithm: null,
-              protocol: null,
-              chainLength: null,
-              chainSubjects: null,
-              probeStatus: 0,
-              probeError: err instanceof Error ? err.message : String(err),
-            });
-          } catch {
-            /* ignore — DB failure is non-fatal for the probe pass */
-          }
+          writes.push({
+            method: 'setHostCert',
+            args: [
+              {
+                host,
+                port: 443,
+                validFrom: null,
+                validTo: null,
+                daysUntilExpiry: null,
+                issuer: null,
+                subject: null,
+                signatureAlgorithm: null,
+                protocol: null,
+                chainLength: null,
+                chainSubjects: null,
+                probeStatus: 0,
+                probeError: err instanceof Error ? err.message : String(err),
+              },
+            ],
+          });
         }
       }
     };
@@ -1854,6 +2000,7 @@ export class Crawler extends EventEmitter {
     const workers: Promise<void>[] = [];
     for (let i = 0; i < concurrency; i++) workers.push(worker());
     await Promise.all(workers);
+    await writes.flush();
     this.emit(
       'info',
       `TLS probe complete: ${probed} hosts, ${expired} expired, ${expiringSoon} expiring ≤30d`,
@@ -3105,6 +3252,14 @@ export class Crawler extends EventEmitter {
    * evenly-spaced slots. `maxRps <= 0` disables the gate (unlimited).
    */
   private async acquireRateSlot(): Promise<void> {
+    // Adaptive speed (opt-in): honour a hard cooldown set by a 429/503 or a
+    // `Retry-After` header before this dispatch even reserves a slot. The
+    // cooldown is a *global* pause — every worker waits it out — which is
+    // exactly how a server's rate-limit window works.
+    if (this.config.adaptiveSpeed && this.adaptiveCooldownUntil > 0) {
+      const waitCooldown = this.adaptiveCooldownUntil - Date.now();
+      if (waitCooldown > 0 && !this.stopped) await sleep(waitCooldown);
+    }
     // A robots.txt `Crawl-delay` means "one request every N seconds to this
     // origin" — a *global* spacing, not a per-worker one. Applying it as a
     // per-worker post-request sleep (as this used to) both violated the
@@ -3113,13 +3268,116 @@ export class Crawler extends EventEmitter {
     // literally when the user opts in. Only reached when `respectCrawlDelay`
     // is on — `robotsCrawlDelayMs` stays 0 otherwise.
     const rpsInterval = this.config.maxRps > 0 ? 1000 / this.config.maxRps : 0;
-    const minInterval = Math.max(rpsInterval, this.robotsCrawlDelayMs);
+    let minInterval = Math.max(rpsInterval, this.robotsCrawlDelayMs);
+    // Adaptive slow-down: widen the dispatch interval by the current scale
+    // (0.1–1). When the user left RPS unlimited (0), a base derived from the
+    // concurrency ceiling gives the controller a rate to shrink from once a
+    // 429 arrives — otherwise there is nothing to slow.
+    if (this.config.adaptiveSpeed && this.adaptiveRateScale < 1) {
+      const baseRps =
+        this.config.maxRps > 0 ? this.config.maxRps : Math.max(1, this.config.maxConcurrency);
+      minInterval = Math.max(minInterval, 1000 / (baseRps * this.adaptiveRateScale));
+    }
     if (minInterval <= 0) return;
     const now = Date.now();
     const scheduled = Math.max(now, this.nextDispatchAt);
     this.nextDispatchAt = scheduled + minInterval;
     const waitMs = scheduled - now;
     if (waitMs > 0 && !this.stopped) await sleep(waitMs);
+  }
+
+  // ==================================================================
+  // Adaptive speed controller (opt-in via `config.adaptiveSpeed`).
+  //
+  // The fixed-rate crawler holds `maxRps` / `maxConcurrency` no matter how
+  // the origin responds, so a site whose Cloudflare rate-limits (thinpo.com)
+  // gets 429s the moment the first burst lands — and, because nothing backs
+  // off, restarting keeps re-tripping the same penalty window. With adaptive
+  // speed on, a 429/503 (or a `Retry-After`) both pauses dispatch for the
+  // penalty window and permanently trims the rate a notch; a long stretch of
+  // clean responses grows it back toward the configured ceiling. Every field
+  // and branch here is dead unless the opt-in is set.
+  // ==================================================================
+
+  /** Current fraction (0.1–1) of the configured rate/concurrency in effect. */
+  private adaptiveRateScale = 1;
+  /** Dispatch is paused until this epoch-ms (Retry-After / 429 breather). */
+  private adaptiveCooldownUntil = 0;
+  /** Consecutive clean (non-limited) responses, for gradual recovery. */
+  private adaptiveCleanStreak = 0;
+  /** Last time the rate was cut — dedups a burst of 429s into one step. */
+  private lastAdaptiveCutTs = 0;
+  private static readonly ADAPTIVE_MIN_SCALE = 0.1;
+  private static readonly ADAPTIVE_CUT_COOLDOWN_MS = 1_000;
+  private static readonly ADAPTIVE_RECOVERY_STREAK = 25;
+  private static readonly ADAPTIVE_MAX_COOLDOWN_MS = 120_000;
+
+  /** Base rate the scale is applied to, for user-facing rate messages. */
+  private adaptiveBaseRps(): number {
+    return this.config.maxRps > 0 ? this.config.maxRps : Math.max(1, this.config.maxConcurrency);
+  }
+
+  /**
+   * React to a rate-limit signal (HTTP 429/503, optionally with a
+   * `Retry-After`). Sets the cooldown pause and, at most once per
+   * {@link ADAPTIVE_CUT_COOLDOWN_MS}, halves the effective rate + concurrency.
+   */
+  private noteRateLimited(retryAfterMs: number | null): void {
+    if (!this.config.adaptiveSpeed || !this.running) return;
+    const now = Date.now();
+    const cooldown =
+      retryAfterMs && retryAfterMs > 0
+        ? Math.min(retryAfterMs, Crawler.ADAPTIVE_MAX_COOLDOWN_MS)
+        : 2_000;
+    this.adaptiveCooldownUntil = Math.max(this.adaptiveCooldownUntil, now + cooldown);
+    this.adaptiveCleanStreak = 0;
+    if (now - this.lastAdaptiveCutTs < Crawler.ADAPTIVE_CUT_COOLDOWN_MS) return;
+    this.lastAdaptiveCutTs = now;
+    const prev = this.adaptiveRateScale;
+    this.adaptiveRateScale = Math.max(Crawler.ADAPTIVE_MIN_SCALE, this.adaptiveRateScale * 0.5);
+    // Concurrency is trimmed through the shared throttle map (composes with
+    // thermal / multi-session sources via minimum), so this never fights the
+    // OS-pressure throttle.
+    this.setThrottleScale(this.adaptiveRateScale, 'adaptive');
+    if (this.adaptiveRateScale !== prev) {
+      this.emit(
+        'info',
+        `Adaptive speed: rate limited — slowing to ~${(
+          this.adaptiveBaseRps() * this.adaptiveRateScale
+        ).toFixed(1)} URL/s${
+          retryAfterMs ? `, honouring Retry-After ${Math.round(cooldown / 1000)}s` : ''
+        }`,
+      );
+    }
+  }
+
+  /**
+   * React to a clean response. After {@link ADAPTIVE_RECOVERY_STREAK}
+   * consecutive non-limited responses past the cooldown window, nudge the
+   * rate + concurrency one step back toward the configured ceiling.
+   */
+  private noteCleanResponse(): void {
+    if (!this.config.adaptiveSpeed || !this.running) return;
+    if (this.adaptiveRateScale >= 1) return;
+    if (Date.now() < this.adaptiveCooldownUntil) return;
+    if (++this.adaptiveCleanStreak < Crawler.ADAPTIVE_RECOVERY_STREAK) return;
+    this.adaptiveCleanStreak = 0;
+    this.adaptiveRateScale = Math.min(1, this.adaptiveRateScale + 0.1);
+    this.setThrottleScale(this.adaptiveRateScale, 'adaptive');
+    // setThrottleScale raises the ceiling but never grows the live worker
+    // count on its own; step it up by one so recovery is visible even when
+    // no renderer-lag samples are arriving to drive the lag-adaptive loop.
+    const ceiling = this.effectiveCeiling();
+    if (this.currentConcurrency < ceiling) {
+      this.currentConcurrency = Math.min(ceiling, this.currentConcurrency + 1);
+      this.queue.concurrency = this.currentConcurrency;
+    }
+    this.emit(
+      'debug',
+      `Adaptive speed: recovering → ~${(this.adaptiveBaseRps() * this.adaptiveRateScale).toFixed(
+        1,
+      )} URL/s (concurrency ${this.currentConcurrency}/${ceiling})`,
+    );
   }
 
   private async fetchAndProcess(item: QueueItem): Promise<void> {
@@ -3239,6 +3497,16 @@ export class Crawler extends EventEmitter {
                     : 'client error'
           }`,
         );
+      }
+      // Adaptive speed: let the final response of every URL steer the rate —
+      // a 429/503 slows it (and honours any Retry-After), a clean response
+      // counts toward recovering it. No-op unless the opt-in is set.
+      if (this.config.adaptiveSpeed) {
+        if (statusCode === 429 || statusCode === 503) {
+          this.noteRateLimited(parseRetryAfterMs(res.headers.get('retry-after')));
+        } else if (statusCode < 400) {
+          this.noteCleanResponse();
+        }
       }
       const contentLengthHeader = res.headers.get('content-length');
       const xRobotsTag = res.headers.get('x-robots-tag');
@@ -3710,12 +3978,15 @@ export class Crawler extends EventEmitter {
       // itself stays whole: traversal below and the page's outlink count
       // both describe what the page declared, which doesn't change just
       // because the user stopped recording one side of the graph.
+      // A missing flag (a config assembled outside the Settings dialog —
+      // an older saved project, an MCP override) means "store", never
+      // "drop": a silently empty link graph is the worse failure.
+      const storeInternalLinks = this.config.storeInternalLinks ?? true;
+      const storeExternalLinks = this.config.storeExternalLinks ?? true;
       const persistedLinks: DiscoveredLink[] = [];
-      if (this.config.storeInternalLinks || this.config.storeExternalLinks) {
+      if (storeInternalLinks || storeExternalLinks) {
         for (const l of storableLinks) {
-          const keep = l.isInternal
-            ? this.config.storeInternalLinks
-            : this.config.storeExternalLinks;
+          const keep = l.isInternal ? storeInternalLinks : storeExternalLinks;
           if (keep) persistedLinks.push(l);
         }
       }
@@ -3940,6 +4211,15 @@ export class Crawler extends EventEmitter {
           : null,
         links: persistedLinks,
         images: this.config.storeImages ? parsed.images : [],
+        // Whether the empty lists above mean "this page has none"
+        // (storage on → the writer replaces the page's rows) or "not
+        // recording" (storage off → it keeps what an earlier crawl stored).
+        storeLinks:
+          storeInternalLinks ||
+          storeExternalLinks ||
+          this.config.storeIframes ||
+          this.config.crawlInvalidLinks,
+        storeImages: this.config.storeImages,
         fromDepth: item.depth,
       });
       // V2 Faz 1 — Persist render artefacts inline so they finish before
@@ -4584,10 +4864,28 @@ export class Crawler extends EventEmitter {
           /* ignore */
         }
         lastError = new Error(`HTTP ${res.status}`);
+        // Adaptive speed: a retryable 429/503 feeds the controller so the
+        // *global* dispatch rate widens for every worker, and its
+        // `Retry-After` drives this URL's own backoff instead of the fixed
+        // exponential curve — retrying faster than the server allows is what
+        // deepens a Cloudflare penalty window.
+        let adaptiveRetryMs: number | null = null;
+        if (this.config.adaptiveSpeed && (res.status === 429 || res.status === 503)) {
+          adaptiveRetryMs = parseRetryAfterMs(res.headers.get('retry-after'));
+          this.noteRateLimited(adaptiveRetryMs);
+        }
         this.emit(
           'warn',
           `Retry ${attempt + 1}/${maxAttempts - 1} for ${url}: HTTP ${res.status} after ${ttfbMs}ms`,
         );
+        if (adaptiveRetryMs !== null) {
+          const wait = Math.min(
+            Math.max(adaptiveRetryMs, baseDelay * 2 ** attempt),
+            Crawler.ADAPTIVE_MAX_COOLDOWN_MS,
+          );
+          if (!this.stopped) await sleep(wait);
+          continue;
+        }
       } catch (err) {
         lastError = err;
         const elapsedMs = Date.now() - (this.startedAt > 0 ? this.startedAt : Date.now());
@@ -4812,6 +5110,20 @@ function sleep(ms: number): Promise<void> {
  */
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Parse a `Retry-After` header to milliseconds. Accepts the two RFC forms:
+ * a delta-seconds integer (`120`) and an HTTP-date (`Wed, 21 Oct 2026 …`).
+ * Returns null when absent/unparseable; a past date clamps to 0.
+ */
+export function parseRetryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const s = header.trim();
+  if (/^\d+$/.test(s)) return Number.parseInt(s, 10) * 1000;
+  const when = Date.parse(s);
+  if (Number.isFinite(when)) return Math.max(0, when - Date.now());
+  return null;
 }
 
 function isRetryableStatus(status: number): boolean {

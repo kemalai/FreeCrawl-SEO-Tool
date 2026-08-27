@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
+import { TabExportButton } from '../components/TabExportButton.js';
 import { Loader2, Search, Play, AlertTriangle } from 'lucide-react';
 import type {
   AhrefsMetrics,
@@ -308,6 +309,7 @@ export function SeoTab() {
               })}
             </button>
           )}
+          <TabExportButton tab="seo" disabled={total === 0} defaultLeaf={`seo:${provider}`} />
         </div>
       </div>
 

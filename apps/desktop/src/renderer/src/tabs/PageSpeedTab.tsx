@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
+import { TabExportButton } from '../components/TabExportButton.js';
 import { Smartphone, Monitor, Loader2 } from 'lucide-react';
 import type {
   PagespeedMetrics,
@@ -318,6 +319,7 @@ export function PageSpeedTab() {
               })}
             </button>
           )}
+          <TabExportButton tab="pagespeed" disabled={total === 0} />
         </div>
       </div>
 

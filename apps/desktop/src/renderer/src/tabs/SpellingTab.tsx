@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
+import { TabExportButton } from '../components/TabExportButton.js';
 import { Loader2 } from 'lucide-react';
 import type { SpellingProgress, SpellingRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
@@ -269,6 +270,7 @@ export function SpellingTab() {
               })}
             </button>
           )}
+          <TabExportButton tab="spelling" disabled={total === 0} />
         </div>
       </div>
 

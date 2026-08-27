@@ -2184,6 +2184,53 @@ const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 87,
+    name: 'log_threats',
+    // Log Analyzer — Suspicious Requests. The one per-line log table: a
+    // row for every request the threat classifier flagged (SQLi / XSS /
+    // path traversal / command injection / scanner probes / sensitive
+    // files / anomalies), with the sender IP, the decoded payload and
+    // the rule evidence. Flagged lines are a tiny fraction of a log and
+    // the analyzer caps them per file, so unlike hits this can be kept
+    // row-by-row. `ip_owner` is set only when rDNS verification ran and
+    // proved the IP is a search engine's own infrastructure.
+    // `log_ingests.threats_dropped` records how many flagged lines the
+    // per-file cap discarded, so the tab can say its list is partial.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(log_ingests)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'threats_dropped')) {
+        db.exec('ALTER TABLE log_ingests ADD COLUMN threats_dropped INTEGER NOT NULL DEFAULT 0');
+      }
+      db.exec(`
+      CREATE TABLE IF NOT EXISTS log_threats (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        ingest_id  INTEGER NOT NULL,
+        ts         INTEGER,
+        ip         TEXT,
+        method     TEXT,
+        path       TEXT NOT NULL,
+        decoded    TEXT NOT NULL,
+        status     INTEGER,
+        bytes      INTEGER,
+        user_agent TEXT,
+        referer    TEXT,
+        bot        TEXT,
+        category   TEXT NOT NULL,
+        rules      TEXT NOT NULL,
+        score      INTEGER NOT NULL,
+        evidence   TEXT NOT NULL,
+        ip_owner   TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_log_threats_ts ON log_threats(ts);
+      CREATE INDEX IF NOT EXISTS idx_log_threats_ip ON log_threats(ip);
+      CREATE INDEX IF NOT EXISTS idx_log_threats_category ON log_threats(category);
+      CREATE INDEX IF NOT EXISTS idx_log_threats_score ON log_threats(score);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

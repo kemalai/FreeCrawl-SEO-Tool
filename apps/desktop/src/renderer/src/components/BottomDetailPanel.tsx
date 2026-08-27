@@ -335,6 +335,20 @@ export function BottomDetailPanel() {
 
   const showSingleScopeBanner = isMulti && SINGLE_URL_ONLY_TABS.has(subTab);
 
+  // "(0)" on Inlinks / Outlinks looks like a crawl result; when it is a
+  // Settings choice — Store switched off for one or both hyperlink rows,
+  // so the link graph was never recorded — say so, in the tab itself.
+  const storeInternalLinks = useAppStore((s) => s.config.storeInternalLinks);
+  const storeExternalLinks = useAppStore((s) => s.config.storeExternalLinks);
+  const linkStoreOffLabels = useMemo(() => {
+    const off: string[] = [];
+    if (!storeInternalLinks) off.push(translateLabel('Internal Hyperlinks', lang));
+    if (!storeExternalLinks) off.push(translateLabel('External Links', lang));
+    return off;
+  }, [storeInternalLinks, storeExternalLinks, lang]);
+  const showLinkStoreOffBanner =
+    (subTab === 'inlinks' || subTab === 'outlinks') && linkStoreOffLabels.length > 0;
+
   // Shared file-name stem for every sub-tab's Export button, so a saved
   // file says which page it came from ("example.com-blog-post-1-inlinks")
   // instead of a generic name the user has to rename.
@@ -394,6 +408,16 @@ export function BottomDetailPanel() {
           {tx('detail.perPagePrefix', { defaultValue: 'This tab is per-page — showing data for' })}{' '}
           <span className="font-mono text-surface-200">{detail.row.url}</span>{' '}
           {tx('detail.perPageSuffix', { defaultValue: '(primary URL of the selection).' })}
+        </div>
+      )}
+
+      {showLinkStoreOffBanner && (
+        <div className="shrink-0 border-b border-surface-800 bg-surface-900/40 px-3 py-1 text-[10.5px] text-amber-400/90">
+          {tx('detail.linkStoreOff', {
+            defaultValue:
+              'Store is off for {{what}} (Settings → Spider → Crawl), so those links are not recorded — turn Store on and re-crawl to fill this tab.',
+            what: linkStoreOffLabels.join(' + '),
+          })}
         </div>
       )}
 
@@ -1726,8 +1750,8 @@ function HttpHeadersView({
   // 5xx-under-load) into a plain-English explanation enriched with
   // signals read off the response headers (Retry-After, cf-ray, …).
   const diag = useMemo(
-    () => diagnoseStatus(row.statusCode, row.statusText, headers),
-    [row.statusCode, row.statusText, headers],
+    () => diagnoseStatus(row.statusCode, row.statusText, headers, row.indexability),
+    [row.statusCode, row.statusText, headers, row.indexability],
   );
   const rows = side === 'response' ? headers : requestHeaders;
   // Only surface the diagnosis banner when there's something worth

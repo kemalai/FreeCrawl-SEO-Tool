@@ -106,29 +106,43 @@ export async function copySelection(
 }
 
 /**
- * Write `text` to the OS clipboard.
+ * Write `text` to the OS clipboard. Resolves false when every path failed,
+ * so a caller can tell the user instead of leaving a dead button.
  *
- * The async Clipboard API is tried first and covers the normal case. It
- * rejects when the renderer isn't focused or the clipboard permission is
- * unset — situations that do occur in Electron — so a hidden textarea +
- * `execCommand('copy')` backs it up. The deprecated call is deliberate:
- * it is the only path that works without focus.
+ * Electron's main-process `clipboard` module goes first: it needs neither
+ * a focused document nor a clipboard permission, which is why the async
+ * Clipboard API alone left the Logs window's Copy button doing nothing at
+ * all. The two DOM paths stay as fallbacks for any renderer without the
+ * preload bridge (and `execCommand` is deprecated but is still the only
+ * one that works unfocused).
  */
-export async function writeTextToClipboard(text: string): Promise<void> {
+export async function writeTextToClipboard(text: string): Promise<boolean> {
+  const bridge = window.freecrawl?.clipboardWriteText;
+  if (bridge) {
+    try {
+      if (await bridge(text)) return true;
+    } catch {
+      /* fall through to the DOM paths */
+    }
+  }
   try {
     await navigator.clipboard.writeText(text);
+    return true;
   } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try {
-      document.execCommand('copy');
-    } finally {
-      document.body.removeChild(ta);
-    }
+    /* fall through */
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    return document.execCommand('copy');
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(ta);
   }
 }
 

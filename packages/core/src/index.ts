@@ -58,6 +58,7 @@ export {
   type GridExportOptions,
   type GridExportResult,
 } from './tabular-export.js';
+export { datasetRows, readCell, type DatasetExportContext } from './dataset-export.js';
 export { ensureHeapHeadroom, heapHeadroomBytes } from './heap-guard.js';
 export {
   testUrlAgainstRobots,
@@ -135,6 +136,16 @@ export {
   buildLogExportCsv,
   type LogExportTables,
 } from './log-export.js';
+export {
+  classifyRequest,
+  classifyIpOwner,
+  decodeTarget,
+  ownerOfHostname,
+  THREAT_RULES,
+  THREAT_THRESHOLD,
+  type ThreatRule,
+  type ThreatMatch,
+} from './log-threats.js';
 export {
   buildXlsx,
   buildCsvTable,

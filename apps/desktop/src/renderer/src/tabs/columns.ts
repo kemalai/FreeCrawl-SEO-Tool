@@ -621,7 +621,14 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
   // schema. Entries kept so Record<TabKey, ...> is total.
   images: [],
   'broken-links': [],
-  serp: [],
+  serp: [
+    COL.url,
+    COL.title,
+    COL.titleLength,
+    COL.metaDescription,
+    COL.metaDescriptionLength,
+    COL.inlinks,
+  ],
   pagespeed: [],
   crux: [],
   spelling: [],

@@ -38,7 +38,7 @@ import {
 } from 'node:fs';
 import { copyFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
-import { totalmem, freemem, cpus } from 'node:os';
+import { totalmem, freemem, cpus, release } from 'node:os';
 // Lives under src/main/assets (not resources/) on purpose: electron-vite
 // treats resources/ as the public dir and references it in place, which the
 // packaged app doesn't ship — assets/ files get copied into out/main/chunks.
@@ -200,6 +200,10 @@ import {
   type LogImportSummary,
   type LogExportInput,
   type LogExportResult,
+  type LogThreatsInput,
+  type LogThreatsResult,
+  type LogThreatSummary,
+  type LogThreatIpRow,
   type LogEntry,
   type BrowserInstallState,
   type McpStartCrawlInput,
@@ -246,6 +250,7 @@ import {
   exportUrlsToJson,
   exportUrlsToXml,
   exportTabular,
+  type DatasetExportContext,
   exportGrid,
   exportSitemap,
   exportHtmlReport,
@@ -598,7 +603,11 @@ class ProjectSession {
         'main',
         'Storage mode: RAM-only — project held in an in-memory database; worker pools disabled. Save As writes it to disk.',
       );
+      freezeWatchdog.note(
+        '[STORAGE] mode=ram (no worker pools — DB reads, writes and issue passes run on the main thread)',
+      );
     } else {
+      freezeWatchdog.note(`[STORAGE] mode=disk file=${path.split(/[\\/]/).pop() ?? path}`);
       try {
         this.readerPool.init(path, freezeWatchdog.sharedBuffer);
       } catch (err) {
@@ -4135,6 +4144,19 @@ function openLogAnalyzerWindow(): void {
   logger.log('info', 'main', 'Log Analyzer window opened');
 }
 
+/** Every flagged request, oldest first, paged under the query's 1000-row
+ *  clamp — the export wants the whole table, not one page of it. */
+function allLogThreats(db: ProjectDb): LogThreatsResult['rows'] {
+  const PAGE = 1000;
+  const rows: LogThreatsResult['rows'] = [];
+  for (let offset = 0; ; offset += PAGE) {
+    const page = db.queryLogThreats({ limit: PAGE, offset, sortBy: 'ts' });
+    rows.push(...page.rows);
+    if (page.rows.length < PAGE || rows.length >= page.total) break;
+  }
+  return rows.reverse();
+}
+
 /**
  * V2 Faz 2 — flatten the core analyzer's Map aggregates into the plain
  * arrays the DB ingest expects, then persist. Returns the import summary.
@@ -4199,6 +4221,8 @@ function ingestLogResult(filePath: string, result: LogAnalysisResult): LogImport
     urlBots: urlAggregates.flatMap((u) =>
       Array.from(u.botCounts.entries()).map(([bot, hits]) => ({ path: u.path, bot, hits })),
     ),
+    threats: result.threats,
+    threatsDropped: result.threatsDropped,
   };
   return getDb().ingestLogAnalysis(payload);
 }
@@ -4434,6 +4458,21 @@ function registerIpc(): void {
     if (typeof ownerId !== 'number') return all;
     return all.filter((e) => e.windowId === undefined || e.windowId === ownerId);
   });
+  registerHandle(IPC.clipboardWriteText, (_e, text: unknown): boolean => {
+    if (typeof text !== 'string') return false;
+    try {
+      clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `clipboard write failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  });
+
   registerHandle(IPC.logsClear, () => {
     logger.clearAll();
     logger.log('info', 'main', 'Log buffer cleared');
@@ -4496,7 +4535,7 @@ function registerIpc(): void {
           logger.log(
             'info',
             'main',
-            `Log Analyzer ingested ${basename(filePath)} (${result.format}): ${result.parsedLines}/${result.totalLines} lines, ${result.bots.size} bot type(s).`,
+            `Log Analyzer ingested ${basename(filePath)} (${result.format}): ${result.parsedLines}/${result.totalLines} lines, ${result.bots.size} bot type(s), ${result.threats.length} suspicious request(s)${result.threatsDropped > 0 ? ` (+${result.threatsDropped} beyond the cap)` : ''}.`,
           );
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err);
@@ -4586,6 +4625,8 @@ function registerIpc(): void {
         trend: db.getLogTrend(),
         crawlBudget: db.getLogCrawlBudget(5000),
         discovery: db.getLogDiscovery(50_000),
+        threats: allLogThreats(db),
+        threatIps: db.getLogThreatIps(100_000),
       };
       const { writeFileSync } = await import('node:fs');
       if (format === 'csv') {
@@ -4603,6 +4644,15 @@ function registerIpc(): void {
     fireDataChanged();
     logger.log('info', 'main', 'Log Analyzer data cleared');
   });
+  registerHandle(
+    IPC.logThreats,
+    (_e, input: LogThreatsInput): LogThreatsResult => getDb().queryLogThreats(input),
+  );
+  registerHandle(IPC.logThreatSummary, (): LogThreatSummary => getDb().getLogThreatSummary());
+  registerHandle(
+    IPC.logThreatIps,
+    (_e, limit?: number): LogThreatIpRow[] => getDb().getLogThreatIps(limit ?? 25),
+  );
 
   registerHandle(
     IPC.screenshotRead,
@@ -6779,6 +6829,10 @@ function registerIpc(): void {
         'crawler',
         `Crawl done: total=${summary.total} avgResp=${summary.avgResponseTimeMs}ms totalBytes=${summary.totalBytes}`,
       );
+      freezeWatchdog.note(
+        `[CRAWL] done total=${summary.total} failed=${sess.latestProgress?.failed ?? '?'} ` +
+          `avgResp=${summary.avgResponseTimeMs}ms elapsed=${Math.round((sess.latestProgress?.elapsedMs ?? 0) / 1000)}s`,
+      );
       sess.send(IPC.crawlDone, summary);
       sess.activeCrawler = null;
       // Free the MCP crawl lease so a queued agent start_crawl can proceed.
@@ -6827,6 +6881,10 @@ function registerIpc(): void {
     // and skips, leaving the NEW crawl's freshly-granted lease intact.
     crawler.on('stopped', () => {
       if (sess.activeCrawler !== crawler) return;
+      freezeWatchdog.note(
+        `[CRAWL] stopped crawled=${sess.latestProgress?.crawled ?? '?'} ` +
+          `pending=${sess.latestProgress?.pending ?? '?'} failed=${sess.latestProgress?.failed ?? '?'}`,
+      );
       releaseSessionLease(sess);
       rebalanceGlobalConcurrency();
     });
@@ -6878,6 +6936,16 @@ function registerIpc(): void {
         : `Crawl starting: ${config.startUrl} (scope=${config.scope}, maxDepth=${config.maxDepth}, maxUrls=${config.maxUrls}, concurrency=${config.maxConcurrency}, rps=${config.maxRps})`,
       undefined,
       sess.logTag,
+    );
+    freezeWatchdog.note(
+      `[CRAWL] start ${opts.respiderSeeds ? `respider=${opts.respiderSeeds.length} ` : ''}` +
+        `url=${config.startUrl} mode=${config.mode} scope=${config.scope} depth=${config.maxDepth} ` +
+        `maxUrls=${config.maxUrls} concurrency=${config.maxConcurrency} rps=${config.maxRps} ` +
+        `adaptiveSpeed=${config.adaptiveSpeed} ` +
+        `timeout=${config.requestTimeoutMs}ms render=${config.renderingMode} ` +
+        `robots=${config.respectRobotsTxt} crawlExternal=${config.crawlExternal} ` +
+        `storeLinks=${config.storeInternalLinks}/${config.storeExternalLinks} ` +
+        `imageProbe=${config.probeImageSizes}`,
     );
     const database = sess.getDb();
     database.setMeta('lastStartUrl', config.startUrl);
@@ -7244,6 +7312,19 @@ function registerIpc(): void {
    * — written before multi-account existed — are relabelled to it, so an
    * upgraded project keeps the data it already pulled.
    */
+  /** Account + URL-matching context the dataset exports (Search Console,
+   *  GA4) read with — the same resolution the tabs' query handlers use,
+   *  so an exported sheet matches what the tab shows. */
+  function datasetExportContext(): DatasetExportContext {
+    const gsc = resolveGscSettings();
+    return {
+      gscAccountId: resolveGoogleAccount('gsc'),
+      ga4AccountId: resolveGoogleAccount('ga4'),
+      gscMatchSlash: gsc.matchSlash,
+      gscMatchCase: gsc.matchCase,
+    };
+  }
+
   function resolveGoogleAccount(
     integrationId: 'gsc' | 'ga4',
     requested?: string,
@@ -7373,6 +7454,7 @@ function registerIpc(): void {
   });
 
   registerHandle(IPC.crawlStop, () => {
+    freezeWatchdog.note('[CRAWL] stop requested by user');
     const sess = currentSession();
     if (sess.activeCrawler) {
       sess.activeCrawler.stop();
@@ -7393,10 +7475,12 @@ function registerIpc(): void {
   });
 
   registerHandle(IPC.crawlPause, () => {
+    freezeWatchdog.note('[CRAWL] pause requested by user');
     currentSession().activeCrawler?.pause();
   });
 
   registerHandle(IPC.crawlResume, () => {
+    freezeWatchdog.note('[CRAWL] resume requested by user');
     currentSession().activeCrawler?.resume();
   });
 
@@ -7688,6 +7772,7 @@ function registerIpc(): void {
         selectedIds: i.selectedIds,
         search: i.search,
         filter: i.filter,
+        datasetContext: datasetExportContext(),
       });
     },
 
@@ -9343,6 +9428,7 @@ function registerIpc(): void {
         search,
         filter,
         csvBom,
+        datasetContext: datasetExportContext(),
       });
       return result;
     },
@@ -9800,6 +9886,21 @@ try {
   browserCacheDecision = `resolution failed: ${(err as Error).message} — using Playwright defaults`;
 }
 
+/**
+ * One line of host facts for the top of debug.txt. Half of "why is it
+ * slow for this user" is answered by RAM, core count and Electron
+ * version — none of which a remote user thinks to mention.
+ */
+function describeHostEnvironment(): string {
+  const v = process.versions;
+  return (
+    `app=${app.getVersion()} electron=${v.electron ?? '?'} node=${v.node} ` +
+    `chrome=${v.chrome ?? '?'} os=${process.platform} ${release()} ${process.arch} ` +
+    `cpus=${cpus().length} mem=${Math.round(totalmem() / 1073741824)}GB ` +
+    `locale=${app.getLocale()} packaged=${app.isPackaged}`
+  );
+}
+
 void app.whenReady().then(async () => {
   // Disk logging is bootstrapped after `app.whenReady()` — `getPath('userData')`
   // is only valid post-ready. Prior log lines are still in the ring buffer
@@ -9817,7 +9918,15 @@ void app.whenReady().then(async () => {
   // noise from normal app events).
   try {
     const debugPath = join(app.getPath('userData'), 'debug.txt');
-    freezeWatchdog.init(debugPath);
+    freezeWatchdog.init(debugPath, describeHostEnvironment());
+    // Errors and non-crawler warnings get a copy in debug.txt, so the one
+    // file a user sends carries the stall AND the `database is locked` or
+    // worker exit that sat next to it in the main log.
+    logger.setDebugMirror((line) => freezeWatchdog.note(line));
+    freezeWatchdog.setStatsProvider(() => {
+      const s = dbWriterPool.pendingStats();
+      return { writerPending: s.count, writerOldestMs: s.oldestMs };
+    });
   } catch (err) {
     logger.log('warn', 'main', `freeze-watchdog init failed: ${(err as Error).message}`);
   }

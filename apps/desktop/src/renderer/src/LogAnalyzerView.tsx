@@ -8,10 +8,15 @@ import type {
   LogFormatChoice,
   LogOverview,
   LogStatusRow,
+  LogThreatCategory,
+  LogThreatRow,
+  LogThreatsInput,
+  LogThreatSummary,
   LogTrendRow,
   LogUrlStatRow,
   LogUrlStatsInput,
 } from '@freecrawl/shared-types';
+import { writeTextToClipboard } from './utils/clipboard.js';
 
 /**
  * V2 Faz 2 — standalone Log File Analyzer window (renderer `?loganalyzer=1`).
@@ -20,7 +25,7 @@ import type {
  * orphan detection, and seeding log-discovered URLs into the active crawl.
  */
 
-type Tab = 'urls' | 'bots' | 'status' | 'trend' | 'budget' | 'orphans' | 'discovery';
+type Tab = 'urls' | 'bots' | 'status' | 'trend' | 'budget' | 'orphans' | 'discovery' | 'threats';
 
 const FAMILY_COLORS: Record<string, string> = {
   googlebot: 'text-blue-300 bg-blue-500/15',
@@ -254,6 +259,7 @@ export function LogAnalyzerView() {
             {tab === 'trend' && <TrendTab version={version} />}
             {tab === 'budget' && <BudgetTab version={version} />}
             {tab === 'discovery' && <DiscoveryTab version={version} onToast={showToast} />}
+            {tab === 'threats' && <ThreatsTab version={version} onToast={showToast} />}
           </div>
         </>
       )}
@@ -333,6 +339,13 @@ function SummaryCards({ overview }: { overview: LogOverview }) {
     { label: t('logAnalyzer.cardVerified', { defaultValue: 'Verified Bot Hits' }), value: fmtNum(overview.verifiedBotHits) },
     { label: t('logAnalyzer.cardUrls', { defaultValue: 'Distinct URLs' }), value: fmtNum(overview.distinctUrls) },
     {
+      label: t('logAnalyzer.cardThreats', { defaultValue: 'Suspicious Requests' }),
+      value:
+        overview.threatHits > 0
+          ? `${fmtNum(overview.threatHits)} · ${fmtNum(overview.threatIps)} IP`
+          : '0',
+    },
+    {
       label: t('logAnalyzer.cardRange', { defaultValue: 'Date Range' }),
       value: overview.minTs ? `${fmtTs(overview.minTs)} → ${fmtTs(overview.maxTs)}` : '—',
     },
@@ -367,6 +380,7 @@ function TabStrip({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
     { id: 'budget', label: t('logAnalyzer.tabBudget', { defaultValue: 'Crawl Budget' }) },
     { id: 'orphans', label: t('logAnalyzer.tabOrphans', { defaultValue: 'Orphans' }) },
     { id: 'discovery', label: t('logAnalyzer.tabDiscovery', { defaultValue: 'Discovery' }) },
+    { id: 'threats', label: t('logAnalyzer.tabThreats', { defaultValue: 'Suspicious Requests' }) },
   ];
   return (
     <div className="flex shrink-0 gap-1 border-b border-surface-800 bg-surface-900/60 px-2 text-[12px]">
@@ -790,6 +804,465 @@ function DiscoveryTab({ version, onToast }: { version: number; onToast: (m: stri
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+const THREAT_CATEGORIES: LogThreatCategory[] = [
+  'sqli',
+  'xss',
+  'traversal',
+  'cmdi',
+  'scanner',
+  'sensitive-file',
+  'anomaly',
+];
+
+const THREAT_COLORS: Record<LogThreatCategory, string> = {
+  sqli: 'text-red-300 bg-red-500/15',
+  xss: 'text-orange-300 bg-orange-500/15',
+  traversal: 'text-amber-300 bg-amber-500/15',
+  cmdi: 'text-rose-300 bg-rose-500/15',
+  scanner: 'text-purple-300 bg-purple-500/15',
+  'sensitive-file': 'text-pink-300 bg-pink-500/15',
+  anomaly: 'text-surface-300 bg-surface-700/40',
+};
+
+function useThreatCategoryLabel(): (cat: LogThreatCategory) => string {
+  const { t } = useTranslation();
+  return useCallback(
+    (cat: LogThreatCategory): string => {
+      switch (cat) {
+        case 'sqli':
+          return t('logAnalyzer.threatCatSqli', { defaultValue: 'SQL injection' });
+        case 'xss':
+          return t('logAnalyzer.threatCatXss', { defaultValue: 'XSS' });
+        case 'traversal':
+          return t('logAnalyzer.threatCatTraversal', { defaultValue: 'Path traversal' });
+        case 'cmdi':
+          return t('logAnalyzer.threatCatCmdi', { defaultValue: 'Command injection' });
+        case 'scanner':
+          return t('logAnalyzer.threatCatScanner', { defaultValue: 'Scanner probe' });
+        case 'sensitive-file':
+          return t('logAnalyzer.threatCatSensitiveFile', { defaultValue: 'Sensitive file' });
+        default:
+          return t('logAnalyzer.threatCatAnomaly', { defaultValue: 'Anomaly' });
+      }
+    },
+    [t],
+  );
+}
+
+function ThreatBadge({ category, label }: { category: LogThreatCategory; label: string }) {
+  return (
+    <span className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] ${THREAT_COLORS[category]}`}>
+      {label}
+    </span>
+  );
+}
+
+function fmtTsFull(ts: number | null): string {
+  if (ts === null) return '—';
+  try {
+    return new Date(ts).toISOString().replace('T', ' ').slice(0, 19);
+  } catch {
+    return '—';
+  }
+}
+
+/** Decoded payload with the rule evidence wrapped in <mark>. The evidence
+ *  was matched on a `+`→space normalised copy, so fall back to that. */
+function HighlightedPayload({ text, evidence }: { text: string; evidence: string }) {
+  const needle = evidence.replace(/…$/, '');
+  let hay = text;
+  let idx = needle ? hay.toLowerCase().indexOf(needle.toLowerCase()) : -1;
+  if (idx < 0 && needle) {
+    hay = text.replace(/\+/g, ' ');
+    idx = hay.toLowerCase().indexOf(needle.toLowerCase());
+  }
+  if (idx < 0) return <>{text}</>;
+  return (
+    <>
+      {hay.slice(0, idx)}
+      <mark className="rounded bg-red-500/30 px-0.5 text-red-100">{hay.slice(idx, idx + needle.length)}</mark>
+      {hay.slice(idx + needle.length)}
+    </>
+  );
+}
+
+type BlocklistFormat = 'plain' | 'nginx' | 'apache';
+
+function renderBlocklist(ips: string[], format: BlocklistFormat): string {
+  if (format === 'nginx') return ips.map((ip) => `deny ${ip};`).join('\n') + '\n';
+  if (format === 'apache') {
+    return ['<RequireAll>', '  Require all granted', ...ips.map((ip) => `  Require not ip ${ip}`), '</RequireAll>'].join('\n') + '\n';
+  }
+  return ips.join('\n') + '\n';
+}
+
+function BlocklistMenu({ onCopy }: { onCopy: (format: BlocklistFormat) => void }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const choose = (format: BlocklistFormat): void => {
+    setOpen(false);
+    onCopy(format);
+  };
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-surface-200 hover:bg-surface-800"
+      >
+        {t('logAnalyzer.threatCopyMenu', { defaultValue: 'Copy blocklist' })}
+        <span className="text-[9px] text-surface-400">▼</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded border border-surface-700 bg-surface-800 shadow-lg">
+            <button onClick={() => choose('plain')} className="block w-full px-3 py-1.5 text-left text-surface-200 hover:bg-surface-700">
+              {t('logAnalyzer.threatCopyPlain', { defaultValue: 'Plain IP list' })}
+            </button>
+            <button onClick={() => choose('nginx')} className="block w-full px-3 py-1.5 text-left text-surface-200 hover:bg-surface-700">
+              {t('logAnalyzer.threatCopyNginx', { defaultValue: 'nginx deny rules' })}
+            </button>
+            <button onClick={() => choose('apache')} className="block w-full px-3 py-1.5 text-left text-surface-200 hover:bg-surface-700">
+              {t('logAnalyzer.threatCopyApache', { defaultValue: 'Apache Require not ip' })}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ThreatsTab({ version, onToast }: { version: number; onToast: (m: string) => void }) {
+  const { t } = useTranslation();
+  const catLabel = useThreatCategoryLabel();
+  const [summary, setSummary] = useState<LogThreatSummary | null>(null);
+  const [rows, setRows] = useState<LogThreatRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [search, setSearch] = useState('');
+  const [category, setCategory] = useState<NonNullable<LogThreatsInput['category']>>('all');
+  const [status, setStatus] = useState<NonNullable<LogThreatsInput['status']>>('all');
+  const [ip, setIp] = useState('');
+  const [sortBy, setSortBy] = useState<NonNullable<LogThreatsInput['sortBy']>>('ts');
+  const [selected, setSelected] = useState<LogThreatRow | null>(null);
+
+  useEffect(() => {
+    void window.freecrawl.logThreatSummary().then(setSummary);
+  }, [version]);
+
+  useEffect(() => {
+    setOffset(0);
+    setSelected(null);
+  }, [search, category, status, ip, sortBy, version]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const input: LogThreatsInput = {
+      limit: PAGE,
+      offset,
+      search,
+      category,
+      status,
+      ip: ip || undefined,
+      sortBy,
+    };
+    void window.freecrawl.logThreats(input).then((r) => {
+      if (cancelled) return;
+      setRows(r.rows);
+      setTotal(r.total);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [offset, search, category, status, ip, sortBy, version]);
+
+  const copyBlocklist = useCallback(
+    async (format: BlocklistFormat) => {
+      const senders = await window.freecrawl.logThreatIps(100_000);
+      // Search-engine infrastructure is never a blocklist candidate.
+      const ips = senders.filter((s) => !s.ipOwner).map((s) => s.ip);
+      if (ips.length === 0) {
+        onToast(t('logAnalyzer.threatCopyEmpty', { defaultValue: 'No IPs to copy' }));
+        return;
+      }
+      const ok = await writeTextToClipboard(renderBlocklist(ips, format));
+      onToast(
+        ok
+          ? t('logAnalyzer.threatCopied', {
+              defaultValue: 'Copied {{n}} IP(s) to the clipboard (search-engine infrastructure excluded)',
+              n: ips.length,
+            })
+          : t('logAnalyzer.threatCopyFailed', { defaultValue: 'Could not copy to the clipboard' }),
+      );
+    },
+    [onToast, t],
+  );
+
+  const copyIp = useCallback(
+    async (value: string) => {
+      const ok = await writeTextToClipboard(value);
+      if (!ok) onToast(t('logAnalyzer.threatCopyFailed', { defaultValue: 'Could not copy to the clipboard' }));
+    },
+    [onToast, t],
+  );
+
+  const hasThreats = (summary?.totalHits ?? 0) > 0;
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Summary strip */}
+      <div className="shrink-0 border-b border-surface-800 bg-surface-900/40 px-3 py-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-surface-400">
+            {t('logAnalyzer.threatIntro', {
+              defaultValue:
+                'Requests that look like attacks or vulnerability probes — SQL injection, XSS, path traversal, command injection, scanner paths, sensitive-file fetches — with the sender IP and the decoded payload.',
+            })}
+          </span>
+          {hasThreats && (
+            <div className="ml-auto">
+              <BlocklistMenu onCopy={(f) => void copyBlocklist(f)} />
+            </div>
+          )}
+        </div>
+        {summary && hasThreats && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="font-mono text-surface-200">
+              {t('logAnalyzer.threatStats', {
+                defaultValue: '{{hits}} flagged request(s) from {{ips}} IP(s)',
+                hits: summary.totalHits.toLocaleString(),
+                ips: summary.distinctIps.toLocaleString(),
+              })}
+            </span>
+            <span className="text-surface-600">·</span>
+            {summary.servedHits > 0 ? (
+              <span className="text-amber-300">
+                {t('logAnalyzer.threatServed', {
+                  defaultValue:
+                    '{{n}} answered 2xx — the server processed those payloads; check the application, not just the log',
+                  n: summary.servedHits.toLocaleString(),
+                })}
+              </span>
+            ) : (
+              <span className="text-green-400">
+                {t('logAnalyzer.threatServedNone', { defaultValue: 'none answered 2xx' })}
+              </span>
+            )}
+            {summary.capHit && (
+              <span className="text-amber-400">
+                {t('logAnalyzer.threatCapHit', { defaultValue: 'The per-file cap was reached — this list is partial.' })}
+              </span>
+            )}
+          </div>
+        )}
+        {summary && hasThreats && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <button
+              onClick={() => setCategory('all')}
+              className={`rounded border px-2 py-0.5 ${category === 'all' ? 'border-blue-500 text-surface-100' : 'border-surface-700 text-surface-400 hover:text-surface-200'}`}
+            >
+              {t('logAnalyzer.threatCatAll', { defaultValue: 'All categories' })} ({summary.totalHits.toLocaleString()})
+            </button>
+            {summary.byCategory.map((c) => (
+              <button
+                key={c.category}
+                onClick={() => setCategory(category === c.category ? 'all' : c.category)}
+                className={`rounded border px-2 py-0.5 ${category === c.category ? 'border-blue-500' : 'border-surface-800 hover:border-surface-600'}`}
+                title={`${c.ips.toLocaleString()} IP`}
+              >
+                <ThreatBadge category={c.category} label={`${catLabel(c.category)} ${c.hits.toLocaleString()}`} />
+              </button>
+            ))}
+          </div>
+        )}
+        {summary && summary.topIps.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="text-surface-500">{t('logAnalyzer.threatTopIps', { defaultValue: 'Top senders' })}:</span>
+            {summary.topIps.slice(0, 10).map((s) => (
+              <button
+                key={s.ip}
+                onClick={() => setIp(ip === s.ip ? '' : s.ip)}
+                className={`rounded border px-1.5 py-0.5 font-mono ${ip === s.ip ? 'border-blue-500 text-surface-100' : 'border-surface-800 text-surface-300 hover:border-surface-600'}`}
+                title={s.categories.map(catLabel).join(', ')}
+              >
+                {s.ip} <span className="text-surface-500">×{s.hits.toLocaleString()}</span>
+                {s.servedHits > 0 && <span className="ml-1 text-amber-400">{s.servedHits}·2xx</span>}
+                {s.ipOwner && <span className="ml-1 text-blue-300">{s.ipOwner}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Filter bar */}
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-surface-800 px-3 py-1.5 text-[11px]">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={t('logAnalyzer.threatSearch', { defaultValue: 'Filter by payload, IP or user-agent…' })}
+          className="w-64 rounded border border-surface-700 bg-surface-800 px-2 py-1 text-surface-100"
+        />
+        <select
+          value={category}
+          onChange={(e) => setCategory(e.target.value as NonNullable<LogThreatsInput['category']>)}
+          className="rounded border border-surface-700 bg-surface-800 px-2 py-1 text-surface-100"
+        >
+          <option value="all">{t('logAnalyzer.threatCatAll', { defaultValue: 'All categories' })}</option>
+          {THREAT_CATEGORIES.map((c) => (
+            <option key={c} value={c}>
+              {catLabel(c)}
+            </option>
+          ))}
+        </select>
+        <select
+          value={status}
+          onChange={(e) => setStatus(e.target.value as NonNullable<LogThreatsInput['status']>)}
+          className="rounded border border-surface-700 bg-surface-800 px-2 py-1 text-surface-100"
+        >
+          <option value="all">{t('logAnalyzer.threatStatusAll', { defaultValue: 'Any status' })}</option>
+          <option value="2xx">{t('logAnalyzer.threatStatus2xx', { defaultValue: '2xx (served)' })}</option>
+          <option value="3xx">3xx</option>
+          <option value="4xx">4xx</option>
+          <option value="5xx">5xx</option>
+        </select>
+        <select
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value as NonNullable<LogThreatsInput['sortBy']>)}
+          className="rounded border border-surface-700 bg-surface-800 px-2 py-1 text-surface-100"
+        >
+          <option value="ts">{t('logAnalyzer.threatSortRecent', { defaultValue: 'Sort: Most recent' })}</option>
+          <option value="score">{t('logAnalyzer.threatSortScore', { defaultValue: 'Sort: Score' })}</option>
+          <option value="status">{t('logAnalyzer.threatSortStatus', { defaultValue: 'Sort: Status' })}</option>
+        </select>
+        {ip && (
+          <button
+            onClick={() => setIp('')}
+            className="rounded border border-blue-500/60 px-2 py-0.5 font-mono text-blue-200 hover:bg-surface-800"
+            title={t('logAnalyzer.threatClearIp', { defaultValue: 'Clear IP filter' })}
+          >
+            {t('logAnalyzer.threatIpFilter', { defaultValue: 'IP: {{ip}}', ip })} ✕
+          </button>
+        )}
+        <Pager offset={offset} total={total} onPrev={() => setOffset(Math.max(0, offset - PAGE))} onNext={() => setOffset(offset + PAGE)} />
+      </div>
+
+      {/* Table */}
+      <div className="min-h-0 flex-1 overflow-auto">
+        <table className="w-full border-collapse text-[11px]">
+          <thead>
+            <tr>
+              <Th>{t('logAnalyzer.colTime', { defaultValue: 'Time' })}</Th>
+              <Th>IP</Th>
+              <Th>{t('logAnalyzer.colMethod', { defaultValue: 'Method' })}</Th>
+              <Th>{t('logAnalyzer.colRequest', { defaultValue: 'Request (decoded)' })}</Th>
+              <Th className="text-right">{t('logAnalyzer.colStatus', { defaultValue: 'Status' })}</Th>
+              <Th>{t('logAnalyzer.colCategory', { defaultValue: 'Category' })}</Th>
+              <Th className="text-right">{t('logAnalyzer.colScore', { defaultValue: 'Score' })}</Th>
+              <Th>{t('logAnalyzer.colEvidence', { defaultValue: 'Evidence' })}</Th>
+              <Th>{t('logAnalyzer.colDeclaredBot', { defaultValue: 'Declared Bot' })}</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const served = r.status !== null && r.status >= 200 && r.status < 300;
+              return (
+                <tr
+                  key={r.id}
+                  onClick={() => setSelected(selected?.id === r.id ? null : r)}
+                  className={`cursor-pointer border-b border-surface-800/60 hover:bg-surface-900/40 ${selected?.id === r.id ? 'bg-surface-900/70' : ''}`}
+                >
+                  <td className="whitespace-nowrap px-2 py-1 font-mono text-surface-400">{fmtTsFull(r.ts)}</td>
+                  <td className="whitespace-nowrap px-2 py-1 font-mono text-surface-200">
+                    {r.ip ?? '—'}
+                    {r.ipOwner && <span className="ml-1 text-blue-300">{r.ipOwner}</span>}
+                  </td>
+                  <td className="px-2 py-1 font-mono text-surface-300">{r.method ?? '—'}</td>
+                  <td className="max-w-[420px] truncate px-2 py-1 font-mono text-surface-200" title={r.decoded}>
+                    {r.decoded}
+                  </td>
+                  <td className={`px-2 py-1 text-right font-mono ${served ? 'text-amber-300' : 'text-surface-300'}`}>
+                    {r.status ?? '—'}
+                    {served && (
+                      <span className="ml-1 text-[9px] uppercase text-amber-400">
+                        {t('logAnalyzer.threatServedBadge', { defaultValue: 'served' })}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1"><ThreatBadge category={r.category} label={catLabel(r.category)} /></td>
+                  <td className="px-2 py-1 text-right font-mono">{r.score}</td>
+                  <td className="max-w-[240px] truncate px-2 py-1 font-mono text-red-200/80" title={r.evidence}>{r.evidence}</td>
+                  <td className="px-2 py-1 text-surface-400">{r.bot ?? '—'}</td>
+                </tr>
+              );
+            })}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={9} className="px-3 py-6 text-center text-surface-500">
+                  {t('logAnalyzer.threatNone', { defaultValue: 'No suspicious requests in the ingested logs.' })}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Detail panel */}
+      {selected && (
+        <div className="max-h-[40%] shrink-0 overflow-auto border-t border-surface-700 bg-surface-900/80 px-3 py-2 text-[11px]">
+          <div className="flex flex-wrap items-center gap-2">
+            <ThreatBadge category={selected.category} label={catLabel(selected.category)} />
+            <span className="font-mono text-surface-200">{selected.ip ?? '—'}</span>
+            <span className="text-surface-500">{fmtTsFull(selected.ts)}</span>
+            <span className="font-mono text-surface-400">{selected.method ?? '—'} · {selected.status ?? '—'}</span>
+            <span className={selected.targetInCrawl ? 'text-blue-300' : 'text-surface-500'}>
+              {selected.targetInCrawl
+                ? t('logAnalyzer.threatTargetInCrawl', { defaultValue: 'Target exists in the crawl' })
+                : t('logAnalyzer.threatTargetProbe', { defaultValue: 'Blind probe — target not in the crawl' })}
+            </span>
+            <div className="ml-auto flex items-center gap-1">
+              {selected.ip && (
+                <>
+                  <button onClick={() => setIp(selected.ip!)} className="rounded border border-surface-700 px-2 py-0.5 text-surface-300 hover:bg-surface-800">
+                    {t('logAnalyzer.threatFilterIp', { defaultValue: 'Only this IP' })}
+                  </button>
+                  <button onClick={() => void copyIp(selected.ip!)} className="rounded border border-surface-700 px-2 py-0.5 text-surface-300 hover:bg-surface-800">
+                    {t('logAnalyzer.threatCopyIp', { defaultValue: 'Copy IP' })}
+                  </button>
+                </>
+              )}
+              <button onClick={() => setSelected(null)} className="rounded border border-surface-700 px-2 py-0.5 text-surface-300 hover:bg-surface-800">
+                {t('logAnalyzer.threatClose', { defaultValue: 'Close' })}
+              </button>
+            </div>
+          </div>
+          {selected.ipOwner && (
+            <div className="mt-2 rounded border border-blue-500/40 bg-blue-500/10 px-2 py-1 text-blue-200">
+              {t('logAnalyzer.threatOwnerWarning', {
+                defaultValue:
+                  "This IP resolves to {{owner}}'s own infrastructure — the payload was relayed through the search engine (Lens, Translate, a fetch of a crafted URL). Blocking the IP would block {{owner}}; fix the application instead.",
+                owner: selected.ipOwner,
+              })}
+            </div>
+          )}
+          <pre className="mt-2 whitespace-pre-wrap break-all rounded bg-surface-950 px-2 py-1.5 font-mono text-surface-100">
+            <HighlightedPayload text={selected.decoded} evidence={selected.evidence} />
+          </pre>
+          <div className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-surface-400">
+            <span>{t('logAnalyzer.threatDetailRaw', { defaultValue: 'Raw request target' })}</span>
+            <code className="break-all text-surface-300">{selected.path}</code>
+            <span>{t('logAnalyzer.threatDetailRules', { defaultValue: 'Matched rules' })}</span>
+            <code className="text-surface-300">{selected.rules.join(', ')}</code>
+            <span>User-Agent</span>
+            <code className="break-all text-surface-300">{selected.userAgent ?? '—'}</code>
+            <span>Referer</span>
+            <code className="break-all text-surface-300">{selected.referer ?? '—'}</code>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

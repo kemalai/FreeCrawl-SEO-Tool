@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
+import { TabExportButton } from '../components/TabExportButton.js';
 import type { CrawlUrlRow } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
@@ -117,7 +118,8 @@ export function SerpTab() {
             <option value="desc-length-desc">{t('serpTab.sortDescLen', { defaultValue: 'Longest description first' })}</option>
           </select>
         </label>
-        <div className="ml-auto text-[11px] text-surface-500">
+        <TabExportButton tab="serp" disabled={total === 0} className="ml-auto" />
+        <div className="text-[11px] text-surface-500">
           {/* Rows are on screen, so the list itself isn't misleading — but
               the counts are stale, and saying so beats silence. */}
           {loadError && rows.length > 0 && (

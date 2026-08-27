@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
+import { TabExportButton } from '../components/TabExportButton.js';
 import { Loader2, Search, Play, AlertTriangle } from 'lucide-react';
 import type {
   AiProgress,
@@ -309,6 +310,7 @@ export function AiTab() {
               })}
             </button>
           )}
+          <TabExportButton tab="ai" disabled={total === 0} defaultLeaf={`ai:${provider}`} />
         </div>
       </div>
 

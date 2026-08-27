@@ -23,6 +23,13 @@ const TICK_THROTTLE_MS = 100;
 // arriving (crawl finished, manual DB edits, etc.). Long interval —
 // the progress-event path drives the in-crawl experience.
 const LIVE_REFRESH_MS = 5000;
+// After a query fails (a reader timeout, most likely), hold every
+// automatic re-issue — live tick, scroll-driven chunk fetch — for this
+// long. Each of those used to fire again immediately, and against a
+// query that had just spent 30 s timing out that stacked one abandoned
+// copy per tick onto the reader pool until nothing else could get
+// through. The user's explicit Retry bypasses the hold.
+const FAILURE_BACKOFF_MS = 5000;
 
 export interface LazyRowsOpts {
   category: UrlCategory;
@@ -46,6 +53,17 @@ export interface LazyRowsState {
    *  none" from "0 URLs because we haven't fetched yet" — which the
    *  empty-state UI cares about a lot. */
   isLoading: boolean;
+  /** Why the last query for this shape failed (reader timeout, SQL
+   *  error), or null. A silent failure looked exactly like "the filter
+   *  did nothing"; the consumer shows this instead. */
+  error: string | null;
+  /** Re-run the current shape now, ignoring the failure back-off. */
+  retry: () => void;
+}
+
+function describeError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw.replace(/^Error invoking remote method '[^']+': /, '').replace(/^Error: /, '');
 }
 
 /**
@@ -67,6 +85,14 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
   const [total, setTotal] = useState(0);
   const [version, setVersion] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
+  const failedAt = useRef(0);
+  const inBackoff = (): boolean => Date.now() - failedAt.current < FAILURE_BACKOFF_MS;
+  const noteFailure = (err: unknown): void => {
+    failedAt.current = Date.now();
+    setError(describeError(err));
+  };
   const chunks = useRef(new Map<number, CrawlUrlRow[]>());
   const chunkOrder = useRef<number[]>([]);
   const fetching = useRef(new Set<number>());
@@ -76,7 +102,7 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
   // Serialising the filter keeps it part of the cache-key string so
   // changes invalidate chunks the same way as sort/search.
   const filterKey = opts.filter ? JSON.stringify(opts.filter) : '';
-  const keyStr = `${opts.category}|${opts.search}|${opts.sortBy ?? ''}|${opts.sortDir}|${filterKey}|${String(opts.refreshKey ?? '')}`;
+  const keyStr = `${opts.category}|${opts.search}|${opts.sortBy ?? ''}|${opts.sortDir}|${filterKey}|${String(opts.refreshKey ?? '')}|${retryNonce}`;
 
   const queryChunk = useCallback(
     (chunkIdx: number) =>
@@ -152,6 +178,8 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     chunkOrder.current = [];
     fetching.current.clear();
     setIsLoading(true);
+    setError(null);
+    failedAt.current = 0;
     setVersion((v) => v + 1);
     const token = resetToken.current;
     let cancelled = false;
@@ -173,11 +201,11 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
         }
         setTotal(t);
         setVersion((v) => v + 1);
-      } catch {
+      } catch (err) {
         if (cancelled || token !== resetToken.current) return;
-        // Leave chunks empty on error; the live tick / ensureRange
-        // will retry. Still need to flip loading off so the empty
-        // state can render an actual error/empty UI.
+        // Chunks stay empty; the consumer renders the error and the
+        // back-off keeps the live tick from re-issuing the same query.
+        noteFailure(err);
       } finally {
         if (!cancelled && token === resetToken.current) {
           setIsLoading(false);
@@ -211,7 +239,7 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     let inFlight = false;
     let lastTickTs = 0;
     const tick = async () => {
-      if (inFlight) return;
+      if (inFlight || inBackoff()) return;
       inFlight = true;
       lastTickTs = Date.now();
       const token = resetToken.current;
@@ -231,8 +259,10 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
           for (let c = 0; c < spanCount; c++) {
             storeChunk(first + c, rows.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE));
           }
-        } catch {
-          /* ignore transient errors */
+          setError(null);
+        } catch (err) {
+          if (cancelled || token !== resetToken.current) return;
+          noteFailure(err);
         }
         if (cancelled || token !== resetToken.current) return;
         setVersion((v) => v + 1);
@@ -289,6 +319,7 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     async (chunkIdx: number) => {
       if (chunks.current.has(chunkIdx)) return;
       if (fetching.current.has(chunkIdx)) return;
+      if (inBackoff()) return;
       fetching.current.add(chunkIdx);
       const token = resetToken.current;
       try {
@@ -296,7 +327,13 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
         if (token !== resetToken.current) return;
         storeChunk(chunkIdx, rows);
         setTotal(t);
+        setError(null);
         setVersion((v) => v + 1);
+      } catch (err) {
+        // `ensureRange` fires this on every render; a rejection here
+        // used to surface as an unhandled promise, and the next render
+        // re-issued the same failing query.
+        if (token === resetToken.current) noteFailure(err);
       } finally {
         fetching.current.delete(chunkIdx);
       }
@@ -339,5 +376,10 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     [version],
   );
 
-  return { total, loadedRows, rowAt, ensureRange, isLoading };
+  const retry = useCallback(() => {
+    failedAt.current = 0;
+    setRetryNonce((n) => n + 1);
+  }, []);
+
+  return { total, loadedRows, rowAt, ensureRange, isLoading, error, retry };
 }

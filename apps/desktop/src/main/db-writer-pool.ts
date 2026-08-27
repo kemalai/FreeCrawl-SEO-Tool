@@ -145,6 +145,20 @@ export class DbWriterPool {
     });
   }
 
+  /**
+   * Calls outstanding and the age of the oldest. The watchdog heartbeat
+   * carries both, so a crawl whose counters stopped moving shows at a
+   * glance whether it is waiting on the writer.
+   */
+  pendingStats(): { count: number; oldestMs: number } {
+    const now = Date.now();
+    let oldestMs = 0;
+    for (const p of this.pending.values()) {
+      oldestMs = Math.max(oldestMs, now - p.startedAt);
+    }
+    return { count: this.pending.size, oldestMs };
+  }
+
   async terminate(): Promise<void> {
     this.terminated = true;
     if (this.monitorTimer) {

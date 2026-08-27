@@ -712,6 +712,16 @@ export interface CrawlConfig {
   maxUrls: number;
   maxConcurrency: number;
   maxRps: number;
+  /**
+   * Adaptive speed. Off by default. When on, the crawler treats
+   * `maxConcurrency` / `maxRps` as a *ceiling* and automatically slows
+   * down when the target pushes back — a 429/503 (or a `Retry-After`
+   * header) shrinks the dispatch rate and concurrency, and a sustained
+   * run of clean responses gradually restores them toward the ceiling.
+   * When off, the crawler holds exactly the configured rate regardless
+   * of how the server responds (the previous, only, behaviour).
+   */
+  adaptiveSpeed: boolean;
   requestTimeoutMs: number;
   userAgent: string;
   /**
@@ -2209,6 +2219,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   maxUrls: 1_000_000,
   maxConcurrency: 20,
   maxRps: 20,
+  adaptiveSpeed: false,
   requestTimeoutMs: 20_000,
   userAgent: 'FreeCrawlSEO/0.1 (+https://github.com/kemalai/FreeCrawl-SEO-Tool)',
   deviceMode: 'desktop',

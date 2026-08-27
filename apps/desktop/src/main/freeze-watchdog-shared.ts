@@ -37,7 +37,12 @@
  *      [5]    main op string byte length
  *      [6]    reader op string byte length
  *      [7]    writer op string byte length
- *      [8..15] spare
+ *      [8]    main-process RSS (MB)
+ *      [9]    main-process V8 heap in use (MB)
+ *      [10]   main event-loop max lag over the last ~5 s (ms)
+ *      [11]   db-writer calls outstanding
+ *      [12]   age of the oldest outstanding db-writer call (ms)
+ *      [13..15] spare
  *   [96..)     Uint8Array        — op string bytes (UTF-8)
  *      [0..256)    main op
  *      [256..512)  reader op
@@ -68,6 +73,11 @@ const I32_IDX_FAILED = 4;
 const I32_IDX_MAIN_OP_LEN = 5;
 const I32_IDX_READER_OP_LEN = 6;
 const I32_IDX_WRITER_OP_LEN = 7;
+const I32_IDX_RSS_MB = 8;
+const I32_IDX_HEAP_MB = 9;
+const I32_IDX_MAIN_LOOP_LAG_MS = 10;
+const I32_IDX_WRITER_PENDING = 11;
+const I32_IDX_WRITER_OLDEST_MS = 12;
 
 export const SAB_BYTE_LENGTH = 1024;
 
@@ -83,6 +93,19 @@ export interface CounterSnapshot {
   discovered: number;
   pending: number;
   failed: number;
+}
+
+/**
+ * Main-process health the heartbeat line carries next to the counters.
+ * Memory and loop lag answer "was the process under pressure" for a
+ * stall; the writer queue answers "was the crawl waiting on the DB".
+ */
+export interface HostStats {
+  rssMb: number;
+  heapMb: number;
+  mainLoopLagMs: number;
+  writerPending: number;
+  writerOldestMs: number;
 }
 
 /**
@@ -152,7 +175,31 @@ export class FreezeWatchdogSharedState {
     }
   }
 
+  updateHostStats(s: Partial<HostStats>): void {
+    if (s.rssMb !== undefined) Atomics.store(this.i32, I32_IDX_RSS_MB, s.rssMb | 0);
+    if (s.heapMb !== undefined) Atomics.store(this.i32, I32_IDX_HEAP_MB, s.heapMb | 0);
+    if (s.mainLoopLagMs !== undefined) {
+      Atomics.store(this.i32, I32_IDX_MAIN_LOOP_LAG_MS, s.mainLoopLagMs | 0);
+    }
+    if (s.writerPending !== undefined) {
+      Atomics.store(this.i32, I32_IDX_WRITER_PENDING, s.writerPending | 0);
+    }
+    if (s.writerOldestMs !== undefined) {
+      Atomics.store(this.i32, I32_IDX_WRITER_OLDEST_MS, s.writerOldestMs | 0);
+    }
+  }
+
   // ── Readers (used by the watchdog worker) ─────────────────────────
+
+  readHostStats(): HostStats {
+    return {
+      rssMb: Atomics.load(this.i32, I32_IDX_RSS_MB),
+      heapMb: Atomics.load(this.i32, I32_IDX_HEAP_MB),
+      mainLoopLagMs: Atomics.load(this.i32, I32_IDX_MAIN_LOOP_LAG_MS),
+      writerPending: Atomics.load(this.i32, I32_IDX_WRITER_PENDING),
+      writerOldestMs: Atomics.load(this.i32, I32_IDX_WRITER_OLDEST_MS),
+    };
+  }
 
   readMainHeartbeatMs(): number {
     return Number(Atomics.load(this.i64, I64_IDX_MAIN_HB));

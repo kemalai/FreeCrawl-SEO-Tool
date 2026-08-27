@@ -69,6 +69,23 @@ if (watchdog) {
   }, WATCHDOG_HEARTBEAT_INTERVAL_MS).unref();
 }
 
+/**
+ * Requests interleave: the handler below is async, and a yielding pass
+ * (`recomputeUrlsIssuesYielding`) hands the loop back between
+ * definitions, so a per-URL write can run — and finish — while the pass
+ * is still open. Its `finally` used to overwrite the op slot with
+ * `idle`, and the pass's next multi-second statement then reached
+ * debug.txt as an `idle → idle` writer stall: real time lost, wrong
+ * label. The slot now names the oldest request still open (the one a
+ * long statement belongs to) and only reads `idle` once none is.
+ */
+const inFlight = new Map<number, string>();
+function publishOp(): void {
+  if (!watchdog) return;
+  const oldest = inFlight.values().next();
+  watchdog.setWriterOp(oldest.done ? 'idle' : oldest.value);
+}
+
 interface RequestMessage {
   requestId: number;
   method: string;
@@ -92,6 +109,7 @@ const ALLOWED_METHODS = new Set<string>([
   'setSitemapUrls',
   'setHostCert',
   'setImageSize',
+  'applyProbeWrites',
   'setMeta',
   'updateExternalProbe',
   'recomputeInlinks',
@@ -119,7 +137,8 @@ const ALLOWED_METHODS = new Set<string>([
 parentPort.on('message', async (msg: RequestMessage) => {
   if (!msg || typeof msg.requestId !== 'number') return;
   const { requestId, method, args } = msg;
-  if (watchdog) watchdog.setWriterOp(method);
+  inFlight.set(requestId, method);
+  publishOp();
   try {
     if (!ALLOWED_METHODS.has(method)) {
       throw new Error(`db-writer-worker: method '${method}' is not whitelisted`);
@@ -135,7 +154,8 @@ parentPort.on('message', async (msg: RequestMessage) => {
       // "long pass, still advancing" from a genuinely wedged worker.
       const defs = (args?.[0] ?? []) as ReadonlyArray<readonly [string, string]>;
       result = await db.recomputeUrlsIssuesYielding(defs, (done, total) => {
-        watchdog.setWriterOp(`recomputeUrlsIssuesYielding ${done}/${total}`);
+        inFlight.set(requestId, `recomputeUrlsIssuesYielding ${done}/${total}`);
+        publishOp();
       });
     } else {
       const out = (fn as (...a: unknown[]) => unknown).apply(db, args ?? []);
@@ -149,7 +169,8 @@ parentPort.on('message', async (msg: RequestMessage) => {
       error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
     });
   } finally {
-    if (watchdog) watchdog.setWriterOp('idle');
+    inFlight.delete(requestId);
+    publishOp();
   }
 });
 

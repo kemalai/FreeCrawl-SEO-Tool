@@ -86,6 +86,110 @@ export interface LogIngestInput {
   }>;
   /** Per-(path, bot) hit counts — backs the URL Hits per-bot filter. */
   urlBots: Array<{ path: string; bot: string; hits: number }>;
+  /** Requests the threat classifier flagged (SQLi / XSS / scanner probes …),
+   *  one row per log line — the only per-line data the analyzer keeps. */
+  threats: LogThreatHit[];
+  /** Flagged lines dropped once the per-file threat cap was reached. */
+  threatsDropped?: number;
+}
+
+/** What a flagged request was trying to do. */
+export type LogThreatCategory =
+  | 'sqli'
+  | 'xss'
+  | 'traversal'
+  | 'cmdi'
+  | 'scanner'
+  | 'sensitive-file'
+  | 'anomaly';
+
+/**
+ * One access-log line the threat classifier flagged. Unlike every other
+ * analyzer aggregate this is per-line: the point is to show the exact IP,
+ * timestamp and decoded parameter payload, so nothing is rolled up.
+ */
+export interface LogThreatHit {
+  /** Epoch ms, or null when the line's timestamp could not be parsed. */
+  ts: number | null;
+  ip: string | null;
+  method: string | null;
+  /** Request target exactly as logged (path + query, still percent-encoded). */
+  path: string;
+  /** Same target percent-decoded (up to two rounds) — the human-readable payload. */
+  decoded: string;
+  status: number | null;
+  bytes: number | null;
+  userAgent: string | null;
+  referer: string | null;
+  /** Declared bot name when the UA matched the bot library, else null. */
+  bot: string | null;
+  /** Category of the strongest matching rule. */
+  category: LogThreatCategory;
+  /** Ids of every rule that matched, strongest first. */
+  rules: string[];
+  /** Sum of matched rule weights — higher = more certain. */
+  score: number;
+  /** The decoded fragment the strongest rule matched — what to highlight. */
+  evidence: string;
+  /**
+   * Set when reverse-DNS verification ran and the IP belongs to a search
+   * engine's own infrastructure (`google` / `bing` / `yandex` / `apple`).
+   * Such a payload was relayed through the engine (Lens, Translate, a
+   * fetch of a crafted URL) — blocking the IP would block the engine.
+   */
+  ipOwner: string | null;
+}
+
+/** A persisted flagged request — `LogThreatHit` plus its row id and the
+ *  crawl join. */
+export interface LogThreatRow extends LogThreatHit {
+  id: number;
+  /** True when the target's path (query stripped) is a crawled internal URL. */
+  targetInCrawl: boolean;
+}
+
+export interface LogThreatsInput {
+  limit: number;
+  offset: number;
+  /** Substring match over the decoded target, IP and user-agent. */
+  search?: string;
+  category?: LogThreatCategory | 'all';
+  /** Exact IP filter (drill-down from the IP panel). */
+  ip?: string;
+  /** Response class of the flagged request; `2xx` = the payload was served. */
+  status?: 'all' | '2xx' | '3xx' | '4xx' | '5xx';
+  sortBy?: 'ts' | 'score' | 'status';
+}
+
+export interface LogThreatsResult {
+  rows: LogThreatRow[];
+  total: number;
+}
+
+export interface LogThreatIpRow {
+  ip: string;
+  hits: number;
+  /** Distinct categories this IP was flagged under. */
+  categories: LogThreatCategory[];
+  firstTs: number | null;
+  lastTs: number | null;
+  /** How many of its flagged requests were answered 2xx. */
+  servedHits: number;
+  /** Declared bot name seen on this IP's flagged requests (first wins). */
+  bot: string | null;
+  ipOwner: string | null;
+}
+
+/** Roll-up the Suspicious Requests tab shows above its table. */
+export interface LogThreatSummary {
+  totalHits: number;
+  distinctIps: number;
+  /** Flagged requests the server answered 2xx — the ones that matter. */
+  servedHits: number;
+  byCategory: Array<{ category: LogThreatCategory; hits: number; ips: number }>;
+  topIps: LogThreatIpRow[];
+  /** True when at least one ingest hit the per-file threat cap. */
+  capHit: boolean;
 }
 
 /** One ingested file's metadata — mirrors a `log_ingests` row. */
@@ -129,6 +233,9 @@ export interface LogOverview {
   distinctUrls: number;
   minTs: number | null;
   maxTs: number | null;
+  /** Requests the threat classifier flagged, and how many IPs sent them. */
+  threatHits: number;
+  threatIps: number;
 }
 
 /** One URL's aggregated log activity (item 6 — bot hits per URL). */

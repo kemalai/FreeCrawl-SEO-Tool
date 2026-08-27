@@ -1,6 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import * as fs from 'node:fs';
 import { FreezeWatchdogSharedState } from './freeze-watchdog-shared.js';
+import { PhaseTracker, previousSessionVerdict } from './freeze-watchdog-report.js';
 
 /**
  * Freeze-watchdog worker.
@@ -47,7 +48,12 @@ const HEARTBEAT_LOG_INTERVAL_MS = 5000;
 interface InitData {
   sab: SharedArrayBuffer;
   debugFilePath: string;
+  /** One-line host description (app / Electron / OS / CPU / RAM). */
+  envLine?: string;
 }
+
+/** Roll the file over past this size — keeps one predecessor. */
+const DEBUG_MAX_BYTES = 25 * 1024 * 1024;
 
 if (!parentPort) {
   throw new Error('freeze-watchdog-worker: must be loaded via worker_threads');
@@ -60,6 +66,37 @@ if (!init?.sab || !init?.debugFilePath) {
 
 const state = new FreezeWatchdogSharedState(init.sab);
 const debugPath = init.debugFilePath;
+
+/** Last ~4 KB of the existing file — enough for its final line. */
+function readTail(): string {
+  try {
+    const fd = fs.openSync(debugPath, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const len = Math.min(size, 4096);
+      if (len === 0) return '';
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      return buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
+}
+
+// Read before rotating: the verdict is about the file we are about to
+// push aside. Rotation keeps one predecessor so a report that spans the
+// boundary is still recoverable.
+const prevSessionLine = previousSessionVerdict(readTail());
+try {
+  if (fs.statSync(debugPath).size > DEBUG_MAX_BYTES) {
+    fs.renameSync(debugPath, debugPath.replace(/\.txt$/i, '') + '.1.txt');
+  }
+} catch {
+  /* no file yet, or locked — append below either way */
+}
 
 // Silently swallow append failures — if the disk is full or the
 // file is locked by AV, we can't recover, and writing would just
@@ -82,6 +119,12 @@ function sanitizeOp(op: string): string {
   return op.replace(/[\r\n\t]+/g, ' ').slice(0, 240);
 }
 
+/** Main-process notes ([CRAWL] / [STORAGE] / mirrored log lines) — same
+ *  sanitising, longer cap: a mirrored error is already compacted. */
+function sanitizeNote(line: string): string {
+  return line.replace(/[\r\n\t]+/g, ' ').slice(0, 600);
+}
+
 interface StallTracker {
   /** Gap exceeded the threshold and we're timing it. */
   active: boolean;
@@ -91,6 +134,8 @@ interface StallTracker {
   startOp: string;
   /** `gap=612ms` / `silence=1709ms`, captured at onset. */
   detail: string;
+  /** `crawled` at onset — the end line reports how far it moved. */
+  startCrawled: number;
 }
 
 const newTracker = (): StallTracker => ({
@@ -99,6 +144,7 @@ const newTracker = (): StallTracker => ({
   startTs: 0,
   startOp: '',
   detail: '',
+  startCrawled: 0,
 });
 
 const mainStall = newTracker();
@@ -118,6 +164,7 @@ function trackStall(
   now: number,
   op: string,
   detail: string,
+  crawledNow: number,
   onStart: (t: StallTracker) => string,
   onEnd: (t: StallTracker, durationMs: number) => string,
 ): void {
@@ -128,6 +175,7 @@ function trackStall(
       t.startTs = now;
       t.startOp = op;
       t.detail = detail;
+      t.startCrawled = crawledNow;
     } else if (!t.reported && now - t.startTs >= STALL_REPORT_FLOOR_MS) {
       t.reported = true;
       appendLine(onStart(t));
@@ -142,6 +190,7 @@ function trackStall(
 
 let lastHeartbeatLogTs = 0;
 let bootLogged = false;
+const phases = new PhaseTracker();
 
 function check(): void {
   const now = Date.now();
@@ -154,6 +203,13 @@ function check(): void {
   const mainOp = sanitizeOp(state.readMainOp());
   const readerOp = sanitizeOp(state.readReaderOp());
   const writerOp = sanitizeOp(state.readWriterOp());
+  const host = state.readHostStats();
+  // Signed delta of the crawled counter across a stall: "+0" over two
+  // minutes is a wedge, "+400" is a slow patch the crawl worked through.
+  const crawledDelta = (t: StallTracker): string => {
+    const d = counters.crawled - t.startCrawled;
+    return `${d >= 0 ? '+' : ''}${d}`;
+  };
 
   const mainGap = mainHb > 0 ? now - mainHb : 0;
   const readerGap = readerHb > 0 ? now - readerHb : 0;
@@ -167,12 +223,14 @@ function check(): void {
     now,
     mainOp,
     `gap=${mainGap}ms`,
+    counters.crawled,
     (t) =>
       `${isoNow()} [STALL:MAIN start ${t.detail}] op="${t.startOp || '<unknown>'}" ` +
       `crawled=${counters.crawled} discovered=${counters.discovered} ` +
       `pending=${counters.pending} failed=${counters.failed}`,
     (t, dur) =>
-      `${isoNow()} [STALL:MAIN end after ${dur}ms] startOp="${t.startOp}" endOp="${mainOp}"`,
+      `${isoNow()} [STALL:MAIN end after ${dur}ms] startOp="${t.startOp}" endOp="${mainOp}" ` +
+      `crawled_delta=${crawledDelta(t)} writer_op="${writerOp}" rss=${host.rssMb}MB heap=${host.heapMb}MB`,
   );
 
   // ── DB reader pool stall ──
@@ -184,6 +242,7 @@ function check(): void {
     now,
     readerOp,
     `gap=${readerGap}ms`,
+    counters.crawled,
     (t) => `${isoNow()} [STALL:READER start ${t.detail}] op="${t.startOp || '<unknown>'}"`,
     (t, dur) =>
       `${isoNow()} [STALL:READER end after ${dur}ms] startOp="${t.startOp}" endOp="${readerOp}"`,
@@ -200,11 +259,13 @@ function check(): void {
     now,
     writerOp,
     `gap=${writerGap}ms`,
+    counters.crawled,
     (t) =>
       `${isoNow()} [STALL:WRITER start ${t.detail}] op="${t.startOp || '<unknown>'}" ` +
       `crawled=${counters.crawled} pending=${counters.pending}`,
     (t, dur) =>
-      `${isoNow()} [STALL:WRITER end after ${dur}ms] startOp="${t.startOp}" endOp="${writerOp}"`,
+      `${isoNow()} [STALL:WRITER end after ${dur}ms] startOp="${t.startOp}" endOp="${writerOp}" ` +
+      `crawled_delta=${crawledDelta(t)} writer_q=${host.writerPending} main_op="${mainOp}"`,
   );
 
   // ── Renderer stall ──
@@ -227,6 +288,7 @@ function check(): void {
     now,
     mainOp,
     rendererReason,
+    counters.crawled,
     (t) =>
       `${isoNow()} [STALL:RENDERER start ${t.detail}] last_main_op="${t.startOp || '<unknown>'}" ` +
       `crawled=${counters.crawled} pending=${counters.pending}`,
@@ -244,14 +306,20 @@ function check(): void {
         `renderer_lag>${STALL_THRESHOLD_RENDERER_LAG_MS}ms renderer_silence>${STALL_THRESHOLD_RENDERER_SILENCE_MS}ms ` +
         `report_floor=${STALL_REPORT_FLOOR_MS}ms`,
     );
+    if (init.envLine) appendLine(`${isoNow()} [ENV] ${sanitizeNote(init.envLine)}`);
+    if (prevSessionLine) appendLine(`${isoNow()} ${prevSessionLine}`);
   }
+  const phaseLine = phases.observe(mainOp, now);
+  if (phaseLine) appendLine(`${isoNow()} ${phaseLine}`);
   if (now - lastHeartbeatLogTs >= HEARTBEAT_LOG_INTERVAL_MS) {
     lastHeartbeatLogTs = now;
     appendLine(
       `${isoNow()} [HEARTBEAT] main_op="${mainOp}" reader_op="${readerOp}" ` +
         `writer_op="${writerOp}" ` +
         `crawled=${counters.crawled} discovered=${counters.discovered} ` +
-        `pending=${counters.pending} renderer_lag=${rendererLag}ms`,
+        `pending=${counters.pending} failed=${counters.failed} renderer_lag=${rendererLag}ms ` +
+        `rss=${host.rssMb}MB heap=${host.heapMb}MB loop_lag=${host.mainLoopLagMs}ms ` +
+        `writer_q=${host.writerPending} writer_oldest=${host.writerOldestMs}ms`,
     );
   }
 }
@@ -261,7 +329,14 @@ setInterval(check, CHECK_INTERVAL_MS);
 // Accept a graceful-shutdown ping from the parent. We don't strictly
 // need it (the worker exits with the parent), but logging the close
 // lets the user see "watchdog stopped" instead of a silent truncation.
-parentPort.on('message', (msg: { type?: string }) => {
+parentPort.on('message', (msg: { type?: string; line?: unknown }) => {
+  // Main-process annotations — crawl start/stop, storage mode, mirrored
+  // error lines. They queue behind a frozen main thread and land here in
+  // order once it resumes, timestamped at write so the delay is visible.
+  if (msg?.type === 'note' && typeof msg.line === 'string') {
+    appendLine(`${isoNow()} ${sanitizeNote(msg.line)}`);
+    return;
+  }
   if (msg?.type === 'shutdown') {
     appendLine(`${isoNow()} [SHUTDOWN] watchdog received shutdown signal`);
     process.exit(0);

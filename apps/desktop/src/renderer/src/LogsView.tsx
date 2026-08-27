@@ -11,6 +11,7 @@ import clsx from 'clsx';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import type { LogEntry, LogLevel } from '@freecrawl/shared-types';
+import { writeTextToClipboard } from './utils/clipboard.js';
 
 const LEVEL_ORDER: LogLevel[] = ['debug', 'info', 'warn', 'error'];
 
@@ -93,6 +94,7 @@ export function LogsView() {
   const [minLevel, setMinLevel] = useState<LogLevel>('info');
   const [filter, setFilter] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   // Pending batches — main process already coalesces entries on a
   // 100 ms window, so the renderer's only job is to apply the batch.
@@ -216,11 +218,11 @@ export function LogsView() {
     const text = visible
       .map((e) => `${e.ts}  ${e.level.toUpperCase().padEnd(5)} [${e.source}] ${e.message}`)
       .join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      /* clipboard may be unavailable in locked-down renderer contexts */
-    }
+    // Confirm on the button itself. Copy is silent by nature, so without
+    // this the user cannot tell a working button from a broken one — which
+    // is exactly how the old swallowed failure went unnoticed.
+    setCopyState((await writeTextToClipboard(text)) ? 'copied' : 'failed');
+    window.setTimeout(() => setCopyState('idle'), 1600);
   }
 
   const totalHeight = rowVirtualizer.getTotalSize();
@@ -263,11 +265,23 @@ export function LogsView() {
           {t('logs.autoScroll', { defaultValue: 'Auto-scroll' })}
         </label>
         <button
-          className="rounded border border-surface-700 px-2 py-1 text-[11px] hover:bg-surface-800"
-          onClick={copyAll}
+          className={clsx(
+            'rounded border px-2 py-1 text-[11px]',
+            copyState === 'copied'
+              ? 'border-emerald-700/60 text-emerald-300'
+              : copyState === 'failed'
+                ? 'border-red-800/60 text-red-300'
+                : 'border-surface-700 hover:bg-surface-800',
+          )}
+          onClick={() => void copyAll()}
+          disabled={visible.length === 0}
           title={t('logs.copyTitle', { defaultValue: 'Copy visible entries to clipboard' })}
         >
-          {t('logs.copy', { defaultValue: 'Copy' })}
+          {copyState === 'copied'
+            ? t('logs.copied', { defaultValue: 'Copied' })
+            : copyState === 'failed'
+              ? t('logs.copyFailed', { defaultValue: 'Copy failed' })
+              : t('logs.copy', { defaultValue: 'Copy' })}
         </button>
         <button
           className="rounded border border-red-800/60 px-2 py-1 text-[11px] text-red-300 hover:bg-red-900/30"

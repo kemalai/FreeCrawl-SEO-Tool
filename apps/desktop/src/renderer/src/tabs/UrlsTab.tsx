@@ -1598,6 +1598,26 @@ export function UrlsTab() {
           </div>
         </div>
 
+        {lazy.error && (
+          <div
+            className="absolute inset-x-0 z-20 flex items-center gap-2 border-b border-red-900/60 bg-red-950/70 px-3 py-1 text-[11px] text-red-200"
+            style={{ top: HEADER_HEIGHT }}
+          >
+            <span className="min-w-0 flex-1 truncate" title={lazy.error}>
+              {t('urlsTab.loadFailed', {
+                defaultValue: 'Could not load this filter: {{detail}}',
+                detail: lazy.error,
+              })}
+            </span>
+            <button
+              type="button"
+              onClick={() => lazy.retry()}
+              className="shrink-0 rounded border border-red-700/60 px-2 py-0.5 text-red-100 hover:bg-red-900/50"
+            >
+              {t('urlsTab.retry', { defaultValue: 'Retry' })}
+            </button>
+          </div>
+        )}
         {lazy.total === 0 && lazy.isLoading && (
           <div
             className="pointer-events-none absolute inset-0 flex items-center justify-center"
@@ -1606,7 +1626,7 @@ export function UrlsTab() {
             <div className="text-xs text-surface-500">{t('common.loading', { defaultValue: 'Loading…' })}</div>
           </div>
         )}
-        {lazy.total === 0 && !lazy.isLoading && (
+        {lazy.total === 0 && !lazy.isLoading && !lazy.error && (
           <div
             className="pointer-events-none absolute inset-0 flex items-center justify-center"
             style={{ top: HEADER_HEIGHT }}
@@ -2086,6 +2106,23 @@ function Cell({
 
   if (spec.kind === 'status') {
     const code = row.statusCode;
+    // A robots-blocked URL also has no status — but because the crawler
+    // chose not to request it, not because the request failed. Painting
+    // it in the failure red said "this broke" about a crawl the status
+    // bar reports as Failed 0.
+    if (
+      (code === null || code === undefined) &&
+      row.indexability === 'non-indexable:robots-blocked'
+    ) {
+      return (
+        <span
+          className="inline-block rounded bg-surface-800 px-1.5 font-mono text-[10px] text-amber-400"
+          title={translateLabel(ROBOTS_STATUS_TITLE, lang)}
+        >
+          {translateLabel('Robots', lang)}
+        </span>
+      );
+    }
     // No HTTP status (DNS/TLS/connect/timeout failure): a bare "—" hides the
     // reason the crawler already captured. Show a compact token (DNS / TLS /
     // Timeout / …) with the full error text on hover.
@@ -2317,6 +2354,9 @@ function cellText(row: CrawlUrlRow, spec: ColumnSpec, lang: string): string {
   if (spec.kind === 'status') {
     const code = row.statusCode;
     if (code !== null && code !== undefined) return String(code);
+    if (row.indexability === 'non-indexable:robots-blocked') {
+      return translateLabel('Robots', lang);
+    }
     const label = shortFailureLabel(row.statusText);
     return label === '—' ? '' : label;
   }
@@ -2407,6 +2447,10 @@ function indexabilityStatusLabel(v: CrawlUrlRow['indexability']): string {
  * localized, same convention as the numeric status codes themselves. The full
  * diagnostic is on hover (title) and in the URL Details → HTTP Headers tab.
  */
+/** Tooltip for the Robots status badge — dictionary key, so the grid
+ *  cell stays free of a `useTranslation` hook. */
+const ROBOTS_STATUS_TITLE = 'Not requested — disallowed by robots.txt';
+
 function shortFailureLabel(statusText: string | null): string {
   if (!statusText) return '—';
   if (/ENOTFOUND|EAI_AGAIN|ENODATA|ESERVFAIL|getaddrinfo|DNS/i.test(statusText)) return 'DNS';

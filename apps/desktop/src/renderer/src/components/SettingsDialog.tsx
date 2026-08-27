@@ -33,7 +33,6 @@ import {
   Wrench,
   FolderOpen,
   SpellCheck,
-  Lock,
   Languages,
   Plug,
   ExternalLink,
@@ -89,6 +88,7 @@ interface FormState {
   maxUrls: string;
   maxConcurrency: string;
   maxRps: string;
+  adaptiveSpeed: boolean;
   requestTimeoutMs: string;
   crawlDelayMs: string;
   retryAttempts: string;
@@ -260,7 +260,6 @@ export type SettingsSectionKey =
   | 'performance-budget'
   | 'storage'
   | 'spelling'
-  | 'privacy'
   | 'language'
   /** Per-integration sub-page, e.g. `integration:gsc`. Each integration
    *  gets its own page under the "Integrations" group header, so a
@@ -488,12 +487,6 @@ const SECTIONS: SectionDef[] = [
     keywords: 'spelling grammar languagetool dictionary ignore words picky rule level yazım dilbilgisi sözlük',
   },
   {
-    key: 'privacy',
-    label: 'Privacy',
-    icon: Lock,
-    keywords: 'privacy telemetry analytics anonymous opt in out tracking data',
-  },
-  {
     key: 'language',
     label: 'Language',
     icon: Languages,
@@ -510,6 +503,7 @@ function configToForm(c: CrawlConfig): FormState {
     maxUrls: String(c.maxUrls),
     maxConcurrency: String(c.maxConcurrency),
     maxRps: String(c.maxRps),
+    adaptiveSpeed: c.adaptiveSpeed,
     requestTimeoutMs: String(c.requestTimeoutMs),
     crawlDelayMs: String(c.crawlDelayMs),
     retryAttempts: String(c.retryAttempts),
@@ -810,6 +804,7 @@ export function SettingsDialog({ open, onClose }: Props) {
       maxUrls: Math.max(1, num(form.maxUrls, config.maxUrls)),
       maxConcurrency: Math.max(1, Math.min(200, num(form.maxConcurrency, config.maxConcurrency))),
       maxRps: Math.max(1, num(form.maxRps, config.maxRps)),
+      adaptiveSpeed: form.adaptiveSpeed,
       requestTimeoutMs: Math.max(1000, num(form.requestTimeoutMs, config.requestTimeoutMs)),
       crawlDelayMs: Math.max(0, num(form.crawlDelayMs, config.crawlDelayMs)),
       retryAttempts: Math.max(0, num(form.retryAttempts, config.retryAttempts)),
@@ -1233,7 +1228,6 @@ export function SettingsDialog({ open, onClose }: Props) {
               )}
               {active === 'storage' && <StoragePanel />}
               {active === 'spelling' && <SpellingPanel />}
-              {active === 'privacy' && <PrivacyPanel />}
               {active === 'language' && <LanguagePanel />}
             </div>
           </div>
@@ -2220,6 +2214,21 @@ function SpeedPanel({ form, update }: PanelProps) {
         info="Hard ceiling on requests per second across all workers combined. Equivalent to Screaming Frog's 'Max URL/s'. Acts as a token bucket — even with high concurrency the crawler waits between bursts to stay below this rate."
         example="20 for typical sites; 5 to be polite on shared hosting; 60+ when crawling your own infra."
       />
+      <div className="mt-2">
+        <Bool
+          label={t('settingsPanels.speed.adaptiveSpeed', { defaultValue: 'Adaptive speed (auto-slow on 429 / Retry-After)' })}
+          checked={form.adaptiveSpeed}
+          onChange={(v) => update('adaptiveSpeed', v)}
+          info="Treat the concurrency and RPS above as a ceiling and let the target server set the real pace. On a 429/503 (or a Retry-After header) the crawler pauses for the penalty window and steps the rate + concurrency down; after a sustained run of clean responses it grows them back toward the ceiling. Off = hold the configured rate no matter how the server responds."
+          example="Turn on for sites behind Cloudflare / a WAF that returns 429s; leave off for your own infrastructure where the fixed rate is safe."
+        />
+        <p className="mt-1 text-[10px] text-surface-500">
+          {t('settingsPanels.speed.adaptiveSpeedHint', {
+            defaultValue:
+              'Only affects behaviour when the server pushes back — a healthy site is crawled at the full ceiling either way.',
+          })}
+        </p>
+      </div>
       <Num
         label={t('settingsPanels.speed.crawlDelayMs', { defaultValue: 'Per-Worker Delay (ms after each request)' })}
         value={form.crawlDelayMs}
@@ -5234,58 +5243,6 @@ function StoragePanel() {
 
       <div className="rounded border border-surface-800 bg-surface-950/40 p-3 text-[11px] text-surface-400">
         {t('settings.storage.note', { defaultValue: "Active crawl data lives in the app's user-data directory until you Save As — the path above only controls where Save As starts. Changing this won't move any existing project files." })}
-      </div>
-    </>
-  );
-}
-
-/**
- * V1 Faz 9 — Privacy panel. Single toggle for anonymous telemetry opt-in.
- * No telemetry backend is wired up yet (default off, no events fire);
- * this preference is kept so future opt-in metrics ship with consent
- * already gathered and the default remains opt-out.
- */
-function PrivacyPanel() {
-  const { t } = useTranslation();
-  const [telemetryOptIn, setTelemetryOptIn] = useState<boolean>(() => {
-    return window.freecrawl.prefsGet('telemetryOptIn') === true;
-  });
-
-  function toggle(v: boolean) {
-    setTelemetryOptIn(v);
-    window.freecrawl.prefsSet('telemetryOptIn', v);
-  }
-
-  return (
-    <>
-      <p className="mb-3 text-[11px] text-surface-400">
-        {t('settings.privacy.intro', { defaultValue: "FreeCrawl is local-first — crawl results, project files, and URLs you visit never leave your machine." })}
-      </p>
-
-      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
-        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
-          {t('settings.privacy.telemetryHeading', { defaultValue: "Anonymous Telemetry" })}
-        </div>
-        <label className="flex items-start gap-2">
-          <input
-            type="checkbox"
-            checked={telemetryOptIn}
-            onChange={(e) => toggle(e.target.checked)}
-            className="mt-0.5"
-          />
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[12px] text-surface-100">
-              {t('settings.privacy.telemetryLabel', { defaultValue: "Send anonymous usage telemetry (opt-in)" })}
-            </span>
-            <span className="text-[10px] text-surface-500">
-              {t('settings.privacy.telemetryHelp', { defaultValue: "Off by default. When on, aggregated counts of feature use (e.g. \"export ran\", \"report opened\") may be sent — never URLs, project contents, or crawl results." })}
-            </span>
-          </div>
-        </label>
-      </div>
-
-      <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
-        {t('settings.privacy.statusNote', { defaultValue: "No telemetry endpoint is currently wired up. Toggling this preference is recorded but nothing is transmitted in the current build. The toggle is exposed now so consent state persists across upgrades when a future build adds an endpoint." })}
       </div>
     </>
   );

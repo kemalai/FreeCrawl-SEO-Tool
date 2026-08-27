@@ -525,6 +525,8 @@ function flattenLogResult(filePath: string, result: LogAnalysisResult): LogInges
     urlBots: Array.from(result.urlStats.values()).flatMap((u) =>
       Array.from(u.botCounts.entries()).map(([bot, hits]) => ({ path: u.path, bot, hits })),
     ),
+    threats: result.threats,
+    threatsDropped: result.threatsDropped,
   };
 }
 

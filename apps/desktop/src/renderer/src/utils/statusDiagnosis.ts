@@ -349,12 +349,14 @@ const GENERIC_CODES: Record<number, CodeInfo> = {
 /**
  * Build the diagnosis for a (statusCode, statusText, headers) triple.
  * `statusCode` may be null/0 for pre-response network failures, in
- * which case the explanation focuses on connection-level causes.
+ * which case the explanation focuses on connection-level causes —
+ * unless `indexability` says the URL was never requested at all.
  */
 export function diagnoseStatus(
   statusCode: number | null,
   statusText: string | null,
   headers: HeaderList,
+  indexability?: string | null,
 ): StatusDiagnosis {
   const h = headerMap(headers);
   const front = detectFront(h);
@@ -382,6 +384,34 @@ export function diagnoseStatus(
   if (cfCache) signals.push(`Cloudflare cache status: ${cfCache}.`);
   const xRobots = h.get('x-robots-tag');
   if (xRobots) signals.push(`X-Robots-Tag: ${xRobots} — affects indexability regardless of the status.`);
+
+  // ----- Deliberately not requested (robots.txt) -----
+  // Shares the "no status code" shape with a network failure, so without
+  // this branch a disallowed URL was diagnosed as a DNS/TLS/timeout
+  // error and sent the user hunting a connection problem that isn't there.
+  if (
+    (statusCode === null || statusCode === 0) &&
+    indexability === 'non-indexable:robots-blocked'
+  ) {
+    return {
+      title: 'Not Requested — Disallowed by robots.txt',
+      severity: 'info',
+      explanation:
+        'The crawler never sent a request for this URL: a robots.txt rule for the ' +
+        'configured user-agent disallows it. There is no status code because no ' +
+        'response was ever asked for — this is not a connection failure.',
+      causes: [
+        'A Disallow rule in the site robots.txt matches this path for the crawl user-agent',
+        'The URL is linked from crawled pages, so it is recorded and counted, but never fetched',
+      ],
+      whatToDo: [
+        'Nothing, if the exclusion is intended — Google will not crawl it either',
+        'Check whether the page should be indexable: a disallowed URL cannot pass on link equity and its content is never seen',
+        'Use Reports → Robots Tester to see which rule matches, or turn off "Respect robots.txt" in Settings → Crawler to audit it anyway',
+      ],
+      signals,
+    };
+  }
 
   // ----- Network error (no response) -----
   if (statusCode === null || statusCode === 0) {

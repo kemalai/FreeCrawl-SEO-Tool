@@ -1,3 +1,4 @@
+import type { ExportDatasetKey } from './export-datasets.js';
 import type {
   AdvancedFilter,
   BrokenLinkRow,
@@ -64,6 +65,10 @@ import type {
   LogSeedDiscoveryResult,
   LogExportInput,
   LogExportResult,
+  LogThreatsInput,
+  LogThreatsResult,
+  LogThreatSummary,
+  LogThreatIpRow,
 } from './loganalyzer.js';
 
 export const IPC = {
@@ -189,6 +194,11 @@ export const IPC = {
   confirmClear: 'confirm:clear',
   logsGetAll: 'logs:get-all',
   logsClear: 'logs:clear',
+  /** Write text to the OS clipboard from the main process. The renderer's
+   *  own `navigator.clipboard` needs a focused document and a granted
+   *  permission, neither of which holds in every window — Electron's
+   *  `clipboard` module has no such preconditions. */
+  clipboardWriteText: 'clipboard:write-text',
   /** Single log entry — kept for compatibility but not used for the
    * live tail anymore; high-volume crawls would saturate the IPC
    * channel. The renderer receives entries via `logsBatch` instead. */
@@ -407,6 +417,12 @@ export const IPC = {
   logSeedDiscovery: 'loganalyzer:seed-discovery',
   logExport: 'loganalyzer:export',
   logClear: 'loganalyzer:clear',
+  /** Suspicious Requests tab — flagged log lines (SQLi / XSS / scanner
+   *  probes …) with sender IP + decoded payload, their roll-up, and the
+   *  sender list that backs the blocklist copy. */
+  logThreats: 'loganalyzer:threats',
+  logThreatSummary: 'loganalyzer:threat-summary',
+  logThreatIps: 'loganalyzer:threat-ips',
 } as const;
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC];
@@ -609,7 +625,17 @@ export interface ExportImagesResult {
 export interface ExportTabularSection {
   /** Display label — becomes the xlsx sheet name and the per-file label. */
   label: string;
-  category: UrlCategory;
+  /** URL category to stream `CrawlUrlRow`s from. Required unless `dataset` is set. */
+  category?: UrlCategory;
+  /**
+   * Non-URL-row table to export instead of a category — Images, Broken
+   * Links, Search Console, GA4, PageSpeed, CrUX, Spelling, AI, SEO
+   * Authority. Rows come from the dataset's own query; `columns` names its
+   * dotted column keys (see `EXPORT_DATASET_COLUMNS`).
+   */
+  dataset?: ExportDatasetKey;
+  /** Column keys for this section only; overrides the input-level `columns`. */
+  columns?: string[];
   /** Optional subdirectory under the chosen folder. When set, the section
    *  file lands at `<root>/<subdir>/<filename>.<ext>` instead of the flat
    *  `<root>/<filename>.<ext>`. Lets a hierarchical tree pick (Internal →
@@ -1854,6 +1880,9 @@ export interface FreeCrawlApi {
    *  app-global entries; omitted returns everything (primary/legacy view). */
   logsGetAll(ownerId?: number): Promise<LogEntry[]>;
   logsClear(): Promise<void>;
+  /** Copy `text` to the OS clipboard via the main process. Resolves true
+   *  on success; the renderer falls back to the DOM paths on false. */
+  clipboardWriteText(text: string): Promise<boolean>;
   logsOpenWindow(): Promise<void>;
   openVisualizationWindow(): Promise<void>;
   readScreenshot(absolutePath: string): Promise<string | null>;
@@ -2062,6 +2091,12 @@ export interface FreeCrawlApi {
   logExport(input: LogExportInput): Promise<LogExportResult>;
   /** Wipe every ingested log aggregate from the project. */
   logClear(): Promise<void>;
+  /** Paginated flagged requests (Suspicious Requests tab). */
+  logThreats(input: LogThreatsInput): Promise<LogThreatsResult>;
+  /** Totals, per-category counts and busiest senders of flagged requests. */
+  logThreatSummary(): Promise<LogThreatSummary>;
+  /** Senders of flagged requests, busiest first — backs the blocklist copy. */
+  logThreatIps(limit?: number): Promise<LogThreatIpRow[]>;
   onProgress(cb: (p: CrawlProgress) => void): () => void;
   onDone(cb: (summary: CrawlSummary) => void): () => void;
   onError(cb: (message: string) => void): () => void;

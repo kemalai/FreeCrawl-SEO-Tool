@@ -52,6 +52,12 @@ import type {
   LogTrendRow,
   LogCrawlBudgetRow,
   LogDiscoveryRow,
+  LogThreatCategory,
+  LogThreatIpRow,
+  LogThreatRow,
+  LogThreatsInput,
+  LogThreatsResult,
+  LogThreatSummary,
 } from '@freecrawl/shared-types';
 import { issueCategoriesBySeverity } from '@freecrawl/shared-types';
 import { runMigrations } from './migrations.js';
@@ -869,6 +875,23 @@ const CANONICAL_CMP = "COALESCE(NULLIF(canonical_resolved, ''), canonical)";
 const CANONICAL_CMP_Q =
   "COALESCE(NULLIF(urls.canonical_resolved, ''), urls.canonical)";
 
+/**
+ * One post-crawl probe result, addressed to the setter that stores it.
+ * The crawler buffers these and ships them through `applyProbeWrites`.
+ */
+export type ProbeWrite =
+  | { method: 'setImageSize'; args: Parameters<ProjectDb['setImageSize']> }
+  | {
+      method: 'setSocialImageDimsForReferrers';
+      args: Parameters<ProjectDb['setSocialImageDimsForReferrers']>;
+    }
+  | { method: 'setHostCert'; args: Parameters<ProjectDb['setHostCert']> }
+  | {
+      method: 'setManifestForReferrers';
+      args: Parameters<ProjectDb['setManifestForReferrers']>;
+    }
+  | { method: 'setPdfMetadata'; args: Parameters<ProjectDb['setPdfMetadata']> };
+
 export class ProjectDb {
   private readonly db: DatabaseSync;
   /** Read-only connections can't write `sqlite_stat1`; see `optimize()`. */
@@ -1040,6 +1063,12 @@ export class ProjectDb {
          DELETE FROM seo_results;
          DELETE FROM gsc_inspection_results;`,
         );
+        // Log Analyzer aggregates live in this project too. Left out of
+        // the wipe they survived every cold start and Clear inside the
+        // disk-mode scratch project, so a brand-new "Untitled project"
+        // opened the analyzer onto whatever access log an earlier
+        // session had imported — with nothing on screen to say so.
+        this.clearLogData();
       });
     } finally {
       this.db.exec('PRAGMA foreign_keys = ON');
@@ -1365,6 +1394,16 @@ export class ProjectDb {
     storeBody: { body: string; maxBytes: number } | null;
     links: DiscoveredLink[];
     images: DiscoveredImage[];
+    /**
+     * Whether the crawl is recording this page's link graph at all
+     * (Spider → Crawl → Store for hyperlinks / iframes / invalid links).
+     * When false, `links` is empty because nothing is being recorded —
+     * not because the page has none — so the rows an earlier crawl
+     * stored are left in place. Defaults to true for CLI / test callers.
+     */
+    storeLinks?: boolean;
+    /** Same contract for `image_usages` (Spider → Crawl → Store → Images). */
+    storeImages?: boolean;
     fromDepth: number;
   }): { urlId: number } {
     return this.runInTransaction(() => {
@@ -1389,28 +1428,38 @@ export class ProjectDb {
         // metric. Delete unconditionally (a no-op on a first crawl, both
         // DELETEs are index-backed) so the page's link + image set
         // always reflects the latest fetch.
-        this.db.prepare('DELETE FROM links WHERE from_url_id = ?').run(urlId);
-        // `images.occurrences` is a running tally of how many pages use each
-        // image. Deleting this page's usage rows must first decrement that
-        // tally for the affected images, otherwise the re-insert via
-        // `insertImages` (which does `occurrences + 1`) drifts the count
-        // upward without bound on every re-crawl / Re-Spider / resume.
-        // Decrement-then-reinsert nets zero for images still on the page and
-        // correctly drops images that vanished from it.
-        this.db
-          .prepare(
-            `UPDATE images SET occurrences = occurrences - 1
-             WHERE id IN (SELECT image_id FROM image_usages WHERE from_url_id = ?)`,
-          )
-          .run(urlId);
-        this.db
-          .prepare('DELETE FROM image_usages WHERE from_url_id = ?')
-          .run(urlId);
-        if (payload.links.length > 0) {
-          this.insertLinks(urlId, payload.links, payload.fromDepth);
+        //
+        // Each DELETE is gated on its Store flag. With storage switched
+        // off the crawler ships an empty list, and wiping first would
+        // erase what a previous crawl (storage on) had recorded — every
+        // resume / Re-Spider silently zeroed the page's Inlinks and
+        // Outlinks and dropped it from its neighbours' inlink counts.
+        if (payload.storeLinks ?? true) {
+          this.db.prepare('DELETE FROM links WHERE from_url_id = ?').run(urlId);
+          if (payload.links.length > 0) {
+            this.insertLinks(urlId, payload.links, payload.fromDepth);
+          }
         }
-        if (payload.images.length > 0) {
-          this.insertImages(urlId, payload.images);
+        if (payload.storeImages ?? true) {
+          // `images.occurrences` is a running tally of how many pages use each
+          // image. Deleting this page's usage rows must first decrement that
+          // tally for the affected images, otherwise the re-insert via
+          // `insertImages` (which does `occurrences + 1`) drifts the count
+          // upward without bound on every re-crawl / Re-Spider / resume.
+          // Decrement-then-reinsert nets zero for images still on the page and
+          // correctly drops images that vanished from it.
+          this.db
+            .prepare(
+              `UPDATE images SET occurrences = occurrences - 1
+               WHERE id IN (SELECT image_id FROM image_usages WHERE from_url_id = ?)`,
+            )
+            .run(urlId);
+          this.db
+            .prepare('DELETE FROM image_usages WHERE from_url_id = ?')
+            .run(urlId);
+          if (payload.images.length > 0) {
+            this.insertImages(urlId, payload.images);
+          }
         }
       }
       return { urlId };
@@ -7435,6 +7484,39 @@ export class ProjectDb {
       );
       for (const ub of input.urlBots) upUrlBot.run(ub.path, ub.bot, ub.hits);
 
+      const insThreat = this.db.prepare(
+        `INSERT INTO log_threats
+           (ingest_id, ts, ip, method, path, decoded, status, bytes, user_agent, referer, bot,
+            category, rules, score, evidence, ip_owner)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const ingestId = ins.lastInsertRowid as number;
+      for (const t of input.threats) {
+        insThreat.run(
+          ingestId,
+          t.ts,
+          t.ip,
+          t.method,
+          t.path,
+          t.decoded,
+          t.status,
+          t.bytes,
+          t.userAgent,
+          t.referer,
+          t.bot,
+          t.category,
+          t.rules.join(','),
+          t.score,
+          t.evidence,
+          t.ipOwner,
+        );
+      }
+      if (input.threatsDropped && input.threatsDropped > 0) {
+        this.db
+          .prepare('UPDATE log_ingests SET threats_dropped = ? WHERE id = ?')
+          .run(input.threatsDropped, ingestId);
+      }
+
       this.db.exec('COMMIT');
       const row = this.db
         .prepare('SELECT ingested_at FROM log_ingests WHERE id = ?')
@@ -7518,6 +7600,10 @@ export class ProjectDb {
       }
     }
 
+    const threats = this.db
+      .prepare('SELECT COUNT(*) AS hits, COUNT(DISTINCT ip) AS ips FROM log_threats')
+      .get() as { hits: number; ips: number };
+
     return {
       hasData: files.length > 0,
       files,
@@ -7528,6 +7614,8 @@ export class ProjectDb {
       distinctUrls: agg.urls,
       minTs: span.lo,
       maxTs: span.hi,
+      threatHits: threats.hits,
+      threatIps: threats.ips,
     };
   }
 
@@ -7716,21 +7804,152 @@ export class ProjectDb {
     return out;
   }
 
-  /** Wipe every ingested log aggregate. */
-  clearLogData(): void {
-    this.db.exec('BEGIN');
-    try {
-      this.db.exec('DELETE FROM log_url_stats');
-      this.db.exec('DELETE FROM log_url_bot');
-      this.db.exec('DELETE FROM log_daily');
-      this.db.exec('DELETE FROM log_status');
-      this.db.exec('DELETE FROM log_bots');
-      this.db.exec('DELETE FROM log_ingests');
-      this.db.exec('COMMIT');
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
+  /** Crawled internal pathnames (query stripped) for the threat-target join. */
+  private crawlInternalPathnameSet(): Set<string> {
+    const set = new Set<string>();
+    for (const p of this.crawlInternalPathSet()) {
+      const q = p.indexOf('?');
+      set.add(q >= 0 ? p.slice(0, q) : p);
     }
+    return set;
+  }
+
+  /**
+   * Suspicious Requests — paginated flagged log lines. Filters compose;
+   * `search` covers the decoded target, the IP and the user-agent. The
+   * crawl join (`targetInCrawl`) compares the target's pathname with the
+   * crawled internal URLs, so a payload aimed at a real page reads
+   * differently from a blind probe for a file that never existed.
+   */
+  queryLogThreats(input: LogThreatsInput): LogThreatsResult {
+    const limit = Math.max(1, Math.min(input.limit, 1000));
+    const offset = Math.max(0, input.offset);
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    const search = input.search?.trim();
+    if (search) {
+      where.push('(decoded LIKE ? OR ip LIKE ? OR user_agent LIKE ?)');
+      const like = `%${search}%`;
+      args.push(like, like, like);
+    }
+    if (input.category && input.category !== 'all') {
+      where.push('category = ?');
+      args.push(input.category);
+    }
+    if (input.ip && input.ip.trim()) {
+      where.push('ip = ?');
+      args.push(input.ip.trim());
+    }
+    const cls = input.status ?? 'all';
+    if (cls !== 'all') {
+      const lo = Number(cls[0]) * 100;
+      where.push('status >= ? AND status < ?');
+      args.push(lo, lo + 100);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const orderSql =
+      input.sortBy === 'score'
+        ? 'ORDER BY score DESC, ts DESC, id DESC'
+        : input.sortBy === 'status'
+          ? 'ORDER BY status ASC, ts DESC, id DESC'
+          : 'ORDER BY ts DESC, id DESC';
+    const total = (
+      this.db.prepare(`SELECT COUNT(*) AS n FROM log_threats ${whereSql}`).get(...args) as {
+        n: number;
+      }
+    ).n;
+    const rows = this.db
+      .prepare(`SELECT * FROM log_threats ${whereSql} ${orderSql} LIMIT ? OFFSET ?`)
+      .all(...args, limit, offset) as LogThreatDbRow[];
+    const crawled = this.crawlInternalPathnameSet();
+    return { rows: rows.map((r) => toLogThreatRow(r, crawled)), total };
+  }
+
+  /** Roll-up above the Suspicious Requests table: totals, per-category
+   *  counts, the busiest senders, and whether any ingest hit the cap. */
+  getLogThreatSummary(topIps = 25): LogThreatSummary {
+    const tot = this.db
+      .prepare(
+        `SELECT COUNT(*) AS hits,
+                COUNT(DISTINCT ip) AS ips,
+                COALESCE(SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END), 0) AS served
+           FROM log_threats`,
+      )
+      .get() as { hits: number; ips: number; served: number };
+    const byCategory = this.db
+      .prepare(
+        `SELECT category, COUNT(*) AS hits, COUNT(DISTINCT ip) AS ips
+           FROM log_threats GROUP BY category ORDER BY hits DESC, category ASC`,
+      )
+      .all() as { category: LogThreatCategory; hits: number; ips: number }[];
+    const dropped = this.db
+      .prepare('SELECT COALESCE(SUM(threats_dropped), 0) AS n FROM log_ingests')
+      .get() as { n: number };
+    return {
+      totalHits: tot.hits,
+      distinctIps: tot.ips,
+      servedHits: tot.served,
+      byCategory,
+      topIps: this.getLogThreatIps(topIps),
+      capHit: dropped.n > 0,
+    };
+  }
+
+  /** Senders of flagged requests, busiest first. A large `limit` serves the
+   *  blocklist export; the tab's IP panel asks for the top few dozen. */
+  getLogThreatIps(limit = 25): LogThreatIpRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT ip,
+                COUNT(*) AS hits,
+                GROUP_CONCAT(DISTINCT category) AS categories,
+                MIN(ts) AS first_ts,
+                MAX(ts) AS last_ts,
+                COALESCE(SUM(CASE WHEN status >= 200 AND status < 300 THEN 1 ELSE 0 END), 0) AS served,
+                MAX(bot) AS bot,
+                MAX(ip_owner) AS ip_owner
+           FROM log_threats
+          WHERE ip IS NOT NULL
+          GROUP BY ip
+          ORDER BY hits DESC, last_ts DESC
+          LIMIT ?`,
+      )
+      .all(Math.max(1, Math.min(limit, 100_000))) as {
+      ip: string;
+      hits: number;
+      categories: string;
+      first_ts: number | null;
+      last_ts: number | null;
+      served: number;
+      bot: string | null;
+      ip_owner: string | null;
+    }[];
+    return rows.map((r) => ({
+      ip: r.ip,
+      hits: r.hits,
+      categories: r.categories.split(',').filter(Boolean) as LogThreatCategory[],
+      firstTs: r.first_ts,
+      lastTs: r.last_ts,
+      servedHits: r.served,
+      bot: r.bot,
+      ipOwner: r.ip_owner,
+    }));
+  }
+
+  /** Wipe every ingested log aggregate. Nests inside `reset()`'s
+   *  transaction, so it must not open its own with a bare BEGIN. */
+  clearLogData(): void {
+    this.runInTransaction(() => {
+      this.db.exec(
+        `DELETE FROM log_threats;
+         DELETE FROM log_url_stats;
+         DELETE FROM log_url_bot;
+         DELETE FROM log_daily;
+         DELETE FROM log_status;
+         DELETE FROM log_bots;
+         DELETE FROM log_ingests;`,
+      );
+    });
   }
 
   /**
@@ -8216,6 +8435,45 @@ export class ProjectDb {
    * is null when the server didn't return Content-Length, status records
    * the HTTP code (or 0 when the request errored entirely).
    */
+  /**
+   * Store a batch of post-crawl probe results in one transaction.
+   *
+   * The probe loops (image size, social image, TLS, manifest, PDF) run on
+   * the main thread and used to call the per-row setters straight on its
+   * own connection — the one place in a crawl that wrote around the
+   * writer worker, and one autocommit transaction per row on top of
+   * that. This is the entry point the writer exposes for them instead:
+   * the crawler buffers results and ships a few hundred at a time, so a
+   * probe phase costs one round-trip and one commit per batch rather
+   * than per image, and the "one writer connection" rule holds end to
+   * end. A batch is atomic; a failing row rolls the batch back and the
+   * caller reports it, which the old per-row `catch {}` never did.
+   */
+  applyProbeWrites(writes: readonly ProbeWrite[]): void {
+    if (writes.length === 0) return;
+    this.runInTransaction(() => {
+      for (const w of writes) {
+        switch (w.method) {
+          case 'setImageSize':
+            this.setImageSize(...w.args);
+            break;
+          case 'setSocialImageDimsForReferrers':
+            this.setSocialImageDimsForReferrers(...w.args);
+            break;
+          case 'setHostCert':
+            this.setHostCert(...w.args);
+            break;
+          case 'setManifestForReferrers':
+            this.setManifestForReferrers(...w.args);
+            break;
+          case 'setPdfMetadata':
+            this.setPdfMetadata(...w.args);
+            break;
+        }
+      }
+    });
+  }
+
   setImageSize(imageId: number, byteSize: number | null, status: number): void {
     this.db
       .prepare(
@@ -9021,77 +9279,84 @@ function parsePaginationOrdinal(
  * `getOverviewCounts`. The materialised table picks it up on the next
  * recompute with no further plumbing.
  */
+/** Lowercased host of a URL column: `https://Ex.com/a?b` → `ex.com`. */
+function urlHostSql(col: string): string {
+  return `LOWER(
+    SUBSTR(
+      ${col},
+      INSTR(${col}, '://') + 3,
+      CASE
+        WHEN INSTR(SUBSTR(${col}, INSTR(${col}, '://') + 3), '/') > 0
+          THEN INSTR(SUBSTR(${col}, INSTR(${col}, '://') + 3), '/') - 1
+        ELSE LENGTH(${col})
+      END
+    )
+  )`;
+}
+
+/** Post-normalisation form of a URL column — query string stripped,
+ *  lowercased, trailing slash trimmed — the identity two "duplicate
+ *  URL" rows share. */
+function urlPostNormSql(col: string): string {
+  return `RTRIM(
+    LOWER(
+      CASE
+        WHEN INSTR(${col}, '?') > 0 THEN SUBSTR(${col}, 1, INSTR(${col}, '?') - 1)
+        ELSE ${col}
+      END
+    ),
+    '/'
+  )`;
+}
+
 export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string]> = [
   [
     'issues:dead-external-domain',
+    // Set-based on purpose. Every sub-select here is uncorrelated, so
+    // SQLite materialises each once and probes it through an ephemeral
+    // index — one pass over `links` and one over the external rows. The
+    // previous correlated `EXISTS (… JOIN …)` re-ran the host grouping
+    // per page and scaled with pages × outlinks.
     `is_external = 0 AND content_kind = 'html'
-     AND EXISTS (
-       SELECT 1 FROM links l
-         JOIN urls eu ON l.to_url = eu.url
-        WHERE l.from_url_id = urls.id
-          AND l.is_internal = 0
-          AND eu.is_external = 1
-          AND LOWER(
-            SUBSTR(
-              eu.url,
-              INSTR(eu.url, '://') + 3,
-              CASE
-                WHEN INSTR(SUBSTR(eu.url, INSTR(eu.url, '://') + 3), '/') > 0
-                  THEN INSTR(SUBSTR(eu.url, INSTR(eu.url, '://') + 3), '/') - 1
-                ELSE LENGTH(eu.url)
-              END
-            )
-          ) IN (
-            SELECT host_grouped FROM (
-              SELECT
-                LOWER(
-                  SUBSTR(
-                    url,
-                    INSTR(url, '://') + 3,
-                    CASE
-                      WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
-                        THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
-                      ELSE LENGTH(url)
-                    END
-                  )
-                ) AS host_grouped,
-                COUNT(*) AS total,
-                SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
-              FROM urls
-              WHERE is_external = 1 AND status_code IS NOT NULL
-              GROUP BY host_grouped
-              HAVING total >= 3 AND CAST(errors AS REAL) / total >= 0.8
-            )
+     AND id IN (
+       SELECT l.from_url_id
+         FROM links l
+        WHERE l.is_internal = 0
+          AND l.to_url IN (
+            SELECT eu.url
+              FROM urls eu
+             WHERE eu.is_external = 1
+               AND ${urlHostSql('eu.url')} IN (
+                 SELECT host_grouped FROM (
+                   SELECT
+                     ${urlHostSql('url')} AS host_grouped,
+                     COUNT(*) AS total,
+                     SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
+                   FROM urls
+                   WHERE is_external = 1 AND status_code IS NOT NULL
+                   GROUP BY host_grouped
+                   HAVING total >= 3 AND CAST(errors AS REAL) / total >= 0.8
+                 )
+               )
           )
      )`,
   ],
   [
     'issues:duplicate-url-post-norm',
-    `is_external = 0 AND content_kind = 'html' AND EXISTS (
-       SELECT 1 FROM urls u2
-        WHERE u2.id <> urls.id
-          AND u2.is_external = 0
-          AND u2.content_kind = 'html'
-          AND RTRIM(
-                LOWER(
-                  CASE
-                    WHEN INSTR(u2.url, '?') > 0
-                      THEN SUBSTR(u2.url, 1, INSTR(u2.url, '?') - 1)
-                    ELSE u2.url
-                  END
-                ),
-                '/'
-              ) =
-              RTRIM(
-                LOWER(
-                  CASE
-                    WHEN INSTR(urls.url, '?') > 0
-                      THEN SUBSTR(urls.url, 1, INSTR(urls.url, '?') - 1)
-                    ELSE urls.url
-                  END
-                ),
-                '/'
-              )
+    // "Another page normalises to the same URL" as a GROUP BY over the
+    // normalised form, probed once per row. The self-join it replaces
+    // compared computed strings, which no index can serve: a full scan
+    // of `urls` for every row — 20k pages took ~150 s and froze the app
+    // for that long on every mid-crawl recompute; this form takes ~20 ms.
+    `is_external = 0 AND content_kind = 'html'
+     AND ${urlPostNormSql('url')} IN (
+       SELECT norm_url FROM (
+         SELECT ${urlPostNormSql('url')} AS norm_url
+           FROM urls
+          WHERE is_external = 0 AND content_kind = 'html'
+          GROUP BY norm_url
+         HAVING COUNT(*) > 1
+       )
      )`,
   ],
   [
@@ -9249,7 +9514,7 @@ function buildClauseSql(c: FilterClause, args: (string | number)[]): string | nu
   }
 }
 
-function categoryWhereClause(cat: UrlCategory): string | null {
+export function categoryWhereClause(cat: UrlCategory): string | null {
   switch (cat) {
     case 'all':
       return null;
@@ -9278,7 +9543,13 @@ function categoryWhereClause(cat: UrlCategory): string | null {
     case 'status:blocked-robots':
       return "indexability = 'non-indexable:robots-blocked'";
     case 'status:no-response':
-      return 'status_code IS NULL';
+      // Robots-blocked URLs are recorded with a NULL status because the
+      // crawler deliberately never requested them — they are not pages
+      // that failed to answer. Counting them here made "No Response"
+      // read as N failures on a crawl whose failure count was zero, and
+      // double-counted them against the sibling Blocked by Robots row.
+      return `status_code IS NULL
+              AND indexability != 'non-indexable:robots-blocked'`;
     case 'status:2xx':
       return 'status_code >= 200 AND status_code < 300';
     case 'status:3xx':
@@ -10262,13 +10533,19 @@ function categoryWhereClause(cat: UrlCategory): string | null {
       // A page links to ≥1 internal URL whose status is 3xx. Each hop
       // burns crawl budget and weakens link equity — best-practice is
       // to update every link to the redirect's final destination.
+      // Set-based: the redirecting URLs are resolved once (status index),
+      // then the links pointing at them once (to_url index). The
+      // correlated EXISTS it replaces re-joined every page's outlinks to
+      // `urls` by string — pages × outlinks lookups, ~20× slower.
       return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM links l
-                  JOIN urls t ON l.to_url = t.url
-                 WHERE l.from_url_id = urls.id
-                   AND l.is_internal = 1
-                   AND t.status_code >= 300 AND t.status_code < 400
+              AND id IN (
+                SELECT l.from_url_id
+                  FROM links l
+                 WHERE l.is_internal = 1
+                   AND l.to_url IN (
+                     SELECT url FROM urls
+                      WHERE status_code >= 300 AND status_code < 400
+                   )
               )`;
     case 'issues:h1-equals-title':
       // Title and H1 are *almost* always supposed to differ —
@@ -10280,108 +10557,19 @@ function categoryWhereClause(cat: UrlCategory): string | null {
               AND h1 IS NOT NULL AND h1 != ''
               AND TRIM(LOWER(title)) = TRIM(LOWER(h1))`;
     case 'issues:dead-external-domain':
-      // Page links to an external domain whose own crawled pages are
-      // mostly broken: ≥3 attempts (so a single 404 doesn't poison a
-      // whole site) AND ≥80% error rate. Both thresholds match the
-      // External Domain Health report's "BAD" classification so the
-      // sidebar count and the report agree on what counts as dead.
-      // The host extraction is inlined below; SQLite's substring
-      // arithmetic is verbose but stays in the query planner so a
-      // 100K-URL crawl resolves this in a single pass.
-      return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM links l
-                  JOIN urls eu ON l.to_url = eu.url
-                 WHERE l.from_url_id = urls.id
-                   AND l.is_internal = 0
-                   AND eu.is_external = 1
-                   AND LOWER(
-                     SUBSTR(
-                       eu.url,
-                       INSTR(eu.url, '://') + 3,
-                       CASE
-                         WHEN INSTR(SUBSTR(eu.url, INSTR(eu.url, '://') + 3), '/') > 0
-                           THEN INSTR(SUBSTR(eu.url, INSTR(eu.url, '://') + 3), '/') - 1
-                         ELSE LENGTH(eu.url)
-                       END
-                     )
-                   ) IN (
-                     SELECT host_grouped FROM (
-                       SELECT
-                         LOWER(
-                           SUBSTR(
-                             url,
-                             INSTR(url, '://') + 3,
-                             CASE
-                               WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0
-                                 THEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1
-                               ELSE LENGTH(url)
-                             END
-                           )
-                         ) AS host_grouped,
-                         COUNT(*) AS total,
-                         SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
-                       FROM urls
-                       WHERE is_external = 1 AND status_code IS NOT NULL
-                       GROUP BY host_grouped
-                       HAVING total >= 3 AND CAST(errors AS REAL) / total >= 0.8
-                     )
-                   )
-              )`;
     case 'issues:duplicate-url-post-norm':
-      // Two distinct URL rows that collapse to the same value once
-      // common normalisations are applied: lowercase the host, strip a
-      // trailing slash, drop the query string. We don't strip the
-      // fragment because we already have a separate "Fragment in URL"
-      // issue and a fragment-only difference is rare in real corpora.
-      // EXISTS pattern matches at least one OTHER row with the same
-      // normalised key; current row excluded by `urls.id <> u2.id`.
-      return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM urls u2
-                 WHERE u2.id <> urls.id
-                   AND u2.is_external = 0
-                   AND u2.content_kind = 'html'
-                   AND RTRIM(
-                         LOWER(
-                           CASE
-                             WHEN INSTR(u2.url, '?') > 0
-                               THEN SUBSTR(u2.url, 1, INSTR(u2.url, '?') - 1)
-                             ELSE u2.url
-                           END
-                         ),
-                         '/'
-                       ) =
-                       RTRIM(
-                         LOWER(
-                           CASE
-                             WHEN INSTR(urls.url, '?') > 0
-                               THEN SUBSTR(urls.url, 1, INSTR(urls.url, '?') - 1)
-                             ELSE urls.url
-                           END
-                         ),
-                         '/'
-                       )
-              )`;
     case 'issues:canonical-chain-multi-hop':
-      // Page has a canonical, AND that canonical's target is also a
-      // crawled URL with its own *different* canonical. Two-hop
-      // detection is enough for the bulk of misconfigurations — deeper
-      // chains cascade through this filter too because the second hop
-      // would also surface as a multi-hop chain on its own row.
-      return `is_external = 0 AND content_kind = 'html'
-              AND canonical IS NOT NULL AND canonical != ''
-              AND ${CANONICAL_CMP} != url
-              AND EXISTS (
-                SELECT 1 FROM urls c2
-                 WHERE c2.url = ${CANONICAL_CMP_Q}
-                   AND c2.canonical IS NOT NULL
-                   AND c2.canonical != ''
-                   AND COALESCE(NULLIF(c2.canonical_resolved, ''), c2.canonical)
-                       != c2.url
-                   AND COALESCE(NULLIF(c2.canonical_resolved, ''), c2.canonical)
-                       != ${CANONICAL_CMP_Q}
-              )`;
+      // These three are materialised into `urls_issues` by the issue
+      // recompute (EXPENSIVE_ISSUE_DEFINITIONS, every 30 s mid-crawl and
+      // once more post-crawl), and the sidebar count already reads that
+      // table via `getIssueCounts`. The list filter carried its own
+      // inline copy of each predicate — the pre-rewrite O(n²) self-join
+      // in the duplicate case — so one sidebar click ran a 150 s query
+      // (23k URLs) against a 30 s reader timeout, and the abandoned
+      // query then held a reader worker for minutes, timing out every
+      // filter clicked after it. Count and list now come from the same
+      // rows, in one indexed lookup.
+      return `id IN (SELECT url_id FROM urls_issues WHERE issue_key = '${cat}')`;
     case 'issues:image-slow-loading':
       // Page loads at least one image > 200 KB AND the page hasn't
       // applied lazy-loading to every image. Big un-lazy images are
@@ -10774,6 +10962,51 @@ function toLogUrlStatRow(r: LogUrlStatDbRow, crawlPaths: Set<string>): LogUrlSta
     lastStatus: r.last_status,
     lastHitAt: r.last_ts,
     inCrawl: crawlPaths.has(r.path),
+  };
+}
+
+type LogThreatDbRow = {
+  id: number;
+  ts: number | null;
+  ip: string | null;
+  method: string | null;
+  path: string;
+  decoded: string;
+  status: number | null;
+  bytes: number | null;
+  user_agent: string | null;
+  referer: string | null;
+  bot: string | null;
+  category: LogThreatCategory;
+  rules: string;
+  score: number;
+  evidence: string;
+  ip_owner: string | null;
+};
+
+/** Map a raw log_threats row to the IPC row; `crawled` holds crawled
+ *  internal pathnames (query stripped). */
+function toLogThreatRow(r: LogThreatDbRow, crawled: Set<string>): LogThreatRow {
+  const q = r.path.indexOf('?');
+  const pathname = q >= 0 ? r.path.slice(0, q) : r.path;
+  return {
+    id: r.id,
+    ts: r.ts,
+    ip: r.ip,
+    method: r.method,
+    path: r.path,
+    decoded: r.decoded,
+    status: r.status,
+    bytes: r.bytes,
+    userAgent: r.user_agent,
+    referer: r.referer,
+    bot: r.bot,
+    category: r.category,
+    rules: r.rules.split(',').filter(Boolean),
+    score: r.score,
+    evidence: r.evidence,
+    ipOwner: r.ip_owner,
+    targetInCrawl: crawled.has(pathname),
   };
 }
 

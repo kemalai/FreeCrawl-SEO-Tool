@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
+import { TabExportButton } from '../components/TabExportButton.js';
 import { Loader2, Search, RefreshCw, Plus } from 'lucide-react';
 import { InfoTip } from '../components/InfoTip.js';
 import {
@@ -454,6 +455,7 @@ export function SearchConsoleTab() {
         </select>
 
         <div className="ml-auto flex items-center gap-2">
+          <TabExportButton tab="search-console" disabled={total === 0} />
           {accounts.length > 1 && (
             <select
               className="h-6 max-w-[170px] rounded border border-surface-700 bg-surface-950 px-1.5 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"

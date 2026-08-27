@@ -4,10 +4,10 @@ import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import type {
   AdvancedFilter,
-  CrawlUrlRow,
   ExportTabularSection,
   UrlCategory,
 } from '@freecrawl/shared-types';
+import { EXPORT_DATASET_COLUMNS, type ExportDatasetKey } from '@freecrawl/shared-types';
 import { TAB_ORDER, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId, type ColumnSpec } from '../tabs/columns.js';
 
@@ -28,7 +28,10 @@ type Format = 'csv' | 'xlsx' | 'json' | 'xml';
 interface SubCategory {
   /** Child label shown beneath the parent (translated via labels.ts). */
   label: string;
-  category: UrlCategory;
+  /** URL category this leaf streams — unset for dataset leaves. */
+  category?: UrlCategory;
+  /** Non-URL-row table this leaf exports (one AI / SEO provider). */
+  dataset?: ExportDatasetKey;
   /** Filename stem written under the parent's subdir. */
   filename: string;
 }
@@ -43,7 +46,9 @@ interface ExportNode {
   /** Folder name when this node has children; '' when no nesting. */
   subdir: string;
   /** Default category when the parent itself is exported (no children selected). */
-  category: UrlCategory;
+  category?: UrlCategory;
+  /** Set when the whole tab is one non-URL-row table (Images, Search Console, …). */
+  dataset?: ExportDatasetKey;
   /** Optional structural sub-categories. Empty array = leaf node. */
   children: SubCategory[];
 }
@@ -106,9 +111,65 @@ const TAB_CHILDREN: Partial<Record<TabKey, { subdir: string; children: SubCatego
   },
 };
 
-/** Tabs that aren't exportable via the URL-row schema (Images / Broken
- *  Links use their own per-tab CSV exporter; Visualization is a graph). */
-const SKIPPED_TABS = new Set<TabKey>(['images', 'broken-links']);
+/**
+ * Tabs whose rows are not `CrawlUrlRow`s. Each maps to one dataset query
+ * — or, for the per-provider AI / SEO Authority tabs, to one leaf per
+ * provider, so a workbook gets an "AI — OpenAI" sheet holding exactly that
+ * provider's rows. See `ExportDatasetKey`.
+ */
+type DatasetTab =
+  | { dataset: ExportDatasetKey }
+  | { subdir: string; providers: { id: string; label: string; dataset: ExportDatasetKey }[] };
+const DATASET_TABS: Partial<Record<TabKey, DatasetTab>> = {
+  images: { dataset: 'images' },
+  'broken-links': { dataset: 'broken-links' },
+  pagespeed: { dataset: 'pagespeed' },
+  crux: { dataset: 'crux' },
+  spelling: { dataset: 'spelling' },
+  'search-console': { dataset: 'search-console' },
+  analytics: { dataset: 'analytics' },
+  ai: {
+    subdir: 'ai',
+    providers: [
+      { id: 'openai', label: 'OpenAI', dataset: 'ai:openai' },
+      { id: 'anthropic', label: 'Anthropic Claude', dataset: 'ai:anthropic' },
+      { id: 'ollama', label: 'Ollama (local LLM)', dataset: 'ai:ollama' },
+    ],
+  },
+  seo: {
+    subdir: 'seo-authority',
+    providers: [
+      { id: 'ahrefs', label: 'Ahrefs', dataset: 'seo:ahrefs' },
+      { id: 'majestic', label: 'Majestic', dataset: 'seo:majestic' },
+      { id: 'moz', label: 'Moz', dataset: 'seo:moz' },
+      { id: 'semrush', label: 'Semrush', dataset: 'seo:semrush' },
+    ],
+  },
+};
+
+/** Column-picker id for a dataset column — prefixed so `url` on Search
+ *  Console and `url` on Internal toggle independently. */
+function datasetColumnId(dataset: ExportDatasetKey, key: string): string {
+  return `${dataset}:${key}`;
+}
+
+/** Every dataset a node can export (its own, or one per provider leaf). */
+function nodeDatasets(node: ExportNode): ExportDatasetKey[] {
+  if (node.dataset) return [node.dataset];
+  return node.children.flatMap((c) => (c.dataset ? [c.dataset] : []));
+}
+
+/** Column-picker ids a node contributes — URL tabs via their column
+ *  specs, dataset tabs via the dataset catalogue. */
+function nodeColumnIds(node: ExportNode): string[] {
+  const datasets = nodeDatasets(node);
+  if (datasets.length > 0) {
+    return datasets.flatMap((d) =>
+      EXPORT_DATASET_COLUMNS[d].map((c) => datasetColumnId(d, c.key)),
+    );
+  }
+  return (COLUMN_SPECS[node.tabKey] ?? []).map((s) => columnId(s));
+}
 
 /** Default category for top-level tabs that don't have structural
  *  sub-categories. Issues / filter content is intentionally NOT broken
@@ -142,7 +203,32 @@ const TAB_CATEGORY: Partial<Record<TabKey, UrlCategory>> = {
 function buildTree(): ExportNode[] {
   const out: ExportNode[] = [];
   for (const t of TAB_ORDER) {
-    if (SKIPPED_TABS.has(t.key)) continue;
+    const ds = DATASET_TABS[t.key];
+    if (ds) {
+      if ('dataset' in ds) {
+        out.push({
+          key: t.key,
+          tabKey: t.key,
+          label: t.label,
+          subdir: '',
+          dataset: ds.dataset,
+          children: [],
+        });
+      } else {
+        out.push({
+          key: t.key,
+          tabKey: t.key,
+          label: t.label,
+          subdir: ds.subdir,
+          children: ds.providers.map((p) => ({
+            label: p.label,
+            filename: p.id,
+            dataset: p.dataset,
+          })),
+        });
+      }
+      continue;
+    }
     const cols = COLUMN_SPECS[t.key];
     if (!cols || cols.length === 0) continue;
     const sub = TAB_CHILDREN[t.key];
@@ -178,6 +264,9 @@ interface ExportDialogProps {
   search?: string;
   /** Active advanced filter — forwarded so the export matches the grid. */
   filter?: AdvancedFilter;
+  /** Leaf to pre-select under `defaultTab` — a provider tab passes the
+   *  provider it is showing (`seo:ahrefs`) so Export means "this table". */
+  defaultLeaf?: string;
 }
 
 export function ExportDialog({
@@ -187,6 +276,7 @@ export function ExportDialog({
   selectedIds,
   search,
   filter,
+  defaultLeaf,
 }: ExportDialogProps) {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -211,7 +301,8 @@ export function ExportDialog({
     const node = tree.find((n) => n.tabKey === initialTabKey);
     if (!node) return new Set();
     if (node.children.length === 0) return new Set([leafId(node)]);
-    return new Set([leafId(node, node.children[0])]);
+    const preferred = node.children.find((c) => leafId(node, c) === defaultLeaf);
+    return new Set([leafId(node, preferred ?? node.children[0])]);
   });
 
   // Expanded parent rows in the tree — closed nodes still let their
@@ -226,8 +317,7 @@ export function ExportDialog({
   // key (indexability / indexability-status) and must toggle independently.
   const [pickedColumns, setPickedColumns] = useState<Set<string>>(() => {
     const node = tree.find((n) => n.tabKey === initialTabKey);
-    const specs = node ? COLUMN_SPECS[node.tabKey] : [];
-    return new Set(specs.map((s) => columnId(s)));
+    return new Set(node ? nodeColumnIds(node) : []);
   });
   const [useSelection, setUseSelection] = useState<boolean>(selectionCount > 0);
   const [busy, setBusy] = useState(false);
@@ -266,9 +356,33 @@ export function ExportDialog({
 
   const offeredColumns = useMemo(() => {
     const seen = new Set<string>();
-    const out: { id: string; key: string; header: string; tab: TabKey }[] = [];
+    const out: {
+      id: string;
+      key: string;
+      header: string;
+      tab: TabKey;
+      dataset?: ExportDatasetKey;
+    }[] = [];
     for (const node of tree) {
       if (!pickedTabKeys.has(node.tabKey)) continue;
+      if (nodeDatasets(node).length > 0) {
+        // Only the datasets whose leaves are picked — an Ahrefs export
+        // must not offer Semrush's columns.
+        const picked = new Set<ExportDatasetKey>();
+        if (node.dataset && pickedLeaves.has(leafId(node))) picked.add(node.dataset);
+        for (const child of node.children) {
+          if (child.dataset && pickedLeaves.has(leafId(node, child))) picked.add(child.dataset);
+        }
+        for (const d of picked) {
+          for (const col of EXPORT_DATASET_COLUMNS[d]) {
+            const id = datasetColumnId(d, col.key);
+            if (seen.has(id)) continue;
+            seen.add(id);
+            out.push({ id, key: col.key, header: col.header, tab: node.tabKey, dataset: d });
+          }
+        }
+        continue;
+      }
       const specs = COLUMN_SPECS[node.tabKey];
       for (const spec of specs) {
         const id = columnId(spec);
@@ -278,12 +392,23 @@ export function ExportDialog({
       }
     }
     return out;
-  }, [pickedTabKeys, tree]);
+  }, [pickedTabKeys, pickedLeaves, tree]);
 
+  /** CrawlUrlRow keys for the URL-category sections, in picker order. */
   const orderedColumnList = useMemo(
-    () => offeredColumns.filter((c) => pickedColumns.has(c.id)).map((c) => c.key),
+    () =>
+      offeredColumns.filter((c) => !c.dataset && pickedColumns.has(c.id)).map((c) => c.key),
     [offeredColumns, pickedColumns],
   );
+  const pickedColumnCount = useMemo(
+    () => offeredColumns.filter((c) => pickedColumns.has(c.id)).length,
+    [offeredColumns, pickedColumns],
+  );
+  /** Picked dotted keys for one dataset section, in catalogue order. */
+  const datasetColumnKeys = (dataset: ExportDatasetKey): string[] =>
+    EXPORT_DATASET_COLUMNS[dataset]
+      .filter((c) => pickedColumns.has(datasetColumnId(dataset, c.key)))
+      .map((c) => c.key);
 
   if (!open) return null;
 
@@ -325,11 +450,10 @@ export function ExportDialog({
     // currently in pickedColumns.
     if (state !== 'all') {
       setPickedColumns((prev) => {
-        const specs = COLUMN_SPECS[node.tabKey] ?? [];
-        const hasAny = specs.some((spec) => prev.has(columnId(spec)));
-        if (hasAny) return prev;
+        const ids = nodeColumnIds(node);
+        if (ids.some((id) => prev.has(id))) return prev;
         const next = new Set(prev);
-        for (const spec of specs) next.add(columnId(spec));
+        for (const id of ids) next.add(id);
         return next;
       });
     }
@@ -345,11 +469,10 @@ export function ExportDialog({
     });
     // Bug #12 — same conditional auto-add as toggleParent.
     setPickedColumns((prev) => {
-      const specs = COLUMN_SPECS[node.tabKey] ?? [];
-      const hasAny = specs.some((spec) => prev.has(columnId(spec)));
-      if (hasAny) return prev;
+      const ids = nodeColumnIds(node);
+      if (ids.some((id) => prev.has(id))) return prev;
       const next = new Set(prev);
-      for (const spec of specs) next.add(columnId(spec));
+      for (const id of ids) next.add(id);
       return next;
     });
   };
@@ -415,10 +538,6 @@ export function ExportDialog({
   };
 
   const submit = async () => {
-    if (orderedColumnList.length === 0) {
-      setStatus(t('export.errorNoColumn', { defaultValue: 'Pick at least one column.' }));
-      return;
-    }
     if (!splitBySeverity && totalLeafSelections === 0) {
       setStatus(t('export.errorNoTable', { defaultValue: 'Pick at least one table.' }));
       return;
@@ -452,7 +571,15 @@ export function ExportDialog({
         for (const node of tree) {
           if (node.children.length === 0) {
             if (pickedLeaves.has(leafId(node))) {
-              sections.push({ label: node.label, category: node.category });
+              sections.push(
+                node.dataset
+                  ? {
+                      label: node.label,
+                      dataset: node.dataset,
+                      columns: datasetColumnKeys(node.dataset),
+                    }
+                  : { label: node.label, category: node.category },
+              );
             }
             continue;
           }
@@ -460,12 +587,25 @@ export function ExportDialog({
             if (!pickedLeaves.has(leafId(node, child))) continue;
             sections.push({
               label: `${node.label} — ${child.label}`,
-              category: child.category,
               subdir: node.subdir,
               filename: child.filename,
+              ...(child.dataset
+                ? { dataset: child.dataset, columns: datasetColumnKeys(child.dataset) }
+                : { category: child.category }),
             });
           }
         }
+      }
+      // URL sections share the CrawlUrlRow column list; each dataset
+      // section carries its own keys — every section needs at least one.
+      const needsUrlColumns = splitBySeverity || sections.some((s) => !s.dataset);
+      if (
+        (needsUrlColumns && orderedColumnList.length === 0) ||
+        sections.some((s) => s.dataset && (s.columns?.length ?? 0) === 0)
+      ) {
+        setStatus(t('export.errorNoColumn', { defaultValue: 'Pick at least one column.' }));
+        setBusy(false);
+        return;
       }
       const usingSelection = useSelection && !!selectedIds && selectedIds.length > 0;
       const result = await window.freecrawl.exportTabular({
@@ -830,7 +970,7 @@ export function ExportDialog({
             {t('export.summary', {
               defaultValue: '{{n}} section(s) · {{c}} column(s)',
               n: totalLeafSelections,
-              c: orderedColumnList.length,
+              c: pickedColumnCount,
             })}
           </div>
           <div className="flex gap-2">

@@ -12,13 +12,16 @@
  *   - status     : response-code distribution from the log (item 8)
  *   - daily      : per-day, per-bot-family hit trend (item 10)
  *   - bots       : per-bot hit + distinct-IP + verified-IP counts (item 5)
+ *   - threats    : per-line rows for requests the threat classifier
+ *                  flagged (SQLi / XSS / scanner probes …) — the one
+ *                  place the analyzer keeps IP + full target, capped
  */
 
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
 import { createGunzip } from 'node:zlib';
-import type { LogFormat, LogFormatChoice } from '@freecrawl/shared-types';
+import type { LogFormat, LogFormatChoice, LogThreatHit } from '@freecrawl/shared-types';
 import {
   createLogParser,
   detectLogFormat,
@@ -26,6 +29,7 @@ import {
   type ParsedLogLine,
 } from './log-parser.js';
 import { detectBot, verifyBotByRdns, type BotFamily } from './bot-detect.js';
+import { classifyIpOwner, classifyRequest } from './log-threats.js';
 
 export interface LogUrlStat {
   path: string;
@@ -69,20 +73,29 @@ export interface LogAnalysisResult {
   bots: Map<string, LogBotAgg>;
   /** True when the distinct-URL cap was reached and new URLs were dropped. */
   urlCapHit: boolean;
+  /** Requests the threat classifier flagged, in file order. */
+  threats: LogThreatHit[];
+  /** Flagged lines dropped after `maxThreatRows` was reached. */
+  threatsDropped: number;
 }
 
 export interface LogAnalyzeOptions {
   format?: LogFormatChoice;
   customRegex?: string;
+  /** Reverse-DNS verify sampled bot IPs — and, for flagged requests, whether
+   *  the sender is a search engine's own infrastructure. */
   verifyBots?: boolean;
   /** Distinct-URL cap to bound memory on pathological logs. Default 500k. */
   maxDistinctUrls?: number;
   /** Per-bot distinct-IP sample cap (also the verification cap). Default 200. */
   maxIpsPerBot?: number;
+  /** Cap on flagged-request rows kept per file. Default 50k. */
+  maxThreatRows?: number;
 }
 
 const DEFAULT_MAX_URLS = 500_000;
 const DEFAULT_MAX_IPS = 200;
+const DEFAULT_MAX_THREATS = 50_000;
 
 /**
  * Open a log file as a UTF-8 text stream, transparently decompressing
@@ -119,6 +132,8 @@ function emptyResult(format: LogFormat): LogAnalysisResult {
     status: new Map(),
     bots: new Map(),
     urlCapHit: false,
+    threats: [],
+    threatsDropped: 0,
   };
 }
 
@@ -143,6 +158,7 @@ export async function analyzeLogFile(
   const result = emptyResult(format);
   const maxUrls = opts.maxDistinctUrls ?? DEFAULT_MAX_URLS;
   const maxIps = opts.maxIpsPerBot ?? DEFAULT_MAX_IPS;
+  const maxThreats = opts.maxThreatRows ?? DEFAULT_MAX_THREATS;
 
   const rl = createInterface({
     input: openLogStream(filePath),
@@ -162,11 +178,12 @@ export async function analyzeLogFile(
       continue;
     }
     result.parsedLines++;
-    accumulate(result, parsed, maxUrls, maxIps);
+    accumulate(result, parsed, maxUrls, maxIps, maxThreats);
   }
 
   if (opts.verifyBots) {
     await verifyBots(result, maxIps);
+    await verifyThreatIps(result, maxIps);
   }
   return result;
 }
@@ -191,9 +208,38 @@ function accumulate(
   p: ParsedLogLine,
   maxUrls: number,
   maxIps: number,
+  maxThreats: number,
 ): void {
   const bot = detectBot(p.userAgent);
   const isBot = bot !== null;
+
+  // Threat classification — the only per-line data kept. Runs before the
+  // URL cap check below so a scanner burst of unique targets (each one a
+  // new "URL") is still recorded once the URL aggregate is full.
+  const threat = classifyRequest(p);
+  if (threat) {
+    if (result.threats.length >= maxThreats) {
+      result.threatsDropped++;
+    } else {
+      result.threats.push({
+        ts: p.ts,
+        ip: p.ip,
+        method: p.method,
+        path: p.path!,
+        decoded: threat.decoded,
+        status: p.status,
+        bytes: p.bytes,
+        userAgent: p.userAgent,
+        referer: p.referer,
+        bot: bot ? bot.name : null,
+        category: threat.category,
+        rules: threat.rules,
+        score: threat.score,
+        evidence: threat.evidence,
+        ipOwner: null,
+      });
+    }
+  }
 
   // Timestamp bounds + daily trend.
   if (p.ts !== null) {
@@ -284,6 +330,28 @@ async function verifyBots(result: LogAnalysisResult, maxIps: number): Promise<vo
       verifyBotByRdns(ip, agg.rdnsSuffixes),
     );
     agg.verifiedIps = verified.filter(Boolean).length;
+  }
+}
+
+/**
+ * Reverse-DNS the senders of flagged requests (distinct IPs, capped) and
+ * mark the ones that are a search engine's own infrastructure. That is
+ * the difference between "block this IP" and "this payload was relayed
+ * through Google — fix the application instead".
+ */
+async function verifyThreatIps(result: LogAnalysisResult, maxIps: number): Promise<void> {
+  const ips = new Set<string>();
+  for (const t of result.threats) {
+    if (t.ip) ips.add(t.ip);
+    if (ips.size >= maxIps) break;
+  }
+  if (ips.size === 0) return;
+  const list = Array.from(ips);
+  const owners = await mapLimit(list, 8, (ip) => classifyIpOwner(ip));
+  const byIp = new Map<string, string | null>();
+  list.forEach((ip, i) => byIp.set(ip, owners[i] ?? null));
+  for (const t of result.threats) {
+    if (t.ip) t.ipOwner = byIp.get(t.ip) ?? null;
   }
 }
 

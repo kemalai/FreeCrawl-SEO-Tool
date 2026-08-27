@@ -13,6 +13,8 @@ import type {
   LogDiscoveryRow,
   LogOverview,
   LogStatusRow,
+  LogThreatIpRow,
+  LogThreatRow,
   LogTrendRow,
   LogUrlStatRow,
 } from '@freecrawl/shared-types';
@@ -32,6 +34,10 @@ export interface LogExportTables {
   trend: LogTrendRow[];
   crawlBudget: LogCrawlBudgetRow[];
   discovery: LogDiscoveryRow[];
+  /** Flagged requests + their senders (Suspicious Requests tab). Optional
+   *  so older callers that never ran the classifier still export. */
+  threats?: LogThreatRow[];
+  threatIps?: LogThreatIpRow[];
 }
 
 interface Section {
@@ -175,6 +181,51 @@ function buildSections(tables: LogExportTables): Section[] {
         { key: 'totalHits', label: 'Total' },
       ],
       rows: tables.discovery.map((r) => ({ ...r })),
+    },
+    {
+      name: 'Suspicious Requests',
+      columns: [
+        { key: 'time', label: 'Time' },
+        { key: 'ip', label: 'IP' },
+        { key: 'ipOwner', label: 'IP Owner' },
+        { key: 'method', label: 'Method' },
+        { key: 'decoded', label: 'Request (decoded)' },
+        { key: 'path', label: 'Request (raw)' },
+        { key: 'status', label: 'Status' },
+        { key: 'category', label: 'Category' },
+        { key: 'score', label: 'Score' },
+        { key: 'evidence', label: 'Evidence' },
+        { key: 'rules', label: 'Rules' },
+        { key: 'bot', label: 'Declared Bot' },
+        { key: 'userAgent', label: 'User-Agent' },
+        { key: 'referer', label: 'Referer' },
+        { key: 'targetInCrawl', label: 'Target In Crawl' },
+      ],
+      rows: (tables.threats ?? []).map((r) => ({
+        ...r,
+        time: fmtTs(r.ts),
+        rules: r.rules.join(' '),
+        targetInCrawl: r.targetInCrawl ? 'yes' : 'no',
+      })),
+    },
+    {
+      name: 'Suspicious IPs',
+      columns: [
+        { key: 'ip', label: 'IP' },
+        { key: 'hits', label: 'Flagged Requests' },
+        { key: 'servedHits', label: 'Answered 2xx' },
+        { key: 'categories', label: 'Categories' },
+        { key: 'firstSeen', label: 'First Seen' },
+        { key: 'lastSeen', label: 'Last Seen' },
+        { key: 'bot', label: 'Declared Bot' },
+        { key: 'ipOwner', label: 'IP Owner' },
+      ],
+      rows: (tables.threatIps ?? []).map((r) => ({
+        ...r,
+        categories: r.categories.join(' '),
+        firstSeen: fmtTs(r.firstTs),
+        lastSeen: fmtTs(r.lastTs),
+      })),
     },
   ];
 }

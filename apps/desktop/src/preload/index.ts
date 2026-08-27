@@ -165,6 +165,10 @@ import {
   type LogSeedDiscoveryResult,
   type LogExportInput,
   type LogExportResult,
+  type LogThreatsInput,
+  type LogThreatsResult,
+  type LogThreatSummary,
+  type LogThreatIpRow,
 } from '@freecrawl/shared-types';
 
 function subscribe<T>(
@@ -308,6 +312,8 @@ const api: FreeCrawlApi = {
   logsGetAll: (ownerId?: number): Promise<LogEntry[]> =>
     ipcRenderer.invoke(IPC.logsGetAll, ownerId),
   logsClear: (): Promise<void> => ipcRenderer.invoke(IPC.logsClear),
+  clipboardWriteText: (text: string): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.clipboardWriteText, text),
   logsOpenWindow: (): Promise<void> => ipcRenderer.invoke(IPC.logsOpenWindow),
   openVisualizationWindow: (): Promise<void> =>
     ipcRenderer.invoke(IPC.visualizationOpenWindow),
@@ -507,6 +513,11 @@ const api: FreeCrawlApi = {
   logExport: (input: LogExportInput): Promise<LogExportResult> =>
     ipcRenderer.invoke(IPC.logExport, input),
   logClear: (): Promise<void> => ipcRenderer.invoke(IPC.logClear),
+  logThreats: (input: LogThreatsInput): Promise<LogThreatsResult> =>
+    ipcRenderer.invoke(IPC.logThreats, input),
+  logThreatSummary: (): Promise<LogThreatSummary> => ipcRenderer.invoke(IPC.logThreatSummary),
+  logThreatIps: (limit?: number): Promise<LogThreatIpRow[]> =>
+    ipcRenderer.invoke(IPC.logThreatIps, limit),
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
   onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),

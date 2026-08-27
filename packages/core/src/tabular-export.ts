@@ -4,9 +4,15 @@ import { Readable } from 'node:stream';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import type { ProjectDb } from '@freecrawl/db';
-import type { CrawlUrlRow, UrlCategory, AdvancedFilter } from '@freecrawl/shared-types';
+import type {
+  CrawlUrlRow,
+  UrlCategory,
+  AdvancedFilter,
+  ExportDatasetKey,
+} from '@freecrawl/shared-types';
 import { ensureHeapHeadroom } from './heap-guard.js';
 import { escapeCsv } from './spreadsheet.js';
+import { datasetRows, readCell, type DatasetExportContext } from './dataset-export.js';
 
 /** How a section selects its rows. `selectedIds` wins; otherwise category is
  *  narrowed by the active search/filter so the export matches the grid. */
@@ -19,7 +25,12 @@ interface RowQuery {
 
 export interface TabularSection {
   label: string;
-  category: UrlCategory;
+  /** URL category to stream `CrawlUrlRow`s from. Required unless `dataset` is set. */
+  category?: UrlCategory;
+  /** Non-URL-row table (Search Console, Broken Links, …) — see `datasetRows`. */
+  dataset?: ExportDatasetKey;
+  /** Column keys for this section only; defaults to the export-wide `columns`. */
+  columns?: string[];
   /** Optional sub-directory under the export root (for hierarchical
    *  tree exports — e.g. `Internal` → HTML / JS / CSS land under
    *  `internal/`). Ignored for xlsx output. */
@@ -44,6 +55,8 @@ export interface TabularExportOptions {
   /** Prefix CSV files with a UTF-8 BOM so Excel-for-Windows opens them
    *  in the correct charset. Ignored for non-CSV formats. Default true. */
   csvBom?: boolean;
+  /** Account / matching context for the dataset sections that need it. */
+  datasetContext?: DatasetExportContext;
 }
 
 export interface TabularExportResult {
@@ -120,10 +133,9 @@ function rowSource(db: ProjectDb, q: RowQuery): Iterable<CrawlUrlRow> {
 }
 
 async function writeCsvFile(
-  db: ProjectDb,
+  source: Iterable<Record<string, unknown>>,
   filePath: string,
   columns: string[],
-  query: RowQuery,
   withBom: boolean,
 ): Promise<number> {
   let rowsWritten = 0;
@@ -131,14 +143,13 @@ async function writeCsvFile(
   // leading `=`/`+`/`-`/`@` would otherwise break the CSV or inject a
   // formula. The data rows below already go through escapeCsv.
   const header = columns.map((c) => escapeCsv(c)).join(',') + '\n';
-  const source = rowSource(db, query);
   const generator = async function* (): AsyncGenerator<string> {
     if (withBom) yield '﻿' + header;
     else yield header;
     for (const row of source) {
       const line =
         columns
-          .map((c) => escapeCsv((row as unknown as Record<string, unknown>)[c]))
+          .map((c) => escapeCsv(readCell(row, c)))
           .join(',') + '\n';
       rowsWritten++;
       yield line;
@@ -180,20 +191,18 @@ function xmlSafeTag(name: string): string {
 }
 
 async function writeJsonFile(
-  db: ProjectDb,
+  source: Iterable<Record<string, unknown>>,
   filePath: string,
   columns: string[],
-  query: RowQuery,
 ): Promise<number> {
   let rowsWritten = 0;
-  const source = rowSource(db, query);
   const generator = async function* (): AsyncGenerator<string> {
     yield '[';
     let first = true;
     for (const row of source) {
       const obj: Record<string, unknown> = {};
       for (const c of columns) {
-        obj[c] = (row as unknown as Record<string, unknown>)[c] ?? null;
+        obj[c] = readCell(row, c) ?? null;
       }
       yield (first ? '\n  ' : ',\n  ') + JSON.stringify(obj);
       first = false;
@@ -209,14 +218,12 @@ async function writeJsonFile(
 }
 
 async function writeXmlFile(
-  db: ProjectDb,
+  source: Iterable<Record<string, unknown>>,
   filePath: string,
   columns: string[],
-  query: RowQuery,
   sectionLabel: string,
 ): Promise<number> {
   let rowsWritten = 0;
-  const source = rowSource(db, query);
   const rootTag = xmlSafeTag(sectionLabel) || 'export';
   const cols = columns.map((c) => ({ key: c, tag: xmlSafeTag(c) }));
   const generator = async function* (): AsyncGenerator<string> {
@@ -224,7 +231,7 @@ async function writeXmlFile(
     for (const row of source) {
       yield '  <row>\n';
       for (const { key, tag } of cols) {
-        const v = (row as unknown as Record<string, unknown>)[key];
+        const v = readCell(row, key);
         if (v === null || v === undefined) continue;
         yield `    <${tag}>${escapeXml(v)}</${tag}>\n`;
       }
@@ -368,7 +375,7 @@ function buildSheetXmlFromCells(
 }
 
 function buildSheetXml(
-  rows: CrawlUrlRow[],
+  rows: Record<string, unknown>[],
   columns: string[],
 ): string {
   const parts: string[] = [];
@@ -390,7 +397,7 @@ function buildSheetXml(
     const r = rIdx + 2;
     parts.push(`<row r="${r}">`);
     columns.forEach((col, i) => {
-      const v = (row as unknown as Record<string, unknown>)[col];
+      const v = readCell(row, col);
       if (v === null || v === undefined || v === '') return;
       const cellRef = `${colLetter(i)}${r}`;
       if (typeof v === 'number' && Number.isFinite(v)) {
@@ -513,8 +520,7 @@ function buildZip(files: { name: string; data: Buffer }[]): Buffer {
 }
 
 function buildXlsxBuffer(
-  sheets: { name: string; rows: CrawlUrlRow[] }[],
-  columns: string[],
+  sheets: { name: string; rows: Record<string, unknown>[]; columns: string[] }[],
 ): Buffer {
   const contentTypes =
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
@@ -568,7 +574,7 @@ function buildXlsxBuffer(
   sheets.forEach((s, i) => {
     files.push({
       name: `xl/worksheets/sheet${i + 1}.xml`,
-      data: Buffer.from(buildSheetXml(s.rows, columns), 'utf8'),
+      data: Buffer.from(buildSheetXml(s.rows, s.columns), 'utf8'),
     });
   });
 
@@ -606,8 +612,22 @@ export async function exportTabular(
   if (sections.length === 0) {
     throw new Error('exportTabular: at least one section is required');
   }
-  if (columns.length === 0) {
-    throw new Error('exportTabular: at least one column is required');
+  // Every section resolves its own row source and column list: URL
+  // categories stream CrawlUrlRows over the shared `columns`; datasets
+  // (Search Console, Broken Links, …) walk their own query with the
+  // per-section keys the dialog picked for them.
+  const columnsFor = (section: TabularSection): string[] => section.columns ?? columns;
+  const sourceFor = (section: TabularSection): Iterable<Record<string, unknown>> => {
+    if (section.dataset) return datasetRows(db, section.dataset, options.datasetContext);
+    if (!section.category) {
+      throw new Error(`exportTabular: section '${section.label}' needs a category or a dataset`);
+    }
+    return rowSource(db, queryFor(section.category)) as Iterable<Record<string, unknown>>;
+  };
+  for (const section of sections) {
+    if (columnsFor(section).length === 0) {
+      throw new Error(`exportTabular: section '${section.label}' has no columns`);
+    }
   }
 
   if (format === 'xlsx') {
@@ -619,20 +639,23 @@ export async function exportTabular(
     // datasets this big" error than a V8 OOM abort of the whole app.
     const usedNames = new Set<string>();
     let total = 0;
+    let cells = 0;
     const sheets = sections.map((section) => {
-      const rows: CrawlUrlRow[] = [];
-      for (const row of rowSource(db, queryFor(section.category))) {
+      const rows: Record<string, unknown>[] = [];
+      const sheetColumns = columnsFor(section);
+      for (const row of sourceFor(section)) {
         rows.push(row);
         if (rows.length % 50_000 === 0) {
           ensureHeapHeadroom('XLSX export', 128 * 1024 * 1024);
         }
       }
       total += rows.length;
-      return { name: sanitizeSheetName(section.label, usedNames), rows };
+      cells += rows.length * sheetColumns.length;
+      return { name: sanitizeSheetName(section.label, usedNames), rows, columns: sheetColumns };
     });
-    // Workbook buffer is roughly rows × columns × ~24 B of XML.
-    ensureHeapHeadroom('XLSX export', total * columns.length * 24);
-    const buf = buildXlsxBuffer(sheets, columns);
+    // Workbook buffer is roughly cells × ~24 B of XML.
+    ensureHeapHeadroom('XLSX export', cells * 24);
+    const buf = buildXlsxBuffer(sheets);
     writeFileSync(outputPath, buf);
     return { filePath: outputPath, files: [outputPath], rowsWritten: total };
   }
@@ -655,14 +678,15 @@ export async function exportTabular(
     : outputPath;
 
   const writeOne = async (filePath: string, section: TabularSection): Promise<number> => {
-    const query = queryFor(section.category);
+    const source = sourceFor(section);
+    const sectionColumns = columnsFor(section);
     if (format === 'csv') {
-      return writeCsvFile(db, filePath, columns, query, csvBom);
+      return writeCsvFile(source, filePath, sectionColumns, csvBom);
     }
     if (format === 'json') {
-      return writeJsonFile(db, filePath, columns, query);
+      return writeJsonFile(source, filePath, sectionColumns);
     }
-    return writeXmlFile(db, filePath, columns, query, section.label);
+    return writeXmlFile(source, filePath, sectionColumns, section.label);
   };
 
   if (singleFlat) {
