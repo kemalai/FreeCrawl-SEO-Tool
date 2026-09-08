@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.9] — 2026-09-09
+
+### Added
+- In-app AI Assistant tab — chat over your crawl data with OpenAI, Claude, or Ollama, and connect external MCP servers to add their tools.
+- Crawl setting to skip URLs with query strings, plus a parameter whitelist, so faceted navigation no longer eats the whole URL budget.
+- SPA route discovery for JavaScript rendering — hash routes and History-API navigations are now crawled as their own pages.
+
+### Changed
+- The Settings dialog and every table column tooltip are now fully translated into Turkish.
+- The Log Analyzer URL Hits tab gained a response-code filter, with hover explanations for each threat category and the threat score.
+
+### Fixed
+- X-Robots-Tag directives are now scoped to the correct bot, so a rule meant for one crawler no longer leaks onto the others.
+- robots.txt parsing is capped at 512 KiB to stay fast and within spec on oversized files.
+
 ## [0.9.8] — 2026-08-27
 
 ### Added

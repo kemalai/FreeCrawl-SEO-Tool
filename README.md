@@ -19,7 +19,7 @@
 
 <br />
 
-A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog–style UI, **150+ SEO issue checks**, and zero native dependencies.
+A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog–style UI, **167 SEO issue checks**, and zero native dependencies.
 
 </div>
 
@@ -31,7 +31,7 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 FreeCrawl crawls your website and checks it for SEO problems — a free, desktop alternative to Screaming Frog. It handles very large sites (**1M+ URLs on one machine**) and streams the results into a fast, dense table while the crawl is still running.
 
-It runs **150+ SEO checks across 32 tabs** — page titles, meta descriptions, headings, duplicate content, broken links, redirects, canonicals, hreflang, structured data, security headers, readability, and more. It can also render JavaScript pages with a real headless browser to capture the final DOM, screenshots, and Core Web Vitals.
+It runs **167 SEO checks across 32 tabs** — page titles, meta descriptions, headings, duplicate content, broken links, redirects, canonicals, hreflang, structured data, security headers, readability, and more. It can also render JavaScript pages with a real headless browser to capture the final DOM, screenshots, and Core Web Vitals.
 
 Every link type — images, CSS, JavaScript, media, canonicals, pagination, hreflang, AMP, iframes — has its own **Crawl** and **Store** switch, so you decide exactly what gets fetched and what gets reported. Right-click any table selection to copy cells, rows, or columns straight to the clipboard.
 
@@ -406,7 +406,7 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development — feature-complete for daily SEO audits.** All 32 analysis tabs, 150+ issue checks, JavaScript rendering (screenshots, LCP candidate, Mobile Usability), multi-window projects, the link visualiser, every Google integration (Search Console / GA4 / PageSpeed / CrUX), LanguageTool spelling, AI per-URL prompts, SEO Authority providers, Google Sheets + BigQuery export, encrypted projects, the MCP server with live crawl control, and the standalone Log File Analyzer all ship today.
+> **Active development — feature-complete for daily SEO audits.** All 32 analysis tabs, 167 issue checks, JavaScript rendering (screenshots, LCP candidate, Mobile Usability), multi-window projects, the link visualiser, every Google integration (Search Console / GA4 / PageSpeed / CrUX), LanguageTool spelling, AI per-URL prompts, SEO Authority providers, Google Sheets + BigQuery export, encrypted projects, the MCP server with live crawl control, and the standalone Log File Analyzer all ship today.
 >
 > Cross-platform installers ship for Windows (`.exe` + portable), macOS (`.dmg`, arm64 + x64), and Linux (`.AppImage` / `.deb` / `.rpm`), with Playwright Chromium bundled so JS rendering works on first launch. The virtualized 1M-row table streams the first row in ~1 s, and long crawls are tuned for Apple Silicon (see [docs](docs/macos-apple-silicon-performance.md)).
 >
