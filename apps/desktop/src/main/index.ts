@@ -47,6 +47,14 @@ import {
   DEFAULT_CRAWL_CONFIG,
   IPC,
   type MenuEvent,
+  type AssistantApprovalInput,
+  type AssistantEvent,
+  type AssistantSendInput,
+  type AssistantSendResult,
+  type McpServerConfig,
+  type McpServerStatus,
+  type McpToolPolicy,
+  type McpToolsListResult,
   type ConfirmClearResult,
   type CrawlConfig,
   type CrawlProgress,
@@ -316,6 +324,13 @@ import { listProperties as ga4ListProperties, runReport as ga4RunReport } from '
 import { runAiBatch, type AiBatchItem } from './ai-batch.js';
 import { resolveModel, defaultConcurrency } from './ai-providers.js';
 import { runSeoBatch } from './seo-batch.js';
+import * as mcpClient from './mcp-client.js';
+import {
+  builtinToolInfos,
+  cancelAssistant,
+  resolveApproval,
+  runAssistantTurn,
+} from './assistant.js';
 import * as logger from './logger.js';
 import {
   dbReaderPool,
@@ -6375,6 +6390,86 @@ function registerIpc(): void {
     async (_e, input: AiRunInput): Promise<AiRunResult> => runAiJob(input),
   );
 
+  // ── Faz 5 — MCP client + in-app assistant ──────────────────────────
+  //
+  // The registry lives in mcp-client.ts (its own 0600 file under userData,
+  // secrets encrypted with the same safeStorage helpers as the credential
+  // store). These handlers are thin: everything stateful — connections,
+  // approvals, the tool loop — belongs to the two modules, so a second
+  // project window drives the same server processes instead of spawning
+  // its own copy of every MCP server.
+
+  registerHandle(IPC.mcpServersList, (): McpServerConfig[] => mcpClient.listServers());
+
+  registerHandle(
+    IPC.mcpServersSave,
+    (_e, servers: McpServerConfig[]): McpServerConfig[] =>
+      mcpClient.saveServers(Array.isArray(servers) ? servers : []),
+  );
+
+  registerHandle(
+    IPC.mcpServerConnect,
+    async (_e, id: string): Promise<McpServerStatus> => {
+      try {
+        return await mcpClient.connect(id);
+      } catch {
+        // The failure is already recorded on the status row; surfacing it
+        // as a rejected IPC call would make every caller write the same
+        // try/catch to read an error it can just render.
+        return mcpClient.statusOf(id);
+      }
+    },
+  );
+
+  registerHandle(IPC.mcpServerDisconnect, (_e, id: string): McpServerStatus => {
+    mcpClient.disconnect(id);
+    return mcpClient.statusOf(id);
+  });
+
+  registerHandle(IPC.mcpServerStatuses, (): McpServerStatus[] => mcpClient.statuses());
+
+  registerHandle(
+    IPC.mcpToolsList,
+    async (_e, serverIds: string[]): Promise<McpToolsListResult> => {
+      const { tools, errors } = await mcpClient.toolsFor(
+        Array.isArray(serverIds) ? serverIds : [],
+      );
+      return { tools: [...builtinToolInfos(), ...tools], errors };
+    },
+  );
+
+  registerHandle(
+    IPC.mcpPolicySet,
+    (_e, serverId: string, tool: string, policy: McpToolPolicy): void => {
+      mcpClient.setPolicy(serverId, tool, policy);
+    },
+  );
+
+  registerHandle(IPC.mcpPolicyList, (): Record<string, McpToolPolicy> =>
+    mcpClient.listPolicies(),
+  );
+
+  registerHandle(
+    IPC.assistantSend,
+    async (e, input: AssistantSendInput): Promise<AssistantSendResult> => {
+      const runSession = currentSession();
+      const runKey = e.sender.id;
+      return runAssistantTurn(input, {
+        db: () => runSession.getDb(),
+        emit: (event: AssistantEvent) => runSession.send(IPC.assistantEvent, event),
+        runKey,
+      });
+    },
+  );
+
+  registerHandle(IPC.assistantCancel, (e): void => {
+    cancelAssistant(e.sender.id);
+  });
+
+  registerHandle(IPC.assistantApprove, (_e, input: AssistantApprovalInput): void => {
+    resolveApproval(input.requestId, input.decision);
+  });
+
   registerHandle(IPC.aiCancel, () => {
     const run = currentSession().fetchRuns.ai;
     if (run.active) {
@@ -7123,6 +7218,7 @@ function registerIpc(): void {
             screenshotMode: config.jsRender.screenshotMode,
             detectLcp: config.jsRender.lcpCandidate,
             detectA11y: config.jsRender.a11yAudit,
+            discoverSpaRoutes: config.jsRender.spaRouting,
             screenshotPaths,
           },
           signal,
@@ -7201,6 +7297,7 @@ function registerIpc(): void {
           lcp: res.lcp ?? null,
           mobileUsability,
           a11y: res.a11y ?? null,
+          spaRoutes: res.spaRoutes,
         };
       };
     }
@@ -8792,25 +8889,6 @@ function registerIpc(): void {
     };
   });
 
-  // `setImmediate`-yield wrapper for read-heavy IPC handlers. Yielding
-  // before running the SQL gives the Node event loop one tick to drain
-  // pending IPC and crawler callbacks first — without this, two
-  // simultaneous renderer queries (e.g. table chunk + sidebar refresh)
-  // run back-to-back and freeze input for the duration of both. With
-  // this wrapper they interleave with the crawler's per-URL DB writes
-  // and any other queued IPC, keeping click → response under one frame
-  // even on a saturated main thread. Cost per call: < 1 ms.
-  const yieldThenRun = <T>(fn: () => T): Promise<T> =>
-    new Promise<T>((resolve, reject) => {
-      setImmediate(() => {
-        try {
-          resolve(fn());
-        } catch (err) {
-          reject(err as Error);
-        }
-      });
-    });
-
   registerHandle(IPC.urlsQuery, async (_e, input: UrlsQueryInput): Promise<UrlsQueryResult> => {
     const args: Parameters<typeof ProjectDb.prototype.queryUrls> = [
       {
@@ -10248,6 +10326,9 @@ function performShutdown(): void {
   // Stop an in-flight browser download — otherwise the detached child
   // keeps writing into the cache after the app window is gone.
   abortChromiumInstall();
+  // Kill every MCP server child process — they are ours, and an orphaned
+  // stdio server would keep running after the app window is gone.
+  mcpClient.disconnectAll();
   // Drop the tray so its icon doesn't linger after quit.
   if (tray) {
     try {

@@ -7,7 +7,6 @@ import type {
   ContentKind,
   CrawlConfig,
   CrawlProgress,
-  CrawlScope,
   CrawlSummary,
   DiscoveredLink,
   Indexability,
@@ -194,6 +193,15 @@ export function xRobotsTagDirectives(
     if (/\bnoindex\b/.test(directives)) noindex = true;
     if (/\bnofollow\b/.test(directives)) nofollow = true;
   };
+  // A bot name scopes every directive that FOLLOWS it in the header, not
+  // just the one it is glued to: `X-Robots-Tag: bingbot: noindex, nofollow`
+  // is Bing's whole instruction list, so a Googlebot-shaped crawl must
+  // ignore the `nofollow` too. Splitting on `,` and judging each segment
+  // in isolation leaked that second directive onto every bot — a page
+  // another engine was told not to follow silently lost its outlinks here.
+  // The scope therefore persists until a different bot name appears; a
+  // directive before any bot name is un-scoped and applies to everyone.
+  let scope: string | null = null;
   for (const rawSegment of header.split(',')) {
     const segment = rawSegment.trim().toLowerCase();
     if (!segment) continue;
@@ -203,12 +211,15 @@ export function xRobotsTagDirectives(
       // `head` is a bot name only if it isn't itself a directive keyword
       // (which would mean this is a valued directive like `max-snippet: 5`).
       if (!X_ROBOTS_DIRECTIVES.has(head)) {
+        scope = head;
         if (head !== 'googlebot' && head !== ua) continue; // other bot
         apply(segment.slice(colon + 1));
         continue;
       }
     }
-    apply(segment); // un-scoped
+    // Inside another bot's group — not ours to honour.
+    if (scope !== null && scope !== 'googlebot' && scope !== ua) continue;
+    apply(segment);
   }
   return { noindex, nofollow };
 }
@@ -498,6 +509,9 @@ export class Crawler extends EventEmitter {
   private sitemapAbort: AbortController | null = null;
   private readonly includeRegexes: RegExp[];
   private readonly excludeRegexes: RegExp[];
+  /** Parameter names exempt from the query-string filter, folded once
+   *  because the filter runs on every discovered URL. */
+  private readonly queryStringExceptions: Set<string>;
   /**
    * Snapshotted once in the constructor so the URL-rewrite pass costs
    * nothing per call (no `?:` chains, no per-link `if`s) and so changing
@@ -634,6 +648,8 @@ export class Crawler extends EventEmitter {
       tapTargetsSmall: number;
       tapTargetsSampled: number;
     } | null;
+    /** Client-side routes the SPA reached during render (Bölüm 29). */
+    spaRoutes?: string[];
   }>;
 
   constructor(
@@ -697,6 +713,8 @@ export class Crawler extends EventEmitter {
           tapTargetsSmall: number;
           tapTargetsSampled: number;
         } | null;
+        /** Client-side routes the SPA reached during render (Bölüm 29). */
+        spaRoutes?: string[];
       }>;
       /**
        * Re-fetch exactly these URLs instead of walking the site from the
@@ -795,6 +813,12 @@ export class Crawler extends EventEmitter {
     this.excludeRegexes = compilePatterns(config.excludePatterns, (p, err) => {
       this.emit('error', `Invalid exclude pattern "${p}": ${err}`);
     });
+    // Case-folded once: the filter runs on every discovered URL.
+    this.queryStringExceptions = new Set(
+      (config.crawlQueryStringExceptions ?? [])
+        .map((p) => p.trim().toLowerCase())
+        .filter(Boolean),
+    );
     const compiledRegexRewrites = compileUrlRegexRewrites(config.urlRegexRewrites, (p, err) => {
       this.emit('error', `Invalid URL regex rewrite "${p}": ${err}`);
     });
@@ -806,6 +830,11 @@ export class Crawler extends EventEmitter {
       keepQueryParams: config.keepQueryParams,
       sortQueryParams: config.sortQueryParams,
       collapseDuplicateSlashes: config.collapseDuplicateSlashes,
+      // A hash-routed SPA identifies its pages only by the fragment, so
+      // the same toggle that hooks the History API also has to stop
+      // normalisation from collapsing `#/a` and `#/b` onto the shell.
+      keepHashRoutes:
+        config.renderingMode === 'js' && config.jsRender?.spaRouting === true,
       regexRewrites: compiledRegexRewrites,
     };
   }
@@ -824,6 +853,50 @@ export class Crawler extends EventEmitter {
     if (this.includeRegexes.length === 0) return true;
     return this.includeRegexes.some((re) => re.test(url));
   }
+
+  /**
+   * Spider → Crawl Behaviour "Crawl URLs with Query Strings". Off drops
+   * parameterised pages before robots and before a request goes out, which
+   * is the cheap way to stop a faceted navigation from spending the whole
+   * URL budget on one listing wearing a thousand URLs.
+   *
+   * Three deliberate exemptions, each because dropping the URL would be
+   * surprising rather than helpful:
+   *   - the start URL, which the user typed themselves;
+   *   - fixed-URL modes (List / Sitemap), where the supplied URLs *are*
+   *     the crawl and no link-follow can run away;
+   *   - subresource rows, because `style.css?v=7` is a cache-buster, not
+   *     a facet, and losing it would silently break the CSS/JS audit.
+   *
+   * With exceptions configured, a URL is admitted only when *every*
+   * parameter it carries is on the list — `?page=2` passes, but
+   * `?page=2&color=red` does not. Any-match would defeat the point: a
+   * facet URL nearly always carries the pagination parameter too.
+   */
+  private passesQueryStringFilter(item: QueueItem): boolean {
+    if (this.config.crawlQueryStrings !== false) return true;
+    if (item.url === this.config.startUrl) return true;
+    if (item.resourceRow) return true;
+    if (this.config.mode === 'list' || this.config.mode === 'sitemap') return true;
+    let params: URLSearchParams;
+    try {
+      const u = new URL(item.url);
+      // `?` with nothing after it is not a parameterised page.
+      if (!u.search || u.search === '?') return true;
+      params = u.searchParams;
+    } catch {
+      // Unparseable URLs are the invalid-link path's business, not ours.
+      return true;
+    }
+    if (this.queryStringExceptions.size === 0) return false;
+    for (const name of params.keys()) {
+      if (!this.queryStringExceptions.has(name.toLowerCase())) return false;
+    }
+    return true;
+  }
+
+  /** URLs dropped by `passesQueryStringFilter`, reported at crawl end. */
+  private queryStringsDropped = 0;
 
   /**
    * Classify a URL against the crawl-trap shapes, for storage on its row.
@@ -1233,6 +1306,16 @@ export class Crawler extends EventEmitter {
         'info',
         `Crawl trap guard: skipped ${this.loopTrapsDropped.toLocaleString()} URL(s) whose path repeated a ` +
           `segment ${this.config.maxRepeatedPathSegments}+ times (link loop).`,
+      );
+    }
+    if (this.queryStringsDropped > 0) {
+      const allowed = this.queryStringExceptions.size
+        ? ` (kept URLs whose parameters are all in: ${[...this.queryStringExceptions].join(', ')})`
+        : '';
+      this.emit(
+        'info',
+        `Query-string filter: skipped ${this.queryStringsDropped.toLocaleString()} parameterised URL(s)` +
+          `${allowed}. Turn on Spider → Crawl Behaviour → "Crawl URLs with Query Strings" to include them.`,
       );
     }
     this.stopMemoryMonitor();
@@ -3094,6 +3177,10 @@ export class Crawler extends EventEmitter {
     }
     if (!this.passesUrlFilter(item.url)) return;
     if (!this.passesExtensionFilter(item.url)) return;
+    if (!this.passesQueryStringFilter(item)) {
+      this.queryStringsDropped++;
+      return;
+    }
     // Hard cap on the in-memory pending queue. Beyond this we drop new
     // discoveries — the alternative is unbounded heap growth on big
     // sitemaps / dense link graphs. `seen` still grows, but each entry
@@ -3868,6 +3955,7 @@ export class Crawler extends EventEmitter {
       let renderMobile:
         | { ok: boolean; overflowPx: number; hasViewportMeta: boolean }
         | null = null;
+      let renderSpaRoutes: string[] = [];
       let renderA11y:
         | {
             lowContrast: number;
@@ -3906,6 +3994,7 @@ export class Crawler extends EventEmitter {
             );
           }
           if (renderRes.screenshots) renderScreenshots = renderRes.screenshots;
+          if (renderRes.spaRoutes?.length) renderSpaRoutes = renderRes.spaRoutes;
           if (renderRes.lcp) renderLcp = renderRes.lcp;
           if (renderRes.mobileUsability) renderMobile = renderRes.mobileUsability;
           if (renderRes.a11y) renderA11y = renderRes.a11y;
@@ -4355,6 +4444,24 @@ export class Crawler extends EventEmitter {
             const inScope = isInScope(this.config.startUrl, target, this.config.scope);
             if (!inScope && !this.config.crawlExternal) continue;
             this.enqueue({ url: target, depth: nextDepth });
+          }
+        }
+        // Bölüm 29 — SPA routes discovered during JS render. The app
+        // reached these itself (pushState / hash change) or links to
+        // them with a hash-router href, so they are as real as any
+        // `<a href>` target — they just never produced a document
+        // request the crawler could see.
+        if (renderSpaRoutes.length > 0) {
+          for (const route of renderSpaRoutes) {
+            const normalized = normalizeUrl(route, item.url, this.urlRewrites);
+            if (!normalized || normalized === item.url) continue;
+            const inScope = isInScope(
+              this.config.startUrl,
+              normalized,
+              this.config.scope,
+            );
+            if (!inScope && !this.config.crawlExternal) continue;
+            this.enqueue({ url: normalized, depth: nextDepth });
           }
         }
         // Wave 3 — Canonical follow toggle. When on, a 200 page that

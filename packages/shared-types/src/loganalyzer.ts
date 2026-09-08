@@ -263,6 +263,16 @@ export interface LogUrlStatsInput {
   /** Restrict to URLs a specific named bot hit (e.g. "SemrushBot").
    *  Composes with `search` / `filter`. */
   bot?: string;
+  /**
+   * Response-class filter, matching the Suspicious Requests tab.
+   *
+   * Judged on `lastStatus` — the analyzer stores one status per path
+   * (the most recent one seen), not a per-path distribution, so this
+   * answers "what is this URL returning now", which is the question a
+   * `4xx` / `5xx` filter is actually asked. Paths with no parsed status
+   * are excluded once a class is selected.
+   */
+  status?: 'all' | '2xx' | '3xx' | '4xx' | '5xx';
 }
 
 export interface LogUrlStatsResult {

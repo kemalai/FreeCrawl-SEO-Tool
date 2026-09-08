@@ -26,6 +26,7 @@ import { SearchConsoleTab } from './tabs/SearchConsoleTab.js';
 import { AnalyticsTab } from './tabs/AnalyticsTab.js';
 import { AiTab } from './tabs/AiTab.js';
 import { SeoTab } from './tabs/SeoTab.js';
+import { AssistantTab } from './tabs/AssistantTab.js';
 import { useAppStore } from './store.js';
 import type { MenuEvent, CrawlProgress } from '@freecrawl/shared-types';
 import { clearCrawlWithConfirm } from './utils/clearCrawl.js';
@@ -48,6 +49,7 @@ export function App() {
   const setConfig = useAppStore((s) => s.setConfig);
   const applyProjectConfig = useAppStore((s) => s.applyProjectConfig);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
+  const assistantHandleEvent = useAppStore((s) => s.assistantHandleEvent);
   const [robotsTesterOpen, setRobotsTesterOpen] = useState(false);
   const [sitemapValidatorOpen, setSitemapValidatorOpen] = useState(false);
   const [exportAsOpen, setExportAsOpen] = useState(false);
@@ -62,6 +64,15 @@ export function App() {
       }
     | null
   >(null);
+
+  // Assistant events are subscribed here rather than in the Assistant tab:
+  // a tool round can take minutes, and the user is free to go look at the
+  // URLs table while it runs. A subscription that dies with the tab would
+  // drop the results and leave an approval prompt nobody can answer.
+  useEffect(
+    () => window.freecrawl.onAssistantEvent(assistantHandleEvent),
+    [assistantHandleEvent],
+  );
 
   // Drag & drop URL list — drop a `.txt` / `.csv` of URLs anywhere on the
   // window to populate List mode + open Settings so the user can review
@@ -540,6 +551,8 @@ export function App() {
                   <AiTab />
                 ) : activeTab === 'seo' ? (
                   <SeoTab />
+                ) : activeTab === 'assistant' ? (
+                  <AssistantTab />
                 ) : (
                   <UrlsTab />
                 )}

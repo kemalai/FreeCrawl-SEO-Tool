@@ -46,6 +46,19 @@ export interface UrlRewriteOptions {
    */
   sortQueryParams?: boolean;
   /**
+   * Keep SPA hash routes (`#/about`, `#!/products/1`) as part of the URL
+   * instead of stripping the fragment.
+   *
+   * A fragment is normally not part of a resource's identity — `#pricing`
+   * is a position on a page the server already returned in full. But an
+   * Angular/Vue hash-router app serves its entire site under one document
+   * and distinguishes pages ONLY by that fragment, so stripping it
+   * collapses a 500-page site into a single row. Restricted to the
+   * hash-route forms (`#/…`, `#!/…`): a plain `#section` anchor stays
+   * stripped, because it really is the same page.
+   */
+  keepHashRoutes?: boolean;
+  /**
    * Collapse runs of `/` in the path to a single slash (`/a//b` -> `/a/b`).
    * Web servers serve these identically, so the duplicate-slash variant is
    * a false duplicate - but it is not universally true (a few frameworks
@@ -83,6 +96,14 @@ const DEFAULT_TRACKING_PARAMS = [
   'mc_eid',
 ] as const;
 
+/**
+ * Fragments that identify a page rather than a position in one:
+ * `#/path` (Angular / Vue hash mode) and `#!/path` (the legacy
+ * hashbang). Anything else — `#pricing`, `#`, `#L42` — is an in-page
+ * anchor and stays stripped.
+ */
+const HASH_ROUTE_RE = /^#!?\/./;
+
 export function compileUrlRegexRewrites(
   raw: readonly UrlRegexRewrite[] | undefined,
   onError?: (pattern: string, err: string) => void,
@@ -117,6 +138,9 @@ export function normalizeUrl(
     // means genuine separators like `?a=1&b=2` are left untouched.
     const decoded = raw.replace(/&(?:amp|#0*38|#x0*26);/gi, '&');
     const u = new URL(decoded, base);
+    // Captured before the strip so the hash-route policy below can put a
+    // router path back; everything in between operates on a fragmentless URL.
+    const rawHash = u.hash;
     u.hash = '';
     // Drop HTTP-auth userinfo. `https://user:pass@host` is a common way to
     // crawl a Basic-auth staging site, but the credentials must not survive
@@ -181,6 +205,12 @@ export function normalizeUrl(
     // punycoded by the parser) and the fragment is already stripped.
     if (u.pathname.includes('%')) u.pathname = upperPercentEscapes(u.pathname);
     if (u.search.includes('%')) u.search = upperPercentEscapes(u.search);
+
+    // Re-attach a router fragment last, so no earlier rewrite (trailing
+    // slash, lowercase path, percent folding) ever sees or mangles it.
+    if (rewrites.keepHashRoutes && HASH_ROUTE_RE.test(rawHash)) {
+      u.hash = rawHash;
+    }
 
     let result = u.toString();
     if (rewrites.regexRewrites && rewrites.regexRewrites.length > 0) {

@@ -239,7 +239,8 @@
     "analytics": "GA4",
     "ai": "AI",
     "seo": "SEO Authority",
-    "visualization": "Görselleştirme"
+    "visualization": "Görselleştirme",
+    "assistant": "Asistan"
   },
   "visualization": {
     "windowTitle": "Crawl Görselleştirme",
@@ -421,6 +422,9 @@
     "followInternalNofollow": "Dahili \"nofollow\" Bağlantıları Takip Et",
     "followExternalNofollow": "Harici \"nofollow\" Bağlantıları Takip Et",
     "crawlInvalidLinks": "Geçersiz Bağlantıları Tara",
+    "crawlQueryStrings": "Parametreli URL’leri Tara",
+    "queryStringExceptions": "Bu parametreler hariç",
+    "spiderModeOnly": "Yalnızca Spider modunda geçerli — Liste ve Site Haritası verdiğiniz URL’leri tarar",
     "crawlLinkedSitemaps": "Bağlantılı XML Site Haritalarını Tara",
     "autoDiscover": "robots.txt Üzerinden XML Site Haritalarını Otomatik Keşfet",
     "crawlTheseSitemaps": "Şu Site Haritalarını Tara",
@@ -760,7 +764,8 @@
       "screenshotNone": "Yok (varsayılan)",
       "screenshotFold": "Katlama üstü",
       "screenshotFull": "Tam sayfa",
-      "screenshotBoth": "Her ikisi (tam sayfa + katlama)"
+      "screenshotBoth": "Her ikisi (tam sayfa + katlama)",
+      "spaRouting": "SPA rota keşfi"
     },
     "performanceBudget": {
       "intro": "Sayfa başına performans tavanları belirleyin. Her crawl'dan sonra, etkin eşiklerden herhangi birini aşan dahili HTML sayfaları \"Performans Bütçesini Aşan\" issue filtresinde işaretlenir. Yanıt süresi ve sayfa boyutu crawl'dan; LCP ve CLS mevcutsa PageSpeed Insights verisinden gelir. Bir kontrolü devre dışı bırakmak için ilgili alanı 0 yapın.",
@@ -1621,7 +1626,36 @@
       "telemetryHelp": "Varsayılan olarak kapalı. Açıkken, özellik kullanımının toplulaştırılmış sayıları (örn. \"dışa aktarım çalıştı\", \"rapor açıldı\") gönderilebilir — URL, proje içeriği veya crawl sonuçları asla gönderilmez.",
       "statusNote": "Şu anda herhangi bir telemetri uç noktası kablolanmamıştır. Bu tercihi açıp kapatmak kaydedilir ancak mevcut sürümde hiçbir şey iletilmez. İlerideki bir sürüm uç nokta eklediğinde rıza durumunun korunması için bu toggle şimdi gösteriliyor."
     },
-    "chooseDefaultProjectFolder": "Varsayılan Proje Klasörünü Seç"
+    "chooseDefaultProjectFolder": "Varsayılan Proje Klasörünü Seç",
+    "mcp": {
+      "intro": "Asistan sekmesinin crawl verinizin yanında harici araçları da kullanabilmesi için MCP sunucuları bağlayın. Yerel sunucular alt süreç olarak çalışır, uzak sunucular HTTP üzerinden çağrılır. Her araç çağrısı ilk seferinde onayınızı ister.",
+      "empty": "Henüz sunucu yok. Tipik bir yerel sunucu şöyledir: komut \"npx\", argümanlar \"-y\" ve \"@modelcontextprotocol/server-filesystem\", varsa API anahtarı ortam değişkeni olarak.",
+      "enabled": "Etkin",
+      "labelPlaceholder": "Görünen ad",
+      "connected": "Bağlı",
+      "disconnected": "Bağlı değil",
+      "connect": "Bağlan",
+      "disconnect": "Bağlantıyı kes",
+      "remove": "Sunucuyu kaldır",
+      "transport": "Taşıma",
+      "transportStdio": "Yerel süreç (stdio)",
+      "transportHttp": "Uzak (HTTP)",
+      "command": "Komut",
+      "commandHint": "Çalıştırılabilir dosya adı veya tam yol. Her işletim sisteminde PATH üzerinden çözülür — Windows'ta `npx` otomatik olarak npx.cmd'ye çözülür.",
+      "args": "Argümanlar",
+      "argsHint": "Satır başına bir argüman. Dizi olarak geçirilir — kabuk yok, tırnak ve boşluklar birebir kalır.",
+      "env": "Ortam değişkenleri",
+      "envHint": "Satır başına KEY=değer. Değerler işletim sistemi anahtarlığıyla şifrelenir ve maskeli gösterilir.",
+      "url": "Uç nokta URL'si",
+      "headers": "Başlıklar",
+      "headersHint": "Satır başına Ad: değer. Şifreli saklanır, maskeli gösterilir.",
+      "handshake": "{{name}} {{version}} · MCP {{protocol}} · {{n}} araç",
+      "toolPermissions": "Araç izinleri",
+      "policyAsk": "Sor",
+      "policyAlways": "Her zaman izin ver",
+      "policyNever": "Asla izin verme",
+      "add": "Sunucu ekle"
+    }
   },
   "logAnalyzer": {
     "title": "Log Dosyası Analizi",
@@ -1754,11 +1788,40 @@
     "threatServedBadge": "işlendi",
     "threatClose": "Kapat",
     "clearFailed": "Log verisi temizlenemedi: {{detail}}",
-    "exportFailed": "Dışa aktarma başarısız: {{detail}}"
+    "exportFailed": "Dışa aktarma başarısız: {{detail}}",
+    "urlStatusAll": "Tüm yanıt kodları",
+    "urlStatus4xx": "4xx (hatalar)",
+    "urlStatus5xx": "5xx (sunucu hataları)",
+    "threatChipIps": "{{n}} farklı IP"
   },
   "detailExport": {
     "label": "Dışa Aktar",
     "title": "Bu tabloyu Excel veya CSV olarak dışa aktar",
     "nothing": "Dışa aktarılacak veri yok"
+  },
+  "assistant": {
+    "modelPlaceholder": "Model (sağlayıcı varsayılanı)",
+    "tools": "Araçlar",
+    "builtinTools": "FreeCrawl proje araçları",
+    "builtinToolsHint": "Açık crawl üzerinde salt-okunur sorgular. Onay istemeden çalışır.",
+    "mcpServers": "MCP sunucuları",
+    "noServers": "Henüz MCP sunucusu tanımlı değil. Ayarlar → MCP Sunucuları'ndan ekleyin.",
+    "toolCount": "{{n}} araç",
+    "manageServers": "MCP sunucularını yönet",
+    "tokens": "{{in}} giriş / {{out}} çıkış token",
+    "clear": "Temizle",
+    "emptyTitle": "Bu crawl hakkında gündelik dilde soru sorun.",
+    "emptyHint": "Asistan açık projeyi salt-okunur araçlarla okur ve bağladığınız MCP sunucularını çağırabilir. API anahtarınız bu makinede kalır.",
+    "runningTool": "{{name}} çalışıyor…",
+    "thinking": "Düşünüyor…",
+    "thinkingRound": "Düşünüyor ({{n}}. tur)…",
+    "approvalTitle": "{{server}} sunucusu {{tool}} aracını çalıştırmak istiyor",
+    "allowOnce": "Bir kez izin ver",
+    "allowAlways": "Bu araca her zaman izin ver",
+    "deny": "Reddet",
+    "resultChars": "{{n}} karakter",
+    "placeholder": "ör. Başlık sorunları en kötü olan sayfalar hangileri, neden? (Göndermek için Ctrl+Enter)",
+    "stop": "Durdur",
+    "send": "Gönder"
   }
 }

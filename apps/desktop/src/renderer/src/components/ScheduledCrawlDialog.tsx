@@ -11,7 +11,6 @@ interface Props {
 
 type Cadence = 'hourly' | 'daily' | 'weekly' | 'custom';
 
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MIN_CUSTOM_INTERVAL = 15;
 
 interface FormState {

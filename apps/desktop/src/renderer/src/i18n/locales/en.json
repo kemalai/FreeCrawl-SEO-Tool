@@ -239,7 +239,8 @@
     "analytics": "GA4",
     "ai": "AI",
     "seo": "SEO Authority",
-    "visualization": "Visualization"
+    "visualization": "Visualization",
+    "assistant": "Assistant"
   },
   "visualization": {
     "windowTitle": "Crawl Visualization",
@@ -421,6 +422,9 @@
     "followInternalNofollow": "Follow Internal \"nofollow\"",
     "followExternalNofollow": "Follow External \"nofollow\"",
     "crawlInvalidLinks": "Crawl Invalid Links",
+    "crawlQueryStrings": "Crawl URLs with Query Strings",
+    "queryStringExceptions": "Except these parameters",
+    "spiderModeOnly": "Only applies in Spider mode — List and Sitemap crawl the URLs you supplied",
     "crawlLinkedSitemaps": "Crawl Linked XML Sitemaps",
     "autoDiscover": "Auto Discover XML Sitemaps via robots.txt",
     "crawlTheseSitemaps": "Crawl These Sitemaps",
@@ -760,7 +764,8 @@
       "screenshotNone": "None (default)",
       "screenshotFold": "Above the fold",
       "screenshotFull": "Full page",
-      "screenshotBoth": "Both (full page + fold)"
+      "screenshotBoth": "Both (full page + fold)",
+      "spaRouting": "SPA route discovery"
     },
     "performanceBudget": {
       "intro": "Set per-page performance ceilings. After each crawl, internal HTML pages that exceed any enabled threshold are flagged under the \"Over Performance Budget\" issue filter. Response time and page size come from the crawl itself; LCP and CLS use PageSpeed Insights data when present. Set any field to 0 to disable that individual check.",
@@ -1621,7 +1626,36 @@
       "telemetryHelp": "Off by default. When on, aggregated counts of feature use (e.g. \"export ran\", \"report opened\") may be sent — never URLs, project contents, or crawl results.",
       "statusNote": "No telemetry endpoint is currently wired up. Toggling this preference is recorded but nothing is transmitted in the current build. The toggle is exposed now so consent state persists across upgrades when a future build adds an endpoint."
     },
-    "chooseDefaultProjectFolder": "Choose Default Project Folder"
+    "chooseDefaultProjectFolder": "Choose Default Project Folder",
+    "mcp": {
+      "intro": "Connect external MCP servers so the Assistant tab can use their tools alongside your crawl data. Local servers run as a child process; remote ones are called over HTTP. Every tool call asks for your approval the first time.",
+      "empty": "No servers yet. A typical local server looks like: command \"npx\", arguments \"-y\" and \"@modelcontextprotocol/server-filesystem\", plus any API key as an environment variable.",
+      "enabled": "Enabled",
+      "labelPlaceholder": "Display name",
+      "connected": "Connected",
+      "disconnected": "Not connected",
+      "connect": "Connect",
+      "disconnect": "Disconnect",
+      "remove": "Remove server",
+      "transport": "Transport",
+      "transportStdio": "Local process (stdio)",
+      "transportHttp": "Remote (HTTP)",
+      "command": "Command",
+      "commandHint": "Executable name or full path. Resolved against PATH on every OS — on Windows, `npx` resolves to npx.cmd automatically.",
+      "args": "Arguments",
+      "argsHint": "One per line. Passed as a vector — no shell, so quotes and spaces are literal.",
+      "env": "Environment variables",
+      "envHint": "KEY=value per line. Values are stored encrypted with your OS keychain and shown masked.",
+      "url": "Endpoint URL",
+      "headers": "Headers",
+      "headersHint": "Name: value per line. Stored encrypted and shown masked.",
+      "handshake": "{{name}} {{version}} · MCP {{protocol}} · {{n}} tool(s)",
+      "toolPermissions": "Tool permissions",
+      "policyAsk": "Ask",
+      "policyAlways": "Always allow",
+      "policyNever": "Never allow",
+      "add": "Add server"
+    }
   },
   "logAnalyzer": {
     "title": "Log File Analyzer",
@@ -1754,11 +1788,40 @@
     "threatFilterIp": "Only this IP",
     "threatCopyIp": "Copy IP",
     "threatServedBadge": "served",
-    "threatClose": "Close"
+    "threatClose": "Close",
+    "urlStatusAll": "Any status",
+    "urlStatus4xx": "4xx (errors)",
+    "urlStatus5xx": "5xx (server errors)",
+    "threatChipIps": "{{n}} distinct IP(s)"
   },
   "detailExport": {
     "label": "Export",
     "title": "Export this table to Excel or CSV",
     "nothing": "Nothing to export"
+  },
+  "assistant": {
+    "modelPlaceholder": "Model (provider default)",
+    "tools": "Tools",
+    "builtinTools": "FreeCrawl project tools",
+    "builtinToolsHint": "Read-only queries against the open crawl. Run without asking.",
+    "mcpServers": "MCP servers",
+    "noServers": "No MCP servers configured yet. Add one in Settings → MCP Servers.",
+    "toolCount": "{{n}} tool(s)",
+    "manageServers": "Manage MCP servers",
+    "tokens": "{{in}} in / {{out}} out tokens",
+    "clear": "Clear",
+    "emptyTitle": "Ask about this crawl in plain language.",
+    "emptyHint": "The assistant reads the open project through read-only tools, and can call any MCP server you connect. Your API key stays on this machine.",
+    "runningTool": "Running {{name}}…",
+    "thinking": "Thinking…",
+    "thinkingRound": "Thinking (round {{n}})…",
+    "approvalTitle": "{{server}} wants to run {{tool}}",
+    "allowOnce": "Allow once",
+    "allowAlways": "Always allow this tool",
+    "deny": "Deny",
+    "resultChars": "{{n}} chars",
+    "placeholder": "e.g. Which pages have the worst title problems, and why? (Ctrl+Enter to send)",
+    "stop": "Stop",
+    "send": "Send"
   }
 }

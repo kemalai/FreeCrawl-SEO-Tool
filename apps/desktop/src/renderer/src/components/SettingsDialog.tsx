@@ -65,6 +65,7 @@ import { ExtractionPreviewDialog } from './ExtractionPreviewDialog.js';
 import { IntegrationSetupGuideModal } from './IntegrationSetupGuideModal.js';
 import { GscSettingsSection } from './GscSettingsSection.js';
 import { Ga4SettingsSection } from './Ga4SettingsSection.js';
+import { McpServersSection } from './McpServersSection.js';
 import { GoogleAccountsSection } from './GoogleAccountsSection.js';
 
 interface Props {
@@ -127,6 +128,8 @@ interface FormState {
   checkLinksOutsideStartFolder: boolean;
   followExternalNofollow: boolean;
   crawlInvalidLinks: boolean;
+  crawlQueryStrings: boolean;
+  crawlQueryStringExceptionsText: string;
   crawlLinkedSitemaps: boolean;
   // requests
   userAgent: string;
@@ -221,6 +224,7 @@ interface FormState {
   jsMobileUsability: boolean;
   jsLcpCandidate: boolean;
   jsA11yAudit: boolean;
+  jsSpaRouting: boolean;
   // V2 Faz 15 — performance budget
   budgetEnabled: boolean;
   budgetMaxResponseMs: string;
@@ -260,6 +264,7 @@ export type SettingsSectionKey =
   | 'performance-budget'
   | 'storage'
   | 'spelling'
+  | 'mcp-servers'
   | 'language'
   /** Per-integration sub-page, e.g. `integration:gsc`. Each integration
    *  gets its own page under the "Integrations" group header, so a
@@ -487,6 +492,13 @@ const SECTIONS: SectionDef[] = [
     keywords: 'spelling grammar languagetool dictionary ignore words picky rule level yazım dilbilgisi sözlük',
   },
   {
+    key: 'mcp-servers',
+    label: 'MCP Servers',
+    icon: Plug,
+    keywords:
+      'mcp model context protocol server assistant ai tools stdio http agent claude tool permission approval',
+  },
+  {
     key: 'language',
     label: 'Language',
     icon: Languages,
@@ -541,6 +553,8 @@ function configToForm(c: CrawlConfig): FormState {
     checkLinksOutsideStartFolder: c.checkLinksOutsideStartFolder ?? true,
     followExternalNofollow: c.followExternalNofollow ?? false,
     crawlInvalidLinks: c.crawlInvalidLinks ?? false,
+    crawlQueryStrings: c.crawlQueryStrings ?? true,
+    crawlQueryStringExceptionsText: (c.crawlQueryStringExceptions ?? []).join(', '),
     crawlLinkedSitemaps: c.crawlLinkedSitemaps ?? false,
     userAgent: c.userAgent,
     acceptLanguage: c.acceptLanguage,
@@ -635,6 +649,7 @@ function configToForm(c: CrawlConfig): FormState {
     jsMobileUsability: c.jsRender?.mobileUsability ?? false,
     jsLcpCandidate: c.jsRender?.lcpCandidate ?? false,
     jsA11yAudit: c.jsRender?.a11yAudit ?? false,
+    jsSpaRouting: c.jsRender?.spaRouting ?? false,
     budgetEnabled: c.performanceBudget?.enabled ?? false,
     budgetMaxResponseMs: String(c.performanceBudget?.maxResponseMs ?? 800),
     budgetMaxPageKb: String(
@@ -657,6 +672,22 @@ function parseHeaders(text: string): Record<string, string> {
     if (key) out[key] = val;
   }
   return out;
+}
+
+/**
+ * Query-parameter names typed as a single line. Accepts the three
+ * separators a user is likely to reach for — comma, whitespace,
+ * newline — because "page, lang" and "page lang" mean the same thing
+ * and neither should silently produce one parameter named "page, lang".
+ * `?` and `&` are stripped so pasting `?page&lang` works too.
+ */
+function parseParamNames(text: string): string[] {
+  const seen = new Set<string>();
+  for (const raw of text.split(/[,\s]+/)) {
+    const name = raw.trim().replace(/^[?&]+/, '').replace(/=.*$/, '');
+    if (name) seen.add(name);
+  }
+  return [...seen];
 }
 
 function parseLines(text: string): string[] {
@@ -842,6 +873,8 @@ export function SettingsDialog({ open, onClose }: Props) {
       checkLinksOutsideStartFolder: form.checkLinksOutsideStartFolder,
       followExternalNofollow: form.followExternalNofollow,
       crawlInvalidLinks: form.crawlInvalidLinks,
+      crawlQueryStrings: form.crawlQueryStrings,
+      crawlQueryStringExceptions: parseParamNames(form.crawlQueryStringExceptionsText),
       crawlLinkedSitemaps: form.crawlLinkedSitemaps,
       userAgent: form.userAgent.trim() || config.userAgent,
       acceptLanguage: form.acceptLanguage.trim() || config.acceptLanguage,
@@ -991,6 +1024,7 @@ export function SettingsDialog({ open, onClose }: Props) {
         mobileUsability: form.jsMobileUsability,
         lcpCandidate: form.jsLcpCandidate,
         a11yAudit: form.jsA11yAudit,
+        spaRouting: form.jsSpaRouting,
       },
       performanceBudget: {
         enabled: form.budgetEnabled,
@@ -1151,7 +1185,6 @@ export function SettingsDialog({ open, onClose }: Props) {
                     if (r.unknownFields.length > 0) {
                       // Surface unknown fields as a non-fatal warning by
                       // logging — Settings UI doesn't have a toast system.
-                      // eslint-disable-next-line no-console
                       console.warn(
                         `Import: ignored unknown fields: ${r.unknownFields.join(', ')}`,
                       );
@@ -1228,6 +1261,7 @@ export function SettingsDialog({ open, onClose }: Props) {
               )}
               {active === 'storage' && <StoragePanel />}
               {active === 'spelling' && <SpellingPanel />}
+              {active === 'mcp-servers' && <McpServersSection />}
               {active === 'language' && <LanguagePanel />}
             </div>
           </div>
@@ -2114,6 +2148,38 @@ function SpiderCrawlPanel({ form, update }: PanelProps) {
               info="Record hrefs that cannot be parsed as a URL — unencoded whitespace inside the authority, doubled schemes, stray delimiters. They can never resolve to a crawled page, so every one is reported in Broken Links, which is the point. Deliberate non-navigable schemes (mailto:, tel:, #) are not malformed and never appear."
               example="On when hunting hand-written markup errors; off keeps Broken Links focused on real 404s."
             />
+            <Bool
+              label={t('spiderCrawl.crawlQueryStrings', {
+                defaultValue: 'Crawl URLs with Query Strings',
+              })}
+              checked={form.crawlQueryStrings}
+              onChange={(v) => update('crawlQueryStrings', v)}
+              disabled={form.mode !== 'spider'}
+              hint={
+                form.mode === 'spider'
+                  ? undefined
+                  : t('spiderCrawl.spiderModeOnly', {
+                      defaultValue:
+                        'Only applies in Spider mode — List and Sitemap crawl the URLs you supplied',
+                    })
+              }
+              info="Off drops every discovered URL carrying a `?`, before robots and before a request goes out. That is the cheap way to stop a faceted navigation (?color=red&size=xl&sort=price) from spending the whole URL budget on one product listing wearing a thousand URLs. The start URL is always crawled, and subresources are exempt — style.css?v=7 is a cache-buster, not a facet. Skipped URLs are counted and reported in the log, never dropped silently."
+              example="On (default). Off for a first pass over a shop with faceted filters."
+            />
+            {!form.crawlQueryStrings && form.mode === 'spider' && (
+              <div className="ml-6">
+                <Text
+                  label={t('spiderCrawl.queryStringExceptions', {
+                    defaultValue: 'Except these parameters',
+                  })}
+                  value={form.crawlQueryStringExceptionsText}
+                  onChange={(v) => update('crawlQueryStringExceptionsText', v)}
+                  placeholder="page, lang, p"
+                  info="Parameter names that keep a URL in the crawl anyway — pagination, a language switch, a product id. Names only; values are not looked at, and matching ignores case. A URL is admitted only when every parameter it carries is on this list: ?page=2 passes, ?page=2&color=red does not. Any-match would defeat the point, since a facet URL nearly always carries the pagination parameter too."
+                  example="page, lang — keeps paginated archives reachable while the facets stay out."
+                />
+              </div>
+            )}
           </CrawlGroup>
 
           <CrawlGroup title={t('spiderCrawl.xmlSitemaps', { defaultValue: 'XML Sitemaps' })}>
@@ -2710,7 +2776,6 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                   // Surface main-process parse errors inline rather than
                   // silently dropping — invalid JSON is the most common
                   // import failure mode and the user needs to know.
-                  // eslint-disable-next-line no-alert
                   alert(
                     t('settingsPanels.customExtraction.importFailedAlert', {
                       defaultValue: 'Import failed: {{error}}',
@@ -2721,7 +2786,6 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                 return;
               }
               if (result.rules.length === 0) {
-                // eslint-disable-next-line no-alert
                 alert(
                   result.error ??
                     t('settingsPanels.customExtraction.noValidRules', {
@@ -2731,7 +2795,6 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
                 return;
               }
               if (rules.length > 0) {
-                // eslint-disable-next-line no-alert, no-restricted-globals
                 const ok = confirm(
                   t('settingsPanels.customExtraction.importConfirm', {
                     defaultValue:
@@ -2744,7 +2807,6 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
               }
               setRules(result.rules);
               if (result.skippedCount > 0) {
-                // eslint-disable-next-line no-alert
                 alert(
                   t('settingsPanels.customExtraction.importSkipped', {
                     defaultValue:
@@ -4473,6 +4535,14 @@ function RenderingPanel({ form, update }: PanelProps) {
             hint=""
             info="Audits the rendered DOM for WCAG AA colour-contrast failures (4.5:1 normal text, 3:1 large text) and stylesheet rules that suppress the keyboard focus outline without a :focus-visible fallback. Surfaces the Low-Contrast Text and Focus Outline Suppressed issue filters."
             example="On for accessibility / WCAG audits."
+          />
+          <Bool
+            label={t('settingsPanels.rendering.spaRouting', { defaultValue: 'SPA route discovery' })}
+            checked={form.jsSpaRouting}
+            onChange={(v) => update('jsSpaRouting', v)}
+            hint=""
+            info="Hooks the History API before the page's own scripts run, so routes an SPA reaches via pushState / replaceState / popstate are discovered and crawled. Also keeps hash routes (#/about) as distinct URLs instead of collapsing them onto the shell document."
+            example="On for React Router / Vue Router / Angular sites whose pages never produce a document request."
           />
         </div>
       </div>

@@ -670,6 +670,8 @@ const TR_LABELS: Record<string, string> = {
   Integrations: 'Entegrasyonlar',
   Rendering: 'Render',
   Storage: 'Depolama',
+  'MCP Servers': 'MCP Sunucuları',
+  Assistant: 'Asistan',
   Privacy: 'Gizlilik',
   Language: 'Dil',
   // Status column — robots-blocked badge + its tooltip.

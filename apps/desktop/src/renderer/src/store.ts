@@ -1,6 +1,9 @@
 import { create } from 'zustand';
 import {
   DEFAULT_CRAWL_CONFIG,
+  type AssistantEvent,
+  type AssistantMessage,
+  type AssistantToolCall,
   type AdvancedFilter,
   type CrawlConfig,
   type CrawlProgress,
@@ -57,7 +60,8 @@ export type TabKey =
   | 'search-console'
   | 'analytics'
   | 'ai'
-  | 'seo';
+  | 'seo'
+  | 'assistant';
 
 export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'internal', label: 'Internal' },
@@ -92,6 +96,7 @@ export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'analytics', label: 'GA4' },
   { key: 'ai', label: 'AI' },
   { key: 'seo', label: 'SEO Authority' },
+  { key: 'assistant', label: 'Assistant' },
 ];
 
 /**
@@ -411,7 +416,36 @@ interface AppState {
   setSettingsOpen: (open: boolean, target?: SettingsTarget) => void;
   addRecentUrl: (url: string) => void;
   bumpDataVersion: () => void;
+  /** Faz 5 — assistant transcript. Lives in the store (not the tab) so a
+   *  tab switch mid-turn neither loses the conversation nor strands a
+   *  pending tool-approval card. */
+  assistantMessages: AssistantMessage[];
+  /** Tool-approval cards waiting on the user. */
+  assistantApprovals: AssistantApprovalRequest[];
+  /** A tool call currently executing, for the "running" indicator. */
+  assistantActiveCall: AssistantToolCall | null;
+  assistantRunning: boolean;
+  /** Which tool round the model is on (0 when idle). */
+  assistantRound: number;
+  assistantError: string | null;
+  /** Append the user's message and return the index the turn starts at. */
+  assistantStartTurn: (message: AssistantMessage) => number;
+  /** Replace everything produced after `fromIndex` with the authoritative
+   *  message list the main process returned. */
+  assistantCommitTurn: (fromIndex: number, messages: AssistantMessage[]) => void;
+  assistantSetRunning: (running: boolean) => void;
+  assistantHandleEvent: (event: AssistantEvent) => void;
+  assistantResolveApproval: (requestId: string) => void;
+  assistantClear: () => void;
   reset: () => void;
+}
+
+/** One pending tool-approval card. */
+export interface AssistantApprovalRequest {
+  requestId: string;
+  call: AssistantToolCall;
+  serverId: string;
+  serverLabel: string;
 }
 
 const RECENT_URLS_MAX = 5;
@@ -576,6 +610,100 @@ export const useAppStore = create<AppState>((set) => ({
       return { recentUrls: next };
     }),
   bumpDataVersion: () => set((s) => ({ dataVersion: s.dataVersion + 1 })),
+  assistantMessages: [],
+  assistantApprovals: [],
+  assistantActiveCall: null,
+  assistantRunning: false,
+  assistantRound: 0,
+  assistantError: null,
+  assistantStartTurn: (message) => {
+    let startIndex = 0;
+    set((s) => {
+      startIndex = s.assistantMessages.length + 1;
+      return {
+        assistantMessages: [...s.assistantMessages, message],
+        assistantRunning: true,
+        assistantError: null,
+        assistantRound: 0,
+      };
+    });
+    return startIndex;
+  },
+  assistantCommitTurn: (fromIndex, messages) =>
+    set((s) => ({
+      // The live events already rendered these; replacing the tail keeps
+      // the transcript identical to what the next turn will be sent.
+      assistantMessages: [...s.assistantMessages.slice(0, fromIndex), ...messages],
+      assistantRunning: false,
+      assistantActiveCall: null,
+      assistantRound: 0,
+    })),
+  assistantSetRunning: (running) =>
+    set(() => ({ assistantRunning: running, ...(running ? {} : { assistantActiveCall: null }) })),
+  assistantHandleEvent: (event) =>
+    set((s) => {
+      switch (event.type) {
+        case 'thinking':
+          return { assistantRound: event.round, assistantActiveCall: null };
+        case 'assistant-text':
+          return {
+            assistantMessages: [
+              ...s.assistantMessages,
+              {
+                role: 'assistant' as const,
+                content: event.text,
+                ...(event.toolCalls.length ? { toolCalls: event.toolCalls } : {}),
+              },
+            ],
+          };
+        case 'tool-approval':
+          return {
+            assistantApprovals: [
+              ...s.assistantApprovals,
+              {
+                requestId: event.requestId,
+                call: event.call,
+                serverId: event.serverId,
+                serverLabel: event.serverLabel,
+              },
+            ],
+          };
+        case 'tool-start':
+          return { assistantActiveCall: event.call };
+        case 'tool-result':
+          return {
+            assistantActiveCall: null,
+            assistantMessages: [
+              ...s.assistantMessages,
+              {
+                role: 'tool' as const,
+                content: event.result,
+                toolCallId: event.callId,
+                toolName: event.name,
+                ...(event.isError ? { isError: true } : {}),
+                durationMs: event.durationMs,
+              },
+            ],
+          };
+        case 'error':
+          return { assistantError: event.message };
+        default:
+          return {};
+      }
+    }),
+  assistantResolveApproval: (requestId) =>
+    set((s) => ({
+      assistantApprovals: s.assistantApprovals.filter((a) => a.requestId !== requestId),
+    })),
+  assistantClear: () =>
+    set(() => ({
+      assistantMessages: [],
+      assistantApprovals: [],
+      assistantActiveCall: null,
+      assistantRunning: false,
+      assistantRound: 0,
+      assistantError: null,
+    })),
   reset: () =>
     set({
       progress: null,

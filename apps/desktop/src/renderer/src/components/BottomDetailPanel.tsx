@@ -1987,7 +1987,7 @@ function fleschBand(score: number): string {
 }
 
 function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: string }) {
-  const { t, i18n } = useTranslation();
+  const { i18n } = useTranslation();
   const lang = i18n.language;
   // Server-side pixel-width is the source of truth (drives the issue
   // filters); fall back to the renderer estimate only when the column is

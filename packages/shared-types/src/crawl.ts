@@ -1250,6 +1250,34 @@ export interface CrawlConfig {
    *  record them. Turns `discoverSitemaps` from a reporting aid into a
    *  discovery source, which is what finds orphan pages. */
   crawlLinkedSitemaps: boolean;
+  /**
+   * Whether URLs carrying a query string are taken into the crawl at all.
+   * On (default) crawls `?…` URLs like any other. Off drops them at
+   * enqueue, before robots and before a request goes out — the cheap way
+   * to keep a faceted navigation (`?color=red&size=xl&sort=price`) from
+   * eating the whole URL budget on what is one product listing wearing a
+   * thousand URLs.
+   *
+   * Scope of the switch, deliberately narrow:
+   *  - Spider mode only. List and Sitemap mode crawl exactly the URLs the
+   *    user supplied, and there is no link-follow there to run away with.
+   *  - Pages only. Subresources (image / CSS / JS / media rows) are exempt
+   *    because `style.css?v=7` is a cache-buster, not a facet.
+   *  - The start URL is always crawled, query string and all.
+   */
+  crawlQueryStrings: boolean;
+  /**
+   * Parameter names that keep a URL crawlable while `crawlQueryStrings`
+   * is off — pagination (`page`), language switches (`lang`), a product
+   * id. Matched case-insensitively against parameter *names*, values are
+   * not looked at.
+   *
+   * A URL is admitted only when **every** parameter it carries is on this
+   * list: `?page=2` passes, `?page=2&color=red` does not. Any-match would
+   * defeat the point, since a facet URL nearly always carries the
+   * pagination parameter too.
+   */
+  crawlQueryStringExceptions: string[];
 
   /**
    * Wave 6 — Per-pass crawl-analysis toggles. Each post-crawl pass
@@ -1380,6 +1408,15 @@ export interface JsRenderConfig {
    * runs in JS mode. Off by default — adds an in-page evaluate pass.
    */
   a11yAudit: boolean;
+  /**
+   * Discover client-side routes an SPA reaches without a document
+   * request: the History API (`pushState` / `replaceState` / `popstate`)
+   * is hooked before the page's own scripts run, and hash-router links
+   * (`#/about`) survive URL normalisation instead of collapsing onto the
+   * shell document. Off by default — a hash-routed site can otherwise
+   * multiply into far more URLs than the operator expected.
+   */
+  spaRouting: boolean;
 }
 
 export interface HttpAuth {
@@ -2309,6 +2346,8 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   followExternalNofollow: false,
   crawlInvalidLinks: false,
   crawlLinkedSitemaps: false,
+  crawlQueryStrings: true,
+  crawlQueryStringExceptions: [],
   analyseInlinks: true,
   analyseLinkScore: true,
   analyseRedirectChains: true,
@@ -2343,6 +2382,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
     mobileUsability: false,
     lcpCandidate: false,
     a11yAudit: false,
+    spaRouting: false,
   },
   performanceBudget: {
     enabled: false,

@@ -15,6 +15,11 @@ export interface RenderOptions {
   detectLcp?: boolean;
   /** Run the in-page accessibility audit (contrast + focus outline). */
   detectA11y?: boolean;
+  /**
+   * Record client-side route changes (History API + hash router) so the
+   * crawler can follow routes an SPA reaches without a document request.
+   */
+  discoverSpaRoutes?: boolean;
   /** Where to write screenshot PNGs — the caller resolves a per-URL path. */
   screenshotPaths?: {
     fullpage?: string;
@@ -59,6 +64,13 @@ export interface RenderResult {
   lcp?: LcpCandidate | null;
   /** Accessibility audit from `detectA11y` — null when it could not run. */
   a11y?: A11yAudit | null;
+  /**
+   * Absolute URLs the page navigated to client-side during this render
+   * (`history.pushState` / `replaceState` / `popstate` / `hashchange`),
+   * plus any hash-router links found in the rendered DOM. Empty unless
+   * `discoverSpaRoutes` was set.
+   */
+  spaRoutes?: string[];
 }
 
 /** V2 Faz 16 — in-page accessibility audit result. */
@@ -284,6 +296,82 @@ const A11Y_AUDIT_FN = `(() => {
  * pages warm but does not isolate state per-render. Callers that need state
  * isolation must drop and recreate the context.
  */
+/**
+ * V2 Bölüm 29 — SPA route discovery.
+ *
+ * A single-page app can serve dozens of "pages" without ever making a
+ * document request: the router calls `history.pushState` (or flips the
+ * hash) and re-renders in place. A crawler that only follows `<a href>`
+ * from the settled DOM sees one URL and reports the rest as missing.
+ *
+ * This init script wraps the History API before any page script runs and
+ * records every URL the app routes to. It is injected once per pooled
+ * page (Playwright has no `removeInitScript`, and pages are reused), so
+ * it must be idempotent — the `__freecrawlSpaHook` guard makes it so.
+ * The recorded list is per-document: Playwright re-runs init scripts on
+ * every navigation, which resets `__freecrawlRoutes` for the next URL.
+ */
+const SPA_ROUTE_HOOK = `(() => {
+  if (window.__freecrawlSpaHook) return;
+  window.__freecrawlSpaHook = true;
+  var MAX = 200;
+  var seen = [];
+  window.__freecrawlRoutes = seen;
+  function record() {
+    try {
+      var href = String(location.href);
+      if (!href) return;
+      if (seen.length >= MAX) return;
+      if (seen.indexOf(href) === -1) seen.push(href);
+    } catch (e) { /* cross-origin frame — ignore */ }
+  }
+  ['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name];
+    if (typeof original !== 'function') return;
+    history[name] = function () {
+      var result = original.apply(this, arguments);
+      record();
+      return result;
+    };
+  });
+  window.addEventListener('popstate', record);
+  window.addEventListener('hashchange', record);
+  record();
+})()`;
+
+/**
+ * Collect what the hook recorded, plus hash-router links present in the
+ * settled DOM. The DOM half matters because a hash-router site's nav is
+ * `<a href="#/about">` — real links the crawler can follow without
+ * clicking, but only if they are resolved to absolute URLs here.
+ */
+const SPA_ROUTE_COLLECT_FN = `(() => {
+  var out = [];
+  function push(href) {
+    if (!href) return;
+    if (out.length >= 300) return;
+    if (out.indexOf(href) === -1) out.push(href);
+  }
+  try {
+    var recorded = window.__freecrawlRoutes || [];
+    for (var i = 0; i < recorded.length; i++) push(recorded[i]);
+  } catch (e) { /* ignore */ }
+  try {
+    var anchors = document.querySelectorAll('a[href*="#/"], a[href*="#!/"]');
+    for (var j = 0; j < anchors.length && j < 500; j++) {
+      var raw = anchors[j].getAttribute('href');
+      if (!raw) continue;
+      try { push(new URL(raw, location.href).href); } catch (e) { /* skip */ }
+    }
+  } catch (e) { /* ignore */ }
+  return out;
+})()`;
+
+/** Pages that already carry the SPA hook. Playwright cannot remove an
+ *  init script, and the pool hands the same page back for the next URL,
+ *  so re-adding it on every render would stack duplicates. */
+const spaHookedPages = new WeakSet<object>();
+
 export async function renderUrl(
   url: string,
   pool: BrowserPool,
@@ -322,6 +410,15 @@ export async function renderUrl(
   try {
     if (opts.viewport) {
       await page.setViewportSize(opts.viewport);
+    }
+    if (opts.discoverSpaRoutes && !spaHookedPages.has(page)) {
+      try {
+        await page.addInitScript(SPA_ROUTE_HOOK);
+        spaHookedPages.add(page);
+      } catch {
+        // A page that refuses the init script still renders — route
+        // discovery just falls back to whatever the DOM exposes.
+      }
     }
     const response = await page.goto(url, {
       waitUntil: opts.waitUntil,
@@ -375,6 +472,20 @@ export async function renderUrl(
       }
     }
 
+    // SPA routes — read whatever the hook recorded during hydration and
+    // the hash-router links in the settled DOM.
+    let spaRoutes: string[] | undefined;
+    if (opts.discoverSpaRoutes) {
+      try {
+        const collected = (await page.evaluate(SPA_ROUTE_COLLECT_FN)) as unknown;
+        spaRoutes = Array.isArray(collected)
+          ? collected.filter((r): r is string => typeof r === 'string')
+          : [];
+      } catch {
+        spaRoutes = [];
+      }
+    }
+
     // Screenshot capture — best-effort. Failures (e.g. detached page)
     // do not fail the render result.
     const screenshots: { fullpage?: string; fold?: string } = {};
@@ -417,6 +528,7 @@ export async function renderUrl(
       screenshots: Object.keys(screenshots).length > 0 ? screenshots : undefined,
       lcp: opts.detectLcp ? lcp : undefined,
       a11y: opts.detectA11y ? a11y : undefined,
+      spaRoutes,
     };
   } catch (err) {
     result = {

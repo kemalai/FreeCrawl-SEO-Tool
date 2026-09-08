@@ -49,6 +49,16 @@ import type {
   UrlAnalyticsDetail,
 } from './google.js';
 import type { AiProvider, AiRow } from './ai.js';
+import type {
+  AssistantApprovalInput,
+  AssistantEvent,
+  AssistantSendInput,
+  AssistantSendResult,
+  McpServerConfig,
+  McpServerStatus,
+  McpToolPolicy,
+  McpToolsListResult,
+} from './mcp.js';
 import type { SeoProvider, SeoRow } from './seo.js';
 import type {
   LogAnalyzeInput,
@@ -60,7 +70,6 @@ import type {
   LogStatusRow,
   LogTrendRow,
   LogCrawlBudgetRow,
-  LogOrphanRow,
   LogDiscoveryRow,
   LogSeedDiscoveryResult,
   LogExportInput,
@@ -341,6 +350,29 @@ export const IPC = {
   spellingLanguages: 'spelling:languages',
   /** main → renderer: live progress of an in-flight spelling run. */
   spellingProgress: 'spelling:progress',
+  /** Faz 5 — MCP client. `mcpServersList` / `mcpServersSave` manage the
+   *  registered external MCP servers (secret values masked on the way out,
+   *  encrypted on the way in); `mcpServerConnect` / `mcpServerDisconnect`
+   *  open and close one session; `mcpServerStatuses` reports them all;
+   *  `mcpToolsList` returns the tool catalogue of the chosen servers. */
+  mcpServersList: 'mcp:servers-list',
+  mcpServersSave: 'mcp:servers-save',
+  mcpServerConnect: 'mcp:server-connect',
+  mcpServerDisconnect: 'mcp:server-disconnect',
+  mcpServerStatuses: 'mcp:server-statuses',
+  mcpToolsList: 'mcp:tools-list',
+  /** Remembered per-tool approval decisions (`ask` / `always` / `never`). */
+  mcpPolicySet: 'mcp:policy-set',
+  mcpPolicyList: 'mcp:policy-list',
+  /** Faz 5 — assistant chat. `assistantSend` runs one agentic turn
+   *  (tool rounds included) and resolves with the messages to append;
+   *  `assistantCancel` aborts it; `assistantApprove` answers a pending
+   *  tool-approval card. */
+  assistantSend: 'assistant:send',
+  assistantCancel: 'assistant:cancel',
+  assistantApprove: 'assistant:approve',
+  /** main → renderer: live assistant events (tool calls, results, errors). */
+  assistantEvent: 'assistant:event',
   /** Faz 7 — Google OAuth keystone (shared by Search Console, GA4,
    *  Sheets). `googleAuthStart` opens the consent screen in the browser
    *  and catches the loopback redirect; `googleAuthStatus` reports the
@@ -2097,6 +2129,33 @@ export interface FreeCrawlApi {
   logThreatSummary(): Promise<LogThreatSummary>;
   /** Senders of flagged requests, busiest first — backs the blocklist copy. */
   logThreatIps(limit?: number): Promise<LogThreatIpRow[]>;
+  /** Faz 5 — registered MCP servers, with every secret value masked. */
+  mcpServersList(): Promise<McpServerConfig[]>;
+  /** Replace the server registry. Values that come back as the mask are
+   *  left as they were; anything else is re-encrypted at rest. */
+  mcpServersSave(servers: McpServerConfig[]): Promise<McpServerConfig[]>;
+  /** Open a session with one server (spawns it, for stdio). */
+  mcpServerConnect(id: string): Promise<McpServerStatus>;
+  /** Close one server's session. */
+  mcpServerDisconnect(id: string): Promise<McpServerStatus>;
+  /** Connection state of every registered server. */
+  mcpServerStatuses(): Promise<McpServerStatus[]>;
+  /** Tool catalogue for the given servers, plus FreeCrawl's own built-in
+   *  project tools. Connects on demand. */
+  mcpToolsList(serverIds: string[]): Promise<McpToolsListResult>;
+  /** Remember (or clear) an approval decision for one tool. */
+  mcpPolicySet(serverId: string, tool: string, policy: McpToolPolicy): Promise<void>;
+  /** Every remembered decision, keyed `<serverId>:<tool>`. */
+  mcpPolicyList(): Promise<Record<string, McpToolPolicy>>;
+  /** Run one assistant turn — the model may call tools several times
+   *  before answering. Subscribe to `onAssistantEvent` for live progress. */
+  assistantSend(input: AssistantSendInput): Promise<AssistantSendResult>;
+  /** Abort the in-flight assistant turn for this window. */
+  assistantCancel(): Promise<void>;
+  /** Answer a pending tool-approval card. */
+  assistantApprove(input: AssistantApprovalInput): Promise<void>;
+  /** Live assistant events while a turn runs. */
+  onAssistantEvent(cb: (e: AssistantEvent) => void): () => void;
   onProgress(cb: (p: CrawlProgress) => void): () => void;
   onDone(cb: (summary: CrawlSummary) => void): () => void;
   onError(cb: (message: string) => void): () => void;

@@ -35,6 +35,64 @@ export function robotsUserAgentToken(userAgent: string): string {
   return leading && leading.length > 0 ? leading : userAgent;
 }
 
+
+/**
+ * RFC 9309 §2.5: a crawler MUST parse at least 500 KiB of robots.txt and
+ * MAY ignore the rest. Without a cap the runtime loader called
+ * `res.text()` on whatever the origin sent — a misconfigured server that
+ * answers /robots.txt with a database dump (or a hostile one that streams
+ * forever) would be buffered into memory in full, once per origin, on the
+ * crawl's hot path.
+ */
+export const MAX_ROBOTS_BYTES = 512 * 1024;
+
+/**
+ * Read at most `cap` bytes of a response body, then cancel the stream so
+ * the rest is never transferred. Returns the decoded text plus whether the
+ * cap fired (the caller decides whether that is worth reporting).
+ */
+export async function readBodyCapped(
+  body: ReadableStream<Uint8Array> | null,
+  cap = MAX_ROBOTS_BYTES,
+): Promise<{ text: string; truncated: boolean }> {
+  if (!body) return { text: '', truncated: false };
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let truncated = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      const remaining = cap - total;
+      if (value.byteLength >= remaining) {
+        chunks.push(value.subarray(0, remaining));
+        total = cap;
+        truncated = true;
+        break;
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    // Cancel rather than drain: on a truncated read the origin is still
+    // sending, and we want the socket released now.
+    try {
+      await reader.cancel();
+    } catch {
+      /* already closed */
+    }
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { text: new TextDecoder('utf-8').decode(merged), truncated };
+}
+
 export async function loadRobots(
   origin: string,
   userAgent: string,
@@ -57,7 +115,12 @@ export async function loadRobots(
       signal: controller.signal,
     });
     if (res.ok) {
-      const body = await res.text();
+      const { text: body, truncated } = await readBodyCapped(res.body);
+      if (truncated && onNotice) {
+        onNotice(
+          `robots.txt for ${origin} is larger than ${Math.round(MAX_ROBOTS_BYTES / 1024)} KB; only the first ${Math.round(MAX_ROBOTS_BYTES / 1024)} KB were parsed (RFC 9309 §2.5).`,
+        );
+      }
       const parser = robotsParser(robotsUrl, body);
       return {
         isAllowed: (url: string) => parser.isAllowed(url, uaToken) ?? true,
@@ -174,7 +237,7 @@ export async function testUrlAgainstRobots(
     });
     status = res.status;
     if (res.ok) {
-      const raw = await res.text();
+      const { text: raw } = await readBodyCapped(res.body);
       body = raw.length > 8192 ? raw.slice(0, 8189) + '...' : raw;
     } else {
       try {

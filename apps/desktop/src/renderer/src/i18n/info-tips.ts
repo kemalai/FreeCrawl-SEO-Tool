@@ -12,7 +12,12 @@
  * degradation), which is also what happens to technical example values
  * — regexes, header values, URLs — that are deliberately left untranslated.
  *
- * GENERATED FILE — do not hand-edit. Regenerate when tooltip copy changes.
+ * Hand-maintained: add the entry in the same commit as the tooltip.
+ * `tests/settings-infotip-i18n.test.ts` enforces that for both places
+ * tooltips are authored — SettingsDialog.tsx and tabs/columns.ts — and a
+ * new prose tooltip with no Turkish entry fails the suite by file and
+ * line. Technical sample values need no entry; the test tells a sentence
+ * apart from a value list on its own.
  */
 
 const TR_INFO_TIPS: Record<string, string> = {
@@ -528,6 +533,160 @@ const TR_INFO_TIPS: Record<string, string> = {
     "Bu URL'den başlayan yönlendirme zinciri, döngüye dayanıklı yürütecin tespit ettiği bir çevrim (A → B → A) içeriyorsa Y olur; aksi halde zincir yürünmemiştir.",
   ["Y when this URL belongs to a paginated cluster whose ordinal sequence has a gap (e.g. ?page=1, 2, 4 — page 3 missing). Set by the post-crawl `recomputePaginationSequence` pass."]:
     "Bu URL, sıra numaralarında boşluk olan bir sayfalama kümesine aitse Y olur (ör. ?page=1, 2, 4 — 3. sayfa eksik). Crawl sonrası `recomputePaginationSequence` geçişi tarafından ayarlanır.",
+  ["SQL injection — the request tries to smuggle SQL into a parameter (UNION SELECT, sleep(), error-based functions) to read or alter your database."]:
+    "SQL enjeksiyonu — istek, veritabanınızı okumak veya değiştirmek için bir parametrenin içine SQL kaçırmaya çalışıyor (UNION SELECT, sleep(), hata tabanlı fonksiyonlar).",
+  ["Cross-site scripting — the request carries script markup or a javascript: URL in a parameter, hoping the page echoes it back into the HTML unescaped."]:
+    "Siteler arası betik çalıştırma (XSS) — istek, bir parametrede script işaretlemesi ya da javascript: URL'i taşıyor; sayfanın bunu kaçışsız biçimde HTML'e geri yazmasını umuyor.",
+  ["Path traversal — the request walks out of the web root with ../ or encoded variants to reach files like /etc/passwd or win.ini."]:
+    "Dizin aşımı — istek, /etc/passwd veya win.ini gibi dosyalara ulaşmak için ../ ya da kodlanmış varyantlarıyla web kökünün dışına çıkıyor.",
+  ["Command injection — the request appends shell syntax (;, |, backticks, $( )) to a parameter to run commands on the server."]:
+    "Komut enjeksiyonu — istek, sunucuda komut çalıştırmak için bir parametreye kabuk sözdizimi ekliyor (;, |, ters tırnak, $( )).",
+  ["Scanner probe — an automated vulnerability scanner walking a wordlist of known admin panels, installers and exploit paths (wp-login, phpmyadmin, /actuator, shell uploads). Not tailored to your site; it hits everyone."]:
+    "Tarayıcı sondası — otomatik bir zafiyet tarayıcısı, bilinen yönetim panelleri, kurulum dosyaları ve istismar yollarından oluşan bir listeyi deniyor (wp-login, phpmyadmin, /actuator, shell yüklemeleri). Sitenize özel değildir; herkese aynı listeyi dener.",
+  ["Sensitive file fetch — a direct request for something that must never be public: .env, .git, backups, SQL dumps, private keys, config files."]:
+    "Hassas dosya isteği — asla herkese açık olmaması gereken bir şeye doğrudan istek: .env, .git, yedekler, SQL dump'ları, özel anahtarlar, yapılandırma dosyaları.",
+  ["Anomaly — malformed or evasive input (null bytes, CRLF injection, over-encoding, absurd parameter lengths) that matches no single attack class but is not a normal browser request."]:
+    "Anormallik — tek bir saldırı sınıfına uymayan ama normal bir tarayıcı isteği de olmayan bozuk ya da atlatma amaçlı girdi (null bayt, CRLF enjeksiyonu, aşırı kodlama, absürt parametre uzunlukları).",
+  ["Sum of the weights of every attack signature the request matched. Each signature carries a weight by how conclusive it is (a UNION SELECT weighs 9, a stray quote 2), and a line is only flagged once the total reaches 5 — so one decisive pattern flags on its own, while weak hints have to add up. Higher score = less room for a false positive; sort by it to triage."]:
+    "İsteğin eşleştiği tüm saldırı imzalarının ağırlıklarının toplamı. Her imza ne kadar kesin olduğuna göre bir ağırlık taşır (UNION SELECT 9, başıboş bir tırnak 2 eder) ve bir satır ancak toplam 5'e ulaşınca işaretlenir — yani tek başına belirleyici bir desen yeterken, zayıf ipuçlarının birikmesi gerekir. Skor yükseldikçe yanlış pozitif ihtimali azalır; önceliklendirmek için bu sütuna göre sıralayın.",
+  ["Which attack class the strongest matching signature belongs to: SQL injection, XSS, path traversal, command injection, scanner probe, sensitive file, or anomaly. Hover any badge in this column for what that class means in practice."]:
+    "En güçlü eşleşen imzanın hangi saldırı sınıfına ait olduğu: SQL enjeksiyonu, XSS, dizin aşımı, komut enjeksiyonu, tarayıcı sondası, hassas dosya ya da anormallik. Bu sütundaki herhangi bir rozetin üzerine gelerek o sınıfın pratikte ne anlama geldiğini görebilirsiniz.",
+  ["Filters on the Status column — the most recent response the log recorded for that path. The analyzer keeps one status per URL rather than a full distribution, so this answers 'what is this URL returning now'. Paths whose status could not be parsed are hidden while a class is selected."]:
+    "Durum sütununa göre filtreler — log'un o yol için kaydettiği en son yanıt. Analiz aracı URL başına tam bir dağılım yerine tek bir durum tutar, dolayısıyla bu filtre “bu URL şu anda ne dönüyor” sorusunu yanıtlar. Bir sınıf seçiliyken durumu ayrıştırılamamış yollar gizlenir.",
+  ["Most recent HTTP status the log recorded for this path. One value per URL, not a distribution — a path that returned 200 all week and 404 this morning shows 404."]:
+    "Log'un bu yol için kaydettiği en son HTTP durum kodu. URL başına tek değer tutulur, dağılım değil — bütün hafta 200 dönüp bu sabah 404 dönen bir yol 404 görünür.",
+  ["A URL whose path repeats the same segment this many times or more (/shop/shop/shop/…) is treated as a link loop and skipped. This shape comes from a relative-href bug and has no legitimate counterpart. Skipped counts are reported when the crawl finishes."]:
+    "Yolu aynı segmenti bu kadar veya daha fazla kez tekrarlayan bir URL (/shop/shop/shop/…) bağlantı döngüsü sayılır ve atlanır. Bu şekil göreli href hatasından doğar ve meşru bir karşılığı yoktur. Atlanan URL sayısı crawl bittiğinde raporlanır.",
+  ["3 is safe for every site; raise to 4–5 only if a real path legitimately repeats a segment; 0 disables the guard."]:
+    "3 her site için güvenlidir; gerçek bir yol meşru olarak bir segmenti tekrarlıyorsa 4–5'e çıkarın; 0 korumayı kapatır.",
+  ["URLs with more query parameters than this are flagged as faceted-navigation traps under Issues → URL → Crawl Trap. Detection only — the URLs are still crawled, because legitimate filter pages look the same."]:
+    "Bundan fazla sorgu parametresi taşıyan URL'ler Sorunlar → URL → Crawl Tuzağı altında fasetli navigasyon tuzağı olarak işaretlenir. Yalnızca tespit — URL'ler yine de taranır, çünkü meşru filtre sayfaları da aynı görünür.",
+  ["4 surfaces most faceted-nav explosions; 0 disables the check."]:
+    "4 çoğu fasetli navigasyon patlamasını yakalar; 0 kontrolü kapatır.",
+  ["Honor Allow / Disallow rules declared in /robots.txt for the configured User-Agent. Screaming Frog: 'Respect robots.txt' (Configuration → robots.txt)."]:
+    "Yapılandırılan User-Agent için /robots.txt'te bildirilen Allow / Disallow kurallarına uyar. Screaming Frog'daki karşılığı: 'Respect robots.txt' (Configuration → robots.txt).",
+  ["Honor a Crawl-delay directive as a global rate limit (one request every N seconds). Crawl-delay is not part of RFC 9309 — Google ignores it and Screaming Frog does not implement it — and published values are often stale: 'Crawl-delay: 30' turns a 500-URL crawl into hours. Ignored by default; the directive is still reported in the log when found."]:
+    "Crawl-delay direktifini genel bir hız sınırı olarak uygular (N saniyede bir istek). Crawl-delay RFC 9309'un parçası değildir — Google yok sayar, Screaming Frog uygulamaz — ve yayımlanan değerler çoğu zaman eskimiştir: 'Crawl-delay: 30' 500 URL'lik bir taramayı saatlere çıkarır. Varsayılan olarak yok sayılır; direktif bulunduğunda yine de log'a yazılır.",
+  ["Off (default) for normal audits. On when an ops policy requires it — expect the crawl to take Crawl-delay seconds per URL."]:
+    "Normal denetimler için kapalı (varsayılan). Bir operasyon politikası gerektiriyorsa açın — taramanın URL başına Crawl-delay saniye süreceğini hesaba katın.",
+  ["Crawl fetches internal <img> targets (incl. srcset / <picture> sources) so each appears in the Internal tab with status, content type, and size — every one counts toward Max URLs. Store keeps the <img> declarations in the Images tab, which works even with Crawl off: you get the full image inventory with alt text for the cost of zero extra requests."]:
+    "Tara, dahili <img> hedeflerini (srcset / <picture> kaynakları dahil) çeker; her biri Internal sekmesinde durum, içerik tipi ve boyutuyla görünür — ve her biri Maks URL kotasından düşer. Sakla, <img> bildirimlerini Images sekmesinde tutar ve Tara kapalıyken de çalışır: sıfır ek istek karşılığında alt metinleriyle birlikte tam görsel envanterini alırsınız.",
+  ["Store on, Crawl off is the cheap alt-text audit. Both on for a full image health check."]:
+    "Sakla açık, Tara kapalı — ucuz alt metin denetimi. Tam bir görsel sağlık kontrolü için ikisi de açık.",
+  ["<video> / <audio> and the <source> children they own. Off by default — media files are large and rarely what an SEO crawl is looking for."]:
+    "<video> / <audio> ve bunlara ait <source> öğeleri. Varsayılan olarak kapalı — medya dosyaları büyüktür ve bir SEO taramasının aradığı şey nadiren budur.",
+  ["On when auditing a video-heavy site for dead media URLs."]:
+    "Video ağırlıklı bir sitede ölü medya URL'lerini denetlerken açın.",
+  ["<link rel=stylesheet> targets. Crawling a stylesheet is also what discovers the web fonts and background images declared inside it via @font-face / url() — so Crawl on with Store off still populates the Internal tab's Font filter without listing every stylesheet."]:
+    "<link rel=stylesheet> hedefleri. Bir stylesheet'i taramak, içinde @font-face / url() ile bildirilen web fontlarını ve arka plan görsellerini de keşfeden şeydir — yani Tara açık, Sakla kapalı, her stylesheet'i listelemeden Internal sekmesindeki Font filtresini yine de doldurur.",
+  ["Crawl on, Store off when you want fonts discovered but not hundreds of CSS rows."]:
+    "Fontların keşfedilmesini isteyip yüzlerce CSS satırı istemiyorsanız Tara açık, Sakla kapalı.",
+  ["<script src> targets, fetched so each gets its own row with status code, content type, and size. Headers only — the body is discarded, never executed."]:
+    "<script src> hedefleri; her biri kendi satırını durum kodu, içerik tipi ve boyutuyla alsın diye çekilir. Yalnızca başlıklar — gövde atılır, asla çalıştırılmaz.",
+  ["Both on to catch 404ing bundles; both off for HTML-only crawls."]:
+    "404 dönen bundle'ları yakalamak için ikisi de açık; yalnızca HTML taramaları için ikisi de kapalı.",
+  ["<a href> targets on the same site. Crawl off turns the run into an audit of a fixed set of pages — sitemaps, canonicals, and the other declared alternates below still feed discovery. Store off empties the link graph: inlinks, outlinks, anchor-text reports, and link score all go with it."]:
+    "Aynı sitedeki <a href> hedefleri. Tara kapalıyken çalışma, sabit bir sayfa kümesinin denetimine dönüşür — sitemap'ler, canonical'lar ve aşağıdaki diğer bildirilen alternatifler keşfi beslemeye devam eder. Sakla kapalıyken bağlantı grafiği boşalır: inlink'ler, outlink'ler, anchor metni raporları ve link skoru da onunla birlikte gider.",
+  ["Leave both on. Crawl off only when a sitemap or URL list already defines the exact set you want."]:
+    "İkisini de açık bırakın. Yalnızca bir sitemap veya URL listesi istediğiniz kümeyi zaten tanımlıyorsa Tara'yı kapatın.",
+  ["Outbound links to other hosts are always status-checked (one HEAD each) so Broken Links catches dead externals — that does not depend on this row. Crawl here means fully crawling those pages, following their links onward too. Store keeps outbound links in the link graph."]:
+    "Diğer host'lara giden bağlantıların durumu her zaman kontrol edilir (her biri için bir HEAD), böylece Bozuk Bağlantılar ölü dış bağlantıları yakalar — bu, bu satıra bağlı değildir. Buradaki Tara, o sayfaları tümüyle taramak ve onların bağlantılarını da izlemek demektir. Sakla, giden bağlantıları bağlantı grafiğinde tutar.",
+  ["Crawl off (default) — status-check externals without spidering the whole web."]:
+    "Tara kapalı (varsayılan) — tüm web'i taramadan dış bağlantıların durumunu kontrol edin.",
+  ["<link rel=canonical> and its HTTP Link: header form. Crawl also enqueues the canonical target, treating it as a navigation hint. Store feeds the Canonicals tab and every canonical issue filter."]:
+    "<link rel=canonical> ve onun HTTP Link: başlığı biçimi. Tara ayrıca canonical hedefini de kuyruğa alır, yani onu bir navigasyon ipucu gibi değerlendirir. Sakla, Canonical'lar sekmesini ve tüm canonical sorun filtrelerini besler.",
+  ["Crawl off (default) — canonicals are a signal, not a route. Store on."]:
+    "Tara kapalı (varsayılan) — canonical bir sinyaldir, bir rota değil. Sakla açık.",
+  ["<link rel=next> / <link rel=prev>. Part of the standard discovery graph; turn Crawl off to isolate a pagination loop without disabling link-following everywhere."]:
+    "<link rel=next> / <link rel=prev>. Standart keşif grafiğinin parçasıdır; her yerde bağlantı takibini kapatmadan bir sayfalama döngüsünü izole etmek için Tara'yı kapatın.",
+  ["Both on unless you are debugging an infinite paginated series."]:
+    "Sonsuz bir sayfalama serisinde hata ayıklamıyorsanız ikisi de açık.",
+  ["<link rel=alternate hreflang>. Crawl enqueues every declared alternate, which is how you reach language versions nothing links to. Store feeds the Hreflang tab and the reciprocity / invalid-code audits."]:
+    "<link rel=alternate hreflang>. Tara, bildirilen her alternatifi kuyruğa alır; hiçbir yerden link almayan dil sürümlerine böyle ulaşırsınız. Sakla, Hreflang sekmesini ve karşılıklılık / geçersiz kod denetimlerini besler.",
+  ["Crawl on for a multi-language audit — otherwise unlinked locales stay invisible."]:
+    "Çok dilli bir denetim için Tara açık — aksi halde link almayan yerelleştirmeler görünmez kalır.",
+  ["<link rel=amphtml>. Crawl fetches the AMP variant as its own URL; Store keeps the declaration plus the AMP smoke-validator findings."]:
+    "<link rel=amphtml>. Tara, AMP sürümünü kendi URL'i olarak çeker; Sakla, bildirimi ve AMP smoke doğrulayıcısının bulgularını tutar.",
+  ["Crawl on only if the site still ships AMP pages."]:
+    "Yalnızca site hâlâ AMP sayfası yayınlıyorsa Tara açık.",
+  ["<meta http-equiv=\"refresh\">. Crawl enqueues the parsed target like a redirect; Store keeps the raw directive and its URL for the Meta Refresh tab."]:
+    "<meta http-equiv=\"refresh\">. Tara, ayrıştırılan hedefi bir yönlendirme gibi kuyruğa alır; Sakla, ham direktifi ve URL'ini Meta Refresh sekmesi için tutar.",
+  ["Crawl on when auditing a legacy site that still redirects this way."]:
+    "Hâlâ bu şekilde yönlendiren eski bir siteyi denetlerken Tara açık.",
+  ["<iframe src> documents. Crawl fetches each embedded page as its own URL, which can pull in a lot of third-party surface. Store records them in the link graph so a dead embed shows up in Outlinks and Broken Links — without counting toward the page's outlink total, since an embed is not a hyperlink."]:
+    "<iframe src> dokümanları. Tara, gömülü her sayfayı kendi URL'i olarak çeker; bu da epeyce üçüncü taraf yüzeyini içeri çekebilir. Sakla, bunları bağlantı grafiğine yazar, böylece ölü bir gömme Outlink'lerde ve Bozuk Bağlantılar'da görünür — ama sayfanın outlink toplamına dahil edilmez, çünkü bir gömme hyperlink değildir.",
+  ["Store on, Crawl off is usually the right pair."]:
+    "Genellikle doğru ikili şudur: Sakla açık, Tara kapalı.",
+  ["The separate-URL (m-dot) mobile version: <link rel=\"alternate\" media=\"only screen and (max-width: …)\">. Null on responsive sites, which is most of them — a value here with no reciprocal canonical back is the classic broken m-dot setup."]:
+    "Ayrı URL'li (m-dot) mobil sürüm: <link rel=\"alternate\" media=\"only screen and (max-width: …)\">. Responsive sitelerde — ki çoğu öyledir — boştur; burada bir değer olup geri işaret eden karşılıklı canonical yoksa bu, klasik bozuk m-dot kurulumudur.",
+  ["Crawl on only when the site really does serve a separate mobile host."]:
+    "Yalnızca site gerçekten ayrı bir mobil host sunuyorsa Tara açık.",
+  ["Links a search engine cannot follow: <a> with no href but an onclick, href=\"javascript:…\", and href=\"#\" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter."]:
+    "Bir arama motorunun izleyemeyeceği bağlantılar: href'i olmayıp onclick taşıyan <a>'lar, href=\"javascript:…\" ve bir handler'a bağlanmış href=\"#\" yer tutucuları. Yalnızca Sakla — taranamayan bir bağlantı tanımı gereği hiç çekilmez. JS-Only Navigasyon sorun filtresini besler.",
+  ["On — it is a count, so it costs nothing."]:
+    "Açık — bu bir sayımdır, hiçbir maliyeti yoktur.",
+  ["With a Subfolder-scoped crawl, links pointing outside the start folder are fetched once so their status code is known, then stopped — they are checked, not crawled through. Off leaves them undiscovered entirely."]:
+    "Alt klasör kapsamlı bir taramada, başlangıç klasörünün dışını gösteren bağlantılar durum kodları bilinsin diye bir kez çekilir, sonra durulur — kontrol edilirler, içlerinden geçilerek taranmazlar. Kapalıyken tamamen keşfedilmeden kalırlar.",
+  ["On — knowing a link out of /blog/ is a 404 costs one request."]:
+    "Açık — /blog/ dışına çıkan bir bağlantının 404 olduğunu bilmek bir isteğe mal olur.",
+  ["Off restricts the crawl to URLs under the start URL's path (Crawl Scope = Subfolder). On lets it cover the whole host. This is a view of the Crawl Scope setting, not a separate switch, so the two can never disagree."]:
+    "Kapalıyken tarama, başlangıç URL'inin yolu altındaki URL'lerle sınırlanır (Tarama Kapsamı = Alt Klasör). Açıkken tüm host'u kapsar. Bu ayrı bir anahtar değil, Tarama Kapsamı ayarının bir görünümüdür; dolayısıyla ikisi asla çelişemez.",
+  ["Off to audit just /blog/; on for the whole site."]:
+    "Yalnızca /blog/'u denetlemek için kapalı; tüm site için açık.",
+  ["Treats every host sharing the registrable domain as internal — shop.example.com and blog.example.com crawl alongside example.com instead of counting as external. Another view of the Crawl Scope setting."]:
+    "Kayıtlanabilir alan adını paylaşan her host'u dahili sayar — shop.example.com ve blog.example.com harici sayılmak yerine example.com ile birlikte taranır. Tarama Kapsamı ayarının bir başka görünümü.",
+  ["On when subdomains are part of the same property."]:
+    "Alt alan adları aynı mülkün parçasıysa açık.",
+  ["Crawl through rel=\"nofollow\" links pointing at the same site. Off (default) is Screaming Frog \"Respect Nofollow\" behaviour. Internal and external are separate switches because sites nofollow them for opposite reasons — crawl-budget shaping vs. not vouching for a third party."]:
+    "Aynı siteyi gösteren rel=\"nofollow\" bağlantıların içinden geçerek tarar. Kapalı (varsayılan), Screaming Frog'un \"Respect Nofollow\" davranışıdır. Dahili ve harici ayrı anahtarlardır, çünkü siteler bunlara zıt nedenlerle nofollow koyar — crawl bütçesini şekillendirmek ile üçüncü bir tarafa kefil olmamak.",
+  ["On when a site nofollows its own faceted navigation and you need behind it."]:
+    "Bir site kendi fasetli navigasyonuna nofollow koyuyorsa ve arkasına geçmeniz gerekiyorsa açın.",
+  ["Crawl through rel=\"nofollow\" links pointing at other hosts. Only has an effect while External Links → Crawl is on."]:
+    "Başka host'ları gösteren rel=\"nofollow\" bağlantıların içinden geçerek tarar. Yalnızca Harici Bağlantılar → Tara açıkken etkilidir.",
+  ["Off — nofollowed externals are exactly the ones you did not vouch for."]:
+    "Kapalı — nofollow'lu dış bağlantılar tam da kefil olmadıklarınızdır.",
+  ["Record hrefs that cannot be parsed as a URL — unencoded whitespace inside the authority, doubled schemes, stray delimiters. They can never resolve to a crawled page, so every one is reported in Broken Links, which is the point. Deliberate non-navigable schemes (mailto:, tel:, #) are not malformed and never appear."]:
+    "URL olarak ayrıştırılamayan href'leri kaydeder — authority içinde kodlanmamış boşluk, çiftlenmiş şema, başıboş ayraç. Bunlar hiçbir zaman taranan bir sayfaya çözümlenemez, bu yüzden her biri Bozuk Bağlantılar'da raporlanır; amaç da budur. Kasıtlı olarak navigasyon dışı şemalar (mailto:, tel:, #) bozuk sayılmaz ve hiç görünmez.",
+  ["On when hunting hand-written markup errors; off keeps Broken Links focused on real 404s."]:
+    "Elle yazılmış işaretleme hatalarını ararken açın; kapalı tutmak Bozuk Bağlantılar'ı gerçek 404'lere odaklı tutar.",
+  ["Off drops every discovered URL carrying a `?`, before robots and before a request goes out. That is the cheap way to stop a faceted navigation (?color=red&size=xl&sort=price) from spending the whole URL budget on one product listing wearing a thousand URLs. The start URL is always crawled, and subresources are exempt — style.css?v=7 is a cache-buster, not a facet. Skipped URLs are counted and reported in the log, never dropped silently."]:
+    "Kapalıyken, `?` taşıyan her keşfedilen URL robots kontrolünden ve istek gönderilmeden önce düşürülür. Fasetli bir navigasyonun (?color=red&size=xl&sort=price) tüm URL bütçesini, bin URL kılığına girmiş tek bir ürün listesine harcamasını engellemenin ucuz yolu budur. Başlangıç URL'i her zaman taranır ve alt kaynaklar muaftır — style.css?v=7 bir cache-buster'dır, faset değil. Atlanan URL'ler sayılır ve log'a yazılır, sessizce düşürülmez.",
+  ["On (default). Off for a first pass over a shop with faceted filters."]:
+    "Açık (varsayılan). Fasetli filtreleri olan bir mağazada ilk geçiş için kapalı.",
+  ["Parameter names that keep a URL in the crawl anyway — pagination, a language switch, a product id. Names only; values are not looked at, and matching ignores case. A URL is admitted only when every parameter it carries is on this list: ?page=2 passes, ?page=2&color=red does not. Any-match would defeat the point, since a facet URL nearly always carries the pagination parameter too."]:
+    "Bir URL'i yine de tarama içinde tutan parametre adları — sayfalama, dil değiştirici, ürün id'si. Yalnızca adlar; değerlere bakılmaz ve eşleşmede büyük/küçük harf önemsizdir. Bir URL ancak taşıdığı her parametre bu listedeyse kabul edilir: ?page=2 geçer, ?page=2&color=red geçmez. Herhangi-biri eşleşmesi amacı boşa çıkarırdı, çünkü bir faset URL'i neredeyse her zaman sayfalama parametresini de taşır.",
+  ["page, lang — keeps paginated archives reachable while the facets stay out."]:
+    "page, lang — fasetler dışarıda kalırken sayfalanmış arşivler erişilebilir kalır.",
+  ["Auto-discovery on its own only records sitemap entries, which is what the sitemap issue filters compare the crawl against. Turning this on crawls them too — and that is what surfaces orphans: pages the sitemap declares but nothing on the site links to."]:
+    "Otomatik keşif tek başına yalnızca sitemap kayıtlarını yazar; sitemap sorun filtreleri taramayı bununla karşılaştırır. Bunu açmak onları taramaya da başlar — orphan'ları ortaya çıkaran şey budur: sitemap'in bildirdiği ama sitede hiçbir şeyin link vermediği sayfalar.",
+  ["On for an orphan-page audit."]:
+    "Orphan sayfa denetimi için açık.",
+  ["Reads Sitemap: directives from /robots.txt plus the conventional /sitemap.xml fallbacks at crawl start. Cheap I/O, and it powers every sitemap issue filter."]:
+    "Tarama başlangıcında /robots.txt'teki Sitemap: direktiflerini ve alışılmış /sitemap.xml yedeklerini okur. Ucuz bir I/O'dur ve her sitemap sorun filtresine güç verir.",
+  ["On (default)."]:
+    "Açık (varsayılan).",
+  ["Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions."]:
+    "Açıkça belirtilen sitemap URL'leri, satır başına bir tane. Kayıtları her zaman hem yazılır hem de tarama tohumu olarak kuyruğa alınır — sitemap, robots.txt'in hiç bahsetmediği bir yerde duruyorsa bunu kullanın.",
+  ["Treat the concurrency and RPS above as a ceiling and let the target server set the real pace. On a 429/503 (or a Retry-After header) the crawler pauses for the penalty window and steps the rate + concurrency down; after a sustained run of clean responses it grows them back toward the ceiling. Off = hold the configured rate no matter how the server responds."]:
+    "Yukarıdaki eşzamanlılık ve RPS değerlerini bir tavan olarak alır ve gerçek hızı hedef sunucunun belirlemesine izin verir. Bir 429/503'te (ya da Retry-After başlığında) crawler ceza penceresi boyunca duraklar, hızı ve eşzamanlılığı kademeli olarak düşürür; temiz yanıtlardan oluşan sürekli bir seriden sonra ikisini de tavana doğru geri büyütür. Kapalı = sunucu ne yanıt verirse versin yapılandırılan hızı koru.",
+  ["Turn on for sites behind Cloudflare / a WAF that returns 429s; leave off for your own infrastructure where the fixed rate is safe."]:
+    "Cloudflare / WAF arkasında olup 429 dönen siteler için açın; sabit hızın güvenli olduğu kendi altyapınızda kapalı bırakın.",
+  ["Sorts query parameters alphabetically at normalisation time. Repeated keys keep their relative order, so ?tag=a&tag=b is preserved. Without this the two orderings occupy separate rows and read as duplicates."]:
+    "Normalleştirme sırasında sorgu parametrelerini alfabetik sıralar. Tekrarlanan anahtarlar göreli sıralarını korur, yani ?tag=a&tag=b bozulmaz. Bu olmadan iki farklı sıralama ayrı satırlar işgal eder ve yinelenen gibi görünür.",
+  ["On for most sites; off if your server routes on positional parameter order."]:
+    "Çoğu site için açık; sunucunuz parametre sırasına göre yönlendirme yapıyorsa kapalı.",
+  ["Collapses runs of slashes in the path to a single slash. Applied before the trailing-slash policy. Web servers serve these identically, so the duplicate-slash variant is normally a false duplicate."]:
+    "Yoldaki ardışık eğik çizgileri tek bir eğik çizgiye indirger. Sondaki eğik çizgi politikasından önce uygulanır. Web sunucuları bunları aynı şekilde sunar, dolayısıyla çift eğik çizgili varyant normalde sahte bir yinelenendir.",
+  ["On if a template bug emits //  in links; off if your framework uses empty path segments as data."]:
+    "Bir şablon hatası bağlantılarda // üretiyorsa açık; framework'ünüz boş yol segmentlerini veri olarak kullanıyorsa kapalı.",
+  ["Off by default: verify the login page's TLS certificate before typing credentials into it. Enable only for a trusted internal host with a self-signed certificate — an unverifiable certificate on a login page is a man-in-the-middle risk."]:
+    "Varsayılan olarak kapalı: kimlik bilgilerini yazmadan önce giriş sayfasının TLS sertifikası doğrulanır. Yalnızca kendinden imzalı sertifikası olan, güvendiğiniz bir iç host için açın — bir giriş sayfasında doğrulanamayan sertifika, ortadaki adam (MITM) riskidir.",
+  ["Hooks the History API before the page's own scripts run, so routes an SPA reaches via pushState / replaceState / popstate are discovered and crawled. Also keeps hash routes (#/about) as distinct URLs instead of collapsing them onto the shell document."]:
+    "Sayfanın kendi script'leri çalışmadan önce History API'ye kanca takar; böylece bir SPA'nın pushState / replaceState / popstate ile ulaştığı rotalar keşfedilir ve taranır. Ayrıca hash rotalarını (#/about) kabuk dokümana indirgemek yerine ayrı URL'ler olarak korur.",
+  ["On for React Router / Vue Router / Angular sites whose pages never produce a document request."]:
+    "Sayfaları hiçbir zaman bir doküman isteği üretmeyen React Router / Vue Router / Angular siteleri için açık.",
+  ["`<link rel=\"alternate\" media=\"only screen and (max-width: …)\" href=\"…\">` value — the separate-URL (m-dot) mobile version of this page. Empty on responsive sites, which is most of them. A value here with no reciprocal canonical pointing back is the classic broken m-dot setup."]:
+    "`<link rel=\"alternate\" media=\"only screen and (max-width: …)\" href=\"…\">` değeri — bu sayfanın ayrı URL'li (m-dot) mobil sürümü. Responsive sitelerde — ki çoğu öyledir — boştur. Burada bir değer olup geri işaret eden karşılıklı bir canonical yoksa, bu klasik bozuk m-dot kurulumudur.",
 };
 
 /**

@@ -43,6 +43,14 @@ import {
   type ImagesQueryResult,
   type LogEntry,
   type MenuEvent,
+  type McpServerConfig,
+  type McpServerStatus,
+  type McpToolPolicy,
+  type McpToolsListResult,
+  type AssistantApprovalInput,
+  type AssistantEvent,
+  type AssistantSendInput,
+  type AssistantSendResult,
   type RobotsTestInput,
   type RobotsTestResult,
   type RobotsValidationIssue,
@@ -521,6 +529,31 @@ const api: FreeCrawlApi = {
   onLogEntry: (cb) => subscribe<LogEntry>(IPC.logsEntry, cb),
   onLogsBatch: (cb) => subscribe<LogEntry[]>(IPC.logsBatch, cb),
   onLogsBusy: (cb) => subscribe<boolean>(IPC.logsBusy, cb),
+  mcpServersList: (): Promise<McpServerConfig[]> =>
+    ipcRenderer.invoke(IPC.mcpServersList),
+  mcpServersSave: (servers: McpServerConfig[]): Promise<McpServerConfig[]> =>
+    ipcRenderer.invoke(IPC.mcpServersSave, servers),
+  mcpServerConnect: (id: string): Promise<McpServerStatus> =>
+    ipcRenderer.invoke(IPC.mcpServerConnect, id),
+  mcpServerDisconnect: (id: string): Promise<McpServerStatus> =>
+    ipcRenderer.invoke(IPC.mcpServerDisconnect, id),
+  mcpServerStatuses: (): Promise<McpServerStatus[]> =>
+    ipcRenderer.invoke(IPC.mcpServerStatuses),
+  mcpToolsList: (serverIds: string[]): Promise<McpToolsListResult> =>
+    ipcRenderer.invoke(IPC.mcpToolsList, serverIds),
+  mcpPolicySet: (
+    serverId: string,
+    tool: string,
+    policy: McpToolPolicy,
+  ): Promise<void> => ipcRenderer.invoke(IPC.mcpPolicySet, serverId, tool, policy),
+  mcpPolicyList: (): Promise<Record<string, McpToolPolicy>> =>
+    ipcRenderer.invoke(IPC.mcpPolicyList),
+  assistantSend: (input: AssistantSendInput): Promise<AssistantSendResult> =>
+    ipcRenderer.invoke(IPC.assistantSend, input),
+  assistantCancel: (): Promise<void> => ipcRenderer.invoke(IPC.assistantCancel),
+  assistantApprove: (input: AssistantApprovalInput): Promise<void> =>
+    ipcRenderer.invoke(IPC.assistantApprove, input),
+  onAssistantEvent: (cb) => subscribe<AssistantEvent>(IPC.assistantEvent, cb),
   onProgress: (cb) => subscribe<CrawlProgress>(IPC.crawlProgress, cb),
   onDone: (cb) => subscribe<CrawlSummary>(IPC.crawlDone, cb),
   onError: (cb) => subscribe<string>(IPC.crawlError, cb),

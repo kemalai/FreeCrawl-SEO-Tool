@@ -95,33 +95,6 @@ const REPORT_LABELS: Record<ReportKind, string> = {
   'top-words': 'Top Words (Title + Meta + H1, Top 100)',
 };
 
-const KEY_LABELS: Record<ReportKind, string> = {
-  'pages-per-dir': 'Directory',
-  'status-codes': 'Status',
-  'indexability-distribution': 'Indexability',
-  'content-kind-distribution': 'Content Type',
-  depth: 'Depth',
-  'response-time': 'Bucket',
-  'slowest-urls': 'URL',
-  'most-inlinks': 'URL',
-  'least-inlinks': 'URL',
-  'most-outlinks': 'URL',
-  'biggest-pages': 'URL',
-  'deepest-urls': 'URL',
-  'external-domain-health': 'Domain',
-  'analytics-coverage': 'Tracker',
-  'link-positions': 'Position',
-  'image-weight': 'URL',
-  'inlinks-histogram': 'Bucket',
-  'word-count-histogram': 'Bucket',
-  'url-length-histogram': 'Bucket',
-  'word-count-per-dir': 'Directory',
-  'sitemap-orphans': 'URL',
-  'orphan-cross-source': 'URL',
-  'server-headers': 'Server',
-  'top-words': 'Word',
-};
-
 const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
   'pages-per-dir': null,
   'status-codes': null,

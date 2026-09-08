@@ -7696,6 +7696,15 @@ export class ProjectDb {
       args.push(`%${input.search.trim()}%`);
     }
     if (filter === 'bots') where.push('bot_hits > 0');
+    const statusClass = input.status ?? 'all';
+    if (statusClass !== 'all') {
+      // `last_status` is the only status the aggregate keeps; a NULL means
+      // the line had no parseable status and is excluded rather than
+      // silently counted as a match.
+      const base = Number(statusClass[0]) * 100;
+      where.push('last_status >= ? AND last_status < ?');
+      args.push(base, base + 100);
+    }
     if (input.bot && input.bot.trim()) {
       // Per-named-bot filter — only paths this specific bot hit.
       where.push(
@@ -11040,9 +11049,8 @@ function computeFolderDepth(rawUrl: string): number {
 function computeQueryParamCount(rawUrl: string): number {
   try {
     const u = new URL(rawUrl);
-    let n = 0;
-    for (const _ of u.searchParams) n++;
-    return n;
+    // `size` counts repeated keys the same way the old loop did.
+    return u.searchParams.size;
   } catch {
     return 0;
   }

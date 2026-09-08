@@ -17,6 +17,8 @@ import type {
   LogUrlStatsInput,
 } from '@freecrawl/shared-types';
 import { writeTextToClipboard } from './utils/clipboard.js';
+import { InfoTip } from './components/InfoTip.js';
+import { translateInfoTip } from './i18n/info-tips.js';
 
 /**
  * V2 Faz 2 — standalone Log File Analyzer window (renderer `?loganalyzer=1`).
@@ -401,10 +403,29 @@ function TabStrip({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   );
 }
 
-function Th({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+function Th({
+  children,
+  className = '',
+  info,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  /** English tooltip body — rendered as the standard [i] icon, translated
+   *  through the shared InfoTip dictionary. */
+  info?: string;
+}) {
   return (
     <th className={`sticky top-0 z-10 bg-surface-900 px-2 py-1 text-left font-medium text-surface-400 ${className}`}>
-      {children}
+      {info ? (
+        <span
+          className={`inline-flex items-center gap-1 ${className.includes('text-right') ? 'flex-row-reverse' : ''}`}
+        >
+          {children}
+          <InfoTip info={info} />
+        </span>
+      ) : (
+        children
+      )}
     </th>
   );
 }
@@ -428,6 +449,7 @@ function UrlStatsTab({ version, mode }: { version: number; mode: 'all' | 'orphan
   const [filter, setFilter] = useState<NonNullable<LogUrlStatsInput['filter']>>(mode === 'orphans' ? 'orphans' : 'all');
   const [bot, setBot] = useState('');
   const [botList, setBotList] = useState<LogBotRow[]>([]);
+  const [status, setStatus] = useState<NonNullable<LogUrlStatsInput['status']>>('all');
   const [sortBy, setSortBy] = useState<NonNullable<LogUrlStatsInput['sortBy']>>('totalHits');
 
   useEffect(() => {
@@ -436,7 +458,7 @@ function UrlStatsTab({ version, mode }: { version: number; mode: 'all' | 'orphan
 
   useEffect(() => {
     setOffset(0);
-  }, [search, filter, bot, sortBy, version]);
+  }, [search, filter, bot, status, sortBy, version]);
 
   useEffect(() => {
     // Cancellation guard: fast typing / filter changes fire overlapping
@@ -444,7 +466,15 @@ function UrlStatsTab({ version, mode }: { version: number; mode: 'all' | 'orphan
     // and overwrite the newer result set, showing rows for a filter the user
     // no longer has selected.
     let cancelled = false;
-    const input: LogUrlStatsInput = { limit: PAGE, offset, search, sortBy, filter, bot: bot || undefined };
+    const input: LogUrlStatsInput = {
+      limit: PAGE,
+      offset,
+      search,
+      sortBy,
+      filter,
+      bot: bot || undefined,
+      status,
+    };
     const call = mode === 'orphans' ? window.freecrawl.logOrphans(input) : window.freecrawl.logUrlStats(input);
     void call.then((r) => {
       if (cancelled) return;
@@ -454,7 +484,7 @@ function UrlStatsTab({ version, mode }: { version: number; mode: 'all' | 'orphan
     return () => {
       cancelled = true;
     };
-  }, [offset, search, filter, bot, sortBy, version, mode]);
+  }, [offset, search, filter, bot, status, sortBy, version, mode]);
 
   // The single filter <select> carries either a membership token
   // (all/bots/orphans/crawled) or a `bot:<name>` per-bot selection.
@@ -499,6 +529,20 @@ function UrlStatsTab({ version, mode }: { version: number; mode: 'all' | 'orphan
             )}
           </select>
         )}
+        <span className="inline-flex items-center gap-1">
+          <select
+            value={status}
+            onChange={(e) => setStatus(e.target.value as NonNullable<LogUrlStatsInput['status']>)}
+            className="rounded border border-surface-700 bg-surface-800 px-2 py-1 text-surface-100"
+          >
+            <option value="all">{t('logAnalyzer.urlStatusAll', { defaultValue: 'Any status' })}</option>
+            <option value="2xx">2xx</option>
+            <option value="3xx">3xx</option>
+            <option value="4xx">{t('logAnalyzer.urlStatus4xx', { defaultValue: '4xx (errors)' })}</option>
+            <option value="5xx">{t('logAnalyzer.urlStatus5xx', { defaultValue: '5xx (server errors)' })}</option>
+          </select>
+          <InfoTip info="Filters on the Status column — the most recent response the log recorded for that path. The analyzer keeps one status per URL rather than a full distribution, so this answers 'what is this URL returning now'. Paths whose status could not be parsed are hidden while a class is selected." />
+        </span>
         <select
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value as NonNullable<LogUrlStatsInput['sortBy']>)}
@@ -521,7 +565,12 @@ function UrlStatsTab({ version, mode }: { version: number; mode: 'all' | 'orphan
               <Th className="text-right">Googlebot</Th>
               <Th className="text-right">Bingbot</Th>
               <Th className="text-right">Yandex</Th>
-              <Th className="text-right">{t('logAnalyzer.colStatus', { defaultValue: 'Status' })}</Th>
+              <Th
+                className="text-right"
+                info="Most recent HTTP status the log recorded for this path. One value per URL, not a distribution — a path that returned 200 all week and 404 this morning shows 404."
+              >
+                {t('logAnalyzer.colStatus', { defaultValue: 'Status' })}
+              </Th>
               <Th>{t('logAnalyzer.colLast', { defaultValue: 'Last Hit' })}</Th>
               <Th>{t('logAnalyzer.colCrawl', { defaultValue: 'In Crawl' })}</Th>
             </tr>
@@ -818,6 +867,26 @@ const THREAT_CATEGORIES: LogThreatCategory[] = [
   'anomaly',
 ];
 
+/**
+ * What each category actually means, in the site owner's terms. Shown as
+ * the hover text on every category badge (table rows and the filter
+ * chips) and collected into the Category column's [i] tooltip, because
+ * "Scanner probe" is only obvious to someone who already knows.
+ */
+const THREAT_CATEGORY_INFO: Record<LogThreatCategory, string> = {
+  sqli: 'SQL injection — the request tries to smuggle SQL into a parameter (UNION SELECT, sleep(), error-based functions) to read or alter your database.',
+  xss: 'Cross-site scripting — the request carries script markup or a javascript: URL in a parameter, hoping the page echoes it back into the HTML unescaped.',
+  traversal: 'Path traversal — the request walks out of the web root with ../ or encoded variants to reach files like /etc/passwd or win.ini.',
+  cmdi: 'Command injection — the request appends shell syntax (;, |, backticks, $( )) to a parameter to run commands on the server.',
+  scanner: 'Scanner probe — an automated vulnerability scanner walking a wordlist of known admin panels, installers and exploit paths (wp-login, phpmyadmin, /actuator, shell uploads). Not tailored to your site; it hits everyone.',
+  'sensitive-file': 'Sensitive file fetch — a direct request for something that must never be public: .env, .git, backups, SQL dumps, private keys, config files.',
+  anomaly: 'Anomaly — malformed or evasive input (null bytes, CRLF injection, over-encoding, absurd parameter lengths) that matches no single attack class but is not a normal browser request.',
+};
+
+/** How a request earns its score — the answer to "what is this number?". */
+const THREAT_SCORE_INFO =
+  'Sum of the weights of every attack signature the request matched. Each signature carries a weight by how conclusive it is (a UNION SELECT weighs 9, a stray quote 2), and a line is only flagged once the total reaches 5 — so one decisive pattern flags on its own, while weak hints have to add up. Higher score = less room for a false positive; sort by it to triage.';
+
 const THREAT_COLORS: Record<LogThreatCategory, string> = {
   sqli: 'text-red-300 bg-red-500/15',
   xss: 'text-orange-300 bg-orange-500/15',
@@ -853,9 +922,25 @@ function useThreatCategoryLabel(): (cat: LogThreatCategory) => string {
   );
 }
 
-function ThreatBadge({ category, label }: { category: LogThreatCategory; label: string }) {
+function ThreatBadge({
+  category,
+  label,
+  title,
+}: {
+  category: LogThreatCategory;
+  label: string;
+  /** Extra hover text appended to the category's own explanation. */
+  title?: string;
+}) {
+  const { i18n } = useTranslation();
+  const info = translateInfoTip(THREAT_CATEGORY_INFO[category], i18n.language);
   return (
-    <span className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] ${THREAT_COLORS[category]}`}>
+    <span
+      className={`cursor-help whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] ${THREAT_COLORS[category]}`}
+      title={title ? `${info}
+
+${title}` : info}
+    >
       {label}
     </span>
   );
@@ -1072,9 +1157,15 @@ function ThreatsTab({ version, onToast }: { version: number; onToast: (m: string
                 key={c.category}
                 onClick={() => setCategory(category === c.category ? 'all' : c.category)}
                 className={`rounded border px-2 py-0.5 ${category === c.category ? 'border-blue-500' : 'border-surface-800 hover:border-surface-600'}`}
-                title={`${c.ips.toLocaleString()} IP`}
               >
-                <ThreatBadge category={c.category} label={`${catLabel(c.category)} ${c.hits.toLocaleString()}`} />
+                <ThreatBadge
+                  category={c.category}
+                  label={`${catLabel(c.category)} ${c.hits.toLocaleString()}`}
+                  title={t('logAnalyzer.threatChipIps', {
+                    defaultValue: '{{n}} distinct IP(s)',
+                    n: c.ips.toLocaleString(),
+                  })}
+                />
               </button>
             ))}
           </div>
@@ -1160,8 +1251,12 @@ function ThreatsTab({ version, onToast }: { version: number; onToast: (m: string
               <Th>{t('logAnalyzer.colMethod', { defaultValue: 'Method' })}</Th>
               <Th>{t('logAnalyzer.colRequest', { defaultValue: 'Request (decoded)' })}</Th>
               <Th className="text-right">{t('logAnalyzer.colStatus', { defaultValue: 'Status' })}</Th>
-              <Th>{t('logAnalyzer.colCategory', { defaultValue: 'Category' })}</Th>
-              <Th className="text-right">{t('logAnalyzer.colScore', { defaultValue: 'Score' })}</Th>
+              <Th info="Which attack class the strongest matching signature belongs to: SQL injection, XSS, path traversal, command injection, scanner probe, sensitive file, or anomaly. Hover any badge in this column for what that class means in practice.">
+                {t('logAnalyzer.colCategory', { defaultValue: 'Category' })}
+              </Th>
+              <Th className="text-right" info={THREAT_SCORE_INFO}>
+                {t('logAnalyzer.colScore', { defaultValue: 'Score' })}
+              </Th>
               <Th>{t('logAnalyzer.colEvidence', { defaultValue: 'Evidence' })}</Th>
               <Th>{t('logAnalyzer.colDeclaredBot', { defaultValue: 'Declared Bot' })}</Th>
             </tr>
