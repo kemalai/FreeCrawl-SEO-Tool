@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.0.0] — 2026-09-21
+
+### Added
+- FreeCrawl 1.0.0 is the full release; updates will keep coming based on user feedback.
+- The interface is available in 11 languages, from Turkish and Spanish to Chinese, Korean and Hindi, and follows your system language on first launch.
+- Light theme, switchable from View → Theme or Settings → Theme, with every table, badge and banner tuned for contrast.
+- Canvas-rendered URL table that keeps scrolling smooth and live updates flicker-free on crawls of 25K+ URLs.
+- PDF report export with a brandable header (name, logo, accent colour) and a recommendations section.
+- Screaming Frog-compatible SEO Audit export so existing audit templates and Looker sources work without remapping.
+- Scheduled crawls can export bulk, audit, HTML and PDF reports automatically and notify a webhook when they finish.
+- Custom Extraction rules get their own table columns, plus ready-made templates for price, stock, author, dates, ratings and SKU.
+- Optional crawl setting to follow JavaScript redirects (meta refresh and inline location changes).
+- Canonical chains are followed from redirect targets, with a new "Redirect → Canonical Chain" issue.
+- New checks: Content Wider Than Screen, Mobile / Desktop Mismatch, and structured-data findings that jump to the offending JSON-LD block.
+- Settings → Issues lets you disable any of the 172 checks per project, and Settings → System shows live memory use and environment details.
+- Auto-save the open project every N crawled URLs (Settings → Storage).
+- New E-commerce, News and Accessibility-focus crawl presets.
+- "Pages Over Max Links per Page" report, and Top Words can now include body text.
+
+### Changed
+- Release files are named by platform and CPU (Windows-Setup, Windows-Portable, macOS-Apple-Silicon, macOS-Intel, Linux) so the right download is obvious.
+- Check for Updates now recognises an Apple Silicon Mac running the Intel build under Rosetta and offers the native build.
+- Bulk Export gained the remaining datasets: redirect and canonical chains, hreflang, orphans, AMP, structured data, issue severities and link-level CSVs.
+
+### Fixed
+- Stop now responds immediately on large crawls instead of waiting for the post-crawl analysis to finish.
+- Saving a large project no longer freezes the window; the title shows "Saving…" while it runs in the background.
+- Sidebar issue counts and table queries no longer stall the app on 60K+ URL crawls.
+- The table no longer goes black while scrolling during a live crawl.
+- The duplicate URL check now respects the "normalise before comparing" setting.
+
 ## [0.9.9] — 2026-09-09
 
 ### Added
