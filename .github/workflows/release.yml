@@ -4,7 +4,15 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # Manual runs rebuild the assets of an existing release: pass its tag
+  # and the job uploads into that release instead of one named after the
+  # branch. Used when a leg failed after the tag was pushed.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to (re)build assets for, e.g. v1.0.0'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -36,7 +44,11 @@ jobs:
           # Intel .dmg — where Playwright looked for `chrome-mac-x64`,
           # found nothing, and every Intel user landed on the "browser
           # missing" dialog. Each job now downloads the browsers for the
-          # architecture it is packaging.
+          # architecture it is packaging. The `--arm64` / `--x64` flag is
+          # the ONLY place the arch is chosen: electron-builder.yml must not
+          # list `mac.target[].arch`, or the config list silently overrides
+          # the flag and each leg builds both images again (that is what
+          # broke 1.0.0's first run).
           #
           # Each leg also names its .dmg with the words a user actually
           # knows ("Apple-Silicon" / "Intel") instead of arm64 / x64.
@@ -140,6 +152,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: ${{ matrix.artifact_paths }}
           generate_release_notes: true
           draft: false

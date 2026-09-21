@@ -226,11 +226,11 @@ node apps/cli/dist/index.js analyze-logs access_log-Jul.gz              # gzippe
 ```bash
 npm run build                                  # all packages + desktop + CLI
 npm --workspace apps/desktop run build:win     # Windows installer (NSIS) + portable .exe
-npm --workspace apps/desktop run build:mac     # macOS DMG (arm64 + x64)
+npm --workspace apps/desktop run build:mac     # macOS DMG for this Mac's CPU (add -- --arm64 --x64 for both)
 npm --workspace apps/desktop run build:linux   # AppImage / .deb / .rpm
 ```
 
-A local `build:mac` names the images `-macOS-arm64.dmg` / `-macOS-x64.dmg`; the release workflow builds each architecture on its own runner and renames them to `-macOS-Apple-Silicon.dmg` / `-macOS-Intel.dmg`.
+A local `build:mac` names the image `-macOS-arm64.dmg` or `-macOS-x64.dmg`; the release workflow builds each architecture on its own runner and names them `-macOS-Apple-Silicon.dmg` / `-macOS-Intel.dmg`.
 
 </details>
 

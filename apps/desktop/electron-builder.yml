@@ -65,11 +65,16 @@ portable:
   artifactName: FreeCrawl-SEO-Tool-${version}-Windows-Portable.${ext}
 mac:
   artifactName: FreeCrawl-SEO-Tool-${version}-macOS-${arch}.${ext}
+  # No `arch` list here on purpose. electron-builder lets a config-side
+  # arch list override the CLI's `--arm64` / `--x64` unless a target type
+  # is also given on the CLI (computeArchToTargetNamesMap), so with
+  # `arch: [arm64, x64]` every release leg built BOTH images — and once
+  # both carried the same friendly name they overwrote each other. The
+  # arch now comes from the CLI: the release workflow passes one per leg,
+  # a local `npm run build:mac` builds the host arch, and
+  # `npm run build:mac -- --arm64 --x64` builds both.
   target:
-    - target: dmg
-      arch:
-        - arm64
-        - x64
+    - dmg
   category: public.app-category.developer-tools
 linux:
   executableName: freecrawl-seo
