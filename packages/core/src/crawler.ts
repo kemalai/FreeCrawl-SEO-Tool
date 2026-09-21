@@ -356,7 +356,12 @@ export class Crawler extends EventEmitter {
    * time — on the main thread that share is the freeze budget. */
   private issueRecomputeTimer: NodeJS.Timeout | null = null;
   private static readonly ISSUE_RECOMPUTE_INTERVAL_MS = 30_000;
-  private static readonly ISSUE_RECOMPUTE_MAX_INTERVAL_MS = 5 * 60_000;
+  // Upper bound on the adaptive interval. The pass no longer holds the
+  // writer (it runs on the maintenance worker and writes in short
+  // batches), so the bound only limits how much CPU / disk the crawl
+  // shares with it: 5 min made a slow pass run back-to-back — a 62k-page
+  // project spent 8 min per pass and re-armed after 5.
+  private static readonly ISSUE_RECOMPUTE_MAX_INTERVAL_MS = 30 * 60_000;
   private static readonly ISSUE_RECOMPUTE_DUTY_DIVISOR = 4;
   private issueRecomputeInFlight = false;
   private startIssueRecomputeTimer(): void {
@@ -1220,7 +1225,7 @@ export class Crawler extends EventEmitter {
 
     // Hydrate in-memory state from the DB so resume starts from the right
     // point; then queue whatever work is still pending.
-    this.hydrateFromDb({ refresh: isRefresh });
+    await this.hydrateFromDb({ refresh: isRefresh });
 
     try {
       // Wait for internal crawl first, then drain any external probes still
@@ -1269,7 +1274,16 @@ export class Crawler extends EventEmitter {
         // drain would happily crawl URLs that the live link-follow
         // path explicitly skipped, ending up with a different result
         // than a "no drain" first crawl would produce.
-        const pending = this.db.getPendingInternalLinks({ excludeNofollow });
+        //
+        // Through the host's DB hook rather than `this.db`: this is a
+        // GROUP BY over every stored link, and running it on the main
+        // thread froze the window for 81 s (then 168 s on the next
+        // pass) at the end of a 62k-page crawl. On the writer worker it
+        // also sees every per-URL write queued before it.
+        const pending = await this.dbCall<{ url: string; depth: number }[]>(
+          'getPendingInternalLinks',
+          [{ excludeNofollow }],
+        );
         if (pending.length === 0) break;
         if (pending.length === lastPending) break;
         lastPending = pending.length;
@@ -1296,8 +1310,11 @@ export class Crawler extends EventEmitter {
     // Each pass is gated by its config flag so users running tight time-budget
     // audits can skip steps they don't need, and each yields to the event loop
     // so IPC dispatch (logs:batch, progress, dataChanged) never starves.
+    this.finishing = true;
+    this.emitProgressFinal();
     await this.runPostCrawlPasses();
     this.running = false;
+    this.finishing = false;
     // Say what the loop guard dropped. Silently shrinking a crawl is exactly
     // the kind of invisible behaviour that makes a missing page impossible
     // to explain afterwards.
@@ -1452,6 +1469,9 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.setOp('post-crawl:social-image-probes');
     await this.runSocialImageProbes();
+    await yieldToEventLoop();
+    this.setOp('post-crawl:mobile-parity');
+    await this.runMobileParityProbes();
     await yieldToEventLoop();
     this.setOp('post-crawl:pdf-probes');
     await this.runPdfMetadataProbes();
@@ -1860,6 +1880,98 @@ export class Crawler extends EventEmitter {
    * pass. `pdf_probe_status` records 1 / 0 / negative so a probed PDF
    * drops out of `unprobedPdfUrls` and isn't re-fetched on the next crawl.
    */
+  /**
+   * Mobile-vs-desktop parity: re-fetch a sample of indexable pages with
+   * the opposite user agent and diff the SEO fields against what the
+   * crawl stored. Opt-in (`probeMobileParity`) because it re-downloads
+   * every sampled page.
+   */
+  private async runMobileParityProbes(): Promise<void> {
+    if (!this.config.probeMobileParity) return;
+    if (this.stopped) return;
+    let pages: ReturnType<ProjectDb['pagesForMobileParity']> = [];
+    try {
+      pages = this.db.pagesForMobileParity(this.config.mobileParitySample);
+    } catch (err) {
+      this.emit(
+        'info',
+        `mobile-parity probe skipped (DB query failed): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    if (pages.length === 0) return;
+    const alternateKind: 'mobile' | 'desktop' =
+      this.config.deviceMode === 'mobile' ? 'desktop' : 'mobile';
+    const userAgent = alternateKind === 'mobile' ? MOBILE_USER_AGENT : BROWSER_FALLBACK_UA;
+    this.emit('info', `Mobile-parity probe: re-fetching ${pages.length} page(s) as ${alternateKind}…`);
+    const { fetchForParity, diffParity } = await import('./mobile-parity-probe.js');
+    const concurrency = Math.max(1, Math.min(this.config.maxConcurrency, 4));
+    let cursor = 0;
+    let mismatches = 0;
+    const writes = this.newProbeWriteBuffer();
+    const progress = this.newProbeProgress('Mobile-parity probe', pages.length);
+    const parseOpts = {
+      includeSubdomains: this.config.scope === 'all-subdomains',
+      cdnHosts: this.config.cdnHosts,
+      customSearchTerms: this.config.customSearchTerms,
+      urlRewrites: this.urlRewrites,
+      customExtractionRules: this.config.customExtractionRules,
+      contentAreaSelector: this.config.contentAreaSelector,
+    };
+    const worker = async (): Promise<void> => {
+      while (!this.stopped) {
+        const idx = cursor++;
+        if (idx >= pages.length) return;
+        const src = pages[idx];
+        if (!src) return;
+        await this.probeTick(progress);
+        const fetched = await fetchForParity(src.url, userAgent, {
+          acceptLanguage: this.config.acceptLanguage,
+          customHeaders: this.config.customHeaders,
+          auth: this.config.auth,
+        });
+        let page: ParsedPage | null = null;
+        if (fetched.html) {
+          try {
+            page = await this.parsePage(fetched.html, src.url, parseOpts);
+          } catch {
+            page = null;
+          }
+        }
+        const diff = diffParity(
+          {
+            status: src.status_code,
+            title: src.title,
+            h1: src.h1,
+            metaDescription: src.meta_description,
+            canonical: src.canonical,
+            metaRobots: src.meta_robots,
+            wordCount: src.word_count,
+            outlinks: src.outlinks,
+          },
+          {
+            status: fetched.status,
+            page,
+            outlinks: page
+              ? (this.config.storeNofollowLinks
+                  ? page.links
+                  : page.links.filter((l) => !l.rel?.includes('nofollow'))
+                ).length
+              : undefined,
+          },
+          alternateKind,
+        );
+        if (diff) mismatches++;
+        writes.push({ method: 'setMobileParity', args: [src.url, diff] });
+      }
+    };
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < concurrency; i++) workers.push(worker());
+    await Promise.all(workers);
+    await writes.flush();
+    this.emit('info', `Mobile-parity probe complete: ${mismatches}/${pages.length} page(s) differ`);
+  }
+
   private async runPdfMetadataProbes(): Promise<void> {
     if (!this.config.probePdfMetadata) return;
     if (this.stopped) return;
@@ -2301,11 +2413,14 @@ export class Crawler extends EventEmitter {
     // writer-worker hooks (runDbPass / recomputeIssues) instead of blocking
     // SQL on the main thread, and now includes boilerplate coverage +
     // manifest probes that list mode previously skipped. See rule 1.7.
+    this.finishing = true;
+    this.emitProgressFinal();
     await this.runPostCrawlPasses();
     this.running = false;
     this.stopMemoryMonitor();
     this.seen.clear();
     this.externalSeen.clear();
+    this.finishing = false;
     this.emitProgressFinal();
     if (!this.stopped) {
       // Wave 6 — Clean completion clears the checkpoint so the next
@@ -2480,7 +2595,9 @@ export class Crawler extends EventEmitter {
     }
   }
 
-  private hydrateFromDb(opts: { refresh: boolean } = { refresh: false }): void {
+  private async hydrateFromDb(
+    opts: { refresh: boolean } = { refresh: false },
+  ): Promise<void> {
     // Mark every already-known URL as "seen" so enqueue can skip them.
     for (const url of this.db.getAllUrls()) {
       this.seen.add(url);
@@ -2555,7 +2672,13 @@ export class Crawler extends EventEmitter {
     // skipped, and the user would see "extra" URLs appear that the live
     // link-follow path would never have touched.
     const excludeNofollow = !this.config.followNofollow;
-    for (const pending of this.db.getPendingInternalLinks({ excludeNofollow })) {
+    // Same drain query as the post-crawl pass — off the main thread for
+    // the same reason (see runSpider's drain loop).
+    const pendingLinks = await this.dbCall<{ url: string; depth: number }[]>(
+      'getPendingInternalLinks',
+      [{ excludeNofollow }],
+    );
+    for (const pending of pendingLinks) {
       // Drop from `seen` so enqueue accepts it — these URLs are genuinely
       // unfinished work.
       this.seen.delete(pending.url);
@@ -2745,11 +2868,21 @@ export class Crawler extends EventEmitter {
     // Emit 'stopped' only on the first transition — clearCrawlDb and
     // the Stop IPC handler can both call stop() on the same instance.
     const wasStopped = this.stopped;
+    const wasRunning = this.running;
     this.stopped = true;
     this.running = false;
     this.paused = false;
     this.setOp('idle');
     this.stopMemoryMonitor();
+    // The frame that turns the toolbar's Stop into "Finishing…". Without
+    // it the UI heard nothing until the post-crawl passes had run — Stop
+    // looked dead for as long as they took. `wasRunning` keeps a stop()
+    // that lands after a natural finish (Clear, teardown) from raising a
+    // flag nobody would lower.
+    if (!wasStopped && wasRunning) {
+      this.finishing = true;
+      this.emitProgressFinal();
+    }
     // Stop the periodic checkpoint timer immediately. Without this,
     // the 30-second setInterval keeps firing until start()'s `finally`
     // block tears it down — which on a stop-during-post-crawl can run
@@ -4234,6 +4367,7 @@ export class Crawler extends EventEmitter {
           mixedContentPassive: parsed.mixedContentPassive,
           metaRefresh: this.config.storeMetaRefresh ? parsed.metaRefresh : null,
           metaRefreshUrl: this.config.storeMetaRefresh ? parsed.metaRefreshUrl : null,
+          jsRedirectUrl: parsed.jsRedirectUrl,
           charset,
           extractionResults: parsed.extractionResults
             ? JSON.stringify(parsed.extractionResults)
@@ -4273,6 +4407,8 @@ export class Crawler extends EventEmitter {
           schemaUnknownTypes: parsed.schemaUnknownTypes,
           schemaMissingRequired: parsed.schemaMissingRequired,
           schemaMissingRecommended: parsed.schemaMissingRecommended,
+          schemaFindings:
+            parsed.schemaFindings.length > 0 ? JSON.stringify(parsed.schemaFindings) : null,
           headingOrderViolations: parsed.headingOrderViolations,
           subresourceRequestCount: parsed.subresourceRequestCount,
           headings:
@@ -4485,18 +4621,16 @@ export class Crawler extends EventEmitter {
             this.enqueue({ url: parsed.canonicalResolved, depth: nextDepth });
           }
         }
-        // Wave 3 — JS-style redirect follow. Currently covers
-        // `<meta http-equiv="refresh">` content URLs; window.location
-        // bodies aren't statically followable without a JS engine and
-        // are out of scope.
-        if (this.config.followJsRedirects && parsed.metaRefreshUrl) {
-          const inScope = isInScope(
-            this.config.startUrl,
-            parsed.metaRefreshUrl,
-            this.config.scope,
-          );
-          if (inScope || this.config.crawlExternal) {
-            this.enqueue({ url: parsed.metaRefreshUrl, depth: nextDepth });
+        // Wave 3 — JS-style redirect follow: `<meta http-equiv="refresh">`
+        // content URLs and `window.location = "…"`-style statements the
+        // parser could resolve statically (literal targets only).
+        if (this.config.followJsRedirects) {
+          for (const target of [parsed.metaRefreshUrl, parsed.jsRedirectUrl]) {
+            if (!target || target === item.url) continue;
+            const inScope = isInScope(this.config.startUrl, target, this.config.scope);
+            if (inScope || this.config.crawlExternal) {
+              this.enqueue({ url: target, depth: nextDepth });
+            }
           }
         }
         // Spider → Crawl rows that only add discovery. Each one enqueues a
@@ -5129,6 +5263,8 @@ export class Crawler extends EventEmitter {
   }
 
   private lastProgressEmitTs = 0;
+  /** See `CrawlProgress.finishing`. */
+  private finishing = false;
   private progressTrailingTimer: ReturnType<typeof setTimeout> | null = null;
   /** Minimum gap between two progress events. 200 ms = 5 Hz, which is
    * dense enough that the user reads the URL/s + Crawled counters as
@@ -5198,6 +5334,7 @@ export class Crawler extends EventEmitter {
       avgResponseTimeMs,
       running: this.running,
       paused: this.paused,
+      finishing: this.finishing,
       startUrl: this.config.startUrl,
     };
     this.emit('progress', progress);

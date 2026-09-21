@@ -155,8 +155,9 @@ export function ExtractionPreviewDialog({
               {running
                 ? t('extractionPreview.running', { defaultValue: 'Running…' })
                 : t('extractionPreview.run', {
-                    defaultValue: 'Run preview ({{n}} rule(s))',
-                    n: ruleCount,
+                    defaultValue_one: 'Run preview ({{count}} rule)',
+                    defaultValue_other: 'Run preview ({{count}} rules)',
+                    count: ruleCount,
                   })}
             </span>
           </button>

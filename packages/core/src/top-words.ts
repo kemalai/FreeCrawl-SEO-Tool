@@ -118,6 +118,20 @@ export function aggregateTopWords(
   texts: Iterable<string>,
   opts: TopWordsOptions = {},
 ): TopWordsRow[] {
+  const agg = createTopWordsAggregator(opts);
+  for (const text of texts) agg.add(text);
+  return agg.result();
+}
+
+/** Incremental form of {@link aggregateTopWords} for sources that arrive asynchronously. */
+export interface TopWordsAggregator {
+  /** Counts one source string (one page). */
+  add(text: string): void;
+  /** Top rows so far, sorted by count. */
+  result(): TopWordsRow[];
+}
+
+export function createTopWordsAggregator(opts: TopWordsOptions = {}): TopWordsAggregator {
   const limit = Math.max(1, Math.min(1000, opts.limit ?? 100));
   const minLength = Math.max(1, Math.min(10, opts.minLength ?? 3));
   const stopwords = STOPWORDS_BY_LOCALE[opts.locale ?? 'all'];
@@ -130,25 +144,28 @@ export function aggregateTopWords(
   const pages = new Map<string, number>();
   const seenInThisPage = new Set<string>();
 
-  for (const text of texts) {
-    const tokens = tokenizeForTopWords(text, minLength);
-    seenInThisPage.clear();
-    for (const tok of tokens) {
-      if (stopwords.has(tok)) continue;
-      total.set(tok, (total.get(tok) ?? 0) + 1);
-      if (!seenInThisPage.has(tok)) {
-        pages.set(tok, (pages.get(tok) ?? 0) + 1);
-        seenInThisPage.add(tok);
+  return {
+    add(text: string): void {
+      const tokens = tokenizeForTopWords(text, minLength);
+      seenInThisPage.clear();
+      for (const tok of tokens) {
+        if (stopwords.has(tok)) continue;
+        total.set(tok, (total.get(tok) ?? 0) + 1);
+        if (!seenInThisPage.has(tok)) {
+          pages.set(tok, (pages.get(tok) ?? 0) + 1);
+          seenInThisPage.add(tok);
+        }
       }
-    }
-  }
-
-  return [...total.entries()]
-    .map(([word, count]) => ({
-      word,
-      count,
-      pages: pages.get(word) ?? 0,
-    }))
-    .sort((a, b) => b.count - a.count || a.word.localeCompare(b.word))
-    .slice(0, limit);
+    },
+    result(): TopWordsRow[] {
+      return [...total.entries()]
+        .map(([word, count]) => ({
+          word,
+          count,
+          pages: pages.get(word) ?? 0,
+        }))
+        .sort((a, b) => b.count - a.count || a.word.localeCompare(b.word))
+        .slice(0, limit);
+    },
+  };
 }

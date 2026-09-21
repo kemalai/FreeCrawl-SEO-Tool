@@ -44,6 +44,13 @@ export function SpellingTab() {
   const dataVersion = useAppStore((s) => s.dataVersion);
   const crawlProgress = useAppStore((s) => s.progress);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  // The Detail panel below keys on the store's selected URL id. Rows here
+  // used to only toggle their checkbox, so clicking a page never showed
+  // its findings — the panel stayed on whatever was picked elsewhere, or
+  // empty (issue #22).
+  const selectedUrlId = useAppStore((s) => s.selectedUrlId);
+  const setSelectedUrlId = useAppStore((s) => s.setSelectedUrlId);
+  const setSelectedUrlIds = useAppStore((s) => s.setSelectedUrlIds);
 
   const [rows, setRows] = useState<SpellingRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -281,8 +288,10 @@ export function SpellingTab() {
       {unsupportedCount > 0 && (
         <div className="shrink-0 border-b border-amber-900/60 bg-amber-950/40 px-3 py-1.5 text-[11px] text-amber-200">
           {t('spellingTab.unsupportedBanner', {
-            defaultValue:
-              '{{count}} page(s) left unchecked: LanguageTool has no rules for {{langs}}, and grading that text against a substitute language would report an error on nearly every word. Nothing here is misconfigured — no setting makes this engine check {{langs}}.',
+            defaultValue_one:
+              '{{count}} page left unchecked: LanguageTool has no rules for {{langs}}, and grading that text against a substitute language would report an error on nearly every word. Nothing here is misconfigured — no setting makes this engine check {{langs}}.',
+            defaultValue_other:
+              '{{count}} pages left unchecked: LanguageTool has no rules for {{langs}}, and grading that text against a substitute language would report an error on nearly every word. Nothing here is misconfigured — no setting makes this engine check {{langs}}.',
             count: unsupportedCount,
             langs: unsupportedLangs.join(', '),
           })}
@@ -365,7 +374,12 @@ export function SpellingTab() {
                   <SpellingTableRow
                     row={row}
                     selected={selected.has(row.url)}
+                    active={selectedUrlId === row.id}
                     onToggle={() => toggleRow(row.url)}
+                    onSelect={() => {
+                      setSelectedUrlId(row.id);
+                      setSelectedUrlIds([row.id]);
+                    }}
                   />
                 </div>
               );
@@ -541,19 +555,30 @@ function LangCell({ row }: { row: SpellingRow }) {
 function SpellingTableRow({
   row,
   selected,
+  active,
   onToggle,
+  onSelect,
 }: {
   row: SpellingRow;
+  /** Checked for the next "Check selected" run. */
   selected: boolean;
+  /** The page whose findings the Detail panel is showing. */
+  active: boolean;
   onToggle: () => void;
+  onSelect: () => void;
 }) {
+  // Two independent gestures, like a mail client: the checkbox picks pages
+  // to run the checker on, the row itself opens the page below. Folding
+  // both into one click would check every page the user merely looked at.
   return (
     <div
-      onClick={onToggle}
+      onClick={onSelect}
       className={`flex h-full cursor-pointer items-center text-[11px] ${
-        selected
-          ? 'bg-blue-900/30'
-          : 'odd:bg-surface-900/20 hover:bg-surface-800/40'
+        active
+          ? 'bg-accent-500/20'
+          : selected
+            ? 'bg-blue-900/30'
+            : 'odd:bg-surface-900/20 hover:bg-surface-800/40'
       }`}
     >
       <div className="flex w-[30px] items-center justify-center">

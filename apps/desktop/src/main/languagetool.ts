@@ -36,6 +36,7 @@ import {
 } from './language-detect.js';
 import { checkTextLocally } from './local-spell.js';
 import * as logger from './logger.js';
+import { L } from './menu-i18n.js';
 
 export const PUBLIC_LT_ENDPOINT = 'https://api.languagetool.org';
 
@@ -456,12 +457,12 @@ export async function checkText(
         // and a tooltip can carry.
         (body.trim().length > 0
           ? body.trim().replace(/^Error:\s*/i, '').slice(0, 400)
-          : `LanguageTool returned HTTP ${res.status}`);
+          : L().spellHttpError.replace('{status}', String(res.status)));
       if (isLanguageBailout(apiErr)) {
         return emptyResult(
           fetchedAt,
           'mismatch',
-          `LanguageTool stopped checking — the page does not read as ${languageName(language)}. Pin the language under Settings → Spelling if this is wrong.`,
+          L().spellMismatchBailout.replace('{lang}', languageName(language)),
           { ...langInfo, language },
         );
       }
@@ -514,7 +515,12 @@ export async function checkText(
         return emptyResult(
           fetchedAt,
           'mismatch',
-          `${Math.round((misspellings / words) * 100)}% of words were flagged when checked as ${languageName(usedLang)} — the page is almost certainly written in another language, so the findings were discarded. Pin the language under Settings → Spelling if this is wrong.`,
+          L()
+            .spellMismatchRatio.replace(
+              '{pct}',
+              String(Math.round((misspellings / words) * 100)),
+            )
+            .replace('{lang}', languageName(usedLang)),
           { ...langInfo, language: usedLang },
         );
       }
@@ -543,7 +549,7 @@ export async function checkText(
       cause?.code === 'UND_ERR_BODY_TIMEOUT' ||
       cause?.code === 'UND_ERR_CONNECT_TIMEOUT';
     const message = isTimeout
-      ? `LanguageTool request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`
+      ? L().spellTimeout.replace('{s}', String(REQUEST_TIMEOUT_MS / 1000))
       : err instanceof Error
         ? cause?.message
           ? `${err.message} (${cause.message})`

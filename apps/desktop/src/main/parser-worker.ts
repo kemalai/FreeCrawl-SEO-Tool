@@ -1,5 +1,5 @@
 import { parentPort } from 'node:worker_threads';
-import { parseHtml } from '@freecrawl/core';
+import { parseHtml, extractProseText } from '@freecrawl/core';
 
 /**
  * HTML-parser worker thread.
@@ -29,12 +29,17 @@ interface ParseRequest {
   html: string;
   pageUrl: string;
   opts: Parameters<typeof parseHtml>[2];
+  /** `prose` — return the main-content text instead of the full parse. */
+  mode?: 'parse' | 'prose';
 }
 
 parentPort.on('message', (msg: ParseRequest) => {
   if (!msg || typeof msg.requestId !== 'number') return;
   try {
-    const result = parseHtml(msg.html, msg.pageUrl, msg.opts);
+    const result =
+      msg.mode === 'prose'
+        ? extractProseText(msg.html, msg.opts?.contentAreaSelector)
+        : parseHtml(msg.html, msg.pageUrl, msg.opts);
     parentPort!.postMessage({ requestId: msg.requestId, ok: true, result });
   } catch (err) {
     parentPort!.postMessage({

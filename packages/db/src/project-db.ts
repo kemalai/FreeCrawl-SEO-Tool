@@ -1,5 +1,6 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type {
+  MobileParityDiff,
   AdvancedFilter,
   BrokenLinkRow,
   ContentKind,
@@ -11,6 +12,7 @@ import type {
   FilterClause,
   FilterField,
   ImageRow,
+  ImagesSortKey,
   Indexability,
   InlinkRow,
   OutlinkRow,
@@ -59,8 +61,27 @@ import type {
   LogThreatsResult,
   LogThreatSummary,
 } from '@freecrawl/shared-types';
-import { issueCategoriesBySeverity } from '@freecrawl/shared-types';
+import {
+  ISSUE_COUNT_KEY,
+  issueCategoriesBySeverity,
+  normalizeDisabledIssues,
+} from '@freecrawl/shared-types';
 import { runMigrations } from './migrations.js';
+
+/** `meta` key holding the JSON list of silenced issue categories. */
+export const DISABLED_ISSUES_META_KEY = 'disabledIssues';
+/** `meta` key mirroring `CrawlConfig.dedupePreNormalize` ('1' / '0'). */
+export const DEDUPE_PRE_NORMALIZE_META_KEY = 'dedupePreNormalize';
+/**
+ * Orphan page: an internal 2xx HTML page nothing links to. The start URL
+ * is exempt (nothing links to a homepage from inside the site by
+ * definition); sitemap-seeded and list-mode pages are exactly the ones
+ * this check exists for.
+ */
+const ORPHAN_PAGE_SQL = `is_external = 0 AND content_kind = 'html'
+  AND status_code >= 200 AND status_code < 300 AND inlinks = 0
+  AND url != COALESCE((SELECT value FROM project_meta WHERE key = 'lastStartUrl'), '')`;
+const EMPTY_DISABLED: ReadonlySet<UrlCategory> = new Set();
 
 const SPELLING_STATUSES: readonly SpellingStatus[] = [
   'ok',
@@ -210,9 +231,16 @@ interface UrlRowDb {
   hreflang_self_ref_missing: number;
   hreflang_reciprocity_missing: number;
   hreflang_target_issues: number;
+  hreflang_unlinked: number;
+  mobile_parity: string | null;
+  mobile_parity_diff: number;
+  mobile_usable: number;
+  mobile_overflow_px: number;
   redirect_chain_length: number;
   redirect_final_url: string | null;
   redirect_loop: number;
+  canonical_chain_length: number;
+  canonical_final_url: string | null;
   folder_depth: number;
   query_param_count: number;
   csp: string | null;
@@ -221,6 +249,7 @@ interface UrlRowDb {
   custom_search_hits: string | null;
   meta_refresh: string | null;
   meta_refresh_url: string | null;
+  js_redirect_url: string | null;
   charset: string | null;
   extraction_results: string | null;
   simhash: string | null;
@@ -293,6 +322,7 @@ interface UrlRowDb {
   schema_unknown_types: number;
   schema_missing_required: number;
   schema_missing_recommended: number;
+  schema_findings: string | null;
   heading_order_violations: number;
   subresource_request_count: number;
   changed: number;
@@ -306,6 +336,55 @@ interface ImageRowDb {
   height: number | null;
   is_internal: number;
   occurrences: number;
+  byte_size: number | null;
+}
+
+/**
+ * Where an image's byte size comes from. The post-crawl HEAD probe writes
+ * `images.byte_size`; when it never ran but the image was crawled as its
+ * own URL (Spider → Crawl → Images), that row's `content_length` is the
+ * same number. `urls.url` is UNIQUE, so the join is an index lookup per
+ * row. Both queries alias `images` as `i` so the join reads the same.
+ */
+const IMAGE_SIZE_JOIN_SQL = 'LEFT JOIN urls ui ON ui.url = i.src';
+const IMAGE_BYTE_SIZE_SQL = 'COALESCE(i.byte_size, ui.content_length)';
+
+/**
+ * SQL expression behind each Images-tab sort key, for the per-usage
+ * query (`images i` + `image_usages iu` + page `u`) and the legacy
+ * single-table one. Every column is table-qualified on purpose: `alt`
+ * exists on both `images` and `image_usages`, and a bare name inside the
+ * `IS NULL` wrapper below resolves against the tables (ambiguous), not
+ * the SELECT alias.
+ */
+const IMAGE_SORT_SQL: Record<ImagesSortKey, { usage: string; legacy: string }> = {
+  src: { usage: 'i.src', legacy: 'i.src' },
+  alt: { usage: 'iu.alt', legacy: 'i.alt' },
+  width: { usage: 'i.width', legacy: 'i.width' },
+  height: { usage: 'i.height', legacy: 'i.height' },
+  byteSize: { usage: IMAGE_BYTE_SIZE_SQL, legacy: IMAGE_BYTE_SIZE_SQL },
+  occurrences: { usage: 'i.occurrences', legacy: 'i.occurrences' },
+  // Legacy rows have no page, so "by page" degrades to the default order.
+  fromUrl: { usage: 'u.url', legacy: 'i.occurrences' },
+};
+
+/**
+ * ORDER BY for `queryImages` / `iterateImages`. Nullable columns sort
+ * their unknowns last in either direction — a "largest first" list that
+ * opens with a page of unprobed images is useless — and the id tie-break
+ * keeps pagination stable for equal values.
+ */
+function imageOrderBy(
+  sortBy: ImagesSortKey | undefined,
+  sortDir: 'asc' | 'desc' | undefined,
+  legacy: boolean,
+): string {
+  const key: ImagesSortKey = sortBy && sortBy in IMAGE_SORT_SQL ? sortBy : 'occurrences';
+  const dir = sortDir === 'asc' ? 'ASC' : 'DESC';
+  const spec = IMAGE_SORT_SQL[key]!;
+  const expr = legacy ? spec.legacy : spec.usage;
+  const tie = legacy ? 'i.id' : 'i.id, iu.from_url_id';
+  return `ORDER BY (${expr} IS NULL), ${expr} ${dir}, ${tie}`;
 }
 
 /**
@@ -379,6 +458,8 @@ export interface UpsertUrlInput {
   customSearchHits?: string | null;
   metaRefresh?: string | null;
   metaRefreshUrl?: string | null;
+  /** Literal target of a `window.location = "…"` statement in an inline script. */
+  jsRedirectUrl?: string | null;
   charset?: string | null;
   schemaTypes?: string | null;
   schemaBlockCount?: number;
@@ -449,6 +530,8 @@ export interface UpsertUrlInput {
   schemaUnknownTypes?: number;
   schemaMissingRequired?: number;
   schemaMissingRecommended?: number;
+  /** JSON array of `SchemaFinding` — the detail behind the three schema counters. */
+  schemaFindings?: string | null;
   /** Skipped-level heading events on this page (h1→h3 etc.). */
   headingOrderViolations?: number;
   /** Total subresource requests declared (img/script/stylesheet/iframe/video/audio). */
@@ -543,7 +626,7 @@ const UPSERT_URL_SQL = `
     folder_depth, query_param_count,
     csp, referrer_policy, permissions_policy,
     custom_search_hits,
-    meta_refresh, meta_refresh_url, charset,
+    meta_refresh, meta_refresh_url, js_redirect_url, charset,
     extraction_results,
     simhash, content_hash,
     title_count, images_empty_alt, empty_anchor_count,
@@ -564,7 +647,7 @@ const UPSERT_URL_SQL = `
     url_malformed, url_trap, og_type, og_url, og_site_name, og_locale, android_icon,
     landmark_main, skip_link_present, aria_invalid_roles,
     schema_duplicate_ids, schema_unknown_types, schema_missing_required,
-    schema_missing_recommended,
+    schema_missing_recommended, schema_findings,
     heading_order_violations, subresource_request_count,
     amp_page, amp_validation_errors, mobile_alternate
   ) VALUES (
@@ -585,7 +668,7 @@ const UPSERT_URL_SQL = `
     :folder_depth, :query_param_count,
     :csp, :referrer_policy, :permissions_policy,
     :custom_search_hits,
-    :meta_refresh, :meta_refresh_url, :charset,
+    :meta_refresh, :meta_refresh_url, :js_redirect_url, :charset,
     :extraction_results,
     :simhash, :content_hash,
     :title_count, :images_empty_alt, :empty_anchor_count,
@@ -606,7 +689,7 @@ const UPSERT_URL_SQL = `
     :url_malformed, :url_trap, :og_type, :og_url, :og_site_name, :og_locale, :android_icon,
     :landmark_main, :skip_link_present, :aria_invalid_roles,
     :schema_duplicate_ids, :schema_unknown_types, :schema_missing_required,
-    :schema_missing_recommended,
+    :schema_missing_recommended, :schema_findings,
     :heading_order_violations, :subresource_request_count,
     :amp_page, :amp_validation_errors, :mobile_alternate
   )
@@ -683,6 +766,7 @@ const UPSERT_URL_SQL = `
     custom_search_hits = excluded.custom_search_hits,
     meta_refresh = excluded.meta_refresh,
     meta_refresh_url = excluded.meta_refresh_url,
+    js_redirect_url = excluded.js_redirect_url,
     charset = excluded.charset,
     extraction_results = excluded.extraction_results,
     simhash = excluded.simhash,
@@ -741,6 +825,7 @@ const UPSERT_URL_SQL = `
     schema_unknown_types = excluded.schema_unknown_types,
     schema_missing_required = excluded.schema_missing_required,
     schema_missing_recommended = excluded.schema_missing_recommended,
+    schema_findings = excluded.schema_findings,
     heading_order_violations = excluded.heading_order_violations,
     subresource_request_count = excluded.subresource_request_count,
     amp_page = excluded.amp_page,
@@ -879,6 +964,34 @@ const CANONICAL_CMP_Q =
  * One post-crawl probe result, addressed to the setter that stores it.
  * The crawler buffers these and ships them through `applyProbeWrites`.
  */
+/** A page as the mobile-parity probe sees it before re-fetching. */
+export interface MobileParitySource {
+  url: string;
+  status_code: number | null;
+  title: string | null;
+  h1: string | null;
+  meta_description: string | null;
+  canonical: string | null;
+  meta_robots: string | null;
+  word_count: number | null;
+  outlinks: number;
+}
+
+/** One link edge as the bulk "Links" CSVs write it. */
+export interface LinkExportRow {
+  from_url: string;
+  to_url: string;
+  to_status: number | null;
+  anchor: string | null;
+  rel: string | null;
+  type: string | null;
+  target: string | null;
+  alt_text: string | null;
+  link_position: string | null;
+  link_path: string | null;
+  link_origin: string | null;
+}
+
 export type ProbeWrite =
   | { method: 'setImageSize'; args: Parameters<ProjectDb['setImageSize']> }
   | {
@@ -890,9 +1003,13 @@ export type ProbeWrite =
       method: 'setManifestForReferrers';
       args: Parameters<ProjectDb['setManifestForReferrers']>;
     }
-  | { method: 'setPdfMetadata'; args: Parameters<ProjectDb['setPdfMetadata']> };
+  | { method: 'setPdfMetadata'; args: Parameters<ProjectDb['setPdfMetadata']> }
+  | { method: 'setMobileParity'; args: Parameters<ProjectDb['setMobileParity']> };
 
 export class ProjectDb {
+  /** Parse cache for `getDisabledIssues()` — keyed by the raw meta string. */
+  private disabledIssuesRaw: string | null = null;
+  private disabledIssuesSet: ReadonlySet<UrlCategory> | null = null;
   private readonly db: DatabaseSync;
   /** Read-only connections can't write `sqlite_stat1`; see `optimize()`. */
   private readonly readOnly: boolean;
@@ -1363,11 +1480,101 @@ export class ProjectDb {
     }
   }
 
+  /**
+   * `VACUUM INTO` — a transactionally consistent, self-contained copy of
+   * the database at `targetPath`. One synchronous call that reads every
+   * page, so the desktop host runs it on the maintenance worker; it is
+   * exposed here so that worker (and the RAM-only main-thread fallback)
+   * share one implementation.
+   */
+  vacuumInto(targetPath: string): void {
+    this.db.exec(`VACUUM INTO '${targetPath.replace(/'/g, "''")}'`);
+  }
+
+  /**
+   * Changes whenever the database content this connection can see has
+   * changed: `PRAGMA data_version` moves on every commit by ANOTHER
+   * connection (the writer / maintenance workers), `total_changes()` on
+   * every row this connection wrote itself (RAM-only mode, main-thread
+   * fallbacks). Together they key the host's overview cache — two equal
+   * signatures mean the aggregate would return the same numbers.
+   */
+  dataSignature(): string {
+    const v = (this.db.prepare('PRAGMA data_version').get() as { data_version: number })
+      .data_version;
+    const c = (this.db.prepare('SELECT total_changes() AS c').get() as { c: number }).c;
+    return `${v}:${c}`;
+  }
+
   getMeta(key: string): string | null {
     const row = this.db
       .prepare('SELECT value FROM project_meta WHERE key = ?')
       .get(key) as { value: string } | undefined;
     return row?.value ?? null;
+  }
+
+  /**
+   * Issue checks silenced for this project — the `disabledIssues` half of
+   * the crawl config, mirrored into `meta` so every ProjectDb instance on
+   * this file (main thread, reader workers, CLI) applies the same list
+   * without being handed the config. Written by the desktop whenever the
+   * config is saved or a crawl starts.
+   */
+  setDisabledIssues(list: readonly string[]): void {
+    const normalized = normalizeDisabledIssues(list);
+    const next = normalized.length === 0 ? '' : JSON.stringify(normalized);
+    if ((this.getMeta(DISABLED_ISSUES_META_KEY) ?? '') === next) return;
+    this.setMeta(DISABLED_ISSUES_META_KEY, next);
+  }
+
+  /** Mirrors the "normalise before duplicate-URL check" toggle for the SQL side. */
+  setDedupePreNormalize(on: boolean): void {
+    const next = on ? '1' : '0';
+    if ((this.getMeta(DEDUPE_PRE_NORMALIZE_META_KEY) ?? '1') === next) return;
+    this.setMeta(DEDUPE_PRE_NORMALIZE_META_KEY, next);
+  }
+
+  /**
+   * Applies the parts of a crawl config that SQL has to know about —
+   * silenced issue checks and the duplicate-URL comparison key. Called
+   * whenever the desktop saves a config or starts a crawl.
+   */
+  applyCrawlConfigFlags(config: {
+    disabledIssues?: readonly string[];
+    dedupePreNormalize?: boolean;
+  }): void {
+    this.setDisabledIssues(config.disabledIssues ?? []);
+    this.setDedupePreNormalize(config.dedupePreNormalize ?? true);
+  }
+
+  /** The silenced issue categories, as a set. Empty when none. */
+  getDisabledIssues(): ReadonlySet<UrlCategory> {
+    const raw = this.getMeta(DISABLED_ISSUES_META_KEY);
+    if (!raw) return EMPTY_DISABLED;
+    if (raw === this.disabledIssuesRaw && this.disabledIssuesSet) return this.disabledIssuesSet;
+    let list: unknown = [];
+    try {
+      list = JSON.parse(raw);
+    } catch {
+      list = [];
+    }
+    const set = new Set(normalizeDisabledIssues(Array.isArray(list) ? (list as string[]) : []));
+    this.disabledIssuesRaw = raw;
+    this.disabledIssuesSet = set;
+    return set;
+  }
+
+  /** Zeroes the counters of silenced checks so every consumer of
+   *  `OverviewCounts` (sidebar, reports, webhook, MCP) agrees. */
+  private silenceDisabledIssues(issues: OverviewCounts['issues']): OverviewCounts['issues'] {
+    const disabled = this.getDisabledIssues();
+    if (disabled.size === 0) return issues;
+    const out = { ...issues };
+    for (const cat of disabled) {
+      const key = ISSUE_COUNT_KEY.get(cat);
+      if (key) (out as Record<string, number>)[key] = 0;
+    }
+    return out;
   }
 
   setMeta(key: string, value: string): void {
@@ -1942,6 +2149,7 @@ export class ProjectDb {
       custom_search_hits: input.customSearchHits ?? null,
       meta_refresh: input.metaRefresh ?? null,
       meta_refresh_url: input.metaRefreshUrl ?? null,
+      js_redirect_url: input.jsRedirectUrl ?? null,
       charset: input.charset ?? null,
       extraction_results: input.extractionResults ?? null,
       simhash: input.simhash ?? null,
@@ -2000,6 +2208,7 @@ export class ProjectDb {
       schema_unknown_types: input.schemaUnknownTypes ?? 0,
       schema_missing_required: input.schemaMissingRequired ?? 0,
       schema_missing_recommended: input.schemaMissingRecommended ?? 0,
+      schema_findings: input.schemaFindings ?? null,
       heading_order_violations: input.headingOrderViolations ?? 0,
       subresource_request_count: input.subresourceRequestCount ?? 0,
     };
@@ -2121,7 +2330,18 @@ export class ProjectDb {
           )
           .run(issueKey);
       }
+      this.setMeta(ISSUE_VERSION_META_KEY, ISSUE_MATERIALISATION_VERSION);
     });
+  }
+
+  /**
+   * True when `urls_issues` was last built by an older definition set (or
+   * never) and the project has rows — i.e. some sidebar counters would
+   * read 0 until the next crawl. Cheap: one meta read, one COUNT.
+   */
+  issueMaterialisationStale(): boolean {
+    if (this.getMeta(ISSUE_VERSION_META_KEY) === ISSUE_MATERIALISATION_VERSION) return false;
+    return this.countUrls() > 0;
   }
 
   /**
@@ -2174,22 +2394,34 @@ export class ProjectDb {
     });
     let done = 0;
     for (const [issueKey, where] of definitions) {
-      // One transaction per definition keeps the writer lock window
-      // short — other writes (the crawler's per-URL inserts) can
-      // interleave between definitions instead of waiting on the
-      // whole 70-statement block.
-      this.runInTransaction(() => {
-        this.db
-          .prepare(
-            `INSERT OR IGNORE INTO urls_issues (url_id, issue_key)
-               SELECT id, ? FROM urls WHERE ${where}`,
-          )
-          .run(issueKey);
-      });
+      // Phase 1 — READ. The heavy part of every definition is the
+      // SELECT, and it runs here as a plain read transaction: no write
+      // lock is taken, so the crawl's per-URL writes on the other
+      // connection proceed while it scans. The single
+      // `INSERT … SELECT` this replaces held the write lock for the
+      // whole scan — 160 s per definition on a 62k-page project, during
+      // which fetched pages queued unwritten for over four minutes.
+      const ids = (
+        this.db.prepare(`SELECT id FROM urls WHERE ${where}`).all() as { id: number }[]
+      ).map((r) => r.id);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      // Phase 2 — WRITE, in short batches. Each transaction is a few
+      // thousand indexed inserts (milliseconds), so a competing writer
+      // waits far less than its `busy_timeout`.
+      const insert = this.db.prepare(
+        'INSERT OR IGNORE INTO urls_issues (url_id, issue_key) VALUES (?, ?)',
+      );
+      for (let i = 0; i < ids.length; i += ISSUE_WRITE_BATCH) {
+        const slice = ids.slice(i, i + ISSUE_WRITE_BATCH);
+        this.runInTransaction(() => {
+          for (const id of slice) insert.run(id, issueKey);
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
       done++;
       onProgress?.(done, definitions.length);
-      await new Promise<void>((resolve) => setImmediate(resolve));
     }
+    this.setMeta(ISSUE_VERSION_META_KEY, ISSUE_MATERIALISATION_VERSION);
   }
 
   /**
@@ -2535,6 +2767,84 @@ export class ProjectDb {
           current = nextHop;
         }
         upd.run(chain, finalUrl, loop, row.id);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    this.recomputeCanonicalChains();
+  }
+
+  /**
+   * Walk canonical chains the way `recomputeRedirectChains` walks
+   * redirects. For every internal page the start point is the page itself;
+   * for a 3xx row it is the redirect's terminal URL, so the Redirects tab
+   * can show where the *combined* redirect → canonical path ends.
+   *
+   * Each hop follows the target's own canonical (`canonical_resolved`,
+   * falling back to the raw `canonical`) until a page that canonicalises
+   * to itself, has no canonical, or was not crawled. A cycle stops the walk
+   * with `canonical_final_url = NULL`. Pages whose canonical is themselves
+   * (or absent) get 0 / NULL.
+   */
+  recomputeCanonicalChains(): void {
+    const canonicalByUrl = new Map<string, string>();
+    const rows = this.db
+      .prepare(
+        `SELECT url, COALESCE(NULLIF(canonical_resolved, ''), canonical) AS target
+           FROM urls
+          WHERE is_external = 0
+            AND COALESCE(NULLIF(canonical_resolved, ''), canonical) IS NOT NULL
+            AND COALESCE(NULLIF(canonical_resolved, ''), canonical) != url`,
+      )
+      .all() as { url: string; target: string }[];
+    for (const r of rows) canonicalByUrl.set(r.url, r.target);
+
+    const starts = this.db
+      .prepare(
+        `SELECT id, url, redirect_final_url, status_code FROM urls
+          WHERE is_external = 0
+            AND (canonical_chain_length != 0 OR canonical_final_url IS NOT NULL
+                 OR url IN (SELECT url FROM urls WHERE is_external = 0
+                             AND COALESCE(NULLIF(canonical_resolved, ''), canonical) IS NOT NULL
+                             AND COALESCE(NULLIF(canonical_resolved, ''), canonical) != url)
+                 OR (status_code >= 300 AND status_code < 400 AND redirect_final_url IS NOT NULL))`,
+      )
+      .all() as {
+      id: number;
+      url: string;
+      redirect_final_url: string | null;
+      status_code: number | null;
+    }[];
+    const upd = this.db.prepare(
+      'UPDATE urls SET canonical_chain_length = ?, canonical_final_url = ? WHERE id = ?',
+    );
+    const HARD_LIMIT = 50;
+    this.db.exec('BEGIN');
+    try {
+      for (const row of starts) {
+        const isRedirect =
+          row.status_code !== null && row.status_code >= 300 && row.status_code < 400;
+        let current: string | null = isRedirect ? row.redirect_final_url : row.url;
+        const visited = new Set<string>();
+        let hops = 0;
+        let finalUrl: string | null = null;
+        while (current && hops < HARD_LIMIT) {
+          if (visited.has(current)) {
+            finalUrl = null; // cycle
+            break;
+          }
+          visited.add(current);
+          const next = canonicalByUrl.get(current);
+          if (!next) {
+            finalUrl = hops > 0 ? current : null;
+            break;
+          }
+          hops++;
+          current = next;
+        }
+        upd.run(hops, finalUrl, row.id);
       }
       this.db.exec('COMMIT');
     } catch (err) {
@@ -3321,7 +3631,8 @@ export class ProjectDb {
          SET hreflang_invalid_count = 0,
              hreflang_self_ref_missing = 0,
              hreflang_reciprocity_missing = 0,
-             hreflang_target_issues = 0
+             hreflang_target_issues = 0,
+             hreflang_unlinked = 0
        WHERE is_external = 0 AND content_kind = 'html'`,
     );
 
@@ -3373,6 +3684,7 @@ export class ProjectDb {
       status: number | null;
       indexability: Indexability;
       canonical: string | null;
+      inlinks: number;
     }
     const targetMeta = new Map<string, TargetMeta>();
     if (allTargets.size > 0) {
@@ -3384,7 +3696,7 @@ export class ProjectDb {
         const placeholders = slice.map(() => '?').join(',');
         const metaRows = this.db
           .prepare(
-            `SELECT url, status_code, indexability,
+            `SELECT url, status_code, indexability, inlinks,
                     ${CANONICAL_CMP} AS canonical FROM urls
               WHERE url IN (${placeholders})`,
           )
@@ -3393,12 +3705,14 @@ export class ProjectDb {
           status_code: number | null;
           indexability: Indexability;
           canonical: string | null;
+          inlinks: number;
         }[];
         for (const m of metaRows) {
           targetMeta.set(m.url, {
             status: m.status_code,
             indexability: m.indexability,
             canonical: m.canonical,
+            inlinks: m.inlinks ?? 0,
           });
         }
       }
@@ -3424,7 +3738,8 @@ export class ProjectDb {
          hreflang_invalid_count = ?,
          hreflang_self_ref_missing = ?,
          hreflang_reciprocity_missing = ?,
-         hreflang_target_issues = ?
+         hreflang_target_issues = ?,
+         hreflang_unlinked = ?
        WHERE id = ?`,
     );
 
@@ -3436,6 +3751,7 @@ export class ProjectDb {
         let selfRef = false;
         let reciprocityMissing = 0;
         let targetIssues = 0;
+        let unlinked = 0;
         for (const e of entries) {
           if (!e.langValid) invalidCount++;
           if (e.href === r.url) selfRef = true;
@@ -3457,6 +3773,9 @@ export class ProjectDb {
               meta.canonical !== '' &&
               meta.canonical !== e.href;
             if (badStatus || isNoindex || isCanonAway) targetIssues++;
+            // Unlinked: crawled, but no page links to it — only the
+            // annotation reaches the alternate, so bots may never fetch it.
+            if (e.href !== r.url && meta.inlinks === 0) unlinked++;
           }
         }
         upd.run(
@@ -3464,6 +3783,7 @@ export class ProjectDb {
           selfRef ? 0 : 1,
           reciprocityMissing,
           targetIssues,
+          unlinked,
           r.id,
         );
       }
@@ -4303,7 +4623,7 @@ export class ProjectDb {
 
     const rowsDb = this.db
       .prepare(
-        `SELECT u.url AS url, u.lang AS lang, u.word_count AS word_count,
+        `SELECT u.id AS id, u.url AS url, u.lang AS lang, u.word_count AS word_count,
                 s.language AS language,
                 s.detected_language AS detected_language,
                 s.match_count AS match_count,
@@ -4322,6 +4642,7 @@ export class ProjectDb {
     return {
       total: totalRow.c,
       rows: rowsDb.map((r) => ({
+        id: r['id'] as number,
         url: r['url'] as string,
         lang: (r['lang'] as string | null) ?? null,
         wordCount: (r['word_count'] as number | null) ?? null,
@@ -5274,6 +5595,19 @@ export class ProjectDb {
   /** True when the project has any per-usage image rows. Current crawls
    *  always populate `image_usages`; only pre-per-usage legacy projects
    *  don't, and those fall back to the deduped per-image view. */
+  /** Real `urls` columns, read once per instance — the sort allowlist. */
+  private urlSortColumnsCache: Set<string> | null = null;
+
+  private urlSortColumns(): ReadonlySet<string> {
+    if (!this.urlSortColumnsCache) {
+      const cols = this.db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      this.urlSortColumnsCache = new Set(cols.map((c) => c.name));
+    }
+    return this.urlSortColumnsCache;
+  }
+
   private hasImageUsages(): boolean {
     return (
       (this.db.prepare('SELECT EXISTS(SELECT 1 FROM image_usages) AS e').get() as {
@@ -5290,12 +5624,20 @@ export class ProjectDb {
     emptyAltOnly?: boolean;
     duplicateAltOnly?: boolean;
     internalOnly?: boolean;
+    minByteSize?: number;
+    sortBy?: ImagesSortKey;
+    sortDir?: 'asc' | 'desc';
   }): { rows: ImageRow[]; total: number } {
     // Per-usage view: one row per (image, page) so alt / missing / empty is
     // accurate per page. An image with alt on one page and none on another
     // becomes two rows — the alt'd one is NOT in Missing Alt, the bare one
     // IS — which is what the sidebar count reflects too. Legacy projects
     // with no `image_usages` fall back to the deduped per-image path below.
+    //
+    // Sorting is done here, not in the renderer: the tab loads one page of
+    // rows, and ordering that page client-side only ever sorted whichever
+    // 5 000 rows the default order happened to return first.
+    const minBytes = Math.max(0, Math.floor(params.minByteSize ?? 0));
     if (this.hasImageUsages()) {
       const where: string[] = [];
       const args: (string | number)[] = [];
@@ -5308,28 +5650,40 @@ export class ProjectDb {
         const like = `%${params.search}%`;
         args.push(like, like);
       }
+      // The size filter has to see the same expression the SELECT exposes,
+      // so both the count and the page agree on which rows qualify.
+      if (minBytes > 0) {
+        where.push(`${IMAGE_BYTE_SIZE_SQL} >= ?`);
+        args.push(minBytes);
+      }
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
       const total = (
         this.db
           .prepare(
             `SELECT COUNT(*) AS c
-               FROM image_usages iu JOIN images i ON iu.image_id = i.id ${whereSql}`,
+               FROM image_usages iu
+               JOIN images i ON iu.image_id = i.id
+               ${IMAGE_SIZE_JOIN_SQL}
+               ${whereSql}`,
           )
           .get(...args) as { c: number }
       ).c;
       const rows = this.db
         .prepare(
           `SELECT i.id, i.src, iu.alt AS alt, i.width, i.height, i.is_internal,
-                  i.occurrences, u.url AS from_url
+                  i.occurrences, u.url AS from_url, iu.from_url_id AS from_url_id,
+                  ${IMAGE_BYTE_SIZE_SQL} AS byte_size
              FROM image_usages iu
              JOIN images i ON iu.image_id = i.id
              LEFT JOIN urls u ON iu.from_url_id = u.id
+             ${IMAGE_SIZE_JOIN_SQL}
              ${whereSql}
-            ORDER BY i.occurrences DESC, i.id, iu.from_url_id
+            ${imageOrderBy(params.sortBy, params.sortDir, false)}
             LIMIT ? OFFSET ?`,
         )
         .all(...args, params.limit, params.offset) as unknown as (ImageRowDb & {
         from_url: string | null;
+        from_url_id: number | null;
       })[];
       return {
         total,
@@ -5342,6 +5696,8 @@ export class ProjectDb {
           isInternal: r.is_internal === 1,
           occurrences: r.occurrences,
           fromUrl: r.from_url ?? null,
+          fromUrlId: r.from_url_id ?? null,
+          byteSize: r.byte_size ?? null,
         })),
       };
     }
@@ -5349,24 +5705,33 @@ export class ProjectDb {
     // Legacy fallback — per distinct image (no usage rows to expand).
     const where: string[] = [];
     const args: (string | number)[] = [];
-    if (params.internalOnly) where.push('is_internal = 1');
-    if (params.missingAltOnly) where.push('alt IS NULL');
-    if (params.emptyAltOnly) where.push("alt = ''");
+    if (params.internalOnly) where.push('i.is_internal = 1');
+    if (params.missingAltOnly) where.push('i.alt IS NULL');
+    if (params.emptyAltOnly) where.push("i.alt = ''");
     if (params.duplicateAltOnly) where.push(DUPLICATE_ALT_PREDICATE);
     if (params.search) {
-      where.push('(src LIKE ? OR alt LIKE ?)');
+      where.push('(i.src LIKE ? OR i.alt LIKE ?)');
       const like = `%${params.search}%`;
       args.push(like, like);
     }
+    if (minBytes > 0) {
+      where.push(`${IMAGE_BYTE_SIZE_SQL} >= ?`);
+      args.push(minBytes);
+    }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const total = (
-      this.db.prepare(`SELECT COUNT(*) AS c FROM images ${whereSql}`).get(...args) as {
-        c: number;
-      }
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM images i ${IMAGE_SIZE_JOIN_SQL} ${whereSql}`,
+        )
+        .get(...args) as { c: number }
     ).c;
     const rows = this.db
       .prepare(
-        `SELECT * FROM images ${whereSql} ORDER BY occurrences DESC, id LIMIT ? OFFSET ?`,
+        `SELECT i.*, ${IMAGE_BYTE_SIZE_SQL} AS byte_size
+           FROM images i ${IMAGE_SIZE_JOIN_SQL} ${whereSql}
+           ${imageOrderBy(params.sortBy, params.sortDir, true)}
+           LIMIT ? OFFSET ?`,
       )
       .all(...args, params.limit, params.offset) as unknown as ImageRowDb[];
     return {
@@ -5380,6 +5745,8 @@ export class ProjectDb {
         isInternal: r.is_internal === 1,
         occurrences: r.occurrences,
         fromUrl: null,
+        fromUrlId: null,
+        byteSize: r.byte_size ?? null,
       })),
     };
   }
@@ -5397,8 +5764,9 @@ export class ProjectDb {
       category: params.category ?? 'all',
       search: params.search,
       filter: params.filter,
+      disabledIssues: this.getDisabledIssues(),
     });
-    const sortCol = validSortColumn(params.sortBy);
+    const sortCol = validSortColumn(params.sortBy, this.urlSortColumns());
     const sortDir = params.sortDir === 'desc' ? 'DESC' : 'ASC';
     // Server-side clamp — this method is reachable from the renderer
     // and the MCP bridge, so the limit can't be trusted to be sane. A
@@ -5613,8 +5981,9 @@ export class ProjectDb {
     // while the filter didn't, so "Success (2xx) 7,327" opened a table of
     // 7,329 rows. Deriving the count from the clause makes the number and
     // the row set the same query by construction.
+    const disabledIssues = this.getDisabledIssues();
     const countCategory = (cat: UrlCategory): number => {
-      const clause = categoryWhereClause(cat);
+      const clause = categoryWhereClause(cat, disabledIssues);
       return countWhere(clause ?? '1 = 1');
     };
 
@@ -5676,7 +6045,7 @@ export class ProjectDb {
         canonicalised: countCategory('indexability:canonicalised'),
         blockedRobots: countCategory('indexability:blocked-robots'),
       },
-      issues: this.getIssuesCounts(),
+      issues: this.silenceDisabledIssues(this.getIssuesCounts()),
     };
   }
 
@@ -5804,6 +6173,10 @@ export class ProjectDb {
       urlNonAscii: countWhere(`${html} AND ${URL_HAS_NON_ASCII}`),
       langMissing: countWhere(`${indexable} AND (lang IS NULL OR lang = '')`),
       viewportMissing: countWhere(`${indexable} AND (viewport IS NULL OR viewport = '')`),
+      mobileParityMismatch: countWhere(`${html} AND mobile_parity_diff > 0`),
+      contentWiderThanScreen: countWhere(
+        `${html} AND mobile_usable >= 0 AND mobile_overflow_px > 4`,
+      ),
       ogMissing: countWhere(
         `${indexable}
          AND (og_title IS NULL OR og_title = '')
@@ -5856,6 +6229,9 @@ export class ProjectDb {
       ),
       faviconMissing: countWhere(`${indexable} AND (favicon IS NULL OR favicon = '')`),
       redirectLoop: countWhere(`${html} AND redirect_loop = 1`),
+      redirectCanonicalChain: countWhere(
+        'is_external = 0 AND status_code >= 300 AND status_code < 400 AND canonical_chain_length > 0',
+      ),
       redirectChainLong: countWhere(`${html} AND redirect_chain_length > 3`),
       redirectSelf: countWhere(
         `${html} AND redirect_target IS NOT NULL AND redirect_target = url`,
@@ -5930,6 +6306,8 @@ export class ProjectDb {
         `${html} AND hreflang_reciprocity_missing > 0`,
       ),
       hreflangTargetIssues: countWhere(`${html} AND hreflang_target_issues > 0`),
+      hreflangUnlinked: countWhere(`${html} AND hreflang_unlinked > 0`),
+      orphanPage: countWhere(ORPHAN_PAGE_SQL),
       crawledNotInSitemap: countWhere(
         `${html} AND status_code >= 200 AND status_code < 300
          AND indexability = 'indexable'
@@ -6031,16 +6409,7 @@ export class ProjectDb {
            OR analytics_trackers LIKE '%"LinkedIn Insight Tag"%')
          AND (permissions_policy IS NULL OR permissions_policy = '')`,
       ),
-      imageTooLarge: countWhere(
-        `${html} AND EXISTS (
-           SELECT 1 FROM image_usages iu
-             JOIN images i ON i.id = iu.image_id
-            WHERE iu.from_url_id = urls.id
-              AND i.is_internal = 1
-              AND i.byte_size IS NOT NULL
-              AND i.byte_size > 102400
-         )`,
-      ),
+      imageTooLarge: issueCount('issues:image-too-large'),
       sslCertExpired: countWhere(
         `${html} AND url LIKE 'https://%'
          AND EXISTS (
@@ -6108,27 +6477,14 @@ export class ProjectDb {
          AND hsts IS NOT NULL AND hsts != ''
          AND LOWER(hsts) NOT LIKE '%includesubdomains%'`,
       ),
-      anchorTextTooLong: countWhere(
-        `${html} AND EXISTS (
-           SELECT 1 FROM links l
-            WHERE l.from_url_id = urls.id
-              AND l.anchor IS NOT NULL
-              AND LENGTH(l.anchor) > 100
-         )`,
-      ),
-      anchorTextGeneric: countWhere(
-        `${html} AND EXISTS (
-           SELECT 1 FROM links l
-            WHERE l.from_url_id = urls.id
-              AND l.anchor IS NOT NULL
-              AND LOWER(TRIM(l.anchor)) IN (
-                'click here', 'click', 'here', 'read more', 'more',
-                'learn more', 'see more', 'continue reading', 'continue',
-                'this link', 'link', 'go', 'buraya', 'tıkla', 'devamı',
-                'devamını oku', 'daha fazla'
-              )
-         )`,
-      ),
+      // Link- and image-correlated counters. Each of these used to run a
+      // per-page EXISTS over `links` / `image_usages` inside the sidebar's
+      // combined scan — O(pages × outlinks) on every tick, which on a 62k-
+      // page crawl held a reader worker for minutes and starved the URL
+      // table. They are materialised into `urls_issues` (see
+      // EXPENSIVE_ISSUE_DEFINITIONS) and read back as one GROUP BY.
+      anchorTextTooLong: issueCount('issues:anchor-text-too-long'),
+      anchorTextGeneric: issueCount('issues:anchor-text-generic'),
       formInputUnlabeled: countWhere(
         `${html} AND form_input_unlabeled > 0`,
       ),
@@ -6164,30 +6520,8 @@ export class ProjectDb {
       schemaMissingRecommended: countWhere(
         `${html} AND schema_missing_recommended > 0`,
       ),
-      imageBrokenSrc: countWhere(
-        `${html} AND EXISTS (
-           SELECT 1 FROM image_usages iu
-             JOIN images i ON i.id = iu.image_id
-            WHERE iu.from_url_id = urls.id
-              AND i.probe_status IS NOT NULL
-              AND i.probe_status >= 400
-              AND i.probe_status < 600
-         )`,
-      ),
-      targetBlankNoNoopener: countWhere(
-        `${html} AND EXISTS (
-           SELECT 1 FROM links l
-            WHERE l.from_url_id = urls.id
-              AND LOWER(COALESCE(l.target, '')) = '_blank'
-              AND (
-                l.rel IS NULL
-                OR (
-                  LOWER(l.rel) NOT LIKE '%noopener%'
-                  AND LOWER(l.rel) NOT LIKE '%noreferrer%'
-                )
-              )
-         )`,
-      ),
+      imageBrokenSrc: issueCount('issues:image-broken-src'),
+      targetBlankNoNoopener: issueCount('issues:target-blank-no-noopener'),
       pageEmpty: countWhere(
         `${html} AND status_code BETWEEN 200 AND 299
          AND word_count IS NOT NULL AND word_count < 30`,
@@ -6213,32 +6547,13 @@ export class ProjectDb {
         `${html} AND title IS NOT NULL AND title != ''
          AND TRIM(title) NOT LIKE '% %'`,
       ),
-      externalLinksTooMany: countWhere(
-        `${html} AND EXISTS (
-           SELECT 1 FROM (
-             SELECT from_url_id, COUNT(*) AS c
-               FROM links
-              WHERE is_internal = 0
-              GROUP BY from_url_id
-             HAVING c > 100
-           ) e
-           WHERE e.from_url_id = urls.id
-         )`,
-      ),
+      externalLinksTooMany: issueCount('issues:external-links-too-many'),
       outlinksZero: countWhere(
         `${html} AND status_code BETWEEN 200 AND 299
          AND indexability = 'indexable'
          AND outlinks = 0`,
       ),
-      internalLinkToRedirect: countWhere(
-        `${html} AND EXISTS (
-           SELECT 1 FROM links l
-             JOIN urls t ON l.to_url = t.url
-            WHERE l.from_url_id = urls.id
-              AND l.is_internal = 1
-              AND t.status_code >= 300 AND t.status_code < 400
-         )`,
-      ),
+      internalLinkToRedirect: issueCount('issues:internal-link-to-redirect'),
       h1EqualsTitle: countWhere(
         `${html} AND title IS NOT NULL AND title != ''
          AND h1 IS NOT NULL AND h1 != ''
@@ -6253,20 +6568,7 @@ export class ProjectDb {
       deadExternalDomain: issueCount('issues:dead-external-domain'),
       duplicateUrlPostNorm: issueCount('issues:duplicate-url-post-norm'),
       canonicalChainMultiHop: issueCount('issues:canonical-chain-multi-hop'),
-      imageSlowLoading: countWhere(
-        // ≥1 image > 200 KB AND the page is missing lazy-loading on at
-        // least one image (images_lazy < images_count). The size join
-        // is on the per-image probed `byte_size`; lazy adoption stays
-        // page-level so we don't need a per-image `loading` column.
-        `${html} AND images_count > 0 AND images_lazy < images_count
-         AND EXISTS (
-           SELECT 1 FROM image_usages iu
-             JOIN images i ON iu.image_id = i.id
-            WHERE iu.from_url_id = urls.id
-              AND i.byte_size IS NOT NULL
-              AND i.byte_size > 204800
-         )`,
-      ),
+      imageSlowLoading: issueCount('issues:image-slow-loading'),
       descriptionEqualsH1: countWhere(
         `${html} AND meta_description IS NOT NULL AND meta_description != ''
          AND h1 IS NOT NULL AND h1 != ''
@@ -6297,24 +6599,8 @@ export class ProjectDb {
          AND url NOT LIKE 'http://%.local'`,
       ),
       renderBlockingCritical: countWhere(`${html} AND render_blocking_count > 20`),
-      ogImageTooLarge: countWhere(
-        `${html} AND og_image IS NOT NULL AND og_image != ''
-         AND EXISTS (
-           SELECT 1 FROM images i
-            WHERE i.src = urls.og_image
-              AND i.byte_size IS NOT NULL
-              AND i.byte_size > 5242880
-         )`,
-      ),
-      twitterImageTooLarge: countWhere(
-        `${html} AND twitter_image IS NOT NULL AND twitter_image != ''
-         AND EXISTS (
-           SELECT 1 FROM images i
-            WHERE i.src = urls.twitter_image
-              AND i.byte_size IS NOT NULL
-              AND i.byte_size > 5242880
-         )`,
-      ),
+      ogImageTooLarge: issueCount('issues:og-image-too-large'),
+      twitterImageTooLarge: issueCount('issues:twitter-image-too-large'),
       ogImageWrongAspect: countWhere(
         `${html} AND og_image IS NOT NULL AND og_image != ''
          AND og_image_width > 0 AND og_image_height > 0
@@ -6386,10 +6672,14 @@ export class ProjectDb {
         : kind === 'external'
           ? 'AND l.is_internal = 0'
           : '';
+    // Broken targets first (idx_urls_status, a few hundred rows), then
+    // their inbound links through idx_links_to. Joining from `links`
+    // walked every stored link on each sidebar tick.
     return this.scalarCount(
       `SELECT COUNT(*) AS c FROM links l
-         JOIN urls t ON l.to_url = t.url
-         WHERE t.status_code >= 400 AND t.status_code < 600 ${scope}`,
+         WHERE l.to_url IN (
+           SELECT url FROM urls WHERE status_code >= 400 AND status_code < 600
+         ) ${scope}`,
     );
   }
 
@@ -6950,9 +7240,13 @@ export class ProjectDb {
     emptyAltOnly?: boolean;
     duplicateAltOnly?: boolean;
     search?: string;
+    minByteSize?: number;
+    sortBy?: ImagesSortKey;
+    sortDir?: 'asc' | 'desc';
   } = {}): IterableIterator<ImageRow> {
     const where: string[] = [];
     const args: (string | number)[] = [];
+    const minBytes = Math.max(0, Math.floor(options.minByteSize ?? 0));
     // Per-usage export to match the per-usage Images tab (one row per page).
     if (this.hasImageUsages()) {
       if (options.missingAltOnly) where.push('iu.alt IS NULL');
@@ -6963,18 +7257,27 @@ export class ProjectDb {
         const like = `%${options.search}%`;
         args.push(like, like);
       }
+      if (minBytes > 0) {
+        where.push(`${IMAGE_BYTE_SIZE_SQL} >= ?`);
+        args.push(minBytes);
+      }
       const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
       const rows = this.db
         .prepare(
           `SELECT i.id, i.src, iu.alt AS alt, i.width, i.height, i.is_internal,
-                  i.occurrences, u.url AS from_url
+                  i.occurrences, u.url AS from_url, iu.from_url_id AS from_url_id,
+                  ${IMAGE_BYTE_SIZE_SQL} AS byte_size
              FROM image_usages iu
              JOIN images i ON iu.image_id = i.id
              LEFT JOIN urls u ON iu.from_url_id = u.id
+             ${IMAGE_SIZE_JOIN_SQL}
              ${whereSql}
-            ORDER BY i.occurrences DESC, i.id, iu.from_url_id`,
+            ${imageOrderBy(options.sortBy, options.sortDir, false)}`,
         )
-        .all(...args) as unknown as (ImageRowDb & { from_url: string | null })[];
+        .all(...args) as unknown as (ImageRowDb & {
+        from_url: string | null;
+        from_url_id: number | null;
+      })[];
       for (const r of rows) {
         yield {
           id: r.id,
@@ -6985,23 +7288,33 @@ export class ProjectDb {
           isInternal: r.is_internal === 1,
           occurrences: r.occurrences,
           fromUrl: r.from_url ?? null,
+          fromUrlId: r.from_url_id ?? null,
+          byteSize: r.byte_size ?? null,
         };
       }
       return;
     }
 
     // Legacy fallback — per distinct image.
-    if (options.missingAltOnly) where.push('alt IS NULL');
-    if (options.emptyAltOnly) where.push("alt = ''");
+    if (options.missingAltOnly) where.push('i.alt IS NULL');
+    if (options.emptyAltOnly) where.push("i.alt = ''");
     if (options.duplicateAltOnly) where.push(DUPLICATE_ALT_PREDICATE);
     if (options.search) {
-      where.push('(src LIKE ? OR alt LIKE ?)');
+      where.push('(i.src LIKE ? OR i.alt LIKE ?)');
       const like = `%${options.search}%`;
       args.push(like, like);
     }
+    if (minBytes > 0) {
+      where.push(`${IMAGE_BYTE_SIZE_SQL} >= ?`);
+      args.push(minBytes);
+    }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const rows = this.db
-      .prepare(`SELECT * FROM images ${whereSql} ORDER BY occurrences DESC, id`)
+      .prepare(
+        `SELECT i.*, ${IMAGE_BYTE_SIZE_SQL} AS byte_size
+           FROM images i ${IMAGE_SIZE_JOIN_SQL} ${whereSql}
+           ${imageOrderBy(options.sortBy, options.sortDir, true)}`,
+      )
       .all(...args) as unknown as ImageRowDb[];
     for (const r of rows) {
       yield {
@@ -7013,6 +7326,8 @@ export class ProjectDb {
         isInternal: r.is_internal === 1,
         occurrences: r.occurrences,
         fromUrl: null,
+        fromUrlId: null,
+        byteSize: r.byte_size ?? null,
       };
     }
   }
@@ -7102,7 +7417,7 @@ export class ProjectDb {
     // inside Electron's 4 GB heap-cap budget. 2000-row batches keep
     // peak memory flat regardless of table size while adding only
     // ~500 statement executions per million rows.
-    const where = categoryWhereClause(category);
+    const where = categoryWhereClause(category, this.getDisabledIssues());
     const BATCH = 2000;
     const sql = where
       ? `SELECT * FROM urls WHERE (${where}) AND id > ? ORDER BY id LIMIT ?`
@@ -7133,7 +7448,10 @@ export class ProjectDb {
     search?: string;
     filter?: AdvancedFilter;
   }): IterableIterator<CrawlUrlRow> {
-    const { whereSql, args: baseArgs } = buildUrlsWhere(params);
+    const { whereSql, args: baseArgs } = buildUrlsWhere({
+      ...params,
+      disabledIssues: this.getDisabledIssues(),
+    });
     const BATCH = 2000;
     const sql = whereSql
       ? `SELECT * FROM urls ${whereSql} AND id > ? ORDER BY id LIMIT ?`
@@ -7983,6 +8301,48 @@ export class ProjectDb {
    * UI never wires this from user input). Direction is fixed DESC since
    * every callsite wants "top by metric".
    */
+  /** Internal HTML pages whose outlink count exceeds `threshold`, most links first. */
+  pagesOverLinkLimit(threshold: number, limit: number): { url: string; value: number | null }[] {
+    return this.db
+      .prepare(
+        `SELECT url, outlinks AS value FROM urls
+          WHERE is_external = 0 AND content_kind = 'html' AND outlinks > ?
+          ORDER BY outlinks DESC, url ASC LIMIT ?`,
+      )
+      .all(Math.max(0, Math.floor(threshold)), Math.max(1, Math.floor(limit))) as {
+      url: string;
+      value: number | null;
+    }[];
+  }
+
+  /**
+   * Every stored link edge, keyset-paginated so a million-link site streams
+   * at flat memory. `scope` splits by the link's `is_internal` flag.
+   */
+  *iterateLinks(scope: 'internal' | 'external'): IterableIterator<LinkExportRow> {
+    const stmt = this.db.prepare(
+      `SELECT l.id, f.url AS from_url, l.to_url, t.status_code AS to_status,
+              l.anchor, l.rel, l.type, l.target, l.alt_text,
+              l.link_position, l.link_path, l.link_origin
+         FROM links l
+         JOIN urls f ON l.from_url_id = f.id
+         LEFT JOIN urls t ON l.to_url = t.url
+        WHERE l.is_internal = ? AND l.id > ?
+        ORDER BY l.id ASC LIMIT 2000`,
+    );
+    const isInternal = scope === 'internal' ? 1 : 0;
+    let lastId = 0;
+    for (;;) {
+      const rows = stmt.all(isInternal, lastId) as unknown as (LinkExportRow & { id: number })[];
+      if (rows.length === 0) return;
+      for (const r of rows) {
+        lastId = r.id;
+        yield r;
+      }
+      if (rows.length < 2000) return;
+    }
+  }
+
   topUrlsBy(
     column: 'response_time_ms' | 'depth' | 'outlinks' | 'inlinks' | 'content_length',
     limit: number,
@@ -8236,6 +8596,72 @@ export class ProjectDb {
    * next crawl. PDFs are their own URL rows, so this is a plain per-row
    * update (no fan-out, unlike manifests/images).
    */
+  /**
+   * Pages the mobile-parity probe re-fetches: indexable internal HTML,
+   * most-linked first so the sample covers what matters. `limit` 0 = all.
+   * Returns the crawl's own values for the fields the probe compares.
+   */
+  pagesForMobileParity(limit: number): MobileParitySource[] {
+    const cap = limit > 0 ? Math.floor(limit) : 2_000_000_000;
+    return this.db
+      .prepare(
+        `SELECT url, status_code, title, h1, meta_description,
+                ${CANONICAL_CMP} AS canonical, meta_robots, word_count, outlinks
+           FROM urls
+          WHERE is_external = 0 AND content_kind = 'html'
+            AND status_code >= 200 AND status_code < 300
+            AND indexability = 'indexable'
+          ORDER BY inlinks DESC, id ASC
+          LIMIT ?`,
+      )
+      .all(cap) as unknown as MobileParitySource[];
+  }
+
+  /** Stores the parity probe's verdict for a page; `null` = identical. */
+  setMobileParity(url: string, diff: MobileParityDiff | null): void {
+    this.db
+      .prepare('UPDATE urls SET mobile_parity = ?, mobile_parity_diff = ? WHERE url = ?')
+      .run(diff ? JSON.stringify(diff) : null, diff ? diff.fields.length : 0, url);
+  }
+
+  /** Pages with parity differences, most differing fields first (report). */
+  mobileParityReport(limit: number): { url: string; value: number | null }[] {
+    return this.db
+      .prepare(
+        `SELECT url, mobile_parity_diff AS value FROM urls
+          WHERE is_external = 0 AND mobile_parity_diff > 0
+          ORDER BY mobile_parity_diff DESC, inlinks DESC, url ASC LIMIT ?`,
+      )
+      .all(Math.max(1, Math.floor(limit))) as { url: string; value: number | null }[];
+  }
+
+  /**
+   * Stored page bodies of indexable internal HTML pages, for corpus-wide
+   * text analysis (Top Words with body text). Keyset-paginated so a large
+   * site never pins more than a page of bodies at once.
+   */
+  *iterateStoredBodies(): IterableIterator<{ url: string; body: string }> {
+    const stmt = this.db.prepare(
+      `SELECT u.id, u.url, s.body
+         FROM url_sources s
+         JOIN urls u ON u.id = s.url_id
+        WHERE u.is_external = 0 AND u.content_kind = 'html'
+          AND u.status_code BETWEEN 200 AND 299 AND u.indexability = 'indexable'
+          AND u.id > ?
+        ORDER BY u.id ASC LIMIT 200`,
+    );
+    let lastId = 0;
+    for (;;) {
+      const rows = stmt.all(lastId) as unknown as { id: number; url: string; body: string }[];
+      if (rows.length === 0) return;
+      for (const r of rows) {
+        lastId = r.id;
+        if (r.body) yield { url: r.url, body: r.body };
+      }
+      if (rows.length < 200) return;
+    }
+  }
+
   unprobedPdfUrls(limit = 1000): string[] {
     const rows = this.db
       .prepare(
@@ -8477,6 +8903,9 @@ export class ProjectDb {
             break;
           case 'setPdfMetadata':
             this.setPdfMetadata(...w.args);
+            break;
+          case 'setMobileParity':
+            this.setMobileParity(...w.args);
             break;
         }
       }
@@ -9085,10 +9514,16 @@ export class ProjectDb {
     hreflangInvalidCount: r.hreflang_invalid_count,
     hreflangSelfRefMissing: r.hreflang_self_ref_missing === 1,
     hreflangReciprocityMissing: r.hreflang_reciprocity_missing,
+    hreflangUnlinked: r.hreflang_unlinked ?? 0,
+    mobileParity: r.mobile_parity ?? null,
+    mobileParityDiff: r.mobile_parity_diff ?? 0,
+    mobileOverflowPx: (r.mobile_usable ?? -1) >= 0 ? (r.mobile_overflow_px ?? 0) : null,
     hreflangTargetIssues: r.hreflang_target_issues,
     redirectChainLength: r.redirect_chain_length,
     redirectFinalUrl: r.redirect_final_url,
     redirectLoop: r.redirect_loop === 1,
+    canonicalChainLength: r.canonical_chain_length ?? 0,
+    canonicalFinalUrl: r.canonical_final_url ?? null,
     folderDepth: r.folder_depth,
     queryParamCount: r.query_param_count,
     csp: r.csp,
@@ -9097,6 +9532,7 @@ export class ProjectDb {
     customSearchHits: r.custom_search_hits,
     metaRefresh: r.meta_refresh,
     metaRefreshUrl: r.meta_refresh_url,
+    jsRedirectUrl: r.js_redirect_url ?? null,
     charset: r.charset,
     extractionResults: r.extraction_results,
     simhash: r.simhash,
@@ -9168,6 +9604,7 @@ export class ProjectDb {
     schemaUnknownTypes: r.schema_unknown_types ?? 0,
     schemaMissingRequired: r.schema_missing_required ?? 0,
     schemaMissingRecommended: r.schema_missing_recommended ?? 0,
+    schemaFindings: r.schema_findings ?? null,
     headingOrderViolations: r.heading_order_violations ?? 0,
     subresourceRequestCount: r.subresource_request_count ?? 0,
     changed: r.changed === 1,
@@ -9179,35 +9616,25 @@ export class ProjectDb {
   }
 }
 
-const VALID_SORT_COLUMNS = new Set([
-  'id',
-  'url',
-  'status_code',
-  'title_length',
-  'meta_description_length',
-  'word_count',
-  'response_time_ms',
-  'depth',
-  'inlinks',
-  'outlinks',
-  'link_score',
-  'crawled_at',
-  'indexability',
-  'content_kind',
-  'images_count',
-  'images_missing_alt',
-  'h1_count',
-  'h1_length',
-]);
-
 function toSnakeCase(s: string): string {
   return s.replace(/([A-Z])/g, '_$1').toLowerCase();
 }
 
-function validSortColumn(sortBy: string | undefined): string {
+/**
+ * Map a `CrawlUrlRow` key to the `urls` column to ORDER BY. `allowed` is
+ * the table's real column set (see `urlSortColumns`), which is what makes
+ * this safe to interpolate into SQL.
+ *
+ * This used to check a hand-kept list of 18 names. Every one of the
+ * ~60 grid columns is clickable, so a header outside that list — Size
+ * (Bytes) among them — flipped its arrow and silently sorted by id.
+ * Anything not backed by a column still falls back to id, but now that
+ * means a genuinely virtual key, not a forgotten one.
+ */
+function validSortColumn(sortBy: string | undefined, allowed: ReadonlySet<string>): string {
   if (!sortBy) return 'id';
   const snake = toSnakeCase(sortBy);
-  return VALID_SORT_COLUMNS.has(snake) ? snake : 'id';
+  return allowed.has(snake) ? snake : 'id';
 }
 
 /**
@@ -9306,6 +9733,19 @@ function urlHostSql(col: string): string {
 /** Post-normalisation form of a URL column — query string stripped,
  *  lowercased, trailing slash trimmed — the identity two "duplicate
  *  URL" rows share. */
+/**
+ * The key two URLs are compared on for the Duplicate URL check. Honours
+ * Settings → Duplicates → "Normalise URLs before duplicate-URL check"
+ * (`dedupePreNormalize`, mirrored into `project_meta` by the desktop):
+ * on (default) compares the lower-cased, query-stripped, slash-trimmed
+ * form; off compares the stored URL byte-for-byte. The uncorrelated
+ * scalar subquery is evaluated once per statement, not per row.
+ */
+function urlDedupeKeySql(col: string): string {
+  return `CASE WHEN (SELECT value FROM project_meta WHERE key = '${DEDUPE_PRE_NORMALIZE_META_KEY}') = '0'
+               THEN ${col} ELSE ${urlPostNormSql(col)} END`;
+}
+
 function urlPostNormSql(col: string): string {
   return `RTRIM(
     LOWER(
@@ -9317,6 +9757,20 @@ function urlPostNormSql(col: string): string {
     '/'
   )`;
 }
+
+/** Rows per write transaction in the yielding issue recompute. */
+const ISSUE_WRITE_BATCH = 2_000;
+
+/**
+ * Bumped whenever EXPENSIVE_ISSUE_DEFINITIONS gains, loses or changes a
+ * key. A materialise pass stamps it into `project_meta`; a project opened
+ * with an older stamp (or none) has an `urls_issues` table that predates
+ * some of the counters reading it, so the host schedules one background
+ * pass (`issueMaterialisationStale`) instead of showing 0 for those
+ * checks until the next crawl.
+ */
+export const ISSUE_MATERIALISATION_VERSION = '2';
+const ISSUE_VERSION_META_KEY = 'urlsIssuesVersion';
 
 export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string]> = [
   [
@@ -9358,15 +9812,130 @@ export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string
     // of `urls` for every row — 20k pages took ~150 s and froze the app
     // for that long on every mid-crawl recompute; this form takes ~20 ms.
     `is_external = 0 AND content_kind = 'html'
-     AND ${urlPostNormSql('url')} IN (
+     AND ${urlDedupeKeySql('url')} IN (
        SELECT norm_url FROM (
-         SELECT ${urlPostNormSql('url')} AS norm_url
+         SELECT ${urlDedupeKeySql('url')} AS norm_url
            FROM urls
           WHERE is_external = 0 AND content_kind = 'html'
           GROUP BY norm_url
          HAVING COUNT(*) > 1
        )
      )`,
+  ],
+  // ── Link- and image-correlated checks ──────────────────────────────
+  // Every clause below is set-based: one `id IN (SELECT from_url_id …)`
+  // over `links` / `image_usages`, evaluated once per definition. The
+  // correlated `EXISTS (… WHERE l.from_url_id = urls.id …)` forms they
+  // replace re-scanned each page's outlinks inside the sidebar's combined
+  // aggregate — with 62k pages and millions of stored links that single
+  // aggregate ran past the 60 s reader budget on every tick.
+  [
+    'issues:anchor-text-too-long',
+    `is_external = 0 AND content_kind = 'html'
+     AND id IN (
+       SELECT from_url_id FROM links
+        WHERE anchor IS NOT NULL AND LENGTH(anchor) > 100
+     )`,
+  ],
+  [
+    'issues:anchor-text-generic',
+    `is_external = 0 AND content_kind = 'html'
+     AND id IN (
+       SELECT from_url_id FROM links
+        WHERE anchor IS NOT NULL
+          AND LOWER(TRIM(anchor)) IN (
+            'click here', 'click', 'here', 'read more', 'more',
+            'learn more', 'see more', 'continue reading', 'continue',
+            'this link', 'link', 'go', 'buraya', 'tıkla', 'devamı',
+            'devamını oku', 'daha fazla'
+          )
+     )`,
+  ],
+  [
+    'issues:target-blank-no-noopener',
+    `is_external = 0 AND content_kind = 'html'
+     AND id IN (
+       SELECT from_url_id FROM links
+        WHERE LOWER(COALESCE(target, '')) = '_blank'
+          AND (
+            rel IS NULL
+            OR (
+              LOWER(rel) NOT LIKE '%noopener%'
+              AND LOWER(rel) NOT LIKE '%noreferrer%'
+            )
+          )
+     )`,
+  ],
+  [
+    'issues:external-links-too-many',
+    `is_external = 0 AND content_kind = 'html'
+     AND id IN (
+       SELECT from_url_id FROM links
+        WHERE is_internal = 0
+        GROUP BY from_url_id
+       HAVING COUNT(*) > 100
+     )`,
+  ],
+  [
+    'issues:internal-link-to-redirect',
+    `is_external = 0 AND content_kind = 'html'
+     AND id IN (
+       SELECT l.from_url_id
+         FROM links l
+        WHERE l.is_internal = 1
+          AND l.to_url IN (
+            SELECT url FROM urls
+             WHERE status_code >= 300 AND status_code < 400
+          )
+     )`,
+  ],
+  [
+    'issues:image-broken-src',
+    `is_external = 0 AND content_kind = 'html'
+     AND id IN (
+       SELECT iu.from_url_id
+         FROM image_usages iu
+         JOIN images i ON i.id = iu.image_id
+        WHERE i.probe_status >= 400 AND i.probe_status < 600
+     )`,
+  ],
+  [
+    'issues:image-slow-loading',
+    // ≥1 image > 200 KB AND the page is missing lazy-loading on at least
+    // one image (images_lazy < images_count). The size join is on the
+    // per-image probed `byte_size`; lazy adoption stays page-level.
+    `is_external = 0 AND content_kind = 'html'
+     AND images_count > 0 AND images_lazy < images_count
+     AND id IN (
+       SELECT iu.from_url_id
+         FROM image_usages iu
+         JOIN images i ON i.id = iu.image_id
+        WHERE i.byte_size > 204800
+     )`,
+  ],
+  [
+    'issues:image-too-large',
+    // Pages referencing at least one internal image whose probed
+    // Content-Length is > 100 KB (the PageSpeed Insights threshold).
+    `is_external = 0 AND content_kind = 'html'
+     AND id IN (
+       SELECT iu.from_url_id
+         FROM image_usages iu
+         JOIN images i ON i.id = iu.image_id
+        WHERE i.is_internal = 1 AND i.byte_size > 102400
+     )`,
+  ],
+  [
+    'issues:og-image-too-large',
+    `is_external = 0 AND content_kind = 'html'
+     AND og_image IS NOT NULL AND og_image != ''
+     AND og_image IN (SELECT src FROM images WHERE byte_size > 5242880)`,
+  ],
+  [
+    'issues:twitter-image-too-large',
+    `is_external = 0 AND content_kind = 'html'
+     AND twitter_image IS NOT NULL AND twitter_image != ''
+     AND twitter_image IN (SELECT src FROM images WHERE byte_size > 5242880)`,
   ],
   [
     'issues:canonical-chain-multi-hop',
@@ -9388,6 +9957,8 @@ export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string
 function buildUrlsWhere(params: {
   category?: UrlCategory;
   search?: string;
+  /** Silenced checks — their categories match no rows. */
+  disabledIssues?: ReadonlySet<string>;
   filter?: AdvancedFilter;
 }): { whereSql: string; args: (string | number)[] } {
   const where: string[] = [];
@@ -9395,7 +9966,7 @@ function buildUrlsWhere(params: {
 
   const cat = params.category ?? 'all';
   if (cat !== 'all') {
-    const clause = categoryWhereClause(cat);
+    const clause = categoryWhereClause(cat, params.disabledIssues);
     if (clause) where.push(clause);
   }
 
@@ -9523,7 +10094,12 @@ function buildClauseSql(c: FilterClause, args: (string | number)[]): string | nu
   }
 }
 
-export function categoryWhereClause(cat: UrlCategory): string | null {
+export function categoryWhereClause(
+  cat: UrlCategory,
+  /** Silenced issue checks (Settings → Issues): their filter matches nothing. */
+  disabledIssues?: ReadonlySet<string>,
+): string | null {
+  if (disabledIssues?.has(cat)) return '1 = 0';
   switch (cat) {
     case 'all':
       return null;
@@ -9816,6 +10392,16 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND status_code >= 200 AND status_code < 300
               AND (lang IS NULL OR lang = '')`;
+    case 'issues:mobile-parity-mismatch':
+      // The alternate-UA fetch disagreed with the crawl on at least one SEO
+      // field — the site serves different signals to phones and desktops.
+      return "is_external = 0 AND content_kind = 'html' AND mobile_parity_diff > 0";
+    case 'issues:content-wider-than-screen':
+      // The JS-render mobile-usability audit measured the document wider
+      // than its 375 px viewport (same 4 px tolerance as `fitsViewport`).
+      // `mobile_usable = -1` marks pages never audited — excluded so only
+      // measured pages are flagged.
+      return "is_external = 0 AND content_kind = 'html' AND mobile_usable >= 0 AND mobile_overflow_px > 4";
     case 'issues:viewport-missing':
       return `is_external = 0 AND content_kind = 'html'
               AND status_code >= 200 AND status_code < 300
@@ -9896,6 +10482,11 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
               AND (favicon IS NULL OR favicon = '')`;
     case 'issues:redirect-loop':
       return "is_external = 0 AND content_kind = 'html' AND redirect_loop = 1";
+    case 'issues:redirect-canonical-chain':
+      // The redirect lands on a page that then canonicalises elsewhere —
+      // two signals pointing at different "real" URLs. Chain length on a
+      // 3xx row is measured from the redirect's terminal page.
+      return 'is_external = 0 AND status_code >= 300 AND status_code < 400 AND canonical_chain_length > 0';
     case 'issues:redirect-chain-long':
       // 3 hops is the conservative SF threshold — every extra redirect
       // multiplies link-equity loss and crawl-budget waste.
@@ -10001,6 +10592,12 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
       // a top-3 hreflang misconfiguration in practice.
       return `is_external = 0 AND content_kind = 'html'
               AND hreflang_reciprocity_missing > 0`;
+    case 'issues:hreflang-unlinked':
+      // A declared alternate that no page links to: crawled (so it is in
+      // scope), yet its only path in is the hreflang annotation.
+      return "is_external = 0 AND content_kind = 'html' AND hreflang_unlinked > 0";
+    case 'issues:orphan-page':
+      return ORPHAN_PAGE_SQL;
     case 'issues:hreflang-target-issues':
       // Hreflang target resolves to a non-200 / noindex / canonical-away
       // page. Aggregated: any kind of broken target trips this filter.
@@ -10161,7 +10758,8 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
             ? 'warning'
             : 'info';
       const clauses = issueCategoriesBySeverity(tier)
-        .map((c) => categoryWhereClause(c))
+        .filter((c) => !disabledIssues?.has(c))
+        .map((c) => categoryWhereClause(c, disabledIssues))
         .filter((c): c is string => c !== null)
         .map((c) => `(${c})`);
       return clauses.length > 0 ? clauses.join(' OR ') : '1 = 0';
@@ -10226,20 +10824,6 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
                 OR analytics_trackers LIKE '%"Pinterest Tag"%'
                 OR analytics_trackers LIKE '%"LinkedIn Insight Tag"%')
               AND (permissions_policy IS NULL OR permissions_policy = '')`;
-    case 'issues:image-too-large':
-      // Pages that reference at least one internal image whose probed
-      // Content-Length is > 100 KB (the PageSpeed Insights threshold).
-      // EXISTS is faster than IN(...) on a join because SQLite can stop
-      // after the first hit per page.
-      return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM image_usages iu
-                  JOIN images i ON i.id = iu.image_id
-                 WHERE iu.from_url_id = urls.id
-                   AND i.is_internal = 1
-                   AND i.byte_size IS NOT NULL
-                   AND i.byte_size > 102400
-              )`;
     case 'issues:ssl-cert-expired':
       // HTTPS pages whose host's certificate is past `valid_to`. The
       // host is parsed inline from the URL because storing it as a column
@@ -10325,33 +10909,6 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
               AND content_kind = 'html'
               AND hsts IS NOT NULL AND hsts != ''
               AND LOWER(hsts) NOT LIKE '%includesubdomains%'`;
-    case 'issues:anchor-text-too-long':
-      // Outgoing links with anchor text > 100 chars usually indicate
-      // either a screen-reader unfriendly "fluff anchor" or an entire
-      // sentence that should be a paragraph + a focused link.
-      return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM links l
-                 WHERE l.from_url_id = urls.id
-                   AND l.anchor IS NOT NULL
-                   AND LENGTH(l.anchor) > 100
-              )`;
-    case 'issues:anchor-text-generic':
-      // Anchor phrases that carry no SEO value or accessibility context.
-      // Google's webmaster guidelines flag these explicitly because they
-      // give no signal about the destination.
-      return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM links l
-                 WHERE l.from_url_id = urls.id
-                   AND l.anchor IS NOT NULL
-                   AND LOWER(TRIM(l.anchor)) IN (
-                     'click here', 'click', 'here', 'read more', 'more',
-                     'learn more', 'see more', 'continue reading', 'continue',
-                     'this link', 'link', 'go', 'buraya', 'tıkla', 'devamı',
-                     'devamını oku', 'daha fazla'
-                   )
-              )`;
     case 'issues:form-input-unlabeled':
       // Pages with at least one form input that has no accessible name
       // (no <label>, no aria-label, no title). WCAG 1.3.1 / 4.1.2 fail.
@@ -10441,37 +10998,6 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
       // markup is valid but not eligible for richer result features.
       return `is_external = 0 AND content_kind = 'html'
               AND schema_missing_recommended > 0`;
-    case 'issues:image-broken-src':
-      // Pages referencing at least one internal image whose HEAD probe
-      // returned a 4xx/5xx status. Uses the existing `probe_status`
-      // column from the post-crawl image-size pass — no extra crawl cost.
-      return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM image_usages iu
-                  JOIN images i ON i.id = iu.image_id
-                 WHERE iu.from_url_id = urls.id
-                   AND i.probe_status IS NOT NULL
-                   AND i.probe_status >= 400
-                   AND i.probe_status < 600
-              )`;
-    case 'issues:target-blank-no-noopener':
-      // `<a target="_blank">` without `rel="noopener"` allows the new
-      // tab to access `window.opener` — a reverse-tabnabbing vector
-      // OWASP / Mozilla flag explicitly. `rel="noreferrer"` also
-      // implies noopener so we accept either.
-      return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM links l
-                 WHERE l.from_url_id = urls.id
-                   AND LOWER(COALESCE(l.target, '')) = '_blank'
-                   AND (
-                     l.rel IS NULL
-                     OR (
-                       LOWER(l.rel) NOT LIKE '%noopener%'
-                       AND LOWER(l.rel) NOT LIKE '%noreferrer%'
-                     )
-                   )
-              )`;
     case 'issues:page-empty':
       // 2xx HTML pages with effectively no body content. Sometimes a 404
       // template renders 200 OK with a blank page, sometimes a publishing
@@ -10516,20 +11042,6 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
       return `is_external = 0 AND content_kind = 'html'
               AND title IS NOT NULL AND title != ''
               AND TRIM(title) NOT LIKE '% %'`;
-    case 'issues:external-links-too-many':
-      // Pages linking to >100 external destinations look like link
-      // farms / scraper SERPs to crawlers and are routinely demoted.
-      return `is_external = 0 AND content_kind = 'html'
-              AND EXISTS (
-                SELECT 1 FROM (
-                  SELECT from_url_id, COUNT(*) AS c
-                    FROM links
-                   WHERE is_internal = 0
-                   GROUP BY from_url_id
-                  HAVING c > 100
-                ) e
-                WHERE e.from_url_id = urls.id
-              )`;
     case 'issues:outlinks-zero':
       // Indexable HTML pages with zero outlinks are dead-end leaves —
       // bad for crawl flow, internal-link equity distribution, and the
@@ -10538,24 +11050,6 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
               AND status_code BETWEEN 200 AND 299
               AND indexability = 'indexable'
               AND outlinks = 0`;
-    case 'issues:internal-link-to-redirect':
-      // A page links to ≥1 internal URL whose status is 3xx. Each hop
-      // burns crawl budget and weakens link equity — best-practice is
-      // to update every link to the redirect's final destination.
-      // Set-based: the redirecting URLs are resolved once (status index),
-      // then the links pointing at them once (to_url index). The
-      // correlated EXISTS it replaces re-joined every page's outlinks to
-      // `urls` by string — pages × outlinks lookups, ~20× slower.
-      return `is_external = 0 AND content_kind = 'html'
-              AND id IN (
-                SELECT l.from_url_id
-                  FROM links l
-                 WHERE l.is_internal = 1
-                   AND l.to_url IN (
-                     SELECT url FROM urls
-                      WHERE status_code >= 300 AND status_code < 400
-                   )
-              )`;
     case 'issues:h1-equals-title':
       // Title and H1 are *almost* always supposed to differ —
       // duplicating one as the other wastes the second relevance
@@ -10568,6 +11062,16 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
     case 'issues:dead-external-domain':
     case 'issues:duplicate-url-post-norm':
     case 'issues:canonical-chain-multi-hop':
+    case 'issues:anchor-text-too-long':
+    case 'issues:anchor-text-generic':
+    case 'issues:target-blank-no-noopener':
+    case 'issues:external-links-too-many':
+    case 'issues:internal-link-to-redirect':
+    case 'issues:image-broken-src':
+    case 'issues:image-slow-loading':
+    case 'issues:image-too-large':
+    case 'issues:og-image-too-large':
+    case 'issues:twitter-image-too-large':
       // These three are materialised into `urls_issues` by the issue
       // recompute (EXPENSIVE_ISSUE_DEFINITIONS, every 30 s mid-crawl and
       // once more post-crawl), and the sidebar count already reads that
@@ -10579,23 +11083,6 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
       // filter clicked after it. Count and list now come from the same
       // rows, in one indexed lookup.
       return `id IN (SELECT url_id FROM urls_issues WHERE issue_key = '${cat}')`;
-    case 'issues:image-slow-loading':
-      // Page loads at least one image > 200 KB AND the page hasn't
-      // applied lazy-loading to every image. Big un-lazy images are
-      // LCP killers on mobile and waste data budget on every reload.
-      // 200 KB matches the existing "Large Image" threshold so the
-      // user sees the same set spanning two complementary issues.
-      // Lazy adoption is tracked per-page (images_lazy / images_count)
-      // because the parser doesn't store a per-image `loading` flag.
-      return `is_external = 0 AND content_kind = 'html'
-              AND images_count > 0 AND images_lazy < images_count
-              AND EXISTS (
-                SELECT 1 FROM image_usages iu
-                  JOIN images i ON iu.image_id = i.id
-                 WHERE iu.from_url_id = urls.id
-                   AND i.byte_size IS NOT NULL
-                   AND i.byte_size > 204800
-              )`;
     case 'issues:description-equals-h1':
       // Meta description verbatim duplicates the H1 — same lazy
       // copy-paste pattern as `description-equals-title` but coming
@@ -10678,29 +11165,6 @@ export function categoryWhereClause(cat: UrlCategory): string | null {
       // cause of slow LCP on any modern site audit.
       return `is_external = 0 AND content_kind = 'html'
               AND render_blocking_count > 20`;
-    case 'issues:og-image-too-large':
-      // og:image > 5 MB. Facebook's documented hard cap is 8 MB; share
-      // card renderers silently drop oversize images well before that.
-      // Joins on the per-image HEAD probe to read `byte_size`.
-      return `is_external = 0 AND content_kind = 'html'
-              AND og_image IS NOT NULL AND og_image != ''
-              AND EXISTS (
-                SELECT 1 FROM images i
-                 WHERE i.src = urls.og_image
-                   AND i.byte_size IS NOT NULL
-                   AND i.byte_size > 5242880
-              )`;
-    case 'issues:twitter-image-too-large':
-      // twitter:image > 5 MB. Conservative threshold that catches both
-      // JPG/PNG (Twitter cap 5 MB) and GIF (cap 15 MB) issues.
-      return `is_external = 0 AND content_kind = 'html'
-              AND twitter_image IS NOT NULL AND twitter_image != ''
-              AND EXISTS (
-                SELECT 1 FROM images i
-                 WHERE i.src = urls.twitter_image
-                   AND i.byte_size IS NOT NULL
-                   AND i.byte_size > 5242880
-              )`;
     case 'issues:og-image-wrong-aspect':
       // og:image dimensions that won't render as a proper Facebook /
       // LinkedIn share card. Probed by the post-crawl social-image pass

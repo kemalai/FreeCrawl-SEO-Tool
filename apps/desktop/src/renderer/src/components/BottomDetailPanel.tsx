@@ -7,6 +7,7 @@ import type {
   CrawlConfig,
   CrawlUrlRow,
   LinkOrigin,
+  SchemaFinding,
   LinkPathType,
   LinkPosition,
   LinkType,
@@ -63,7 +64,7 @@ type SubTab =
  * same height as a populated one.
  */
 const SUBTAB_BAR_CLASS =
-  'flex min-h-[29px] shrink-0 items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-500';
+  'flex min-h-[28px] shrink-0 items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1 text-[11px] text-surface-500';
 
 function SubTabBar({
   children,
@@ -182,6 +183,15 @@ export function BottomDetailPanel() {
   const [details, setDetails] = useState<UrlDetail[]>([]);
   const [loading, setLoading] = useState(false);
   const [subTab, setSubTab] = useState<SubTab>('url-details');
+
+  // Landing on the Spelling tab and clicking a page is a request for that
+  // page's findings, not its URL details — jump this panel to the matching
+  // sub-tab when the user arrives there. Leaving is left alone: the
+  // sub-tab stays useful from the URLs grid too.
+  const activeTab = useAppStore((s) => s.activeTab);
+  useEffect(() => {
+    if (activeTab === 'spelling') setSubTab('spelling');
+  }, [activeTab]);
 
   // Effective scope: if the user has 2+ rows selected we aggregate; one
   // row (or none) keeps the existing single-URL behaviour intact.
@@ -742,8 +752,9 @@ function SpellingView({
       <div className="flex items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[10px] text-surface-400">
         <span>
           {t('spelling.summary', {
-            defaultValue: '{{n}} finding(s)',
-            n: data.matches.length,
+            defaultValue_one: '{{count}} finding',
+            defaultValue_other: '{{count}} findings',
+            count: data.matches.length,
           })}
         </span>
         {data.language && (
@@ -1581,7 +1592,11 @@ function DuplicatesView({
           {t('duplicates.cluster', { defaultValue: 'Cluster' })} <span className="text-surface-200">#{row.clusterId}</span>
         </span>
         <span>
-          {t('duplicates.membersTotal', { defaultValue: '{{n}} member(s) total', n: members.length + 1 })}
+          {t('duplicates.membersTotal', {
+            defaultValue_one: '{{count}} member total',
+            defaultValue_other: '{{count}} members total',
+            count: members.length + 1,
+          })}
         </span>
         <span className="text-surface-500">
           {t('duplicates.hammingHint', { defaultValue: '(Hamming distance from this URL — lower means more similar)' })}
@@ -2104,6 +2119,8 @@ function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: stri
     ['X-Robots-Tag 1', row.xRobotsTag],
     ['HTML Lang', row.lang],
     ['Viewport', row.viewport],
+    ['Mobile Parity', mobileParitySummary(row.mobileParity, row.mobileParityDiff)],
+    ['Mobile Overflow (px)', row.mobileOverflowPx],
     ['OG Title', row.ogTitle],
     ['OG Description', row.ogDescription],
     ['OG Image', row.ogImage],
@@ -2137,6 +2154,7 @@ function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: stri
     ['Charset', row.charset],
     ['Meta Refresh', row.metaRefresh],
     ['Meta Refresh URL', row.metaRefreshUrl],
+    ['JS Redirect URL', row.jsRedirectUrl],
     ['TLS Protocol', cert?.protocol ?? null],
     ['TLS Cert Issuer', cert?.issuer ?? null],
     ['TLS Cert Subject', cert?.subject ?? null],
@@ -2291,6 +2309,8 @@ function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: stri
     ],
     ['Redirect Final URL', row.redirectFinalUrl],
     ['Redirect Loop', row.redirectLoop ? 'YES' : null],
+    ['Canonical Chain Length', row.canonicalChainLength > 0 ? row.canonicalChainLength : null],
+    ['Final Canonical URL', row.canonicalFinalUrl],
     ['Folder Depth', row.folderDepth],
     ['Query Param Count', row.queryParamCount > 0 ? row.queryParamCount : null],
     ...customSearchRows(row.customSearchHits),
@@ -2316,7 +2336,11 @@ function NameValueView({ row, exportName }: { row: CrawlUrlRow; exportName: stri
           ]),
         })}
       />
-      <div className="flex-1 overflow-auto p-3">
+      {/* No top padding on the scroller: Chromium sticks a `top-0` header
+          to the scroller's content box, so with `p-3` the header sat 12 px
+          down and rows scrolled through the gap above it. Same for every
+          sticky-header table in this panel. */}
+      <div className="flex-1 overflow-auto px-3 pb-3">
       <table className="w-full text-[11px]">
         <thead className="sticky top-0 bg-surface-900">
           <tr className="text-surface-400">
@@ -3089,7 +3113,7 @@ function SerpSnippet({ row }: { row: CrawlUrlRow }) {
       <div className="max-w-[580px] rounded border border-surface-800 bg-surface-900 p-4">
         <div className="mb-1 truncate text-[12px] text-surface-400">{displayUrl(row.url)}</div>
         <div
-          className="mb-1 text-[18px] leading-snug text-[#8ab4f8]"
+          className="mb-1 text-[18px] leading-snug text-[color:var(--fc-serp-link)]"
           style={{ maxWidth: 600 }}
         >
           {title.length > 100 ? title.slice(0, 100) + '…' : title}
@@ -3410,7 +3434,7 @@ function CookiesView({
           })}
         />
       </div>
-      <div className="flex-1 overflow-auto p-3">
+      <div className="flex-1 overflow-auto px-3 pb-3">
       <table className="w-full text-[11px]">
         <thead className="sticky top-0 bg-surface-900">
           <tr className="text-surface-400">
@@ -3499,6 +3523,42 @@ function blockSchemaTypes(parsed: unknown): string[] {
   return [...out];
 }
 
+/**
+ * The findings behind the schema counters, as the crawler stored them.
+ * Defensive about shape: the column is free text in the database and a
+ * hand-edited or truncated value must not take the whole sub-tab down.
+ */
+/** "3 fields differ (title, h1, wordCount)" for the URL Details row; null when identical / unprobed. */
+function mobileParitySummary(raw: string | null, diff: number): string | null {
+  if (!raw || diff <= 0) return null;
+  try {
+    const parsed = JSON.parse(raw) as { fields?: { field: string }[]; alternate?: string };
+    const names = (parsed.fields ?? []).map((f) => f.field);
+    return `${names.length} vs ${parsed.alternate ?? 'mobile'}: ${names.join(', ')}`;
+  } catch {
+    return String(diff);
+  }
+}
+
+function parseSchemaFindings(raw: string | null): SchemaFinding[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (f): f is SchemaFinding =>
+        !!f &&
+        typeof f === 'object' &&
+        typeof (f as SchemaFinding).block === 'number' &&
+        typeof (f as SchemaFinding).type === 'string' &&
+        typeof (f as SchemaFinding).kind === 'string' &&
+        Array.isArray((f as SchemaFinding).props),
+    );
+  } catch {
+    return [];
+  }
+}
+
 function extractJsonLdBlocks(html: string): JsonLdBlock[] {
   const blocks: JsonLdBlock[] = [];
   const re =
@@ -3531,6 +3591,35 @@ function StructuredDataView({
   const { t } = useTranslation();
   const [src, setSrc] = useState<UrlSourceResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const findings = useMemo(() => parseSchemaFindings(row.schemaFindings), [row.schemaFindings]);
+  const findingsByBlock = useMemo(() => {
+    const m = new Map<number, SchemaFinding[]>();
+    for (const f of findings) {
+      const list = m.get(f.block);
+      if (list) list.push(f);
+      else m.set(f.block, [f]);
+    }
+    return m;
+  }, [findings]);
+  // Rows crawled before the detail was recorded carry the counters
+  // alone; say so instead of showing a count with nothing behind it.
+  const findingsLegacy =
+    findings.length === 0 &&
+    row.schemaMissingRequired + row.schemaMissingRecommended + row.schemaUnknownTypes > 0;
+  const findingsRef = useRef<HTMLDivElement | null>(null);
+  const blockRefs = useRef(new Map<number, HTMLDivElement>());
+  const scrollToFindings = (): void =>
+    findingsRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const scrollToBlock = (index: number): void =>
+    blockRefs.current.get(index)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const findingKindLabel = (kind: SchemaFinding['kind']): string =>
+    kind === 'missing-required'
+      ? t('structured.findingMissingRequired', { defaultValue: 'missing required' })
+      : kind === 'missing-recommended'
+        ? t('structured.findingMissingRecommended', { defaultValue: 'missing recommended' })
+        : t('structured.findingUnknownType', { defaultValue: 'malformed @type' });
+  const findingKindClass = (kind: SchemaFinding['kind']): string =>
+    kind === 'missing-recommended' ? 'text-amber-400' : 'text-red-400';
 
   useEffect(() => {
     if (urlId === null) {
@@ -3568,17 +3657,45 @@ function StructuredDataView({
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px] text-surface-400">
         <span>
-          <span className="font-medium text-surface-200">{row.schemaBlockCount}</span> JSON-LD{' '}
-          {t('structured.blocks', { defaultValue: 'block(s)' })}
+          <span className="font-medium text-surface-200">{row.schemaBlockCount}</span>{' '}
+          {t('structured.blocks', {
+            defaultValue_one: 'JSON-LD block',
+            defaultValue_other: 'JSON-LD blocks',
+            count: row.schemaBlockCount,
+          })}
         </span>
         {row.schemaInvalidCount > 0 && (
           <span className="text-amber-400">{t('structured.invalid', { defaultValue: '{{n}} invalid', n: row.schemaInvalidCount })}</span>
         )}
         {row.schemaMissingRequired > 0 && (
-          <span className="text-red-400">{t('structured.missingRequired', { defaultValue: '{{n}} missing required', n: row.schemaMissingRequired })}</span>
+          <button
+            type="button"
+            onClick={scrollToFindings}
+            className="text-red-400 underline decoration-dotted underline-offset-2 hover:text-red-300"
+            title={t('structured.findingsTitle', { defaultValue: 'Validation findings' })}
+          >
+            {t('structured.missingRequired', { defaultValue: '{{n}} missing required', n: row.schemaMissingRequired })}
+          </button>
         )}
         {row.schemaMissingRecommended > 0 && (
-          <span className="text-amber-400">{t('structured.missingRecommended', { defaultValue: '{{n}} missing recommended', n: row.schemaMissingRecommended })}</span>
+          <button
+            type="button"
+            onClick={scrollToFindings}
+            className="text-amber-400 underline decoration-dotted underline-offset-2 hover:text-amber-300"
+            title={t('structured.findingsTitle', { defaultValue: 'Validation findings' })}
+          >
+            {t('structured.missingRecommended', { defaultValue: '{{n}} missing recommended', n: row.schemaMissingRecommended })}
+          </button>
+        )}
+        {row.schemaUnknownTypes > 0 && (
+          <button
+            type="button"
+            onClick={scrollToFindings}
+            className="text-red-400 underline decoration-dotted underline-offset-2 hover:text-red-300"
+            title={t('structured.findingsTitle', { defaultValue: 'Validation findings' })}
+          >
+            {t('structured.unknownTypes', { defaultValue: '{{n}} malformed @type', n: row.schemaUnknownTypes })}
+          </button>
         )}
         <span>
           <span className="font-medium text-surface-200">{row.microdataCount}</span> {t('structured.microdataItems', { defaultValue: 'microdata items' })}
@@ -3617,6 +3734,51 @@ function StructuredDataView({
           </div>
         )}
 
+        {(findings.length > 0 || findingsLegacy) && (
+          <div ref={findingsRef} className="mb-3">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">
+              {t('structured.findingsTitle', { defaultValue: 'Validation findings' })}
+            </div>
+            {findingsLegacy && (
+              <div className="text-[11px] text-surface-500">
+                {t('structured.findingsLegacy', {
+                  defaultValue:
+                    'Which properties are missing is recorded from the next crawl on — re-spider this URL to see the details.',
+                })}
+              </div>
+            )}
+            {findings.length > 0 && (
+              <ul className="space-y-1">
+                {findings.map((f, i) => (
+                  <li key={i}>
+                    <button
+                      type="button"
+                      onClick={() => scrollToBlock(f.block)}
+                      className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 rounded border border-surface-800 bg-surface-900/40 px-2 py-1 text-left text-[11px] hover:bg-surface-800/60"
+                      title={t('structured.blockN', { defaultValue: 'Block #{{n}}', n: f.block + 1 })}
+                    >
+                      <span
+                        className={clsx(
+                          'h-1.5 w-1.5 shrink-0 rounded-full',
+                          f.kind === 'missing-recommended' ? 'bg-amber-400' : 'bg-red-400',
+                        )}
+                      />
+                      <span className="font-mono text-surface-200">{f.type}</span>
+                      <span className="text-surface-500">
+                        {t('structured.blockN', { defaultValue: 'Block #{{n}}', n: f.block + 1 })}
+                      </span>
+                      <span className={findingKindClass(f.kind)}>{findingKindLabel(f.kind)}</span>
+                      {f.props.length > 0 && (
+                        <span className="font-mono text-surface-300">{f.props.join(', ')}</span>
+                      )}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
         {types.length > 0 && (
           <div className="mb-3">
             <div className="mb-1 text-[10px] uppercase tracking-wide text-surface-500">
@@ -3647,15 +3809,25 @@ function StructuredDataView({
             {blocks.map((b) => (
               <div
                 key={b.index}
+                ref={(el) => {
+                  if (el) blockRefs.current.set(b.index, el);
+                  else blockRefs.current.delete(b.index);
+                }}
                 className="rounded border border-surface-800 bg-surface-900/40"
               >
-                <div className="flex items-center gap-2 border-b border-surface-800 px-2 py-1 text-[10px] text-surface-400">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-surface-800 px-2 py-1 text-[10px] text-surface-400">
                   <span className="font-mono">{t('structured.blockN', { defaultValue: 'Block #{{n}}', n: b.index + 1 })}</span>
                   {b.ok ? (
                     <span className="text-emerald-400">{t('structured.parsedOk', { defaultValue: 'parsed OK' })}</span>
                   ) : (
                     <span className="text-amber-400">{t('structured.parseFailed', { defaultValue: 'parse failed' })}</span>
                   )}
+                  {(findingsByBlock.get(b.index) ?? []).map((f, i) => (
+                    <span key={i} className={clsx('font-mono', findingKindClass(f.kind))}>
+                      {f.type} · {findingKindLabel(f.kind)}
+                      {f.props.length > 0 && `: ${f.props.join(', ')}`}
+                    </span>
+                  ))}
                 </div>
                 <pre className="overflow-auto p-2 font-mono text-[10.5px] leading-[14px] text-surface-200">
                   {b.ok
@@ -3789,7 +3961,7 @@ function ImagesView({
           })}
         />
       </div>
-      <div className="flex-1 overflow-auto p-3">
+      <div className="flex-1 overflow-auto px-3 pb-3">
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-surface-900">
             <tr className="text-surface-400">
@@ -4096,9 +4268,9 @@ function ResourcesView({
           })}
         />
       </div>
-      <div className="flex-1 overflow-auto p-3">
+      <div className="flex-1 overflow-auto px-3 pb-3">
         {filtered.length === 0 ? (
-          <div className="text-[11px] text-surface-500">{t('resources.noMatch', { defaultValue: 'No resources match this filter.' })}</div>
+          <div className="pt-3 text-[11px] text-surface-500">{t('resources.noMatch', { defaultValue: 'No resources match this filter.' })}</div>
         ) : (
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 bg-surface-900">
@@ -4273,7 +4445,7 @@ function MultiImagesView({
           })}
         />
       </div>
-      <div className="flex-1 overflow-auto p-3">
+      <div className="flex-1 overflow-auto px-3 pb-3">
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-surface-900">
             <tr className="text-surface-400">
@@ -4503,9 +4675,9 @@ function MultiResourcesView({
           })}
         />
       </div>
-      <div className="flex-1 overflow-auto p-3">
+      <div className="flex-1 overflow-auto px-3 pb-3">
         {filtered.length === 0 ? (
-          <div className="text-[11px] text-surface-500">{t('resources.noMatch', { defaultValue: 'No resources match this filter.' })}</div>
+          <div className="pt-3 text-[11px] text-surface-500">{t('resources.noMatch', { defaultValue: 'No resources match this filter.' })}</div>
         ) : (
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 bg-surface-900">
@@ -4792,7 +4964,11 @@ function OutlineView({ row, exportName }: { row: CrawlUrlRow; exportName: string
         )}
         {skippedCount > 0 && (
           <span className="text-amber-400">
-            {t('outline.skippedCount', { defaultValue: '{{n}} skipped level(s)', n: skippedCount })}
+            {t('outline.skippedCount', {
+              defaultValue_one: '{{count}} skipped level',
+              defaultValue_other: '{{count}} skipped levels',
+              count: skippedCount,
+            })}
           </span>
         )}
         {outline.length === 200 && (

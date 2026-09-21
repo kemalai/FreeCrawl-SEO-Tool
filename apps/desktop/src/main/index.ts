@@ -12,6 +12,7 @@ import {
   shell,
   Tray,
   nativeImage,
+  nativeTheme,
   type DownloadItem,
   type MenuItemConstructorOptions,
   type IpcMainInvokeEvent,
@@ -36,7 +37,7 @@ import {
   existsSync,
   rmSync,
 } from 'node:fs';
-import { copyFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { totalmem, freemem, cpus, release } from 'node:os';
 // Lives under src/main/assets (not resources/) on purpose: electron-vite
@@ -99,6 +100,12 @@ import {
   type ExtractionRulesExportResult,
   type ExtractionRulesImportResult,
   type TopUrlsInput,
+  type ExportPdfReportInput,
+  type ExportPdfReportResult,
+  type ExportSeoAuditResult,
+  type ReportBranding,
+  type ScheduleAfterCrawl,
+  type PagesOverLinkLimitInput,
   type TopUrlsRow,
   type ExternalDomainHealthRow,
   type AnalyticsCoverageRow,
@@ -230,6 +237,11 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   BRIDGE_FEATURES,
   PRIMARY_SESSION_ID,
+  normalizeUiTheme,
+  UI_THEME_BACKGROUND,
+  type UiTheme,
+  normalizeAutoSaveEveryUrls,
+  type SystemInfo,
 } from '@freecrawl/shared-types';
 import {
   setupPlaywrightBrowsersPath,
@@ -262,11 +274,15 @@ import {
   exportGrid,
   exportSitemap,
   exportHtmlReport,
+  renderHtmlReport,
+  runSeoAuditExport,
+  postWebhookJson,
   ensureHeapHeadroom,
   compareCrawls,
   testUrlAgainstRobots,
   validateRobotsTxt,
   aggregateTopWords,
+  createTopWordsAggregator,
   fetchSitemaps,
   validateSitemap,
   normalizeUrl,
@@ -282,9 +298,16 @@ import {
 } from '@freecrawl/core';
 import { fetch as undiciFetch } from 'undici';
 import { apiFetch } from './api-fetch.js';
-import { ProjectDb } from '@freecrawl/db';
+import { ProjectDb, EXPENSIVE_ISSUE_DEFINITIONS } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
-import { getMenuLabels, isMenuLang, type MenuLang } from './menu-i18n.js';
+import {
+  L,
+  getMenuLabels,
+  isMenuLang,
+  setMenuLangProvider,
+  type MenuLang,
+} from './menu-i18n.js';
+import { pickUiLanguage } from '@freecrawl/shared-types';
 import {
   getState as getIntegrationsState,
   setCredentials as setIntegrationCredentials,
@@ -498,8 +521,35 @@ class ProjectSession {
    *  Per-session so concurrent scheduled crawls in different windows don't
    *  clobber each other's flag. */
   crawlerStartedByScheduler = false;
+  /** Crawled count at the last batch auto-save (Settings ▸ Storage). Reset
+   *  when a new crawl's counter comes in below it. */
+  autoSaveMark = 0;
+  /** A batch auto-save is mid-flight; the next threshold waits for it. */
+  autoSaveInFlight = false;
   readonly readerPool: DbReaderPool;
   readonly writerPool: DbWriterPool;
+  /**
+   * Second write-capable worker with its own SQLite connection, for the
+   * long passes that must not sit in front of the crawl's per-URL
+   * writes: the issue materialiser (mid-crawl and post-crawl) and the
+   * `VACUUM INTO` behind Save. SQLite serialises the two writers at the
+   * lock, and both passes are built to hold it only briefly (the
+   * materialiser reads first and writes in small batches), so the crawl
+   * writer waits well under its `busy_timeout`. Not initialised in
+   * RAM-only mode, like the other pools.
+   */
+  readonly maintenancePool: DbWriterPool;
+  /**
+   * Last overview aggregate and the `ProjectDb.dataSignature()` it was
+   * computed against. The sidebar polls every 3 s (crawling) / 30 s
+   * (idle); when nothing has been committed since, the poll is answered
+   * from here instead of re-running a 130-counter scan.
+   */
+  overviewCache: { sig: string; value: OverviewCounts } | null = null;
+  /** In-flight overview aggregate — concurrent polls share it. */
+  overviewInFlight: Promise<OverviewCounts> | null = null;
+  /** True while a project snapshot is being written (window title). */
+  savingSnapshot = false;
   /** On-disk scratch DB this session opens by default; resolved lazily.
    *  Repointed to a real `.seoproject` once the user opens/saves one. */
   scratchPath: string | null;
@@ -527,10 +577,12 @@ class ProjectSession {
   constructor(opts: {
     readerPool: DbReaderPool;
     writerPool: DbWriterPool;
+    maintenancePool?: DbWriterPool;
     scratchPath?: string;
   }) {
     this.readerPool = opts.readerPool;
     this.writerPool = opts.writerPool;
+    this.maintenancePool = opts.maintenancePool ?? newMaintenancePool();
     this.scratchPath = opts.scratchPath ?? null;
     this.ownedScratchPath = opts.scratchPath ?? null;
   }
@@ -641,7 +693,20 @@ class ProjectSession {
           `db-writer pool init failed: ${err instanceof Error ? err.message : String(err)} — writes fall back to main thread.`,
         );
       }
+      try {
+        // No watchdog SAB: the shared writer slot belongs to the crawl
+        // writer, and a second heartbeat there would mask a wedged one.
+        this.maintenancePool.init(path, null);
+      } catch (err) {
+        logger.log(
+          'warn',
+          'main',
+          `db-maintenance pool init failed: ${err instanceof Error ? err.message : String(err)} — issue passes and snapshots fall back to the writer / main thread.`,
+        );
+      }
     }
+    this.overviewCache = null;
+    this.overviewInFlight = null;
     return database;
   }
 
@@ -684,6 +749,11 @@ class ProjectSession {
     }
     try {
       await this.writerPool.terminate();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      await this.maintenancePool.terminate();
     } catch {
       /* best-effort */
     }
@@ -1586,60 +1656,33 @@ function categorizeDiagnostic(msg: string): DiagnosticDialog | null {
   if (/\bquery(A|AAAA|Soa|Srv|Mx|Txt|Ns|Cname|Any|Naptr|Ptr)\b/i.test(msg) && /ECONNREFUSED/.test(msg)) {
     return {
       key: 'dns-refused',
-      title: 'No Network Connectivity',
-      message: 'FreeCrawl tried 3 layers of DNS lookup (system, public servers on port 53, and DNS-over-HTTPS on port 443) — every one was refused. Your machine appears to have no working internet connection.',
-      detail:
-        'FreeCrawl already attempts to bypass broken system DNS automatically — if you see this dialog, even DNS-over-HTTPS over port 443 failed.\n\n' +
-        'Most likely causes (in order):\n' +
-        '  1. Antivirus / endpoint security is blocking FreeCrawl from making ANY outbound connection. Whitelist FreeCrawl in your security software.\n' +
-        '  2. You are not connected to the internet — check Wi-Fi / Ethernet.\n' +
-        '  3. A corporate firewall is blocking all outbound traffic — set HTTPS_PROXY in Settings → Network.\n' +
-        '  4. Active VPN is in a broken state — disconnect and try again.\n\n' +
-        'Click "Open Logs" to see the full error chain.',
+      title: L().diagDnsRefusedTitle,
+      message: L().diagDnsRefusedMsg,
+      detail: L().diagDnsRefusedDetail,
     };
   }
   if (/EDESTRUCTION/.test(msg)) {
     return {
       key: 'dns-destroyed',
-      title: 'Network Stack Unresponsive',
-      message:
-        "Your system's DNS resolver crashed AND FreeCrawl's automatic DNS-over-HTTPS bypass also failed. This means the network stack is in a broken state — not just DNS.",
-      detail:
-        'FreeCrawl normally recovers from a crashed Windows DNS Client by routing lookups through Cloudflare/Google over HTTPS:443. If you are seeing this dialog, that fallback also failed — usually because the operating-system network stack itself needs a reset.\n\n' +
-        'Try one of these (in order of effort):\n' +
-        '  1. Toggle airplane mode / disconnect & reconnect Wi-Fi.\n' +
-        '  2. Restart the network adapter (Settings → Network → Change adapter options).\n' +
-        '  3. Open "services.msc", find "DNS Client", right-click → Restart (Windows only).\n' +
-        '  4. As a last resort, restart the computer.\n\n' +
-        'Click "Open Logs" to see the full error chain.',
+      title: L().diagDnsDestroyedTitle,
+      message: L().diagDnsDestroyedMsg,
+      detail: L().diagDnsDestroyedDetail,
     };
   }
   if (/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE|DEPTH_ZERO_SELF_SIGNED_CERT/.test(msg)) {
     return {
       key: 'tls-inspection',
-      title: 'TLS Certificate Rejected',
-      message: 'A TLS certificate failed verification — usually because antivirus or a corporate proxy is intercepting HTTPS.',
-      detail:
-        'Common culprits: Kaspersky, ESET, Bitdefender, Zscaler, BlueCoat, Fortigate.\n\n' +
-        'Try one of these:\n' +
-        '  1. Whitelist FreeCrawl in your antivirus.\n' +
-        '  2. Export the antivirus / proxy root CA as PEM and set the NODE_EXTRA_CA_CERTS environment variable to it before launching.\n' +
-        '  3. Temporarily disable HTTPS scanning in your antivirus.\n\n' +
-        'Click "Open Logs" to see the full error chain.',
+      title: L().diagTlsTitle,
+      message: L().diagTlsMsg,
+      detail: L().diagTlsDetail,
     };
   }
   if (/Invalid start URL/.test(msg)) {
     return {
       key: 'seed-unreachable',
-      title: 'Start URL Unreachable',
-      message: 'FreeCrawl could not reach the URL you entered — neither HTTPS nor HTTP responded within 5 seconds.',
-      detail:
-        'Try one of these:\n' +
-        '  1. Open the URL in a browser to confirm the site is up.\n' +
-        '  2. Check your internet connection.\n' +
-        '  3. If you are on a VPN or behind a corporate proxy, set HTTPS_PROXY before launching, or configure Settings → Network → Proxy URL.\n' +
-        '  4. Verify the URL is spelled correctly (typos in the host).\n\n' +
-        'Click "Open Logs" for the diagnostic trail.',
+      title: L().diagSeedTitle,
+      message: L().diagSeedMsg,
+      detail: L().diagSeedDetail,
     };
   }
   return null;
@@ -1670,10 +1713,10 @@ function showDiagnosticDialog(diag: DiagnosticDialog, ownerWcId?: number): void 
       title: diag.title,
       message: diag.message,
       detail: diag.detail,
-      buttons: ['Open Logs', 'Dismiss'],
+      buttons: [L().btnOpenLogs, L().btnDismiss],
       defaultId: 0,
       cancelId: 1,
-      checkboxLabel: "Don't show this again",
+      checkboxLabel: L().dlgDontShowAgain,
       checkboxChecked: false,
       noLink: true,
     })
@@ -1781,11 +1824,18 @@ async function recomputeIssuesViaPool(
   session: ProjectSession,
   definitions: ReadonlyArray<readonly [string, string]>,
 ): Promise<void> {
-  if (!session.writerPool.isReady()) {
+  // The maintenance worker, not the crawl writer: this pass reads for
+  // minutes on a big project, and on the writer thread every fetched
+  // page queued behind it (writes were landing 4½ minutes late on a
+  // 62k-page crawl). Its own connection lets the crawl keep writing.
+  const pool = session.maintenancePool.isReady()
+    ? session.maintenancePool
+    : session.writerPool;
+  if (!pool.isReady()) {
     return session.getDb().recomputeUrlsIssuesYielding(definitions);
   }
   try {
-    await session.writerPool.call<void>('recomputeUrlsIssuesYielding', [definitions]);
+    await pool.call<void>('recomputeUrlsIssuesYielding', [definitions]);
   } catch (err) {
     // Fall back ONLY when the worker is gone (crashed/terminated/
     // swapped). The old any-error fallback fired on the 60 s dispatch
@@ -1911,6 +1961,188 @@ function applyCurrentThermalState(crawler: Crawler): void {
  *  crawl the user just paid for. Same reasoning as `HEAVY_METHODS` in
  *  db-reader-pool.ts: contain the failure instead of escalating it. */
 const MEMORY_HEAVY_PASSES = new Set<string>(['recomputeLinkScore']);
+
+/** Maintenance worker factory — see `ProjectSession.maintenancePool`. */
+function newMaintenancePool(): DbWriterPool {
+  return new DbWriterPool({
+    label: 'db-maintenance',
+    // Without a watchdog heartbeat the pool recycles a worker whose
+    // oldest call is older than this. A snapshot of a multi-GB project
+    // is a single `VACUUM INTO` that can legitimately run for an hour.
+    noSabWedgeTimeoutMs: 6 * 60 * 60_000,
+  });
+}
+
+/**
+ * Consistent copy of the live database at `tmpPath` (WAL checkpoint +
+ * `VACUUM INTO`), taken on the maintenance worker so the window stays
+ * responsive. A 62k-page project's snapshot ran for 45 minutes on the
+ * main thread — no repaint, no input, "Not Responding". Falls back to the
+ * main thread only when the worker cannot run it at all (RAM-only mode,
+ * crashed worker), and then labels the stall for the freeze watchdog.
+ */
+async function snapshotDatabase(s: ProjectSession, tmpPath: string): Promise<void> {
+  const database = s.getDb();
+  const pool = s.maintenancePool;
+  if (pool.isReady()) {
+    try {
+      try {
+        await pool.call<void>('walCheckpoint', []);
+      } catch (err) {
+        if (err instanceof WriterUnavailableError) throw err;
+        /* checkpoint is best-effort; VACUUM INTO still snapshots consistently */
+      }
+      await pool.call<void>('vacuumInto', [tmpPath]);
+      return;
+    } catch (err) {
+      if (!(err instanceof WriterUnavailableError)) throw err;
+      logger.log(
+        'warn',
+        'main',
+        `db-maintenance unavailable (${err.message}) — taking the snapshot on the main thread.`,
+      );
+    }
+  }
+  try {
+    database.walCheckpoint();
+  } catch {
+    /* best-effort; VACUUM INTO still snapshots consistently */
+  }
+  freezeWatchdog.setMainOp('save:vacuum');
+  try {
+    database.vacuumInto(tmpPath);
+  } finally {
+    freezeWatchdog.setMainOp('idle');
+  }
+}
+
+/**
+ * Settings ▸ Storage "auto-save every N URLs": once the crawl has moved
+ * `N` URLs past the last save, rewrite the session's `.seoproject` so a
+ * crash or power loss costs at most one batch. Only sessions bound to a
+ * document take part — an unsaved crawl already lives in the on-disk
+ * working copy (or, in RAM mode, has nowhere to go). One save at a time;
+ * a threshold reached while one is in flight simply waits for the next
+ * progress frame.
+ */
+function maybeBatchAutoSave(s: ProjectSession, p: CrawlProgress): void {
+  const every = normalizeAutoSaveEveryUrls(prefsCache['autoSaveEveryUrls']);
+  if (every === 0) return;
+  // A fresh crawl restarts the counter — re-arm rather than waiting for it
+  // to climb past the previous crawl's mark.
+  if (p.crawled < s.autoSaveMark) s.autoSaveMark = 0;
+  if (!p.running || !s.currentProjectPath || s.autoSaveInFlight || s.savingSnapshot) return;
+  if (p.crawled - s.autoSaveMark < every) return;
+  const documentPath = s.currentProjectPath;
+  const at = p.crawled;
+  s.autoSaveMark = at;
+  s.autoSaveInFlight = true;
+  saveProjectDocument(s, documentPath)
+    .then(() => {
+      logger.log('info', 'main', `Auto-saved ${documentPath} at ${at} crawled URLs.`);
+    })
+    .catch((err: unknown) => {
+      logger.log(
+        'warn',
+        'main',
+        `Auto-save of ${documentPath} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    })
+    .finally(() => {
+      s.autoSaveInFlight = false;
+    });
+}
+
+/**
+ * `snapshotDatabase` with the window title flipped to "Saving…" for its
+ * duration — the only feedback a snapshot that now runs off-thread would
+ * otherwise have, since the window no longer freezes to announce it.
+ */
+async function snapshotDatabaseWithTitle(s: ProjectSession, tmpPath: string): Promise<void> {
+  s.savingSnapshot = true;
+  updateWindowTitle(s);
+  try {
+    await snapshotDatabase(s, tmpPath);
+  } finally {
+    s.savingSnapshot = false;
+    updateWindowTitle(s);
+  }
+}
+
+/**
+ * Overview aggregate for the sidebar: cached by data signature and
+ * single-flighted. On the 62k-page crawl in the field report the sidebar
+ * re-issued this every 30 s after the crawl had finished, each copy ran
+ * past its timeout on a reader worker and was left running there, and
+ * within minutes every reader slot was busy with an abandoned aggregate.
+ * Two equal signatures mean nothing was committed in between, so the
+ * previous numbers are the correct answer; while one is running, a second
+ * poll waits for it rather than starting another.
+ */
+function overviewCountsFor(sess: ProjectSession): Promise<OverviewCounts> {
+  const db = sess.getDb();
+  let sig: string | null = null;
+  try {
+    sig = db.dataSignature();
+  } catch {
+    sig = null;
+  }
+  if (sig !== null && sess.overviewCache && sess.overviewCache.sig === sig) {
+    return Promise.resolve(sess.overviewCache.value);
+  }
+  if (sess.overviewInFlight) return sess.overviewInFlight;
+  const startSig = sig;
+  const run = callReaderOrFallback<OverviewCounts>('getOverviewCounts', [], () =>
+    db.getOverviewCountsAsync(),
+  )
+    .then((value) => {
+      // Keyed by the signature read BEFORE the scan: a commit that lands
+      // mid-scan changes the signature the next poll reads, so that poll
+      // recomputes instead of trusting numbers that may predate it.
+      if (startSig !== null) sess.overviewCache = { sig: startSig, value };
+      return value;
+    })
+    .finally(() => {
+      if (sess.overviewInFlight === run) sess.overviewInFlight = null;
+    });
+  sess.overviewInFlight = run;
+  return run;
+}
+
+/**
+ * Rebuild `urls_issues` in the background when it was last written by an
+ * older definition set (see ISSUE_MATERIALISATION_VERSION). Skipped while
+ * a crawl runs — the crawler schedules its own passes.
+ */
+function scheduleIssueMaterialisationIfStale(s: ProjectSession): void {
+  if (s.activeCrawler) return;
+  let stale = false;
+  try {
+    stale = s.getDb().issueMaterialisationStale();
+  } catch {
+    return;
+  }
+  if (!stale) return;
+  logger.log(
+    'info',
+    'main',
+    'urls_issues predates the current issue definitions — rebuilding it in the background.',
+  );
+  void recomputeIssuesViaPool(s, EXPENSIVE_ISSUE_DEFINITIONS)
+    .then(() => {
+      // Derived data only — refresh the sidebar without marking the
+      // project dirty.
+      s.overviewCache = null;
+      s.send(IPC.dataChanged);
+    })
+    .catch((err: unknown) => {
+      logger.log(
+        'warn',
+        'main',
+        `background issue materialisation failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+}
 
 async function runDbPassViaPool(
   session: ProjectSession,
@@ -2356,6 +2588,21 @@ async function openProjectAtPath(documentPath: string): Promise<void> {
       `db-writer pool swap failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+  try {
+    s.maintenancePool.swap(filePath, null);
+  } catch (err) {
+    logger.log(
+      'warn',
+      'main',
+      `db-maintenance pool swap failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  s.overviewCache = null;
+  s.overviewInFlight = null;
+  // A project saved by an older build carries a `urls_issues` table that
+  // predates some of the counters now reading it. Rebuild it off-thread
+  // so those sidebar rows show numbers, not 0, before the next crawl.
+  scheduleIssueMaterialisationIfStale(s);
   // Recents and the title track the document the user knows about, not
   // the working copy backing it. A headless (MCP agent) open is invisible
   // to the user, so it must not push the agent's file into File → Open
@@ -2400,7 +2647,8 @@ function updateWindowTitle(s: ProjectSession): void {
     ? basename(s.currentProjectPath)
     : L().titleUntitledProject;
   const mark = s.dirty ? '● ' : '';
-  win.setTitle(`FreeCrawl SEO Tool v${app.getVersion()} — ${mark}${name}`);
+  const saving = s.savingSnapshot ? `${L().titleSaving} ` : '';
+  win.setTitle(`FreeCrawl SEO Tool v${app.getVersion()} — ${saving}${mark}${name}`);
 }
 
 /**
@@ -2486,31 +2734,16 @@ async function saveProjectDocument(
       );
     }
   }
-  try {
-    database.walCheckpoint();
-  } catch {
-    /* best-effort; VACUUM INTO still snapshots consistently */
-  }
   const tmpPath = join(
     app.getPath('temp'),
     `freecrawl-save-${process.pid}-${workingDbCounter}-${Math.round(performance.now())}.seoproject`,
   );
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rawDb = (database as any).db as { exec: (sql: string) => void };
-    // `VACUUM INTO` rewrites the whole database in one synchronous call, so
-    // the window is unresponsive for its duration — seconds on a large
-    // crawl. It stays on the main thread deliberately: it must run on the
-    // connection that holds the data, and in RAM-only mode that is the ONLY
-    // connection (no writer worker exists). Tell the freeze watchdog what
-    // is happening so this shows up in debug.txt as a known save stall
-    // rather than an unattributed hang.
-    freezeWatchdog.setMainOp('save:vacuum');
-    try {
-      rawDb.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
-    } finally {
-      freezeWatchdog.setMainOp('idle');
-    }
+    // `VACUUM INTO` rewrites the whole database in one synchronous call.
+    // It runs on the maintenance worker's connection (a reader of the same
+    // file) so the window stays live; RAM-only mode has no worker and
+    // takes it on the main thread, labelled for the freeze watchdog.
+    await snapshotDatabaseWithTitle(s, tmpPath);
     const result = await packProject(tmpPath, documentPath);
     s.currentProjectPath = documentPath;
     s.dirty = false;
@@ -2597,8 +2830,8 @@ async function runSaveProjectAs(): Promise<{
     title: L().dlgSaveProjectAsTitle,
     defaultPath: join(baseDir, `${suggestedProjectName(sess)}.seoproject`),
     filters: [
-      { name: 'FreeCrawl Project', extensions: ['seoproject'] },
-      { name: 'All Files', extensions: ['*'] },
+      { name: L().filterFreeCrawlProject, extensions: ['seoproject'] },
+      { name: L().filterAllFiles, extensions: ['*'] },
     ],
   });
   if (res.canceled || !res.filePath) return null;
@@ -2800,21 +3033,64 @@ function clearRecentProjects(): void {
   rebuildMenu();
 }
 
+/** The active UI language for native surfaces (menu, tray, dialogs).
+ *
+ *  An explicit saved choice wins; with no saved choice we follow the OS's
+ *  language preferences, and English is the last resort. Same chain the
+ *  renderer runs (`pickUiLanguage`), so the menu and the window can't
+ *  disagree on a cold start. */
 function getMenuLang(): MenuLang {
-  const raw = prefsCache['uiLanguage'];
-  return isMenuLang(raw) ? raw : 'en';
+  return pickUiLanguage(prefsCache['uiLanguage'], app.getPreferredSystemLanguages());
 }
 
-/** Localized menu/dialog labels for the active UI language. Lets native
- *  dialogs pull `L().dlgX` inline without threading a param through handlers. */
-function L(): ReturnType<typeof getMenuLabels> {
-  return getMenuLabels(getMenuLang());
+/** The `uiTheme` pref, dark when unset or unknown. */
+function getUiTheme(): UiTheme {
+  return normalizeUiTheme(prefsCache['uiTheme']);
 }
+
+/** `surface-950` for the active theme — what a new window paints before
+ *  the renderer does, so it never flashes the opposite shade. */
+function windowBackgroundColor(): string {
+  return UI_THEME_BACKGROUND[getUiTheme()];
+}
+
+/**
+ * Make `theme` the app-wide colour theme: persist it (unless the renderer
+ * already wrote the pref and this is the fan-out leg), point Chromium's
+ * native theme at it so dialogs and scrollbars follow, re-tint every open
+ * window, tell each renderer, and rebuild the menu so the View ▸ Theme
+ * radio reflects it.
+ */
+function applyUiTheme(theme: UiTheme, opts: { persist: boolean }): void {
+  if (opts.persist) {
+    prefsCache['uiTheme'] = theme;
+    schedulePrefsWrite();
+  }
+  nativeTheme.themeSource = theme;
+  const bg = UI_THEME_BACKGROUND[theme];
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed()) continue;
+    w.setBackgroundColor(bg);
+    w.webContents.send(IPC.themeChanged, theme);
+  }
+  rebuildMenu();
+}
+
+// `L()` itself lives in `menu-i18n.ts` so modules with no menu of their
+// own (`languagetool.ts`, `language-detect.ts`) can localise their output
+// without importing this file. Hand it the resolver now that `getMenuLang`
+// is in scope; until this runs, `L()` answers in English.
+setMenuLangProvider(getMenuLang);
 
 function rebuildMenu(): void {
+  // Idempotent and cheap; keeps Chromium's native theme (dialog chrome,
+  // scrollbars, form controls) on the app's theme from the first build.
+  nativeTheme.themeSource = getUiTheme();
   Menu.setApplicationMenu(
     buildAppMenu({
       lang: getMenuLang(),
+      theme: getUiTheme(),
+      onSetTheme: (theme) => applyUiTheme(theme, { persist: true }),
       onOpenLogs: () => openLogsWindow(focusedOwnerWcId()),
       onNewProjectWindow: () => createProjectWindow(),
       onOpenProject: () => runInFocusedSession(() => void promptOpenProject()),
@@ -2825,7 +3101,7 @@ function rebuildMenu(): void {
         runInFocusedSession(() => openProjectAtPath(path)).catch((err: unknown) => {
           dialog.showErrorBox(
             L().dlgOpenProjectFailedTitle,
-            `Could not open ${path}.\n\n${(err as Error).message}`,
+            `${L().msgCouldNotOpenPath.replace('{path}', path)}\n\n${(err as Error).message}`,
           );
           // Drop the bad entry so it doesn't keep failing. Use the
           // object-model remover so archived/tags/lastOpened on the
@@ -2908,8 +3184,8 @@ function resetDiagnosticDialogs(): void {
       title: L().dlgDiagResetTitle,
       message:
         removed === 0
-          ? 'No suppressed diagnostic warnings to reset.'
-          : `Re-enabled ${removed} previously dismissed warning${removed === 1 ? '' : 's'}. They will pop up again the next time the underlying issue occurs.`,
+          ? L().dlgDiagResetNoneMsg
+          : L().msgDiagResetDone.replace('{n}', String(removed)),
       buttons: [L().btnOk],
       noLink: true,
     });
@@ -2973,8 +3249,8 @@ function pickInstallerAsset(assets: GitHubReleaseAsset[]): GitHubReleaseAsset | 
   );
   if (process.platform === 'win32') {
     // The Windows release ships two `.exe` assets — the NSIS installer
-    // (`…Setup….exe`) and the standalone portable build
-    // (`…-portable.exe`). "Check for Updates" must offer the installer:
+    // (`…-Windows-Setup.exe`) and the standalone portable build
+    // (`…-Windows-Portable.exe`). "Check for Updates" must offer the installer:
     // prefer the `Setup` asset, fall back to any non-portable `.exe`,
     // and only as a last resort take whatever `.exe` exists.
     const exes = list.filter((a) => /\.exe$/i.test(a.name));
@@ -2986,14 +3262,24 @@ function pickInstallerAsset(assets: GitHubReleaseAsset[]): GitHubReleaseAsset | 
     );
   }
   if (process.platform === 'darwin') {
-    const isArm = process.arch === 'arm64';
+    // `process.arch` names the arch of the *binary*: an Apple Silicon Mac
+    // running the Intel build under Rosetta reports 'x64' and would be
+    // offered Intel builds forever, never able to self-heal onto the
+    // native one. `app.runningUnderARM64Translation` is Electron's answer
+    // to exactly that case, so together they name the real CPU.
+    const isArm = process.arch === 'arm64' || app.runningUnderARM64Translation === true;
+    // Since 1.0.0 the assets are `…-macOS-Apple-Silicon.dmg` and
+    // `…-macOS-Intel.dmg` (release.yml); `…-arm64.dmg` / `…-x64.dmg` is
+    // what a local `npm run build:mac` and every earlier release produced.
+    const isArmDmg = (name: string) => /(apple-silicon|arm64)\.dmg$/i.test(name);
     if (isArm) {
-      return list.find((a) => /-arm64\.dmg$/i.test(a.name)) ?? null;
+      return list.find((a) => isArmDmg(a.name)) ?? null;
     }
-    // Intel Macs: pick the `.dmg` that is NOT the arm64 build.
-    return list.find((a) => /\.dmg$/i.test(a.name) && !/arm64/i.test(a.name)) ?? null;
+    return list.find((a) => /\.dmg$/i.test(a.name) && !isArmDmg(a.name)) ?? null;
   }
-  // Linux installers aren't published yet; caller falls back to release page.
+  // Linux ships three package formats (AppImage / deb / rpm) and which one
+  // fits is a distro question, so the caller opens the release page and
+  // lets the user choose.
   return null;
 }
 
@@ -3123,14 +3409,13 @@ async function downloadAndRevealInstaller(asset: GitHubReleaseAsset): Promise<vo
           void dialog.showMessageBox(win, {
             type: 'info',
             title: L().dlgDownloadCompleteTitle,
-            message: `${asset.name} downloaded.`,
+            message: L().msgDownloadComplete.replace('{name}', asset.name),
             detail:
-              `Saved to:\n${savePath}\n\n` +
-              `The Downloads folder has been opened — double-click the installer to upgrade.\n\n` +
+              `${L().detailDownloadSaved.replace('{path}', savePath)}\n\n` +
               (process.platform === 'win32'
-                ? 'Windows SmartScreen may show "Unrecognized app" because the installer is not code-signed. Click "More info → Run anyway" to proceed.'
+                ? L().detailDownloadSmartScreen
                 : process.platform === 'darwin'
-                  ? 'macOS Gatekeeper may block the app on first open because it is not notarised. Right-click the .dmg → Open to bypass.'
+                  ? L().detailDownloadGatekeeper
                   : ''),
             buttons: [L().btnOk],
             noLink: true,
@@ -3139,8 +3424,8 @@ async function downloadAndRevealInstaller(asset: GitHubReleaseAsset): Promise<vo
           void dialog.showMessageBox(win, {
             type: 'error',
             title: L().dlgDownloadFailedTitle,
-            message: `Could not download ${asset.name}`,
-            detail: `Download state: ${state}\n\nYou can retry from the GitHub Releases page.`,
+            message: L().msgDownloadFailed.replace('{name}', asset.name),
+            detail: L().detailDownloadFailed.replace('{state}', state),
             buttons: [L().btnOk],
             noLink: true,
           });
@@ -3242,7 +3527,7 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
     }
   } catch (err) {
     fetchError =
-      err instanceof Error ? err.message : 'Unknown error contacting GitHub';
+      err instanceof Error ? err.message : L().msgUnknownErrorGitHub;
   }
 
   if (fetchError || !release || !release.tag_name) {
@@ -3257,10 +3542,14 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
     void dialog.showMessageBox(win, {
       type: 'warning',
       title: L().dlgUpdateCheckFailedTitle,
-      message: "Couldn't reach the GitHub Releases API.",
+      message: L().dlgUpdateCheckFailedMsg,
       detail:
-        (fetchError ?? 'No release tag in response.') +
-        '\n\nYou can browse releases manually at:\nhttps://github.com/kemalai/FreeCrawl-SEO-Tool/releases',
+        (fetchError ?? L().msgNoReleaseTag) +
+        '\n\n' +
+        L().detailBrowseReleases.replace(
+          '{url}',
+          'https://github.com/kemalai/FreeCrawl-SEO-Tool/releases',
+        ),
       buttons: [L().btnOpenReleasesPage, L().btnClose],
       defaultId: 0,
       cancelId: 1,
@@ -3282,10 +3571,13 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
     void dialog.showMessageBox(win, {
       type: 'info',
       title: L().dlgUpToDateTitle,
-      message: `You're on the latest version (v${installed}).`,
+      message: L().msgUpToDate.replace('{version}', installed),
       detail: release.published_at
-        ? `Latest GitHub release: ${latest}\nPublished: ${new Date(release.published_at).toLocaleString()}`
-        : `Latest GitHub release: ${latest}`,
+        ? `${L().detailLatestRelease.replace('{tag}', latest)}\n${L().detailPublished.replace(
+            '{date}',
+            new Date(release.published_at).toLocaleString(),
+          )}`
+        : L().detailLatestRelease.replace('{tag}', latest),
       buttons: [L().btnOk],
       noLink: true,
     });
@@ -3309,18 +3601,20 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
     notes.length > 1500 ? notes.slice(0, 1500).trimEnd() + '\n…' : notes;
   const installerAsset = pickInstallerAsset(release.assets ?? []);
   const detail =
-    `Installed: v${installed}\nLatest:    ${latest}\n\n` +
+    `${L()
+      .detailInstalledLatest.replace('{installed}', installed)
+      .replace('{latest}', latest)}\n\n` +
     (notesPreview
-      ? `Release notes:\n${notesPreview}`
-      : 'See the release page for the changelog.');
+      ? `${L().detailReleaseNotes}\n${notesPreview}`
+      : L().detailSeeReleasePage);
 
   // Three-way choice: in-app download (primary, when an asset matches the
   // host platform), open release page (always available — fallback for
   // Linux / unmatched arch), Later. Plus a "Don't show this version
   // again" checkbox keyed by tag so a NEW release re-prompts.
   const buttons = installerAsset
-    ? ['Download Installer', 'Open Release Page', 'Later']
-    : ['Open Release Page', 'Later'];
+    ? [L().btnDownloadInstaller, L().btnOpenReleasePage, L().btnLater]
+    : [L().btnOpenReleasePage, L().btnLater];
   const downloadBtn = installerAsset ? 0 : -1;
   const releasePageBtn = installerAsset ? 1 : 0;
   const laterBtn = installerAsset ? 2 : 1;
@@ -3328,12 +3622,12 @@ async function runUpdateCheck(silent: boolean): Promise<void> {
   const result = await dialog.showMessageBox(win, {
     type: 'info',
     title: L().dlgUpdateAvailableTitle,
-    message: `${latest} is available.`,
+    message: L().msgUpdateAvailable.replace('{version}', latest),
     detail,
     buttons,
     defaultId: downloadBtn >= 0 ? downloadBtn : releasePageBtn,
     cancelId: laterBtn,
-    checkboxLabel: "Don't show this version again",
+    checkboxLabel: L().dlgDontShowVersionAgain,
     checkboxChecked: false,
     noLink: true,
   });
@@ -3361,8 +3655,8 @@ async function promptOpenProject(): Promise<void> {
     title: L().dlgOpenProjectTitle,
     properties: ['openFile'],
     filters: [
-      { name: 'FreeCrawl Project', extensions: ['seoproject', 'sqlite', 'db'] },
-      { name: 'All Files', extensions: ['*'] },
+      { name: L().filterFreeCrawlProject, extensions: ['seoproject', 'sqlite', 'db'] },
+      { name: L().filterAllFiles, extensions: ['*'] },
     ],
   });
   if (res.canceled || res.filePaths.length === 0) return;
@@ -3371,7 +3665,7 @@ async function promptOpenProject(): Promise<void> {
   } catch (err) {
     dialog.showErrorBox(
       L().dlgOpenProjectFailedTitle,
-      `Could not open the selected file.\n\n${(err as Error).message}`,
+      `${L().msgCouldNotOpenSelected}\n\n${(err as Error).message}`,
     );
   }
 }
@@ -3386,6 +3680,12 @@ const WINDOW_ICON = process.platform === 'darwin' ? {} : { icon: appIcon };
 const TRAY_ICON_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAACoUlEQVRYhe2WW4iNURTHz2Bm3NK4NWUayrVIpryQZJRhhHJ5onjRhKZhJpEXESGTmtwLkxIJDxjyIl5MTWIU5VbGvIyEMS45KJef1un/Nbtv9neOy3Gevn99ndbea+3/3mv/19onkYgRI0aOABQDq4CTwJr/SVQEzALmAIuB3UAr8JNufAMmZpu4ENgGJOmJT0ATsA5Yrs1czSb5bOCJyH7o9xmwHZgL9JXfAKBR82+yQTwCOOOk105ZHZw65FsGPHay8vFfiEcBB4HPWuwFsExzAzW3WnYesB74CnwHdgHPgc6/Ia4ALkpEhi/AXmBQhP8wZcXQAZRrfCNw5U+I5wEtTvreAfVASQZdGKnhMjDUmZsBLPod4n7AMYe4DagyMaWJ6QPsVLotQ3XAWuAAUAsMVsXkZSIvAe6LuFPBBZrrnUYbzYp5CMwEHoVK0vQyJhP5cCfwATBS45OBo8B+T8wSXQ3KWn/gCH5cS0deCNyV43UTmL5Gie94cJ8mMieuSzF7nLHw6QMko7KYUJkY7qlxjFb92n0udPy2Aicce6lKzRZfoLHbERt4HUVeplMmRVysjmaCqgz5nlbKi5yxcuC91rCHZ0PEBhqiNnBBDltkX5Jd7/Gt1Jz55IcO8VLdcbOakvsQnTd9+MhLtfMudbOA4K3Z8ikAaoA7emACtKpJpUrLVK7MGfaZiIH5wFhVSs/7BzYpIKVw4IYrKmBIqBl1qC8Eyjc81Ys4XtdnOjKcCrIkEU/wbaBJzhUKDl61qZo/K/smMMmJ6wVMAXZoQ25WrCG1y75lV6t1p/k28Mojlg96TMbJbvPeX/ca5jsdOGRKJxqlvuAG1b37HXb6utnVUeSe9fKtHPVch/+kpMo0Z5CoVwLngBU5JY8RI5EBvwAD+Q6gT36I9wAAAABJRU5ErkJggg==';
 let tray: Tray | null = null;
+/** Rebuilds the tray context menu from the current UI language + window
+ *  state. Hoisted out of `createTray` so the `uiLanguage` prefs path can
+ *  refresh the tray labels too — previously only the window's
+ *  show/hide/minimize/restore events did, so switching language left the
+ *  tray in the old one until the window happened to be hidden. */
+let rebuildTrayMenu: (() => void) | null = null;
 
 /** Show the main window if it's hidden/minimized, else hide it to the tray.
  *  Non-destructive: closing the window still quits (unchanged behaviour) —
@@ -3437,6 +3737,7 @@ function createTray(): void {
       );
     };
     rebuild();
+    rebuildTrayMenu = rebuild;
     t.on('click', () => toggleMainWindow());
     tray = t;
     // Keep the show/hide label in sync with the primary window's state.
@@ -3465,7 +3766,7 @@ function createWindow(): void {
     minHeight: 640,
     show: false,
     autoHideMenuBar: false,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: windowBackgroundColor(),
     title: `FreeCrawl SEO Tool v${app.getVersion()}`,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -3609,7 +3910,7 @@ function createProjectWindow(): void {
     minWidth: 1024,
     minHeight: 640,
     show: false,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: windowBackgroundColor(),
     title: `FreeCrawl SEO Tool v${app.getVersion()}`,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -3926,8 +4227,8 @@ function openLogsWindow(ownerWcId: number): void {
   const ownerLabel = ownerSession.currentProjectPath
     ? basename(ownerSession.currentProjectPath)
     : ownerSession === defaultSession
-      ? 'Primary'
-      : 'New Project';
+      ? L().winLabelPrimary
+      : L().titleUntitledProject;
   const win = new BrowserWindow({
     ...WINDOW_ICON,
     width: 1000,
@@ -3935,8 +4236,8 @@ function openLogsWindow(ownerWcId: number): void {
     minWidth: 560,
     minHeight: 320,
     show: false,
-    backgroundColor: '#0a0a0a',
-    title: `FreeCrawl — Logs (${ownerLabel})`,
+    backgroundColor: windowBackgroundColor(),
+    title: L().winLogsTitle.replace('{label}', ownerLabel),
     // Intentionally NOT a child of mainWindow — `parent: mainWindow`
     // links the two windows in the OS compositor (DWM on Windows) so
     // that when the main process is busy doing post-crawl recompute /
@@ -4052,8 +4353,8 @@ function openVisualizationWindow(ownerWcId?: number): void {
     minWidth: 640,
     minHeight: 480,
     show: false,
-    backgroundColor: '#0a0a0a',
-    title: 'FreeCrawl — Visualization',
+    backgroundColor: windowBackgroundColor(),
+    title: L().winVisualizationTitle,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -4116,8 +4417,8 @@ function openLogAnalyzerWindow(): void {
     minWidth: 720,
     minHeight: 480,
     show: false,
-    backgroundColor: '#0a0a0a',
-    title: 'FreeCrawl — Log Analyzer',
+    backgroundColor: windowBackgroundColor(),
+    title: L().winLogAnalyzerTitle,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -4363,10 +4664,8 @@ async function offerPlaywrightInstall(): Promise<boolean> {
     const res = await dialog.showMessageBox(mainWindow, {
       type: 'question',
       title: L().dlgPlaywrightTitle,
-      message:
-        'FreeCrawl needs to download a Chromium browser before JavaScript rendering can run.',
-      detail:
-        'This is a one-time ~250 MB download that runs inside the app — no terminal needed. The browser is stored in your user folder; only the binary is downloaded, from cdn.playwright.dev.\n\nDownload now?',
+      message: L().dlgPlaywrightMsg,
+      detail: L().dlgPlaywrightDetail,
       buttons: [L().btnDownloadNow, L().btnSkipJsRender],
       defaultId: 0,
       cancelId: 1,
@@ -4377,10 +4676,7 @@ async function offerPlaywrightInstall(): Promise<boolean> {
   if (!ok && mainWindow) {
     dialog.showErrorBox(
       L().dlgBrowserInstallFailedTitle,
-      'The Chromium download could not be completed.\n\n' +
-        'Check your internet connection (or proxy settings) and start the crawl again — ' +
-        'FreeCrawl will retry the download automatically. JavaScript rendering stays ' +
-        'disabled until it succeeds; text-mode crawling is unaffected.',
+      L().msgBrowserInstallFailed,
     );
   }
   return ok;
@@ -4432,6 +4728,21 @@ function registerIpc(): void {
   // (1M / 5M / 10M projection) without separate round-trips.
   // `urlsCrawled = 0` when no project is open — the renderer suppresses
   // the per-URL cost UI in that case.
+  registerHandle(IPC.systemInfo, (): SystemInfo => {
+    getDb();
+    return {
+      appVersion: app.getVersion(),
+      electron: process.versions.electron ?? '',
+      chromium: process.versions.chrome ?? '',
+      node: process.versions.node,
+      platform: `${process.platform} ${process.arch}`,
+      cpuCount: cpus().length,
+      uptimeSec: Math.round(process.uptime()),
+      userDataPath: app.getPath('userData'),
+      logsPath: app.getPath('logs'),
+      storageModeActive: currentSession().storageModeActive,
+    };
+  });
   registerHandle(IPC.memoryStats, () => {
     const mu = process.memoryUsage();
     let urlsCrawled = 0;
@@ -4524,8 +4835,11 @@ function registerIpc(): void {
           title: L().dlgOpenAccessLogTitle,
           properties: ['openFile', 'multiSelections'],
           filters: [
-            { name: 'Log Files', extensions: ['log', 'txt', 'gz', 'out', 'access'] },
-            { name: 'All Files', extensions: ['*'] },
+            {
+              name: L().filterLogFiles,
+              extensions: ['log', 'txt', 'gz', 'out', 'access'],
+            },
+            { name: L().filterAllFiles, extensions: ['*'] },
           ],
         });
         if (res.canceled || res.filePaths.length === 0) {
@@ -4620,7 +4934,7 @@ function registerIpc(): void {
           filters: [
             format === 'csv'
               ? { name: 'CSV', extensions: ['csv'] }
-              : { name: 'Excel Workbook', extensions: ['xlsx'] },
+              : { name: L().filterExcelWorkbook, extensions: ['xlsx'] },
           ],
         });
         if (res.canceled || !res.filePath) return { filePath: '', bytesWritten: 0 };
@@ -5072,6 +5386,19 @@ function registerIpc(): void {
   );
 
   registerHandle(
+    IPC.reportsPagesOverLinkLimit,
+    (_e, input: PagesOverLinkLimitInput): Promise<TopUrlsRow[]> => {
+      const threshold = Math.max(0, Math.floor(Number(input.threshold) || 0));
+      const limit = Math.min(5000, Math.max(1, input.limit ?? 500));
+      return callReaderOrFallback<TopUrlsRow[]>(
+        'pagesOverLinkLimit',
+        [threshold, limit],
+        () => getDb().pagesOverLinkLimit(threshold, limit),
+      );
+    },
+  );
+
+  registerHandle(
     IPC.reportsExternalDomainHealth,
     (_e, limit: number | undefined): Promise<ExternalDomainHealthRow[]> =>
       callReaderOrFallback<ExternalDomainHealthRow[]>(
@@ -5174,13 +5501,18 @@ function registerIpc(): void {
   // whole table in memory and the main thread stays usable.
   registerHandle(
     IPC.reportsTopWords,
-    (_e, input: TopWordsInput): TopWordsRow[] => {
-      const corpus = getDb().seoTextCorpus();
-      return aggregateTopWords(corpus, {
-        limit: input.limit,
-        minLength: input.minLength,
-        locale: input.locale,
-      });
+    (_e, input: TopWordsInput): Promise<TopWordsRow[]> => computeTopWords(input),
+  );
+
+  registerHandle(
+    IPC.reportsMobileParity,
+    (_e, limit?: number): Promise<TopUrlsRow[]> => {
+      const n = Math.min(5000, Math.max(1, limit ?? 500));
+      return callReaderOrFallback<TopUrlsRow[]>(
+        'mobileParityReport',
+        [n],
+        () => getDb().mobileParityReport(n),
+      );
     },
   );
 
@@ -5233,8 +5565,8 @@ function registerIpc(): void {
         raw = JSON.parse(text);
       } catch (err) {
         dialog.showErrorBox(
-          'Import Failed',
-          `Cannot parse JSON: ${(err as Error).message}`,
+          L().dlgImportFailedTitle,
+          L().msgImportCannotParseJson.replace('{error}', (err as Error).message),
         );
         return { filePath: '', config: null, unknownFields: [] };
       }
@@ -5246,8 +5578,8 @@ function registerIpc(): void {
           : (raw as Record<string, unknown>);
       if (!config || typeof config !== 'object') {
         dialog.showErrorBox(
-          'Import Failed',
-          'Imported file does not contain a settings object.',
+          L().dlgImportFailedTitle,
+          L().dlgImportFailedNoSettingsMsg,
         );
         return { filePath: '', config: null, unknownFields: [] };
       }
@@ -6851,7 +7183,15 @@ function registerIpc(): void {
   // renderer renders (avoids column-width / panel-size flash on startup).
   ipcMain.on(IPC.prefsGetAllSync, (e) => {
     loadPrefs();
-    e.returnValue = prefsCache;
+    // The OS language preferences ride along on this one blocking round
+    // trip rather than costing a second `sendSync`, so the renderer can
+    // resolve its startup locale before React mounts. Derived, never
+    // persisted — writing it into `prefsCache` would leak it into
+    // prefs.json and read back as an explicit user choice.
+    e.returnValue = {
+      prefs: prefsCache,
+      systemLanguages: app.getPreferredSystemLanguages(),
+    };
   });
   registerHandle(IPC.prefsSet, (_e, key: string, value: unknown) => {
     loadPrefs();
@@ -6859,10 +7199,16 @@ function registerIpc(): void {
     schedulePrefsWrite();
     // V1 Faz 8 Phase 2 — when the renderer switches language, rebuild the
     // app menu so File/View/Help/etc. labels follow immediately. Cheap;
-    // rebuildMenu is also the recent-projects refresh path.
+    // rebuildMenu is also the recent-projects refresh path. The tray is
+    // rebuilt on the same path: its labels come from the same label set
+    // but its own refresh only fires on window show/hide.
     if (key === 'uiLanguage' && isMenuLang(value)) {
       rebuildMenu();
+      rebuildTrayMenu?.();
     }
+    // Settings ▸ Theme in any window: the pref is already in the cache, so
+    // this is the fan-out to the other windows + menu + native theme.
+    if (key === 'uiTheme') applyUiTheme(normalizeUiTheme(value), { persist: false });
   });
   registerHandle(IPC.prefsDelete, (_e, key: string) => {
     loadPrefs();
@@ -6916,6 +7262,7 @@ function registerIpc(): void {
         pending: p.pending,
         failed: p.failed,
       });
+      maybeBatchAutoSave(sess, p);
     });
     crawler.on('done', (summary: CrawlSummary) => {
       if (sess.activeCrawler !== crawler) return;
@@ -6941,12 +7288,16 @@ function registerIpc(): void {
       if (sess.crawlerStartedByScheduler) {
         sess.crawlerStartedByScheduler = false;
         recordFireResult(schedulerStore, sess.currentProjectPath, 'success');
+        const after = getSchedule(schedulerStore, sess.currentProjectPath)?.spec.afterCrawl;
+        if (after) void runScheduledAfterCrawl(sess, after);
       }
       if (Notification.isSupported() && !sess.window?.isFocused()) {
         try {
           new Notification({
             title: 'FreeCrawl SEO Tool',
-            body: `Crawl finished: ${summary.total.toLocaleString()} URLs · avg ${Math.round(summary.avgResponseTimeMs)} ms`,
+            body: L()
+              .notifCrawlFinished.replace('{urls}', summary.total.toLocaleString())
+              .replace('{ms}', String(Math.round(summary.avgResponseTimeMs))),
             silent: false,
           }).show();
         } catch {
@@ -6997,6 +7348,163 @@ function registerIpc(): void {
     });
   }
 
+  /**
+   * Settings → Reports branding, validated: unknown keys dropped, the
+   * accent colour must be a hex triplet, the logo must be an image data URL.
+   */
+  function readReportBranding(): ReportBranding {
+    const raw = prefsCache['reportBranding'];
+    if (!raw || typeof raw !== 'object') return {};
+    const r = raw as Record<string, unknown>;
+    const str = (v: unknown): string | undefined =>
+      typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+    const accent = str(r['accentColor']);
+    const logo = str(r['logoDataUrl']);
+    return {
+      brandName: str(r['brandName']),
+      preparedBy: str(r['preparedBy']),
+      accentColor: accent && /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(accent) ? accent : undefined,
+      logoDataUrl: logo && logo.startsWith('data:image/') && logo.length <= 1_500_000 ? logo : undefined,
+    };
+  }
+
+  /**
+   * Renders the HTML report to PDF with Chromium's own printer: the same
+   * document the HTML export writes, so branding, Unicode text and fonts
+   * come out exactly as in the browser — no PDF library, no font files.
+   */
+  async function writePdfReport(db: ProjectDb, filePath: string): Promise<number> {
+    const html = await renderHtmlReport(db, {
+      startUrl: db.getMeta('lastStartUrl') ?? '',
+      branding: readReportBranding(),
+    });
+    const tmpHtml = join(app.getPath('temp'), `freecrawl-report-${Date.now()}-${randomBytes(4).toString('hex')}.html`);
+    await writeFile(tmpHtml, html, 'utf8');
+    const win = new BrowserWindow({
+      show: false,
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false },
+    });
+    try {
+      await win.loadFile(tmpHtml);
+      const pdf = await win.webContents.printToPDF({
+        printBackground: true,
+        pageSize: 'A4',
+        margins: { top: 0.5, bottom: 0.5, left: 0.5, right: 0.5 },
+      });
+      await writeFile(filePath, pdf);
+      return pdf.byteLength;
+    } finally {
+      win.destroy();
+      await unlink(tmpHtml).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Post-crawl work a schedule asked for: an export into a timestamped
+   * sub-folder, a Google Sheets push, and a webhook carrying the results.
+   * Best-effort — every step logs its own failure and never touches the
+   * schedule's "last status", which reflects the crawl itself.
+   */
+  async function runScheduledAfterCrawl(sess: ProjectSession, after: ScheduleAfterCrawl): Promise<void> {
+    const db = sess.getDb();
+    const startUrl = db.getMeta('lastStartUrl') ?? '';
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    const project = basename(sess.currentProjectPath, '.seoproject') || 'crawl';
+    const files: string[] = [];
+    const errors: string[] = [];
+    let exportDir: string | null = null;
+    if (after.export !== 'none' && after.outputDir) {
+      exportDir = join(after.outputDir, `${project}-${stamp}`);
+      try {
+        await mkdir(exportDir, { recursive: true });
+        if (after.export === 'bulk') {
+          const r = await runBulkExport(db, exportDir);
+          files.push(...r.files.map((f) => f.filePath));
+          errors.push(...r.errors.map((e) => `${e.label}: ${e.error}`));
+        } else if (after.export === 'seo-audit') {
+          const r = await runSeoAuditExport(db, exportDir);
+          files.push(...r.files.map((f) => f.filePath));
+          errors.push(...r.errors.map((e) => `${e.label}: ${e.error}`));
+        } else if (after.export === 'html') {
+          const target = join(exportDir, 'report.html');
+          await exportHtmlReport(db, target, { startUrl, branding: readReportBranding() });
+          files.push(target);
+        } else if (after.export === 'pdf') {
+          const target = join(exportDir, 'report.pdf');
+          await writePdfReport(db, target);
+          files.push(target);
+        }
+        logger.log('info', 'main', `Scheduled export (${after.export}) wrote ${files.length} file(s) to ${exportDir}`, undefined, sess.logTag);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`export: ${msg}`);
+        logger.log('warn', 'main', `Scheduled export failed: ${msg}`, undefined, sess.logTag);
+      }
+    }
+    let sheetsUrl: string | null = null;
+    if (after.sheets) {
+      try {
+        const r = await exportCategoryToSheets(db, 'all', `FreeCrawl — ${project} — ${stamp}`);
+        sheetsUrl = r.spreadsheetUrl;
+        logger.log('info', 'main', `Scheduled Sheets export: ${sheetsUrl} (${r.rowsWritten} rows)`, undefined, sess.logTag);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`sheets: ${msg}`);
+        logger.log('warn', 'main', `Scheduled Sheets export failed: ${msg}`, undefined, sess.logTag);
+      }
+    }
+    if (after.webhook) {
+      const url = sess.lastCrawlConfig?.webhookUrl?.trim() ?? '';
+      if (!url) {
+        logger.log('warn', 'main', 'Scheduled webhook skipped: no webhook URL in Settings → Webhook', undefined, sess.logTag);
+      } else {
+        const r = await postWebhookJson(url, {
+          event: 'scheduled-export',
+          finishedAt: new Date().toISOString(),
+          startUrl,
+          project: sess.currentProjectPath,
+          export: after.export,
+          exportDir,
+          files,
+          sheetsUrl,
+          errors,
+          summary: db.getSummary(),
+          issues: db.getOverviewCounts().issues,
+        });
+        logger.log(r.ok ? 'info' : 'warn', 'main', `Scheduled webhook ${r.ok ? 'delivered' : 'failed'} (status ${r.status ?? 'n/a'}, ${r.durationMs} ms)${r.ok ? '' : `: ${r.detail}`}`, undefined, sess.logTag);
+      }
+    }
+  }
+
+  /**
+   * Top Words over title + meta + H1, optionally over the stored page
+   * bodies too. Bodies are reduced to main-content prose on the parser
+   * workers, four at a time, so a 60k-page corpus never stalls the UI;
+   * the aggregator keeps one page of text alive at a time.
+   */
+  async function computeTopWords(input: TopWordsInput): Promise<TopWordsRow[]> {
+    const db = getDb();
+    const opts = { limit: input.limit, minLength: input.minLength, locale: input.locale };
+    if (!input.includeBody) return aggregateTopWords(db.seoTextCorpus(), opts);
+    const agg = createTopWordsAggregator(opts);
+    for (const text of db.seoTextCorpus()) agg.add(text);
+    const selector = currentSession().lastCrawlConfig?.contentAreaSelector || undefined;
+    const BATCH = 4;
+    let batch: Promise<string>[] = [];
+    const drain = async (): Promise<void> => {
+      for (const text of await Promise.all(batch)) if (text) agg.add(text);
+      batch = [];
+    };
+    for (const { body } of db.iterateStoredBodies()) {
+      batch.push(
+        parserPool.prose(body, selector).catch(() => extractProseText(body, selector)),
+      );
+      if (batch.length >= BATCH) await drain();
+    }
+    if (batch.length > 0) await drain();
+    return agg.result();
+  }
+
   async function launchCrawl(
     config: CrawlConfig,
     opts: {
@@ -7015,6 +7523,9 @@ function registerIpc(): void {
     // this handler's AsyncLocalStorage context, so its hooks + listeners
     // are bound to `sess` rather than resolved via `currentSession()`.
     const sess = opts.session ?? currentSession();
+    // The silence list rides on the config; mirror it into the project so
+    // reader workers and exports see the same set the sidebar does.
+    sess.getDb().applyCrawlConfigFlags(config);
     const previousCrawler = sess.activeCrawler;
     if (previousCrawler) {
       previousCrawler.stop();
@@ -7682,6 +8193,7 @@ function registerIpc(): void {
       const filePath = assertMcpExportPath(i.filePath);
       const result = await exportHtmlReport(getDb(), filePath, {
         startUrl: getDb().getMeta('lastStartUrl') ?? '',
+        branding: readReportBranding(),
       });
       return { filePath: result.filePath, bytesWritten: result.bytesWritten };
     },
@@ -7781,12 +8293,12 @@ function registerIpc(): void {
     },
 
     'report-top-words': async (input) => {
-      const i = (input ?? {}) as { limit?: number; minLength?: number; locale?: 'en' | 'tr' | 'all' };
-      const corpus = getDb().seoTextCorpus();
-      return aggregateTopWords(corpus, {
+      const i = (input ?? {}) as TopWordsInput;
+      return computeTopWords({
         limit: i.limit ?? 100,
         minLength: i.minLength ?? 3,
         locale: i.locale ?? 'all',
+        includeBody: i.includeBody === true,
       });
     },
 
@@ -7848,6 +8360,7 @@ function registerIpc(): void {
         emptyAltOnly?: boolean;
         duplicateAltOnly?: boolean;
         search?: string;
+        minByteSize?: number;
       };
       const filePath = assertMcpExportPath(i.filePath);
       const { rowsWritten } = await exportImagesToCsv(getDb(), filePath, {
@@ -7855,6 +8368,7 @@ function registerIpc(): void {
         emptyAltOnly: i.emptyAltOnly,
         duplicateAltOnly: i.duplicateAltOnly,
         search: i.search,
+        minByteSize: typeof i.minByteSize === 'number' ? i.minByteSize : undefined,
       });
       return { filePath, rowsWritten };
     },
@@ -8151,7 +8665,55 @@ function registerIpc(): void {
     'google-auth-status': async (input) => {
       const id = (input as { integrationId?: string }).integrationId ?? '';
       if (!id) throw new Error('integrationId is required (e.g. "gsc" or "ga4").');
-      return getAuthState(id);
+      const state = getAuthState(id);
+      // `state.email` is the first-linked account, not necessarily the one
+      // this project pulls with — an agent reading it saw the "Default"
+      // account even after the user had switched under Settings →
+      // Integrations. Report the effective account alongside. Resolving
+      // it needs an open project; without one the field is simply null.
+      let activeAccountId: string | null = null;
+      if (id === 'gsc' || id === 'ga4') {
+        try {
+          activeAccountId = resolveGoogleAccount(id) || null;
+        } catch {
+          activeAccountId = null;
+        }
+      }
+      const active = activeAccountId
+        ? (state.accounts.find((a) => a.accountId === activeAccountId) ?? null)
+        : null;
+      return { ...state, activeAccountId, activeEmail: active?.email ?? null };
+    },
+
+    'google-account-set': async (input) => {
+      // The desktop stores the chosen account in the project's integration
+      // settings (Settings → Integrations); this is the same write, reached
+      // from MCP. Accepts the opaque id or the address, since an agent
+      // usually only has the latter from `google-auth-status`.
+      const i = (input ?? {}) as { integrationId?: unknown; accountId?: unknown };
+      const id = typeof i.integrationId === 'string' ? i.integrationId : '';
+      if (id !== 'gsc' && id !== 'ga4') {
+        throw new Error('integrationId must be "gsc" or "ga4".');
+      }
+      const requested = typeof i.accountId === 'string' ? i.accountId.trim() : '';
+      if (!requested) throw new Error('accountId is required (an account id or email).');
+      const match = listAccounts(id).find(
+        (a) => a.accountId === requested || (a.email !== null && a.email === requested),
+      );
+      if (!match) {
+        throw new Error(
+          `No ${id} account "${requested}" is connected — google_auth_status lists the ` +
+            'linked accounts; new ones are connected under Settings → Integrations.',
+        );
+      }
+      writeIntegrationSettings(id, { accountId: match.accountId });
+      fireDataChanged();
+      return {
+        ok: true,
+        integrationId: id,
+        activeAccountId: match.accountId,
+        activeEmail: match.email,
+      };
     },
 
     // ---- Faz 0.5 Increment 5 — slow batch-fetch triggers (PSI / AI /
@@ -8520,15 +9082,7 @@ function registerIpc(): void {
       if (!i.password) throw new Error('password is required.');
       const tmpPath = join(app.getPath('temp'), `freecrawl-enc-${Date.now()}.seoproject`);
       try {
-        const database = getDb();
-        try {
-          database.walCheckpoint();
-        } catch {
-          /* best-effort */
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawDb = (database as any).db as { exec: (sql: string) => void };
-        rawDb.exec(`VACUUM INTO '${tmpPath.replace(/'/g, "''")}'`);
+        await snapshotDatabaseWithTitle(currentSession(), tmpPath);
         const { encryptFile } = await import('./project-encryption.js');
         const result = await encryptFile(tmpPath, i.filePath, i.password);
         return { filePath: i.filePath, bytesWritten: result.bytesWritten };
@@ -8665,8 +9219,8 @@ function registerIpc(): void {
           title: L().dlgOpenProjectTitle,
           properties: ['openFile'],
           filters: [
-            { name: 'FreeCrawl Project', extensions: ['seoproject', 'sqlite', 'db'] },
-            { name: 'All Files', extensions: ['*'] },
+            { name: L().filterFreeCrawlProject, extensions: ['seoproject', 'sqlite', 'db'] },
+            { name: L().filterAllFiles, extensions: ['*'] },
           ],
         });
         if (res.canceled || res.filePaths.length === 0) return null;
@@ -8679,7 +9233,7 @@ function registerIpc(): void {
         if (mainWindow) {
           dialog.showErrorBox(
             L().dlgOpenProjectFailedTitle,
-            `Could not open ${target}.\n\n${(err as Error).message}`,
+            `${L().msgCouldNotOpenPath.replace('{path}', target)}\n\n${(err as Error).message}`,
           );
         }
         return null;
@@ -8710,6 +9264,7 @@ function registerIpc(): void {
     if (!currentSession().currentProjectPath) return;
     try {
       getDb().setMeta('lastCrawlConfig', serializeConfigWithEncryptedSecrets(config));
+      getDb().applyCrawlConfigFlags(config);
       currentSession().lastCrawlConfig = config;
     } catch (err) {
       logger.log(
@@ -8763,11 +9318,11 @@ function registerIpc(): void {
         return app.getPath('documents');
       })();
       const res = await dialog.showSaveDialog(win, {
-        title: 'Save Encrypted Snapshot…',
+        title: L().dlgSaveEncSnapshotTitle,
         defaultPath: join(baseDir, 'crawl.seoproject.enc'),
         filters: [
-          { name: 'FreeCrawl Encrypted Project', extensions: ['enc', 'seoproject.enc'] },
-          { name: 'All Files', extensions: ['*'] },
+          { name: L().filterFreeCrawlEncProject, extensions: ['enc', 'seoproject.enc'] },
+          { name: L().filterAllFiles, extensions: ['*'] },
         ],
       });
       if (res.canceled || !res.filePath) return null;
@@ -8775,27 +9330,18 @@ function registerIpc(): void {
 
       const tmpPath = join(app.getPath('temp'), `freecrawl-enc-${Date.now()}.seoproject`);
       try {
-        const database = getDb();
-        try {
-          database.walCheckpoint();
-        } catch {
-          /* checkpoint is best-effort; VACUUM INTO still snapshots consistently */
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawDb = (database as any).db as { exec: (sql: string) => void };
-        const escaped = tmpPath.replace(/'/g, "''");
-        rawDb.exec(`VACUUM INTO '${escaped}'`);
-
+        await snapshotDatabaseWithTitle(currentSession(), tmpPath);
         const { encryptFile } = await import('./project-encryption.js');
         const result = await encryptFile(tmpPath, target, password);
 
         await dialog.showMessageBox(win, {
           type: 'info',
           title: L().dlgEncSnapshotSavedTitle,
-          message: `Encrypted snapshot written: ${(result.bytesWritten / (1024 * 1024)).toFixed(1)} MB.`,
-          detail:
-            `${target}\n\n` +
-            'Keep the password safe — it cannot be recovered. Without it, the file is unreadable.',
+          message: L().msgEncSnapshotWritten.replace(
+            '{size}',
+            (result.bytesWritten / (1024 * 1024)).toFixed(1),
+          ),
+          detail: `${target}\n\n${L().detailEncSnapshotKeepPassword}`,
           buttons: [L().btnOk],
           noLink: true,
         });
@@ -8827,11 +9373,11 @@ function registerIpc(): void {
         return { error: 'Password is required.' };
       }
       const open = await dialog.showOpenDialog(win, {
-        title: 'Open Encrypted Project…',
+        title: L().dlgOpenEncProjectTitle,
         properties: ['openFile'],
         filters: [
-          { name: 'FreeCrawl Encrypted Project', extensions: ['enc', 'seoproject.enc'] },
-          { name: 'All Files', extensions: ['*'] },
+          { name: L().filterFreeCrawlEncProject, extensions: ['enc', 'seoproject.enc'] },
+          { name: L().filterAllFiles, extensions: ['*'] },
         ],
       });
       if (open.canceled || open.filePaths.length === 0) return null;
@@ -8847,8 +9393,8 @@ function registerIpc(): void {
         title: L().dlgSaveDecryptedProjectTitle,
         defaultPath: join(baseDir, 'recovered.seoproject'),
         filters: [
-          { name: 'FreeCrawl Project', extensions: ['seoproject'] },
-          { name: 'All Files', extensions: ['*'] },
+          { name: L().filterFreeCrawlProject, extensions: ['seoproject'] },
+          { name: L().filterAllFiles, extensions: ['*'] },
         ],
       });
       if (save.canceled || !save.filePath) return null;
@@ -8909,10 +9455,8 @@ function registerIpc(): void {
     );
   });
 
-  registerHandle(IPC.overviewGet, async (): Promise<OverviewCounts> =>
-    callReaderOrFallback<OverviewCounts>('getOverviewCounts', [], () =>
-      getDb().getOverviewCountsAsync(),
-    ),
+  registerHandle(IPC.overviewGet, (): Promise<OverviewCounts> =>
+    overviewCountsFor(currentSession()),
   );
 
   registerHandle(
@@ -8927,6 +9471,9 @@ function registerIpc(): void {
           emptyAltOnly: input.emptyAltOnly,
           duplicateAltOnly: input.duplicateAltOnly,
           internalOnly: input.internalOnly,
+          minByteSize: input.minByteSize,
+          sortBy: input.sortBy,
+          sortDir: input.sortDir,
         },
       ];
       return callReaderOrFallback<ImagesQueryResult>('queryImages', args, () =>
@@ -9410,6 +9957,7 @@ function registerIpc(): void {
         emptyAltOnly: input.emptyAltOnly,
         duplicateAltOnly: input.duplicateAltOnly,
         search: input.search,
+        minByteSize: input.minByteSize,
       });
       return { filePath, rowsWritten };
     },
@@ -9433,7 +9981,7 @@ function registerIpc(): void {
         title: L().dlgExportTableTitle,
         defaultPath: join(baseDir, `${input.fileName}.xlsx`),
         filters: [
-          { name: 'Excel Workbook', extensions: ['xlsx'] },
+          { name: L().filterExcelWorkbook, extensions: ['xlsx'] },
           { name: 'CSV', extensions: ['csv'] },
         ],
       });
@@ -9471,7 +10019,10 @@ function registerIpc(): void {
         if (needsFolder) {
           const res = await dialog.showOpenDialog(mainWindow!, {
             properties: ['openDirectory', 'createDirectory'],
-            title: `Choose folder for ${format.toUpperCase()} export`,
+            title: L().dlgChooseExportFolderTitle.replace(
+              '{format}',
+              format.toUpperCase(),
+            ),
           });
           if (res.canceled || res.filePaths.length === 0) {
             return { filePath: '', files: [], rowsWritten: 0 };
@@ -9481,7 +10032,7 @@ function registerIpc(): void {
           const ext = format;
           const filterName =
             format === 'xlsx'
-              ? 'Excel Workbook'
+              ? L().filterExcelWorkbook
               : format === 'csv'
                 ? 'CSV (UTF-8)'
                 : format === 'json'
@@ -9652,11 +10203,15 @@ function registerIpc(): void {
       await dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: L().dlgBulkExportCompleteTitle,
-        message: `${files.length} file(s) written, ${totalRows.toLocaleString()} row(s) total.`,
+        message: L()
+          .msgBulkExportWritten.replace('{files}', String(files.length))
+          .replace('{rows}', totalRows.toLocaleString()),
         detail:
           outputDir +
           (errors.length > 0
-            ? `\n\nErrors:\n${errors.map((e) => `• ${e.label}: ${e.error}`).join('\n')}`
+            ? `\n\n${L().detailBulkExportErrors}\n${errors
+                .map((e) => `• ${e.label}: ${e.error}`)
+                .join('\n')}`
             : ''),
         buttons: [L().btnOk, L().btnOpenFolder],
         defaultId: 0,
@@ -9666,6 +10221,97 @@ function registerIpc(): void {
       });
     }
     return { outputDir, files, errors };
+  });
+
+  registerHandle(IPC.pickImageFile, async (): Promise<string | null> => {
+    if (!mainWindow) return null;
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: L().dlgPickLogoTitle,
+      properties: ['openFile'],
+      filters: [{ name: L().filterImages, extensions: ['png', 'jpg', 'jpeg', 'svg', 'webp', 'gif'] }],
+    });
+    const file = res.filePaths[0];
+    if (res.canceled || !file) return null;
+    const buf = await readFile(file);
+    if (buf.byteLength > 1024 * 1024) {
+      await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: L().dlgPickLogoTitle,
+        message: L().msgLogoTooLarge,
+        buttons: [L().btnOk],
+      });
+      return null;
+    }
+    const ext = file.toLowerCase().split('.').pop() ?? '';
+    const mime =
+      ext === 'svg'
+        ? 'image/svg+xml'
+        : ext === 'jpg' || ext === 'jpeg'
+          ? 'image/jpeg'
+          : ext === 'webp'
+            ? 'image/webp'
+            : ext === 'gif'
+              ? 'image/gif'
+              : 'image/png';
+    return `data:${mime};base64,${buf.toString('base64')}`;
+  });
+
+  registerHandle(
+    IPC.exportPdfReport,
+    async (_e, input: ExportPdfReportInput): Promise<ExportPdfReportResult> => {
+      let filePath = input.filePath;
+      if (!filePath) {
+        const res = await dialog.showSaveDialog(mainWindow!, {
+          defaultPath: 'freecrawl-report.pdf',
+          filters: [{ name: L().filterPdfReport, extensions: ['pdf'] }],
+        });
+        if (res.canceled || !res.filePath) return { filePath: '', bytesWritten: 0 };
+        filePath = res.filePath;
+      }
+      const bytesWritten = await writePdfReport(getDb(), filePath);
+      if (mainWindow) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'info',
+          title: L().dlgPdfReportSavedTitle,
+          message: L().msgPdfReportWritten.replace('{size}', String(Math.round(bytesWritten / 1024))),
+          detail: filePath,
+          buttons: [L().btnOk],
+        });
+      }
+      return { filePath, bytesWritten };
+    },
+  );
+
+  registerHandle(IPC.exportSeoAudit, async (): Promise<ExportSeoAuditResult> => {
+    if (!mainWindow) return { outputDir: '', files: [], errors: [] };
+    const dirRes = await dialog.showOpenDialog(mainWindow, {
+      title: L().dlgSeoAuditFolderTitle,
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (dirRes.canceled || dirRes.filePaths.length === 0) {
+      return { outputDir: '', files: [], errors: [] };
+    }
+    const outputDir = dirRes.filePaths[0]!;
+    const result = await runSeoAuditExport(getDb(), outputDir);
+    const totalRows = result.files.reduce((sum, f) => sum + f.rowsWritten, 0);
+    await dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: L().dlgSeoAuditCompleteTitle,
+      message: L()
+        .msgSeoAuditWritten.replace('{files}', String(result.files.length))
+        .replace('{rows}', totalRows.toLocaleString()),
+      detail:
+        outputDir +
+        (result.errors.length > 0
+          ? `\n\n${L().detailBulkExportErrors}\n${result.errors.map((e) => `• ${e.label}: ${e.error}`).join('\n')}`
+          : ''),
+      buttons: [L().btnOk, L().btnOpenFolder],
+      defaultId: 0,
+      noLink: true,
+    }).then((res) => {
+      if (res.response === 1) void shell.openPath(outputDir);
+    });
+    return result;
   });
 
   registerHandle(
@@ -9678,7 +10324,7 @@ function registerIpc(): void {
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
           defaultPath: 'freecrawl-report.html',
-          filters: [{ name: 'HTML Report', extensions: ['html'] }],
+          filters: [{ name: L().filterHtmlReport, extensions: ['html'] }],
         });
         if (res.canceled || !res.filePath) {
           return { filePath: '', bytesWritten: 0 };
@@ -9687,12 +10333,16 @@ function registerIpc(): void {
       }
       const result = await exportHtmlReport(getDb(), filePath, {
         startUrl: getDb().getMeta('lastStartUrl') ?? '',
+        branding: readReportBranding(),
       });
       if (mainWindow) {
         await dialog.showMessageBox(mainWindow, {
           type: 'info',
           title: L().dlgHtmlReportSavedTitle,
-          message: `Report written: ${(result.bytesWritten / 1024).toFixed(1)} KB.`,
+          message: L().msgHtmlReportWritten.replace(
+            '{size}',
+            (result.bytesWritten / 1024).toFixed(1),
+          ),
           detail: result.filePath,
           buttons: [L().btnOk],
           noLink: true,
@@ -9724,8 +10374,8 @@ function registerIpc(): void {
           defaultPath,
           filters: [
             gzip
-              ? { name: 'Gzipped XML Sitemap', extensions: ['xml.gz', 'gz'] }
-              : { name: 'XML Sitemap', extensions: ['xml'] },
+              ? { name: L().filterGzXmlSitemap, extensions: ['xml.gz', 'gz'] }
+              : { name: L().filterXmlSitemap, extensions: ['xml'] },
           ],
         });
         if (res.canceled || !res.filePath) {
@@ -9741,18 +10391,25 @@ function registerIpc(): void {
       });
       if (mainWindow) {
         const detail = result.sharded
-          ? `${result.files.length - 1} part files + index\n${result.files.join('\n')}`
+          ? `${L().detailSitemapParts.replace(
+              '{parts}',
+              String(result.files.length - 1),
+            )}\n${result.files.join('\n')}`
           : result.files[0] ?? filePath;
         await dialog.showMessageBox(mainWindow, {
           type: result.truncated ? 'warning' : 'info',
           title: L().dlgSitemapGeneratedTitle,
           message: result.sharded
-            ? `Sharded sitemap written: ${result.urlsWritten.toLocaleString()} URLs across ${
-                result.files.length - 1
-              } parts + index.`
-            : `Sitemap written with ${result.urlsWritten.toLocaleString()} URLs${
-                result.truncated ? ' (truncated at the 50,000 limit).' : '.'
-              }`,
+            ? L()
+                .msgSitemapSharded.replace(
+                  '{urls}',
+                  result.urlsWritten.toLocaleString(),
+                )
+                .replace('{parts}', String(result.files.length - 1))
+            : (result.truncated
+                ? L().msgSitemapWrittenTruncated
+                : L().msgSitemapWritten
+              ).replace('{urls}', result.urlsWritten.toLocaleString()),
           detail,
           buttons: [L().btnOk],
           noLink: true,
@@ -9774,11 +10431,11 @@ function registerIpc(): void {
       let filePath = input.filePath;
       if (!filePath) {
         const res = await dialog.showOpenDialog(mainWindow!, {
-          title: 'Compare With Project…',
+          title: L().dlgCompareWithProjectTitle,
           properties: ['openFile'],
           filters: [
-            { name: 'FreeCrawl Project', extensions: ['seoproject', 'sqlite', 'db'] },
-            { name: 'All Files', extensions: ['*'] },
+            { name: L().filterFreeCrawlProject, extensions: ['seoproject', 'sqlite', 'db'] },
+            { name: L().filterAllFiles, extensions: ['*'] },
           ],
         });
         if (res.canceled || res.filePaths.length === 0) {

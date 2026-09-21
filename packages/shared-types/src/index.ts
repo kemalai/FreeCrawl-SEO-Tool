@@ -1,5 +1,7 @@
 export * from './crawl.js';
 export * from './issue-severity.js';
+export * from './issue-catalog.js';
+export * from './languages.js';
 export * from './ipc.js';
 export * from './project.js';
 export * from './bridge.js';
@@ -13,3 +15,4 @@ export * from './mcp.js';
 export * from './seo.js';
 export * from './loganalyzer.js';
 export * from './export-datasets.js';
+export * from './theme.js';

@@ -19,6 +19,14 @@ files:
   # singleton — one database per process — so the rest can never be reached.
   - "!node_modules/eld/src/ngrams/{extrasmall,small,medium}.js"
 asar: true
+# Release file names carry the platform and, where it matters, the CPU as
+# plain words (Windows-Setup / Windows-Portable / macOS-Apple-Silicon /
+# macOS-Intel / Linux-x86_64) so the Releases page needs no decoding.
+# Hyphens, not spaces: GitHub rewrites spaces in asset URLs. The macOS
+# name below is the local fallback (`-macOS-arm64` / `-macOS-x64`); the
+# release workflow overrides it per architecture with the friendly words
+# via `-c.mac.artifactName`, since one template cannot branch on arch.
+# `pickInstallerAsset()` in src/main/index.ts matches both spellings.
 asarUnpack:
   - "**/*.node"
 # V2 Faz 1 — JS rendering. By default the Playwright browser cache is
@@ -48,13 +56,15 @@ win:
       arch:
         - x64
 nsis:
+  artifactName: FreeCrawl-SEO-Tool-${version}-Windows-Setup.${ext}
   oneClick: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
 portable:
-  artifactName: ${productName}-${version}-portable.${ext}
+  artifactName: FreeCrawl-SEO-Tool-${version}-Windows-Portable.${ext}
 mac:
+  artifactName: FreeCrawl-SEO-Tool-${version}-macOS-${arch}.${ext}
   target:
     - target: dmg
       arch:
@@ -63,7 +73,7 @@ mac:
   category: public.app-category.developer-tools
 linux:
   executableName: freecrawl-seo
-  artifactName: freecrawl-seo-${version}-${arch}.${ext}
+  artifactName: FreeCrawl-SEO-Tool-${version}-Linux-${arch}.${ext}
   target:
     - AppImage
     - deb

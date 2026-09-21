@@ -37,18 +37,26 @@ jobs:
           # found nothing, and every Intel user landed on the "browser
           # missing" dialog. Each job now downloads the browsers for the
           # architecture it is packaging.
+          #
+          # Each leg also names its .dmg with the words a user actually
+          # knows ("Apple-Silicon" / "Intel") instead of arm64 / x64.
+          # electron-builder's artifactName template cannot branch on
+          # arch, so the override rides on the CLI; single quotes keep
+          # ${version} / ${ext} away from the shell so electron-builder
+          # expands them. Keep in sync with pickInstallerAsset() in
+          # apps/desktop/src/main/index.ts.
           - os: macos-latest
             build_script: build:mac
-            build_args: '-- --arm64'
+            build_args: "-- --arm64 -c.mac.artifactName='FreeCrawl-SEO-Tool-${version}-macOS-Apple-Silicon.${ext}'"
             artifact_name: macos-installer-arm64
             artifact_paths: |
-              apps/desktop/release/*arm64*.dmg
-              apps/desktop/release/*arm64*.dmg.blockmap
-              apps/desktop/release/*arm64*.zip
+              apps/desktop/release/*Apple-Silicon*.dmg
+              apps/desktop/release/*Apple-Silicon*.dmg.blockmap
+              apps/desktop/release/*Apple-Silicon*.zip
               apps/desktop/release/latest-mac.yml
           - os: macos-latest
             build_script: build:mac
-            build_args: '-- --x64'
+            build_args: "-- --x64 -c.mac.artifactName='FreeCrawl-SEO-Tool-${version}-macOS-Intel.${ext}'"
             # Cross-download the Intel browsers on the arm64 runner.
             # Playwright picks its download by host platform, so this
             # override is what makes the x64 bundle actually x64.

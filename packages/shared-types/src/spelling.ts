@@ -106,6 +106,9 @@ export interface SpellingResult {
  * stored check summary. Result fields are `null` until the page is checked.
  */
 export interface SpellingRow {
+  /** `urls.id` — what the Detail panel keys its selection on, so clicking a
+   *  row here can open the page's Spelling & Grammar findings below. */
+  id: number;
   url: string;
   /** `html[lang]` captured during the crawl. */
   lang: string | null;

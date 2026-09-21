@@ -87,6 +87,8 @@ const IMAGES_CSV_HEADER = [
   'Height',
   'Internal',
   'Occurrences',
+  'Size (Bytes)',
+  'Page',
 ] as const;
 
 /**
@@ -95,6 +97,56 @@ const IMAGES_CSV_HEADER = [
  * user is currently looking at. Streamed row-by-row so a 100K-image
  * crawl never builds a giant string in memory.
  */
+const LINKS_CSV_HEADER = [
+  'From URL',
+  'To URL',
+  'Target Status',
+  'Anchor',
+  'Rel',
+  'Type',
+  'Target',
+  'Alt Text',
+  'Position',
+  'Path',
+  'Origin',
+];
+
+/**
+ * One row per stored link edge — the raw `from → to` table the Bulk
+ * Export "Links (Internal / External)" files carry. Streams through the
+ * keyset iterator so memory stays flat on million-link sites.
+ */
+export async function exportLinksToCsv(
+  db: ProjectDb,
+  filePath: string,
+  options: { scope: 'internal' | 'external' },
+): Promise<{ rowsWritten: number }> {
+  let rowsWritten = 0;
+  const header = LINKS_CSV_HEADER.join(',') + '\n';
+  const generator = async function* (): AsyncGenerator<string> {
+    yield '\ufeff' + header;
+    for (const l of db.iterateLinks(options.scope)) {
+      const cells = [
+        l.from_url,
+        l.to_url,
+        l.to_status,
+        l.anchor,
+        l.rel,
+        l.type,
+        l.target,
+        l.alt_text,
+        l.link_position,
+        l.link_path,
+        l.link_origin,
+      ];
+      rowsWritten++;
+      yield cells.map(escapeCsv).join(',') + '\n';
+    }
+  };
+  await pipeline(Readable.from(generator()), createWriteStream(filePath, { encoding: 'utf8' }));
+  return { rowsWritten };
+}
+
 export async function exportImagesToCsv(
   db: ProjectDb,
   filePath: string,
@@ -103,6 +155,7 @@ export async function exportImagesToCsv(
     emptyAltOnly?: boolean;
     duplicateAltOnly?: boolean;
     search?: string;
+    minByteSize?: number;
   } = {},
 ): Promise<{ rowsWritten: number }> {
   let rowsWritten = 0;
@@ -115,6 +168,7 @@ export async function exportImagesToCsv(
       emptyAltOnly: options.emptyAltOnly,
       duplicateAltOnly: options.duplicateAltOnly,
       search: options.search,
+      minByteSize: options.minByteSize,
     })) {
       const cells = [
         row.src,
@@ -123,6 +177,8 @@ export async function exportImagesToCsv(
         row.height,
         row.isInternal ? 'internal' : 'external',
         row.occurrences,
+        row.byteSize,
+        row.fromUrl,
       ];
       rowsWritten++;
       yield cells.map(escapeCsv).join(',') + '\n';

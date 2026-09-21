@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   DndContext,
   PointerSensor,
@@ -38,6 +37,9 @@ import type {
 import { useAppStore, TAB_QUICK_FILTERS, type TabKey } from '../store.js';
 import { COLUMN_SPECS, columnId, type ColumnSpec } from './columns.js';
 import { useLazyUrlRows } from '../hooks/useLazyUrlRows.js';
+import { UrlGridCanvas } from '../grid/UrlGridCanvas.js';
+import { buildGridLayout, type GridHit } from '../grid/canvas-grid-layout.js';
+import { cellText } from '../grid/url-cell-model.js';
 import { AdvancedFilterDialog } from '../components/AdvancedFilterDialog.js';
 import { DuplicatesGroupedView } from '../components/DuplicatesGroupedView.js';
 import { UrlTreeView } from '../components/UrlTreeView.js';
@@ -63,6 +65,9 @@ const MIN_COL_WIDTH = 48;
 const ROW_NUM_DEFAULT_WIDTH = 56;
 const ROW_NUM_KEY = '__row_num__';
 const STATUS_BAR_HEIGHT = 22;
+// Rows the canvas keeps loaded beyond the viewport, each side, so a
+// wheel-scroll lands on rows that are already in the loader's cache.
+const OVERSCAN_ROWS = 30;
 /** Identifies this grid to the copy-shortcut arbitration in `clipboard.ts`. */
 const GRID_ID = 'urls';
 // Rows pulled per query when copying whole columns. Big enough that a
@@ -283,7 +288,24 @@ export function UrlsTab() {
    *  stacking context. */
   const columnsAnchorRef = useRef<HTMLButtonElement>(null);
 
-  const allColumns = COLUMN_SPECS[activeTab];
+  // Custom Extraction gets one column per configured rule in place of the
+  // combined "Extracted Data" blob, so each rule sorts, resizes, hides and
+  // copies like any other column. Ids carry the rule name so widths and
+  // visibility persist per rule.
+  const allColumns = useMemo(() => {
+    const base = COLUMN_SPECS[activeTab];
+    if (activeTab !== 'custom-extraction' || extractionFieldNames.length === 0) return base;
+    const dynamic: ColumnSpec[] = extractionFieldNames.map((name) => ({
+      id: `extract:${name}`,
+      key: 'extractionResults',
+      header: name,
+      size: 220,
+      kind: 'mono',
+      extractionRule: name,
+    }));
+    const at = base.findIndex((c) => columnId(c) === 'extractionResults');
+    return at < 0 ? [...base, ...dynamic] : [...base.slice(0, at), ...dynamic, ...base.slice(at + 1)];
+  }, [activeTab, extractionFieldNames]);
   // Visible columns drive the rendered header + body. Hidden ids that no
   // longer exist on the active tab (e.g. user switched between tabs with
   // different specs) are silently filtered out — they remain in the saved
@@ -521,6 +543,9 @@ export function UrlsTab() {
   // — the user sees a "N new rows · Refresh" pill instead so the sorted
   // view stays stable while they're reading it.
   const dataVersion = useAppStore((s) => s.dataVersion);
+  // The canvas body writes its scroll state here; the loader reads it to
+  // hold the live tick until the scroll settles.
+  const scrollingRef = useRef(false);
   const lazy = useLazyUrlRows({
     category: activeCategory,
     search,
@@ -528,34 +553,24 @@ export function UrlsTab() {
     sortDir,
     filter: filter ?? undefined,
     refreshKey: dataVersion,
+    isScrolling: () => scrollingRef.current,
   });
 
   const activeClauseCount = filter
     ? filter.groups.reduce((n, g) => n + g.clauses.length, 0)
     : 0;
 
-  const virtualizer = useVirtualizer({
-    count: lazy.total,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 30,
-    // Anchor each virtual row to the underlying url id so React reuses the
-    // same DOM node across live refresh ticks — only the cell contents
-    // re-render, the row never unmounts/remounts, so the table never
-    // flashes even while the crawler is writing new rows beneath it.
-    getItemKey: (index) => {
-      const row = lazy.rowAt(index);
-      return row ? `id-${row.id}` : `idx-${index}`;
-    },
-  });
-
-  const virtualRows = virtualizer.getVirtualItems();
-  useEffect(() => {
-    if (virtualRows.length === 0) return;
-    const first = virtualRows[0]!.index;
-    const last = virtualRows[virtualRows.length - 1]!.index;
-    lazy.ensureRange(first, last);
-  }, [virtualRows, lazy]);
+  /** Column geometry for the canvas body — pinned columns lead, as in
+   *  `columns`, so their offsets double as fixed viewport positions. */
+  const gridLayout = useMemo(
+    () =>
+      buildGridLayout(
+        columns.map((c) => ({ id: columnId(c), width: getWidth(c) })),
+        rowNumWidth,
+        pinnedCount,
+      ),
+    [columns, getWidth, rowNumWidth, pinnedCount],
+  );
 
   /** Apply a drag-drop column reorder. Pin state is preserved: drags
    *  inside the pinned strip reorder `pinnedLeftOrder`; drags inside the
@@ -1143,6 +1158,40 @@ export function UrlsTab() {
     });
   };
 
+  // ──────── Canvas body events ────────
+  // The body is one canvas: it resolves the pointer to a row and column
+  // and hands the hit here, where the click / drag / menu logic the DOM
+  // cells used to call runs unchanged.
+
+  const onGridMouseDown = (hit: GridHit, e: React.MouseEvent): void => {
+    if (hit.kind === 'rownum') {
+      const row = lazy.rowAt(hit.rowIndex);
+      if (row) beginRowDrag(row.id, hit.rowIndex, e);
+    } else if (hit.kind === 'cell') {
+      const row = lazy.rowAt(hit.rowIndex);
+      if (row) beginCellDrag(row.id, hit.rowIndex, hit.colIdx, e);
+    }
+  };
+
+  /** The DOM cells' `mouseenter`: grow an in-progress drag selection. A
+   *  row drag follows the row-number column, a cell drag the data cells —
+   *  exactly which elements carried the handlers before. */
+  const onGridHit = (hit: GridHit): void => {
+    const d = dragRef.current;
+    if (!d) return;
+    if (d.kind === 'row' && hit.kind === 'rownum') applyRowDrag(hit.rowIndex);
+    else if (d.kind === 'cell' && hit.kind === 'cell') applyCellDrag(hit.rowIndex, hit.colIdx);
+  };
+
+  /** Right-click: a data cell names its column, the row-number cell and
+   *  the trailing filler are row-semantic (`colIdx` null). */
+  const onGridContextMenu = (hit: GridHit, e: React.MouseEvent): void => {
+    if (hit.kind === 'none') return;
+    const row = lazy.rowAt(hit.rowIndex);
+    if (!row) return;
+    handleContextMenu(row, hit.rowIndex, hit.kind === 'cell' ? hit.colIdx : null, e);
+  };
+
   const startResize = (colKey: string, startWidth: number, clientX: number) => {
     const startX = clientX;
     const onMove = (ev: MouseEvent) => {
@@ -1396,7 +1445,7 @@ export function UrlsTab() {
                 position: 'sticky',
                 left: 0,
                 zIndex: 13,
-                background: 'rgb(23 23 23)',
+                background: 'rgb(var(--sf-900))',
               }}
               title={t('urlsTab.rowNumberTitle', { defaultValue: 'Row number' })}
             >
@@ -1468,134 +1517,30 @@ export function UrlsTab() {
             <div className="flex-1 border-b border-surface-800" />
           </div>
 
-          {/* Rows viewport */}
-          <div
-            className="relative"
-            style={{ height: virtualizer.getTotalSize(), minWidth: totalWidth, width: '100%' }}
-          >
-            {virtualRows.map((vi) => {
-              const row = lazy.rowAt(vi.index);
-              const rowSelected = row !== null && selectedIds.has(row.id);
-              return (
-                <div
-                  key={vi.key}
-                  data-index={vi.index}
-                  ref={virtualizer.measureElement}
-                  // Row-level fallback: the row-number cell and the
-                  // trailing filler. Data cells handle it themselves so
-                  // the menu knows which column was clicked.
-                  onContextMenu={(e) => {
-                    if (row) handleContextMenu(row, vi.index, null, e);
-                  }}
-                  className={clsx(
-                    'absolute left-0 top-0 flex items-center border-b border-surface-900 text-[11px]',
-                    rowSelected ? 'bg-accent-500/15' : 'hover:bg-surface-900/30',
-                  )}
-                  style={{
-                    transform: `translateY(${vi.start}px)`,
-                    height: ROW_HEIGHT,
-                    minWidth: totalWidth,
-                    width: '100%',
-                  }}
-                >
-                  <div
-                    className={clsx(
-                      'flex cursor-pointer items-center justify-end overflow-hidden border-r border-surface-900 px-2 font-mono tabular-nums',
-                      rowSelected
-                        ? 'bg-accent-500/30 text-surface-50'
-                        : 'text-surface-500 hover:bg-surface-800/60',
-                    )}
-                    style={{
-                      width: rowNumWidth,
-                      minWidth: rowNumWidth,
-                      flex: `0 0 ${rowNumWidth}px`,
-                      height: '100%',
-                      // Always-pinned row index. Solid background masks
-                      // cells scrolling underneath; selection state still
-                      // wins (the conditional bg-accent-500/30 class
-                      // overrides the inline background via class
-                      // ordering, but Tailwind's accent class won't beat
-                      // an inline style, so paint the body-default and
-                      // let the selected highlight come from the cell's
-                      // outer ring + text colour).
-                      position: 'sticky',
-                      left: 0,
-                      zIndex: 9,
-                      background: rowSelected
-                        ? 'rgb(37 99 235 / 0.30)'
-                        : 'rgb(10 10 10)',
-                    }}
-                    onMouseDown={(e) => {
-                      if (row) beginRowDrag(row.id, vi.index, e);
-                    }}
-                    onMouseEnter={() => {
-                      if (dragRef.current?.kind === 'row') applyRowDrag(vi.index);
-                    }}
-                    title={t('urlsTab.rowSelectHint', {
-                      defaultValue: 'Click to select row · drag to select multiple rows',
-                    })}
-                  >
-                    {vi.index + 1}
-                  </div>
-                  {columns.map((c, colIdx) => {
-                    const w = getWidth(c);
-                    const id = columnId(c);
-                    const cellSel =
-                      row !== null &&
-                      (selectedCells.has(`${row.id}:${colIdx}`) ||
-                        selectedColumns.has(colIdx));
-                    const stickyLeft = pinnedLeftOffsets.get(id);
-                    const isPinned = stickyLeft !== undefined;
-                    const isLastPinned = isPinned && colIdx + 1 === pinnedCount;
-                    return (
-                      <div
-                        key={id}
-                        className={clsx(
-                          'flex cursor-cell items-center overflow-hidden border-r border-surface-900 px-2',
-                          cellSel
-                            ? 'bg-accent-500/30 text-surface-50'
-                            : 'hover:bg-surface-800/40',
-                        )}
-                        style={{
-                          width: w,
-                          minWidth: w,
-                          flex: `0 0 ${w}px`,
-                          height: '100%',
-                          ...(isPinned && {
-                            position: 'sticky' as const,
-                            left: stickyLeft,
-                            zIndex: 8,
-                            background: cellSel
-                              ? 'rgb(37 99 235 / 0.30)'
-                              : rowSelected
-                                ? 'rgb(37 99 235 / 0.15)'
-                                : 'rgb(10 10 10)',
-                            boxShadow: isLastPinned
-                              ? '2px 0 4px rgba(0,0,0,0.4)'
-                              : undefined,
-                          }),
-                        }}
-                        onMouseDown={(e) => {
-                          if (row) beginCellDrag(row.id, vi.index, colIdx, e);
-                        }}
-                        onMouseEnter={() => {
-                          if (dragRef.current?.kind === 'cell') {
-                            applyCellDrag(vi.index, colIdx);
-                          }
-                        }}
-                        onContextMenu={(e) => {
-                          if (row) handleContextMenu(row, vi.index, colIdx, e);
-                        }}
-                      >
-                        <Cell row={row} spec={c} lang={lang} />
-                      </div>
-                    );
-                  })}
-                  <div className="flex-1" />
-                </div>
-              );
+          {/* Rows — one canvas, painted from the scroll offsets. */}
+          <UrlGridCanvas
+            scrollRef={scrollRef}
+            headerHeight={HEADER_HEIGHT}
+            rowHeight={ROW_HEIGHT}
+            layout={gridLayout}
+            columns={columns}
+            lang={lang}
+            total={lazy.total}
+            rowAt={lazy.rowAt}
+            selectedIds={selectedIds}
+            selectedCells={selectedCells}
+            selectedColumns={selectedColumns}
+            overscan={OVERSCAN_ROWS}
+            rowNumTitle={t('urlsTab.rowSelectHint', {
+              defaultValue: 'Click to select row · drag to select multiple rows',
             })}
-          </div>
+            ariaLabel={t('urlsTab.gridAriaLabel', { defaultValue: 'URL table' })}
+            scrollingRef={scrollingRef}
+            onRangeChange={lazy.ensureRange}
+            onHit={onGridHit}
+            onMouseDown={onGridMouseDown}
+            onContextMenu={onGridContextMenu}
+          />
         </div>
 
         {lazy.error && (
@@ -1653,8 +1598,10 @@ export function UrlsTab() {
           {copyState?.phase === 'done' &&
             (copyState.cells > 0
               ? t('urlsTab.copiedCells', {
-                  defaultValue: '{{n}} cell(s) copied',
-                  n: copyState.cells.toLocaleString(),
+                  defaultValue_one: '{{formatted}} cell copied',
+                  defaultValue_other: '{{formatted}} cells copied',
+                  count: copyState.cells,
+                  formatted: copyState.cells.toLocaleString(),
                 })
               : t('urlsTab.copiedNothing', { defaultValue: 'Nothing to copy' }))}
         </span>
@@ -1785,8 +1732,8 @@ function SortableHeaderCell(props: {
       position: 'sticky' as const,
       left: stickyLeft,
       zIndex: 12,
-      background: 'rgb(23 23 23)',
-      boxShadow: isLastPinned ? '2px 0 4px rgba(0,0,0,0.4)' : undefined,
+      background: 'rgb(var(--sf-900))',
+      boxShadow: isLastPinned ? 'var(--fc-pinned-shadow)' : undefined,
     }),
     transform: CSS.Transform.toString(transform),
     transition,
@@ -2085,142 +2032,6 @@ function ColumnPickerPopover({
   );
 }
 
-/** Hover text for the green `*`. Kept as a constant because `Cell` runs
- *  for every visible cell and looking the string up through the shared
- *  label dictionary avoids a `useTranslation` hook on that path. */
-const CHANGED_MARKER_TITLE = 'Changed since the previous crawl';
-
-function Cell({
-  row,
-  spec,
-  lang,
-}: {
-  row: CrawlUrlRow | null;
-  spec: ColumnSpec;
-  lang: string;
-}) {
-  if (row === null) {
-    return <span className="text-surface-700">…</span>;
-  }
-  const raw = row[spec.key];
-
-  if (spec.kind === 'status') {
-    const code = row.statusCode;
-    // A robots-blocked URL also has no status — but because the crawler
-    // chose not to request it, not because the request failed. Painting
-    // it in the failure red said "this broke" about a crawl the status
-    // bar reports as Failed 0.
-    if (
-      (code === null || code === undefined) &&
-      row.indexability === 'non-indexable:robots-blocked'
-    ) {
-      return (
-        <span
-          className="inline-block rounded bg-surface-800 px-1.5 font-mono text-[10px] text-amber-400"
-          title={translateLabel(ROBOTS_STATUS_TITLE, lang)}
-        >
-          {translateLabel('Robots', lang)}
-        </span>
-      );
-    }
-    // No HTTP status (DNS/TLS/connect/timeout failure): a bare "—" hides the
-    // reason the crawler already captured. Show a compact token (DNS / TLS /
-    // Timeout / …) with the full error text on hover.
-    if (code === null || code === undefined) {
-      return (
-        <span
-          className="inline-block rounded bg-rose-950/60 px-1.5 font-mono text-[10px] text-rose-300"
-          title={row.statusText ?? undefined}
-        >
-          {shortFailureLabel(row.statusText)}
-        </span>
-      );
-    }
-    return (
-      <span
-        className={clsx(
-          'inline-block rounded px-1.5 font-mono text-[10px]',
-          statusClasses(code),
-        )}
-      >
-        {code}
-      </span>
-    );
-  }
-
-  if (spec.kind === 'indexability') {
-    const v = row.indexability;
-    return (
-      <span
-        className={clsx('truncate', v === 'indexable' ? 'text-emerald-400' : 'text-amber-400')}
-        title={v}
-      >
-        {translateLabel(v === 'indexable' ? 'Indexable' : 'Non-Indexable', lang)}
-      </span>
-    );
-  }
-
-  if (spec.kind === 'indexability-status') {
-    const label = indexabilityStatusLabel(row.indexability);
-    if (label === '') {
-      return <span className="text-surface-700">—</span>;
-    }
-    const localized = translateLabel(label, lang);
-    return (
-      <span className="block truncate text-surface-200" title={localized}>
-        {localized}
-      </span>
-    );
-  }
-
-  if (spec.kind === 'number') {
-    return (
-      <span className="block truncate font-mono tabular-nums text-surface-200">
-        {raw === null || raw === undefined ? '—' : Number(raw).toLocaleString()}
-      </span>
-    );
-  }
-
-  // Shared with the clipboard path so what you copy is what you read —
-  // booleans as "Y"/blank, nulls as empty (the "—" below is presentation
-  // only). Derived here rather than at the top of the function so the
-  // branches above, which format their own values, don't pay for it.
-  const value = cellText(row, spec, lang);
-
-  if (spec.kind === 'mono') {
-    // Re-crawl change marker. Sits outside the truncating span so it
-    // survives a URL too long for the column — the whole point is that
-    // it can be spotted by scanning the list, and a marker that
-    // disappears exactly on the long URLs would be worse than none.
-    if (spec.key === 'url' && row.changed) {
-      return (
-        <span className="flex w-full items-baseline overflow-hidden" title={value}>
-          {/* min-w-0 is what lets a flex child actually truncate — without
-              it the item refuses to shrink below its content width. */}
-          <span className="min-w-0 truncate font-mono text-surface-100">{value}</span>
-          <span
-            className="shrink-0 pl-1 font-mono font-bold text-emerald-400"
-            title={translateLabel(CHANGED_MARKER_TITLE, lang)}
-          >
-            *
-          </span>
-        </span>
-      );
-    }
-    return (
-      <span className="block truncate font-mono text-surface-100" title={value}>
-        {value || <span className="text-surface-700">—</span>}
-      </span>
-    );
-  }
-
-  return (
-    <span className="block truncate text-surface-200" title={value}>
-      {value || <span className="text-surface-700">—</span>}
-    </span>
-  );
-}
-
 /** Which selection layer a copy reads from. */
 type CopyScope = 'columns' | 'cells' | 'rows';
 
@@ -2338,136 +2149,4 @@ async function copyWholeColumns(ctx: CopyContext): Promise<number> {
   if (lines.length === 0) return 0;
   await writeTextToClipboard(lines.join('\n'));
   return lines.length * specs.length;
-}
-
-/**
- * Plain-text value of one cell — the clipboard counterpart of
- * {@link Cell}, and the single place the two agree on what a cell "says".
- *
- * Two deliberate departures from what's painted on screen, both because
- * the consumer here is a spreadsheet rather than a reader: numbers are
- * emitted unformatted (thousands separators would arrive as text, not a
- * number), and an absent value is emitted as an empty string rather than
- * the "—" placeholder.
- */
-function cellText(row: CrawlUrlRow, spec: ColumnSpec, lang: string): string {
-  if (spec.kind === 'status') {
-    const code = row.statusCode;
-    if (code !== null && code !== undefined) return String(code);
-    if (row.indexability === 'non-indexable:robots-blocked') {
-      return translateLabel('Robots', lang);
-    }
-    const label = shortFailureLabel(row.statusText);
-    return label === '—' ? '' : label;
-  }
-
-  if (spec.kind === 'indexability') {
-    return translateLabel(
-      row.indexability === 'indexable' ? 'Indexable' : 'Non-Indexable',
-      lang,
-    );
-  }
-
-  if (spec.kind === 'indexability-status') {
-    const label = indexabilityStatusLabel(row.indexability);
-    return label === '' ? '' : translateLabel(label, lang);
-  }
-
-  // Custom-extraction column holds a `{ruleName: value}` JSON map. Showing
-  // the raw `{"h2":"…"}` in the cell reads as noise — the preview and Detail
-  // panel already unwrap it, so match them here (single rule → just the
-  // value; multiple → `name: value` pairs). Full JSON stays in the Detail
-  // panel and in exports (which format from the DB, not this path).
-  if (spec.key === 'extractionResults') {
-    const rawEx = row[spec.key];
-    return typeof rawEx === 'string' && rawEx ? formatExtractionCell(rawEx) : '';
-  }
-
-  const raw = row[spec.key];
-  if (raw === null || raw === undefined) return '';
-  // Booleans render as "Y" / blank rather than the JS-default
-  // "true"/"false" — matches the compact flag-column convention.
-  if (typeof raw === 'boolean') return raw ? 'Y' : '';
-  return String(raw);
-}
-
-/**
- * Flatten the `extraction_results` `{ruleName: value}` map into one compact
- * line for the table cell. Single rule → the value alone; multiple rules →
- * `name: value` pairs joined by " · ". Arrays (multi: all/concat) join with
- * " | ". Malformed JSON falls back to the raw string so nothing is hidden.
- */
-function formatExtractionCell(raw: string): string {
-  let obj: Record<string, unknown>;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return raw;
-    }
-    obj = parsed as Record<string, unknown>;
-  } catch {
-    return raw;
-  }
-  const fmt = (v: unknown): string => {
-    if (v === null || v === undefined) return '';
-    if (Array.isArray(v)) return v.map(String).join(' | ');
-    if (typeof v === 'object') return JSON.stringify(v);
-    return String(v);
-  };
-  const entries = Object.entries(obj);
-  if (entries.length === 0) return '';
-  if (entries.length === 1) return fmt(entries[0]![1]);
-  return entries.map(([name, v]) => `${name}: ${fmt(v)}`).join('  ·  ');
-}
-
-function indexabilityStatusLabel(v: CrawlUrlRow['indexability']): string {
-  switch (v) {
-    case 'indexable':
-      return '';
-    case 'non-indexable:noindex':
-      return 'noindex';
-    case 'non-indexable:canonical':
-      return 'Canonicalised';
-    case 'non-indexable:robots-blocked':
-      return 'Blocked by robots.txt';
-    case 'non-indexable:redirect':
-      return 'Redirected';
-    case 'non-indexable:client-error':
-      return 'Client Error';
-    case 'non-indexable:server-error':
-      return 'Server Error';
-    default:
-      return v;
-  }
-}
-
-/**
- * Compact token for a no-HTTP-response failure, derived from the crawler's
- * captured `statusText`. Technical protocol abbreviations (DNS/TLS/H2/…) — not
- * localized, same convention as the numeric status codes themselves. The full
- * diagnostic is on hover (title) and in the URL Details → HTTP Headers tab.
- */
-/** Tooltip for the Robots status badge — dictionary key, so the grid
- *  cell stays free of a `useTranslation` hook. */
-const ROBOTS_STATUS_TITLE = 'Not requested — disallowed by robots.txt';
-
-function shortFailureLabel(statusText: string | null): string {
-  if (!statusText) return '—';
-  if (/ENOTFOUND|EAI_AGAIN|ENODATA|ESERVFAIL|getaddrinfo|DNS/i.test(statusText)) return 'DNS';
-  if (/UNABLE_TO_VERIFY|CERT|SSL|TLSV1|HANDSHAKE|EPROTO/i.test(statusText)) return 'TLS';
-  if (/ECONNREFUSED/i.test(statusText)) return 'Refused';
-  if (/ECONNRESET|SOCKET|EPIPE|reset/i.test(statusText)) return 'Reset';
-  if (/HTTP2|NGHTTP2|GOAWAY|PROTOCOL_ERROR/i.test(statusText)) return 'H2 err';
-  if (/CONNECT_TIMEOUT|ETIMEDOUT|HEADERS_TIMEOUT|BODY_TIMEOUT|aborted|timeout/i.test(statusText))
-    return 'Timeout';
-  return 'Failed';
-}
-
-function statusClasses(code: number | null): string {
-  if (code === null) return 'bg-surface-800 text-surface-400';
-  if (code >= 200 && code < 300) return 'bg-emerald-900/60 text-emerald-300';
-  if (code >= 300 && code < 400) return 'bg-amber-900/60 text-amber-300';
-  if (code >= 400 && code < 500) return 'bg-orange-900/60 text-orange-300';
-  if (code >= 500) return 'bg-red-900/60 text-red-300';
-  return 'bg-surface-800 text-surface-400';
 }

@@ -2,7 +2,7 @@ import { createWriteStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ProjectDb } from '@freecrawl/db';
-import type { CrawlSummary, OverviewCounts } from '@freecrawl/shared-types';
+import type { CrawlSummary, OverviewCounts, ReportBranding } from '@freecrawl/shared-types';
 
 /**
  * Self-contained HTML audit report for a finished crawl. Single-file
@@ -25,6 +25,8 @@ import type { CrawlSummary, OverviewCounts } from '@freecrawl/shared-types';
 export interface HtmlReportOptions {
   startUrl: string;
   generatedAt?: Date;
+  /** White-label header: brand name, logo, accent colour, "prepared by". */
+  branding?: ReportBranding;
 }
 
 function escape(s: string): string {
@@ -43,7 +45,11 @@ function fmtNum(n: number): string {
 const STYLE = `
 body { font: 13px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif;
   color: #1f2937; background: #f9fafb; margin: 0; padding: 24px; }
-h1 { font-size: 20px; margin: 0 0 4px; }
+h1 { font-size: 20px; margin: 0 0 4px; color: var(--accent, #111827); }
+.hdr { display: flex; align-items: center; gap: 14px; }
+.hdr .logo { max-height: 44px; max-width: 160px; object-fit: contain; }
+.recs { padding-left: 20px; margin: 0; }
+.recs li { margin: 0 0 8px; }
 .muted { color: #6b7280; font-size: 12px; }
 .grid { display: grid; gap: 12px; grid-template-columns: repeat(4, 1fr); margin: 16px 0 24px; }
 .card { background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; }
@@ -51,7 +57,7 @@ h1 { font-size: 20px; margin: 0 0 4px; }
 .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; color: #111827; }
 section { margin: 28px 0 0; }
 section > h2 { font-size: 14px; margin: 0 0 8px; color: #111827;
-  border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
+  border-bottom: 2px solid var(--accent, #e5e7eb); padding-bottom: 4px; }
 table { width: 100%; border-collapse: collapse; background: white;
   border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden; }
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f3f4f6;
@@ -162,6 +168,132 @@ const ISSUES: IssueDef[] = [
 
 const SEV_RANK: Record<IssueDef['severity'], number> = { error: 0, warn: 1, info: 2 };
 
+/**
+ * One-line, action-oriented advice per issue for the "Recommendations"
+ * section. Report copy stays English (the file is shared and machine-
+ * read); the fallback covers checks without a tailored line.
+ */
+const RECOMMENDATIONS: Partial<Record<IssueDef['key'], string>> = {
+  titleMissing: 'Write a unique, descriptive <title> (50–60 characters) for every page; it is the strongest on-page ranking and click-through signal.',
+  titleDuplicate: 'Give each page its own title — duplicates make search engines pick one page and suppress the rest.',
+  titleTooLong: 'Trim titles to about 60 characters so they are not truncated in results; front-load the primary keyword.',
+  titleTooShort: 'Expand titles below 30 characters with the page topic and brand so they describe the page.',
+  titlePlaceholder: 'Replace placeholder titles ("Untitled", "Home") with real page titles.',
+  metaMissing: 'Add a meta description (120–160 characters) that summarises the page and invites the click.',
+  metaDuplicate: 'Write page-specific meta descriptions; duplicated snippets lower click-through and get rewritten by Google.',
+  metaTooLong: 'Shorten meta descriptions to about 160 characters so the snippet is not cut off.',
+  metaTooShort: 'Extend meta descriptions below 120 characters to make full use of the snippet.',
+  h1Missing: 'Add a single H1 that states the page topic; screen readers and crawlers use it as the page headline.',
+  h1Duplicate: 'Make H1s unique per page so each page targets its own topic.',
+  h1Multiple: 'Keep one H1 per page and demote the rest to H2/H3.',
+  headingSkippedLevel: 'Restore the heading hierarchy (H1 → H2 → H3) — skipped levels hurt accessibility and outline parsing.',
+  multipleCanonicals: 'Leave exactly one canonical tag per page; conflicting canonicals are ignored by Google.',
+  canonicalMissing: 'Add a self-referencing canonical to indexable pages to consolidate parameter and duplicate variants.',
+  canonicalToNon200: 'Point canonicals at live 200 pages; a canonical to an error page is discarded.',
+  canonicalToRedirect: 'Canonicalise directly to the final URL instead of a redirecting one.',
+  canonicalToNoindex: 'Never canonicalise to a noindex page — the signals contradict each other.',
+  canonicalMismatch: 'Align HTML and HTTP canonicals so they name the same URL.',
+  contentThin: 'Expand thin pages with substantive content or consolidate them into stronger pages.',
+  nearDuplicate: 'Merge or differentiate near-duplicate pages, or canonicalise them to the preferred version.',
+  duplicateContentExact: 'Serve exact-duplicate pages from one URL and redirect or canonicalise the others.',
+  responseSlow: 'Bring server response time under 1 s: cache HTML, tune the database, use a CDN.',
+  responseVerySlow: 'Investigate pages over 3 s first — they hurt crawl budget and Core Web Vitals most.',
+  ttfbSlow: 'Reduce time-to-first-byte with server-side caching and faster hosting.',
+  ttfbVerySlow: 'TTFB above 1.8 s fails Core Web Vitals; profile the backend and add edge caching.',
+  pageLarge: 'Cut page weight: compress images, defer non-critical scripts, remove unused CSS.',
+  urlTooLong: 'Shorten URLs; keep them readable and under ~100 characters where possible.',
+  urlManyParams: 'Reduce query parameters and canonicalise parameterised variants to a clean URL.',
+  redirectLoop: 'Break redirect loops — they return no content and waste crawl budget.',
+  redirectChainLong: 'Collapse redirect chains so every link points straight to the final URL.',
+  redirectSelf: 'Fix URLs that redirect to themselves; they never resolve.',
+  mixedContent: 'Load every sub-resource over HTTPS to remove "Not Secure" warnings.',
+  imageMissingAlt: 'Add descriptive alt text to content images (empty alt for decorative ones).',
+  imageEmptyAlt: 'Confirm images with empty alt are decorative; give meaningful images real alt text.',
+  imageDuplicateAlt: 'Vary alt text so different images are not described identically.',
+  metaRefreshUsed: 'Replace meta refresh with a server-side 301 redirect.',
+  compressionMissing: 'Enable gzip or Brotli compression for text responses.',
+  cspMissing: 'Add a Content-Security-Policy header to mitigate XSS and injection.',
+  hstsMissing: 'Send Strict-Transport-Security on HTTPS pages so browsers never downgrade to HTTP.',
+  xFrameOptionsMissing: 'Send X-Frame-Options (or CSP frame-ancestors) to prevent clickjacking.',
+  xContentTypeOptionsMissing: 'Send X-Content-Type-Options: nosniff.',
+  viewportMissing: 'Add <meta name="viewport" content="width=device-width, initial-scale=1"> for mobile rendering.',
+  langMissing: 'Set the html lang attribute so browsers, screen readers and search engines know the page language.',
+  ogMissing: 'Add Open Graph title, description and image so shares render a rich preview.',
+  twitterMissing: 'Add Twitter Card tags (card type + image) for X/Twitter previews.',
+  structuredDataMissing: 'Add JSON-LD structured data for the page type to qualify for rich results.',
+  structuredDataInvalid: 'Fix JSON-LD syntax errors; invalid blocks are ignored entirely.',
+  paginationBroken: 'Point rel=next / rel=prev at live pages in the sequence.',
+  hreflangXDefaultMissing: 'Add an x-default hreflang for visitors who match no listed language.',
+  hreflangInvalidCode: 'Use valid ISO 639-1 language (and optional ISO 3166-1 region) codes in hreflang.',
+  hreflangSelfRefMissing: 'Include a self-referencing hreflang on every page in the cluster.',
+  hreflangReciprocityMissing: 'Make hreflang annotations reciprocal — every target must link back.',
+  hreflangTargetIssues: 'Point hreflang at live, indexable, self-canonical pages.',
+  faviconMissing: 'Add a favicon; it appears next to the site in mobile results.',
+  charsetMissing: 'Declare the character encoding (meta charset or Content-Type header).',
+  ampValidationErrors: 'Fix AMP validation errors or the AMP version will not be served.',
+  nonIndexableInSitemap: 'Remove noindex / canonicalised URLs from the XML sitemap.',
+  non200InSitemap: 'Remove error and redirecting URLs from the XML sitemap.',
+  redirectInSitemap: 'List final URLs in the sitemap, not redirecting ones.',
+  crawledNotInSitemap: 'Add indexable pages missing from the sitemap so they are discovered promptly.',
+  brokenLinksInternal: 'Fix or remove internal links to 4xx/5xx pages.',
+  brokenLinksExternal: 'Update or remove external links to dead pages.',
+  linkEmptyAnchor: 'Give links descriptive anchor text (or alt text on image links).',
+  insecureFormAction: 'Submit forms over HTTPS; an HTTP action leaks form data.',
+  missingSri: 'Add integrity attributes to third-party scripts and stylesheets.',
+  cookieNoSecure: 'Set the Secure flag on cookies served over HTTPS.',
+  cookieNoHttpOnly: 'Set HttpOnly on session cookies so scripts cannot read them.',
+  cookieNoSameSite: 'Set SameSite on cookies to limit cross-site requests.',
+  folderDepthTooDeep: 'Flatten deep folder structures so important pages sit closer to the root.',
+  http2NotSupported: 'Enable HTTP/2 (or HTTP/3) on the server for multiplexed, faster page loads.',
+  renderBlocking: 'Defer or async non-critical scripts and inline critical CSS to unblock rendering.',
+  keepaliveDisabled: 'Enable HTTP keep-alive so browsers reuse connections.',
+  highBoilerplate: 'Increase unique main content relative to navigation and footer boilerplate.',
+};
+const SEVERITY_FALLBACK: Record<IssueDef['severity'], string> = {
+  error: 'Fix these pages first — this check marks a problem that blocks indexing or breaks the user experience.',
+  warn: 'Review and correct where practical; this weakens rankings or usability without blocking them.',
+  info: 'Informational — worth tidying when the affected template is next touched.',
+};
+
+function renderRecommendations(counts: OverviewCounts): string {
+  const rows = ISSUES.map((d) => ({ ...d, count: counts.issues[d.key] as number }))
+    .filter((r) => r.count > 0)
+    .sort((a, b) => SEV_RANK[a.severity] - SEV_RANK[b.severity] || b.count - a.count)
+    .slice(0, 12);
+  if (rows.length === 0) return '<p class="muted">Nothing to recommend — no issues were detected.</p>';
+  const items = rows
+    .map(
+      (r) =>
+        `<li><span class="sev-${r.severity}">${escape(r.label)}</span> <span class="muted">(${fmtNum(r.count)} URL${r.count === 1 ? '' : 's'})</span><br>${escape(
+          RECOMMENDATIONS[r.key] ?? SEVERITY_FALLBACK[r.severity],
+        )}</li>`,
+    )
+    .join('');
+  return `<ol class="recs">${items}</ol>`;
+}
+
+function renderHeader(options: HtmlReportOptions, generatedAt: Date): string {
+  const b = options.branding ?? {};
+  const brand = (b.brandName ?? '').trim();
+  const logo = b.logoDataUrl && /^data:image\//.test(b.logoDataUrl)
+    ? `<img class="logo" src="${b.logoDataUrl}" alt="" />`
+    : '';
+  const title = brand ? `${escape(brand)} — SEO Report` : 'FreeCrawl SEO Report';
+  const preparedBy = (b.preparedBy ?? '').trim();
+  return (
+    `<header class="hdr">${logo}<div><h1>${title}</h1>` +
+    `<div class="muted">Site: <span class="mono">${escape(options.startUrl)}</span> · Generated: ${escape(generatedAt.toISOString())}` +
+    (preparedBy ? ` · Prepared by: ${escape(preparedBy)}` : '') +
+    `</div></div></header>`
+  );
+}
+
+function accentStyle(options: HtmlReportOptions): string {
+  const raw = (options.branding?.accentColor ?? '').trim();
+  const ok = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(raw);
+  return ok ? `:root{--accent:${raw}}` : '';
+}
+
 function renderIssues(counts: OverviewCounts): string {
   const rows = ISSUES.map((d) => {
     const c = counts.issues[d.key] as number;
@@ -191,6 +323,32 @@ export async function exportHtmlReport(
   filePath: string,
   options: HtmlReportOptions,
 ): Promise<{ filePath: string; bytesWritten: number }> {
+  let bytesWritten = 0;
+  const counter = new (await import('node:stream')).Transform({
+    transform(chunk, _enc, cb) {
+      bytesWritten += chunk.length;
+      cb(null, chunk);
+    },
+  });
+  await pipeline(
+    Readable.from(htmlReportChunks(db, options)),
+    counter,
+    createWriteStream(filePath, { encoding: 'utf8' }),
+  );
+  return { filePath, bytesWritten };
+}
+
+/** The whole report as one string — what the PDF export hands to Chromium. */
+export async function renderHtmlReport(db: ProjectDb, options: HtmlReportOptions): Promise<string> {
+  const parts: string[] = [];
+  for await (const chunk of htmlReportChunks(db, options)) parts.push(chunk);
+  return parts.join('');
+}
+
+async function* htmlReportChunks(
+  db: ProjectDb,
+  options: HtmlReportOptions,
+): AsyncGenerator<string> {
   const summary: CrawlSummary = db.getSummary();
   const counts: OverviewCounts = db.getOverviewCounts();
   const generatedAt = options.generatedAt ?? new Date();
@@ -219,12 +377,10 @@ export async function exportHtmlReport(
     return `<table><thead><tr><th>URL</th><th class="right">${escape(valueLabel)}</th></tr></thead><tbody>${body}</tbody></table>`;
   }
 
-  let bytesWritten = 0;
-
   const gen = async function* (): AsyncGenerator<string> {
-    yield `<!doctype html><html lang="en"><head><meta charset="utf-8" /><title>FreeCrawl SEO Report — ${escape(options.startUrl)}</title><style>${STYLE}</style></head><body>`;
-    yield `<h1>FreeCrawl SEO Report</h1>`;
-    yield `<div class="muted">Site: <span class="mono">${escape(options.startUrl)}</span> · Generated: ${escape(generatedAt.toISOString())}</div>`;
+    const brand = (options.branding?.brandName ?? '').trim();
+    yield `<!doctype html><html lang="en"><head><meta charset="utf-8" /><title>${escape(brand || 'FreeCrawl')} SEO Report — ${escape(options.startUrl)}</title><style>${STYLE}${accentStyle(options)}</style></head><body>`;
+    yield renderHeader(options, generatedAt);
 
     yield `<div class="grid">
       <div class="card"><div class="label">URLs Crawled</div><div class="value">${fmtNum(summary.total)}</div></div>
@@ -234,24 +390,11 @@ export async function exportHtmlReport(
     </div>`;
 
     yield `<section><h2>Issues</h2>${renderIssues(counts)}</section>`;
+    yield `<section><h2>Recommendations</h2>${renderRecommendations(counts)}</section>`;
     yield `<section><h2>Top 25 Slowest URLs</h2>${rowsTable('slowest', slowestRows, 'ms')}</section>`;
     yield `<section><h2>Top 25 Deepest URLs</h2>${rowsTable('deepest', deepestRows, 'depth')}</section>`;
     yield `<section><h2>Top 25 Outlink-Heavy URLs</h2>${rowsTable('fanout', fanoutRows, 'outlinks')}</section>`;
     yield `</body></html>`;
   };
-
-  const counter = new (await import('node:stream')).Transform({
-    transform(chunk, _enc, cb) {
-      bytesWritten += chunk.length;
-      cb(null, chunk);
-    },
-  });
-
-  await pipeline(
-    Readable.from(gen()),
-    counter,
-    createWriteStream(filePath, { encoding: 'utf8' }),
-  );
-
-  return { filePath, bytesWritten };
+  yield* gen();
 }

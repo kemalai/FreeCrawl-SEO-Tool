@@ -1721,7 +1721,7 @@ function NodeSummaryCard({
       // makes them unreadable. Set inline (not via a Tailwind opacity
       // modifier) so it can't be diluted by a utility class later.
       style={{
-        backgroundColor: '#0a0a0a',
+        backgroundColor: 'rgb(var(--sf-950))',
         ...(pinned
           ? { right: 12, bottom: 12 }
           : {

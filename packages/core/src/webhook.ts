@@ -35,6 +35,19 @@ export interface WebhookResult {
   durationMs: number;
 }
 
+/**
+ * POST any JSON document to a webhook URL — the scheduled-export
+ * notification uses this with its own payload shape. Same best-effort
+ * contract as `postCrawlCompleteWebhook`: never throws.
+ */
+export async function postWebhookJson(
+  url: string,
+  payload: Record<string, unknown>,
+  timeoutMs = 10_000,
+): Promise<WebhookResult> {
+  return postCrawlCompleteWebhook(url, payload as unknown as WebhookPayload, timeoutMs);
+}
+
 export async function postCrawlCompleteWebhook(
   url: string,
   payload: WebhookPayload,

@@ -137,9 +137,21 @@ export function SitemapValidatorDialog({ open, onClose }: Props) {
                   </span>
                 ) : (
                   <span>
-                    ⚠ <strong>{t('sitemap.findingsCount', { defaultValue: '{{n}} finding(s)', n: result.findings.length + result.errors.length })}</strong>
+                    ⚠{' '}
+                    <strong>
+                      {t('sitemap.findingsCount', {
+                        defaultValue_one: '{{count}} finding',
+                        defaultValue_other: '{{count}} findings',
+                        count: result.findings.length + result.errors.length,
+                      })}
+                    </strong>
                     {result.urlCount > 0
-                      ? ` — ${result.urlCount.toLocaleString()} ${t('sitemap.urlsParsed', { defaultValue: 'URL(s) parsed' })}`
+                      ? ` — ${t('sitemap.urlsParsed', {
+                          defaultValue_one: '{{formatted}} URL parsed',
+                          defaultValue_other: '{{formatted}} URLs parsed',
+                          count: result.urlCount,
+                          formatted: result.urlCount.toLocaleString(),
+                        })}`
                       : ''}
                   </span>
                 )}

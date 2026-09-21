@@ -125,6 +125,22 @@ function normalizeSpec(spec: ScheduleSpec): ScheduleSpec {
   if (spec.cadence === 'weekly') {
     out.dayOfWeek = clampInt(spec.dayOfWeek ?? 1, 0, 6);
   }
+  const after = spec.afterCrawl;
+  if (after) {
+    const kinds = ['none', 'bulk', 'html', 'pdf', 'seo-audit'] as const;
+    const kind = kinds.includes(after.export) ? after.export : 'none';
+    const outputDir = typeof after.outputDir === 'string' ? after.outputDir.trim() : '';
+    const normalized = {
+      // An export without a folder cannot run; downgrade rather than fail later.
+      export: kind !== 'none' && outputDir === '' ? 'none' : kind,
+      outputDir,
+      sheets: !!after.sheets,
+      webhook: !!after.webhook,
+    } as const;
+    if (normalized.export !== 'none' || normalized.sheets || normalized.webhook) {
+      out.afterCrawl = normalized;
+    }
+  }
   return out;
 }
 

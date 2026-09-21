@@ -93,8 +93,15 @@ interface RequestMessage {
 }
 
 // Whitelist mirrors ProjectDb's write surface. Reading methods stay
-// off this list — those go to the read-only worker.
+// off this list — those go to the read-only worker. Two exceptions:
+// `getPendingInternalLinks` is the crawler's drain query, which must
+// observe every write queued before it (so it runs behind them on
+// this connection, not on a reader), and `vacuumInto` is the project
+// snapshot — a read that the maintenance pool (a second instance of
+// this worker) takes off the main thread.
 const ALLOWED_METHODS = new Set<string>([
+  'getPendingInternalLinks',
+  'vacuumInto',
   'writeFetchedUrl',
   'upsertUrl',
   'insertLinks',
@@ -114,6 +121,7 @@ const ALLOWED_METHODS = new Set<string>([
   'updateExternalProbe',
   'recomputeInlinks',
   'recomputeRedirectChains',
+  'recomputeCanonicalChains',
   'recomputeLinkScore',
   'recomputeHreflangAnalysis',
   'recomputeHreflangInconsistent',

@@ -1,6 +1,6 @@
 import { Menu, BrowserWindow, app, shell, type MenuItemConstructorOptions } from 'electron';
 import { basename } from 'node:path';
-import { IPC, type MenuEvent } from '@freecrawl/shared-types';
+import { IPC, type MenuEvent, type UiTheme } from '@freecrawl/shared-types';
 import { getMenuLabels, type MenuLang } from './menu-i18n.js';
 
 function send(event: MenuEvent): void {
@@ -45,6 +45,10 @@ export interface AppMenuHandlers {
   onEditCopy: () => void;
   /** UI language for menu labels. Falls back to `en` when missing. */
   lang?: MenuLang;
+  /** Active colour theme — which View ▸ Theme radio is checked. */
+  theme: UiTheme;
+  /** View ▸ Theme pick. Main persists it and fans it out to every window. */
+  onSetTheme: (theme: UiTheme) => void;
 }
 
 export function buildAppMenu(handlers: AppMenuHandlers): Menu {
@@ -117,6 +121,14 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         {
           label: L.exportHtmlReport,
           click: () => send('export-html-report'),
+        },
+        {
+          label: L.exportPdfReport,
+          click: () => send('export-pdf-report'),
+        },
+        {
+          label: L.exportSeoAudit,
+          click: () => send('export-seo-audit'),
         },
         {
           label: L.bulkExport,
@@ -209,6 +221,24 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           label: L.detailPanel,
           accelerator: 'CmdOrCtrl+D',
           click: () => send('toggle-detail-panel'),
+        },
+        { type: 'separator' },
+        {
+          label: L.theme,
+          submenu: [
+            {
+              label: L.themeDark,
+              type: 'radio',
+              checked: handlers.theme === 'dark',
+              click: () => handlers.onSetTheme('dark'),
+            },
+            {
+              label: L.themeLight,
+              type: 'radio',
+              checked: handlers.theme === 'light',
+              click: () => handlers.onSetTheme('light'),
+            },
+          ],
         },
         { type: 'separator' },
         { role: 'reload', accelerator: 'CmdOrCtrl+Shift+R' },

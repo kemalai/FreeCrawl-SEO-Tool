@@ -91,6 +91,8 @@ const ALLOWED_METHODS = new Set<string>([
   'graphSnapshot',
   'crawlPath',
   'topUrlsBy',
+  'pagesOverLinkLimit',
+  'mobileParityReport',
   'externalDomainHealth',
   'analyticsCoverage',
   'linkPositionBreakdown',

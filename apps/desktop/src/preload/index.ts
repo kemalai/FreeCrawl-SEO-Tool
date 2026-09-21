@@ -27,6 +27,9 @@ import {
   type CrashRecoveryResumeResult,
   type CrashRecoveryStatus,
   type ExportHtmlReportInput,
+  type ExportPdfReportInput,
+  type ExportPdfReportResult,
+  type ExportSeoAuditResult,
   type ExportHtmlReportResult,
   type BulkExportResult,
   type CompareLoadInput,
@@ -74,6 +77,7 @@ import {
   type DepthHistogramRow,
   type ResponseTimeHistogramRow,
   type TopUrlsInput,
+  type PagesOverLinkLimitInput,
   type TopUrlsRow,
   type ExternalDomainHealthRow,
   type AnalyticsCoverageRow,
@@ -177,6 +181,8 @@ import {
   type LogThreatsResult,
   type LogThreatSummary,
   type LogThreatIpRow,
+  type UiTheme,
+  type SystemInfo,
 } from '@freecrawl/shared-types';
 
 function subscribe<T>(
@@ -190,8 +196,15 @@ function subscribe<T>(
 
 // Hydrate preferences synchronously so the renderer never sees a flash of
 // default layout before prefs load. Written via async IPC afterwards.
-const prefsCache: Record<string, unknown> =
-  (ipcRenderer.sendSync(IPC.prefsGetAllSync) as Record<string, unknown>) ?? {};
+// The same round trip carries the OS language preferences, which
+// `resolveInitialLanguage()` needs before React mounts; they are derived
+// in the main process and never persisted alongside the prefs.
+const prefsBootstrap =
+  (ipcRenderer.sendSync(IPC.prefsGetAllSync) as
+    | { prefs?: Record<string, unknown>; systemLanguages?: string[] }
+    | undefined) ?? {};
+const prefsCache: Record<string, unknown> = prefsBootstrap.prefs ?? {};
+const systemLanguages: readonly string[] = prefsBootstrap.systemLanguages ?? [];
 
 const api: FreeCrawlApi = {
   crawlStart: (config: CrawlConfig) => ipcRenderer.invoke(IPC.crawlStart, config),
@@ -227,6 +240,7 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.agentsClose, sessionId),
   onAgentsChanged: (cb: () => void) =>
     subscribe<void>(IPC.agentsChanged, () => cb()),
+  onThemeChanged: (cb: (theme: UiTheme) => void) => subscribe<UiTheme>(IPC.themeChanged, cb),
   recentProjectsList: (): Promise<RecentProject[]> =>
     ipcRenderer.invoke(IPC.recentProjectsList),
   recentProjectSetArchived: (path: string, archived: boolean): Promise<void> =>
@@ -291,6 +305,10 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.crashRecoveryResume),
   crashRecoveryDiscard: (): Promise<void> =>
     ipcRenderer.invoke(IPC.crashRecoveryDiscard),
+  exportPdfReport: (input: ExportPdfReportInput): Promise<ExportPdfReportResult> =>
+    ipcRenderer.invoke(IPC.exportPdfReport, input),
+  exportSeoAudit: (): Promise<ExportSeoAuditResult> => ipcRenderer.invoke(IPC.exportSeoAudit),
+  pickImageFile: (): Promise<string | null> => ipcRenderer.invoke(IPC.pickImageFile),
   exportHtmlReport: (input: ExportHtmlReportInput): Promise<ExportHtmlReportResult> =>
     ipcRenderer.invoke(IPC.exportHtmlReport, input),
   exportBulk: (): Promise<BulkExportResult> => ipcRenderer.invoke(IPC.exportBulk),
@@ -306,8 +324,10 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.sitemapGenerate, input),
   appVersion: (): Promise<string> => ipcRenderer.invoke(IPC.appVersion),
   memoryStats: (): Promise<MemoryStats> => ipcRenderer.invoke(IPC.memoryStats),
+  systemInfo: (): Promise<SystemInfo> => ipcRenderer.invoke(IPC.systemInfo),
   prefsGetAll: () => ({ ...prefsCache }),
   prefsGet: (key) => prefsCache[key],
+  systemLanguages: () => systemLanguages,
   prefsSet: (key, value) => {
     prefsCache[key] = value;
     void ipcRenderer.invoke(IPC.prefsSet, key, value);
@@ -369,6 +389,10 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.reportsResponseTimeHistogram),
   reportsTopUrls: (input: TopUrlsInput): Promise<TopUrlsRow[]> =>
     ipcRenderer.invoke(IPC.reportsTopUrls, input),
+  reportsPagesOverLinkLimit: (input: PagesOverLinkLimitInput): Promise<TopUrlsRow[]> =>
+    ipcRenderer.invoke(IPC.reportsPagesOverLinkLimit, input),
+  reportsMobileParity: (limit?: number): Promise<TopUrlsRow[]> =>
+    ipcRenderer.invoke(IPC.reportsMobileParity, limit),
   reportsExternalDomainHealth: (
     limit?: number,
   ): Promise<ExternalDomainHealthRow[]> =>

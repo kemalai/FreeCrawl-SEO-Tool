@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import clsx from 'clsx';
 import { Download } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import type { ImageRow } from '@freecrawl/shared-types';
+import type { ImageRow, ImagesSortKey } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip } from '../components/InfoTip.js';
 import { translateLabel } from '../i18n/labels.js';
@@ -17,7 +17,13 @@ const POLL_MS_RUNNING = 3000;
 const POLL_MS_IDLE = 30_000;
 const PAGE_SIZE = 5000;
 
-type SortKey = 'src' | 'alt' | 'width' | 'height' | 'occurrences' | 'fromUrl';
+type SortKey = ImagesSortKey;
+
+/** Parse the "min size (KB)" box: blank or junk = no filter. */
+function kbToBytes(raw: string): number | undefined {
+  const kb = Number(raw.trim().replace(',', '.'));
+  return Number.isFinite(kb) && kb > 0 ? Math.round(kb * 1024) : undefined;
+}
 
 export function ImagesTab() {
   const { t, i18n } = useTranslation();
@@ -25,14 +31,19 @@ export function ImagesTab() {
   const activeCategory = useAppStore((s) => s.activeCategory);
   const dataVersion = useAppStore((s) => s.dataVersion);
   const progress = useAppStore((s) => s.progress);
+  const setSelectedUrlId = useAppStore((s) => s.setSelectedUrlId);
+  const setSelectedUrlIds = useAppStore((s) => s.setSelectedUrlIds);
+  const selectedUrlId = useAppStore((s) => s.selectedUrlId);
   const [rows, setRows] = useState<ImageRow[]>([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
+  const [minKb, setMinKb] = useState('');
   const [sortBy, setSortBy] = useState<SortKey>('occurrences');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [exporting, setExporting] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const minByteSize = kbToBytes(minKb);
 
   // Alt-issue filters are driven by the Overview sidebar's Issues section —
   // clicking a node switches category, which we watch here. Each maps to a
@@ -41,6 +52,11 @@ export function ImagesTab() {
   const emptyAltOnly = activeCategory === 'issues:image-empty-alt';
   const duplicateAltOnly = activeCategory === 'issues:image-duplicate-alt';
 
+  // Sort and size filter go to the query. This tab loads one page of
+  // PAGE_SIZE rows; sorting that page in the renderer — the previous
+  // design — only ever reordered whichever rows the default order returned
+  // first, so "largest first" on a big site showed an arbitrary window
+  // (issue #20).
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
@@ -52,6 +68,9 @@ export function ImagesTab() {
           missingAltOnly,
           emptyAltOnly,
           duplicateAltOnly,
+          minByteSize,
+          sortBy,
+          sortDir,
         });
         if (cancelled) return;
         setRows(res.rows);
@@ -73,40 +92,34 @@ export function ImagesTab() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [search, missingAltOnly, emptyAltOnly, duplicateAltOnly, dataVersion, progress?.running]);
-
-  const sorted = useMemo(() => {
-    const copy = [...rows];
-    copy.sort((a, b) => {
-      const av = a[sortBy];
-      const bv = b[sortBy];
-      let cmp: number;
-      if (av === null && bv === null) cmp = 0;
-      else if (av === null) cmp = 1;
-      else if (bv === null) cmp = -1;
-      else if (typeof av === 'number' && typeof bv === 'number') cmp = av - bv;
-      else cmp = String(av).localeCompare(String(bv));
-      return sortDir === 'asc' ? cmp : -cmp;
-    });
-    return copy;
-  }, [rows, sortBy, sortDir]);
+  }, [
+    search,
+    missingAltOnly,
+    emptyAltOnly,
+    duplicateAltOnly,
+    minByteSize,
+    sortBy,
+    sortDir,
+    dataVersion,
+    progress?.running,
+  ]);
 
   const virtualizer = useVirtualizer({
-    count: sorted.length,
+    count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 30,
     // Composite key: the tab is per-usage, so the same image id can appear
     // on several rows (one per page). Keying by id alone would collide.
     getItemKey: (index) => {
-      const r = sorted[index];
+      const r = rows[index];
       return r ? `${r.id}:${r.fromUrl ?? ''}` : index;
     },
   });
 
   // Export every image row (not just the loaded page) to CSV. The
-  // export honours the current search box + missing-alt sidebar filter
-  // so what the user sees is what they get.
+  // export honours the current search box, size box + missing-alt sidebar
+  // filter so what the user sees is what they get.
   const handleExport = async () => {
     if (total === 0 || exporting) return;
     setExporting(true);
@@ -116,6 +129,7 @@ export function ImagesTab() {
         emptyAltOnly,
         duplicateAltOnly,
         search: search || undefined,
+        minByteSize,
       });
     } finally {
       setExporting(false);
@@ -126,8 +140,18 @@ export function ImagesTab() {
     if (sortBy === key) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
     else {
       setSortBy(key);
-      setSortDir('asc');
+      // Numeric columns are asked for "largest first" far more often
+      // than the reverse; text columns read naturally A→Z.
+      setSortDir(key === 'byteSize' || key === 'occurrences' ? 'desc' : 'asc');
     }
+  };
+
+  // A usage row's page is a crawled URL; opening it in the Detail panel
+  // answers "where is this image used, and what else is on that page".
+  const selectPage = (row: ImageRow) => {
+    if (row.fromUrlId === null) return;
+    setSelectedUrlId(row.fromUrlId);
+    setSelectedUrlIds([row.fromUrlId]);
   };
 
   const columns: {
@@ -169,6 +193,14 @@ export function ImagesTab() {
       example: '720',
     },
     {
+      key: 'byteSize',
+      label: 'Size (Bytes)',
+      width: 100,
+      align: 'right',
+      info: 'Transfer size of the image file. Filled by the post-crawl image size probe, or by the image\'s own crawled row when Spider → Crawl → Images is on. "—" means the size was never measured, not that it is zero.',
+      example: '184,320',
+    },
+    {
       key: 'occurrences',
       label: 'Occurrences',
       width: 100,
@@ -197,6 +229,18 @@ export function ImagesTab() {
           onChange={(e) => setSearch(e.target.value)}
           spellCheck={false}
         />
+        <input
+          className="input w-32"
+          placeholder={t('imagesTab.minSizePlaceholder', { defaultValue: 'Min size (KB)' })}
+          title={t('imagesTab.minSizeTitle', {
+            defaultValue:
+              'Only images at least this large. Sizes come from the post-crawl image size probe or from images crawled as their own URLs; images with an unknown size are hidden while a value is set.',
+          })}
+          value={minKb}
+          onChange={(e) => setMinKb(e.target.value)}
+          inputMode="decimal"
+          spellCheck={false}
+        />
         {missingAltOnly && (
           <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
             {t('imagesTab.missingAltOnly', { defaultValue: 'Missing Alt only' })}
@@ -214,7 +258,7 @@ export function ImagesTab() {
         )}
         <div className="ml-auto text-[11px] text-surface-500">
           <span className="font-mono text-surface-200">{total.toLocaleString()}</span> {t('imagesTab.imagesUnit', { defaultValue: 'images' })}
-          <span className="ml-2 text-surface-600">({t('imagesTab.loaded', { defaultValue: '{{n}} loaded', n: sorted.length.toLocaleString() })})</span>
+          <span className="ml-2 text-surface-600">({t('imagesTab.loaded', { defaultValue: '{{n}} loaded', n: rows.length.toLocaleString() })})</span>
         </div>
         <button
           type="button"
@@ -288,13 +332,19 @@ export function ImagesTab() {
             }}
           >
             {virtualizer.getVirtualItems().map((vi) => {
-              const row = sorted[vi.index];
+              const row = rows[vi.index];
               if (!row) return null;
+              const isActivePage = row.fromUrlId !== null && row.fromUrlId === selectedUrlId;
               return (
                 <div
                   key={vi.key}
                   data-index={vi.index}
-                  className="absolute left-0 top-0 flex items-center border-b border-surface-900 text-[11px] hover:bg-surface-900/60"
+                  onClick={() => selectPage(row)}
+                  className={clsx(
+                    'absolute left-0 top-0 flex items-center border-b border-surface-900 text-[11px]',
+                    row.fromUrlId !== null && 'cursor-pointer',
+                    isActivePage ? 'bg-accent-500/20' : 'hover:bg-surface-900/60',
+                  )}
                   style={{
                     transform: `translateY(${vi.start}px)`,
                     height: ROW_HEIGHT,
@@ -380,6 +430,22 @@ export function ImagesTab() {
                       flex: `0 0 ${columns[4]!.width}px`,
                     }}
                   >
+                    <span className="block truncate font-mono tabular-nums text-surface-300">
+                      {row.byteSize !== null ? (
+                        row.byteSize.toLocaleString()
+                      ) : (
+                        <span className="text-surface-700">—</span>
+                      )}
+                    </span>
+                  </div>
+                  <div
+                    className="overflow-hidden px-2 text-right"
+                    style={{
+                      width: columns[5]!.width,
+                      minWidth: columns[5]!.width,
+                      flex: `0 0 ${columns[5]!.width}px`,
+                    }}
+                  >
                     <span className="block truncate font-mono tabular-nums text-surface-200">
                       {row.occurrences.toLocaleString()}
                     </span>
@@ -387,9 +453,9 @@ export function ImagesTab() {
                   <div
                     className="overflow-hidden px-2"
                     style={{
-                      width: columns[5]!.width,
-                      minWidth: columns[5]!.width,
-                      flex: `0 0 ${columns[5]!.width}px`,
+                      width: columns[6]!.width,
+                      minWidth: columns[6]!.width,
+                      flex: `0 0 ${columns[6]!.width}px`,
                     }}
                   >
                     {row.fromUrl ? (

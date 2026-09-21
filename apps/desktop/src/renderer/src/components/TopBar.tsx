@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Play, Square, Pause, Eraser, ChevronDown, Settings, History, Plus, ListChecks, Monitor, Smartphone } from 'lucide-react';
+import { Play, Square, Pause, Eraser, ChevronDown, Settings, History, Plus, ListChecks, Monitor, Smartphone, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import type { CrawlScope, CrawlMode } from '@freecrawl/shared-types';
@@ -30,6 +30,12 @@ export function TopBar() {
   // object subscription a new reference on every emitProgress() pinned
   // this component to the renderer's hot path.
   const running = useAppStore((s) => s.progress?.running === true);
+  // Post-crawl passes still running after Stop / queue drain. Start stays
+  // off (a second crawler would race the passes) and Stop gives way to a
+  // spinner, so the click is visibly acknowledged at once.
+  const finishing = useAppStore(
+    (s) => s.progress?.running !== true && s.progress?.finishing === true,
+  );
   const paused = useAppStore((s) => s.progress?.paused === true);
   const progressDiscovered = useAppStore((s) => s.progress?.discovered ?? 0);
   const progressCrawled = useAppStore((s) => s.progress?.crawled ?? 0);
@@ -281,7 +287,11 @@ export function TopBar() {
                   autoFocus
                 />
                 <div className="mt-1 text-[10px] text-surface-500">
-                  {t('topbar.listCount', { defaultValue: '{{n}} URL(s)', n: config.urlList.length })}
+                  {t('topbar.listCount', {
+                    defaultValue_one: '{{count}} URL',
+                    defaultValue_other: '{{count}} URLs',
+                    count: config.urlList.length,
+                  })}
                 </div>
               </div>
             </>
@@ -449,6 +459,11 @@ export function TopBar() {
             <Plus className="h-3.5 w-3.5" /> {t('topbar.addUrl')}
           </button>
         </>
+      ) : finishing ? (
+        <button className="btn btn-ghost border border-amber-700/60 text-amber-300" disabled>
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />{' '}
+          {t('topbar.finishing', { defaultValue: 'Finishing…' })}
+        </button>
       ) : (
         <button className="btn btn-primary" onClick={start}>
           <Play className="h-3.5 w-3.5" /> {t('topbar.start')}
@@ -457,7 +472,7 @@ export function TopBar() {
       <button
         className="btn btn-ghost border border-surface-700"
         onClick={clearCrawl}
-        disabled={running || !hasData}
+        disabled={running || finishing || !hasData}
         title={!hasData ? t('topbar.nothingToClear') : undefined}
       >
         <Eraser className="h-3.5 w-3.5" /> {t('topbar.clear')}

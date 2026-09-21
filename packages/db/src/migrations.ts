@@ -2231,6 +2231,89 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 88,
+    name: 'add_schema_findings',
+    // Structured-data validation detail. The three schema counters
+    // (`schema_unknown_types`, `schema_missing_required`,
+    // `schema_missing_recommended`) only say how many JSON-LD nodes
+    // failed; this JSON array says which block, which `@type` and which
+    // properties, so the Structured Data sub-tab can point at the gap.
+    // NULL = no findings, or crawled before the detail was recorded.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'schema_findings')) {
+        db.exec('ALTER TABLE urls ADD COLUMN schema_findings TEXT');
+      }
+    },
+  },
+  {
+    version: 89,
+    name: 'add_js_redirect_url',
+    // Statically detected `window.location = "…"` redirect target, the
+    // JS counterpart of `meta_refresh_url`. NULL when the page has none.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'js_redirect_url')) {
+        db.exec('ALTER TABLE urls ADD COLUMN js_redirect_url TEXT');
+      }
+    },
+  },
+  {
+    version: 90,
+    name: 'add_canonical_chain',
+    // Canonical-chain walk (the canonical counterpart of
+    // `redirect_chain_length` / `redirect_final_url`): hops from a page —
+    // or from a redirect's terminal URL — through successive canonicals
+    // until a self-canonical page. Filled by `recomputeCanonicalChains`.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      const names = new Set(cols.map((c) => c.name));
+      if (!names.has('canonical_chain_length')) {
+        db.exec('ALTER TABLE urls ADD COLUMN canonical_chain_length INTEGER NOT NULL DEFAULT 0');
+      }
+      if (!names.has('canonical_final_url')) {
+        db.exec('ALTER TABLE urls ADD COLUMN canonical_final_url TEXT');
+      }
+    },
+  },
+  {
+    version: 91,
+    name: 'add_hreflang_unlinked',
+    // Hreflang targets that were crawled but have no inlinks at all — the
+    // alternate exists only through the annotation. Filled by
+    // `recomputeHreflangAnalysis` alongside the other hreflang counters.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      if (!cols.some((c) => c.name === 'hreflang_unlinked')) {
+        db.exec('ALTER TABLE urls ADD COLUMN hreflang_unlinked INTEGER NOT NULL DEFAULT 0');
+      }
+    },
+  },
+  {
+    version: 92,
+    name: 'add_mobile_parity',
+    // Post-crawl mobile-vs-desktop probe: JSON diff of the SEO fields plus
+    // a differing-field count for the issue filter / report.
+    up: (db) => {
+      const cols = db
+        .prepare('PRAGMA table_info(urls)')
+        .all() as unknown as { name: string }[];
+      const names = new Set(cols.map((c) => c.name));
+      if (!names.has('mobile_parity')) db.exec('ALTER TABLE urls ADD COLUMN mobile_parity TEXT');
+      if (!names.has('mobile_parity_diff')) {
+        db.exec('ALTER TABLE urls ADD COLUMN mobile_parity_diff INTEGER NOT NULL DEFAULT 0');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

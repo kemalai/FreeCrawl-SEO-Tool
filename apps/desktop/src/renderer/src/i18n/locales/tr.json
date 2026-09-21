@@ -57,6 +57,7 @@
     "recentUrls": "Son URL'ler",
     "start": "Başlat",
     "stop": "Durdur",
+    "finishing": "Bitiriliyor…",
     "pause": "Duraklat",
     "resume": "Devam Et",
     "clear": "Temizle",
@@ -86,7 +87,8 @@
     "addList": "URL listesi ekle…",
     "listTitle": "URL listesi — her satıra bir tane",
     "listDone": "Tamam",
-    "listCount": "{{n}} URL",
+    "listCount_one": "{{count}} URL",
+    "listCount_other": "{{count}} URL",
     "scopeSpiderOnly": "Kapsam yalnızca Spider modunda geçerli",
     "mode": {
       "spider": "Spider",
@@ -110,7 +112,8 @@
   "agents": {
     "badge": "{{n}} ajan",
     "runningBadge": "{{n}} tarıyor",
-    "indicatorTitle": "{{n}} MCP ajan oturumu etkin — yönetmek için tıklayın",
+    "indicatorTitle_one": "{{count}} MCP ajan oturumu aktif — yönetmek için tıklayın",
+    "indicatorTitle_other": "{{count}} MCP ajan oturumu aktif — yönetmek için tıklayın",
     "popoverTitle": "MCP Ajan Oturumları",
     "popoverSubtitle": "Yapay zekâ ajanlarının MCP üzerinden sürdüğü izole crawl oturumları.",
     "statusRunning": "Tarıyor",
@@ -140,6 +143,7 @@
     "running": "Çalışıyor",
     "paused": "Duraklatıldı",
     "idle": "Boşta",
+    "finishing": "Bitiriliyor…",
     "dismiss": "kapat",
     "fpsSmoothTitle": "Arayüz akıcı (≥ 50 fps)",
     "fpsDegradedTitle": "Arayüz yavaşladı (30–49 fps) — muhtemelen crawl IPC ile yarışıyor",
@@ -266,13 +270,17 @@
     "severityCritical": "Kritik Sorunlar",
     "severityWarning": "Uyarı Sorunları",
     "severityInfo": "Bilgi Sorunları",
-    "summary": "{{n}} bölüm · {{c}} kolon",
     "emptyCols": "Solda bir tablo seç — kolonları buraya yüklensin.",
     "errorNoColumn": "En az bir kolon seç.",
     "errorNoTable": "En az bir tablo seç.",
-    "successMsg": "{{count}} satır {{path}} konumuna aktarıldı",
+    "successMsg_one": "{{formatted}} satır {{path}} dosyasına aktarıldı",
+    "successMsg_other": "{{formatted}} satır {{path}} dosyasına aktarıldı",
     "failedPrefix": "Dışa aktarım başarısız",
-    "gridFailed": "Dışa aktarma başarısız: {{detail}}"
+    "gridFailed": "Dışa aktarma başarısız: {{detail}}",
+    "summarySections_one": "{{count}} bölüm",
+    "summarySections_other": "{{count}} bölüm",
+    "summaryColumns_one": "{{count}} kolon",
+    "summaryColumns_other": "{{count}} kolon"
   },
   "app": {
     "dropMissingPath": "{{name}} için bırakılan yol okunamadı. Bunun yerine Dosya → Proje Aç kullan.",
@@ -283,9 +291,12 @@
     "crashRecovery": "FreeCrawl, temiz bitmemiş bir önceki crawl tespit etti:\n\n  Mod: {{mode}}\n  Başlangıç URL: {{seed}}\n  Bekleyen URL: {{pending}}\n\nCrawl kaldığı yerden devam etsin mi?\n\nDevam etmek için Tamam, recovery durumunu iptal edip baştan başlamak için İptal'e tıkla.",
     "deleteDomainPrompt": "GDPR Alan Temizleme — silinecek host'u gir (büyük/küçük harf duyarsız, tam eşleşme).\n\nÖrnek: example.com  ·  blog.example.com\n\nGeri alınamaz. Yedek istiyorsan önce Projeyi Farklı Kaydet.",
     "deleteDomainConfirm": "\"{{host}}\" üzerindeki tüm URL'leri, linklerini, başlıklarını, görsellerini ve kaynak snapshot'larını sil?\n\nBu işlem geri alınamaz.",
-    "deleteDomainResult": "{{host}} alanından {{urls}} URL satırı silindi (ve {{links}} bağlı link).",
+    "deleteDomainResult_one": "{{host}} adresinden {{formatted}} URL satırı silindi.",
+    "deleteDomainResult_other": "{{host}} adresinden {{formatted}} URL satırı silindi.",
     "clearAllConfirm": "Aktif projedeki TÜM veriler temizlensin mi?\n\nHer URL, link, görsel, başlık, kaynak snapshot, sitemap ve issue silinecek. Geri alınamaz — yedek istiyorsan önce Projeyi Farklı Kaydet.",
-    "clearFailed": "Tarama temizlenemedi: {{detail}}"
+    "clearFailed": "Tarama temizlenemedi: {{detail}}",
+    "deleteDomainLinks_one": "Bunlarla birlikte {{formatted}} ilişkili bağlantı da kaldırıldı.",
+    "deleteDomainLinks_other": "Bunlarla birlikte {{formatted}} ilişkili bağlantı da kaldırıldı."
   },
   "infoTip": {
     "moreInfo": "Daha fazla bilgi",
@@ -346,7 +357,9 @@
       "sitemapOrphans": "Sitemap Yetimleri (Top 1000)",
       "orphanCrossSource": "Yetim Sayfalar — Sitemap + GSC + GA4 (Top 1000)",
       "serverHeaders": "Sunucu Stack (Server Header)",
-      "topWords": "En Çok Kelime (Başlık + Meta + H1, Top 100)"
+      "topWords": "En Çok Kelime (Başlık + Meta + H1, Top 100)",
+      "pagesOverLinkLimit": "Sayfa Başına Maks. Link Sınırını Aşan Sayfalar",
+      "mobileParity": "Mobil / Masaüstü Farkları"
     },
     "groupAtDepth": "Şu derinlikte grupla",
     "depthTopLevel": "1 (üst seviye)",
@@ -364,7 +377,8 @@
     "keyTracker": "İzleyici",
     "keyPosition": "Konum",
     "keyServer": "Sunucu",
-    "keyWord": "Kelime"
+    "keyWord": "Kelime",
+    "includeBody": "Gövde metnini dahil et (daha yavaş)"
   },
   "sitemap": {
     "title": "Sitemap Doğrulayıcı",
@@ -374,8 +388,10 @@
     "walkInfo": "İç içe sitemap-index girdilerini 3 derinlik / 100K URL'e kadar gezer.",
     "valid": "Geçerli",
     "truncated": "(kesildi)",
-    "findingsCount": "{{n}} bulgu",
-    "urlsParsed": "URL parse edildi",
+    "findingsCount_one": "{{count}} bulgu",
+    "findingsCount_other": "{{count}} bulgu",
+    "urlsParsed_one": "{{formatted}} URL ayrıştırıldı",
+    "urlsParsed_other": "{{formatted}} URL ayrıştırıldı",
     "sitemapsTried": "Denenen sitemap",
     "sitemapsParsed": "Parse edilen sitemap",
     "urlEntries": "URL girdisi",
@@ -404,8 +420,10 @@
     "charsCount": "{{n}} karakter",
     "lintPrompt": "Söz dizimini denetlemek için yukarıya bir robots.txt taslağı yapıştır.",
     "noIssues": "Söz dizimi hatası bulunamadı.",
-    "errorCount": "{{n}} hata",
-    "warningCount": "{{n}} uyarı"
+    "errorCount_one": "{{count}} hata",
+    "errorCount_other": "{{count}} hata",
+    "warningCount_one": "{{count}} uyarı",
+    "warningCount_other": "{{count}} uyarı"
   },
   "spiderCrawl": {
     "intro": "Hangi bağlantı türlerinin taranacağını ve saklanacağını seçin. Tara, hedefi çeker ve kendi satırını oluşturur; Sakla ise sayfanın bildirdiğini kaydeder, böylece ilgili sekme dolu gelir. Bu ayarlar kaç URL'in keşfedileceğini, taranacağını ve raporlanacağını belirler.",
@@ -579,10 +597,19 @@
       "importTitle": "Mevcut kuralları JSON dosyasıyla değiştir. {rules: [...]} sarmalı veya çıplak dizi kabul edilir.",
       "exportTitle": "Mevcut kural setini JSON dosyasına kaydet. Versiyonlu sarmal, kaynak kontrolüne commit'lenebilir.",
       "exportDisabled": "Dışa aktarmadan önce en az bir kural ekle.",
-      "importConfirm": "Mevcut {{existing}} kural, içe aktarılan {{incoming}} kuralla değiştirilsin mi?",
-      "importSkipped": "{{ok}} kural içe aktarıldı. {{skipped}} kayıt atlandı (geçersiz şema veya 10 kuralın üzerinde).",
+      "importConfirm_one": "Mevcut kural seti ({{existing}}) yerine {{count}} kural içe aktarılsın mı?",
+      "importConfirm_other": "Mevcut kural seti ({{existing}}) yerine {{count}} kural içe aktarılsın mı?",
+      "importSkipped_one": "{{count}} kural içe aktarıldı. {{skipped}} kayıt atlandı (geçersiz biçim ya da 10 kural sınırının üstü).",
+      "importSkipped_other": "{{count}} kural içe aktarıldı. {{skipped}} kayıt atlandı (geçersiz biçim ya da 10 kural sınırının üstü).",
       "importFailedAlert": "İçe aktarma başarısız: {{error}}",
-      "noValidRules": "Dosyada geçerli kural bulunamadı."
+      "noValidRules": "Dosyada geçerli kural bulunamadı.",
+      "templates": "Şablon ekle…",
+      "template_price": "Ürün fiyatı + para birimi (JSON-LD offers)",
+      "template_author": "Yazar adı (JSON-LD, meta yedeği)",
+      "template_published": "Yayın / güncelleme tarihi",
+      "template_stock": "Stok durumu (JSON-LD offers)",
+      "template_rating": "Değerlendirme puanı + sayısı (JSON-LD aggregateRating)",
+      "template_sku": "SKU + marka (JSON-LD Product)"
     },
     "urlRewriting": {
       "intro": "URL'ler yinelemeden ve kuyruğa alınmadan önce uygulanan normalleştirme.",
@@ -701,12 +728,19 @@
       "hreflang": "Hreflang karşılıklılığı + tutarsız lang",
       "nearDuplicate": "Yakın-yinelenen kümeleme",
       "paginationGap": "Sayfalama ordinal-boşluk tespiti",
-      "materialiseIssues": "Ağır issue sayaçlarını materyalize et"
+      "materialiseIssues": "Ağır issue sayaçlarını materyalize et",
+      "mobileParity": "Mobil / masaüstü parite sondası",
+      "mobileParitySample": "Yeniden çekilecek sayfa (0 = tümü)"
     },
     "issues": {
-      "intro": "Issue başına kontrol on/off toggle'ları.",
-      "v2Prefix": "V2'de Gelecek.",
-      "v2Body": "Bugün her issue kontrolü koşulsuz çalışır ve kenar çubuğunda görünür. Plan, proje başına belirli kontrolleri susturmana izin vermek (örn. kasıtlı olarak yapan bir CMS'te \"Description = Title\"ı kapat). O gelene kadar, umursamadığın satırları kenar çubuğu grubunu daraltarak gizle veya her sekmedeki Advanced filtreyle dışla."
+      "intro": "Bu proje için tek tek issue kontrollerini kapatın — örneğin bunu bilerek yapan bir CMS'te \"Açıklama = Başlık\".",
+      "effect": "Kapatılan bir kontrol kenar çubuğundan, genel bakış sayaçlarından, HTML/PDF raporlarından, toplu dışa aktarmadan ve tarama-bitti webhook'undan kaybolur. Hiçbir şey silinmez — sonuçlarını yeniden görmek için kontrolü tekrar açın.",
+      "search": "Kontrolleri filtrele…",
+      "enableAll": "Tümünü aç",
+      "disableAll": "Tümünü kapat",
+      "summary": "Açık: {{on}} / {{total}}",
+      "groupSummary": "{{on}} / {{total}} açık",
+      "noMatch": "Filtrenizle eşleşen kontrol yok."
     },
     "advanced": {
       "intro": "Daha düşük seviyeli limitler ve link-takip toggle'ları. Varsayılanlar tipik SEO denetimleri için ayarlandı — sebebini bilmiyorsan dokunma.",
@@ -785,6 +819,19 @@
       "empty": "Henüz host-bazlı override yok — aşağıdan ekle.",
       "addRule": "Host bazlı UA kuralı ekle",
       "removeRule": "Kuralı kaldır"
+    },
+    "reports": {
+      "intro": "HTML ve PDF raporlarını markalayın (Dosya → HTML / PDF Rapor Dışa Aktar). Değişiklikler bir sonraki dışa aktarmada geçerli olur; sade FreeCrawl başlığı için her şeyi boş bırakın.",
+      "brandName": "Marka adı",
+      "brandNamePlaceholder": "Acme SEO Ajansı",
+      "preparedBy": "Hazırlayan",
+      "accentColor": "Vurgu rengi",
+      "reset": "Sıfırla",
+      "logo": "Logo",
+      "noLogo": "Yok",
+      "chooseLogo": "Seç…",
+      "removeLogo": "Kaldır",
+      "logoHint": "1 MB'a kadar PNG, JPEG, SVG veya WebP; rapor başlığında en fazla 44 px yükseklikte gösterilir."
     }
   },
   "compare": {
@@ -839,7 +886,19 @@
     "hintDisabled": "Devre dışı — zamanlamayı kurmak için \"Etkin\"i işaretle ve Kaydet.",
     "hintEnabled": "Bir sonraki çalışma zamanını hesaplamak için Kaydet. Zamanlama yalnızca FreeCrawl açıkken çalışır.",
     "confirmRemove": "Bu projenin zamanlanmış crawl'ı kaldırılsın mı?",
-    "saving": "Kaydediliyor…"
+    "saving": "Kaydediliyor…",
+    "afterTitle": "Her zamanlanmış taramadan sonra",
+    "afterExport": "Dışa aktarma",
+    "exportNone": "Hiçbir şey",
+    "exportBulk": "Toplu dışa aktarma (CSV klasörü)",
+    "exportSeoAudit": "SEO Denetimi (Screaming Frog düzeni)",
+    "exportHtml": "HTML rapor",
+    "exportPdf": "PDF rapor",
+    "outputDir": "Klasör",
+    "browse": "Gözat…",
+    "outputDirHint": "Bir klasör seçin — her çalışma orada zaman damgalı bir alt klasöre yazar.",
+    "sheets": "Tüm URL'leri yeni bir Google E-Tablolar dosyasına da gönder",
+    "webhook": "Proje webhook'una dosya listesini bildir (Ayarlar → Webhook)"
   },
   "serp": {
     "noTitle": "(başlık yok)",
@@ -861,7 +920,8 @@
     "notInCluster": "Bu URL bir yakın-yinelenen kümesinin parçası değil. Bitmiş bir crawl üzerinde Crawl Analysis çalıştır veya Settings → Duplicates'da Hamming eşiğini düşürerek yakın-yinelenen sınırını genişlet.",
     "noOtherMembers": "Bu kümede başka üye yok. (Küme boyutu {{n}}.)",
     "cluster": "Küme",
-    "membersTotal": "Toplam {{n}} üye",
+    "membersTotal_one": "toplam {{count}} üye",
+    "membersTotal_other": "toplam {{count}} üye",
     "hammingHint": "(Bu URL'den Hamming mesafesi — düşük = daha benzer)",
     "loadingClusters": "Yakın-yinelenen kümeleri yükleniyor…",
     "noClustersTitle": "Yakın-yinelenen küme yok",
@@ -897,7 +957,8 @@
     "subtitle": "Crawl başlatmadan önce tüm kuralları tek bir URL üzerinde çalıştırarak selector / regex'leri doğrula.",
     "noRules": "Önizleme yapmadan önce en az bir kural (ad + selector ile) ekle.",
     "runTitle": "URL'i çek ve yanıta her kuralı uygula.",
-    "run": "Önizlemeyi çalıştır ({{n}} kural)",
+    "run_one": "Önizlemeyi çalıştır ({{count}} kural)",
+    "run_other": "Önizlemeyi çalıştır ({{count}} kural)",
     "running": "Çalışıyor…",
     "idle": "Yukarıya bir URL gir ve her kuralı uygulamak için Önizlemeyi çalıştır'a bas.",
     "fetching": "URL çekiliyor ve yanıt parse ediliyor…",
@@ -908,10 +969,17 @@
     "colValue": "Değer"
   },
   "structured": {
-    "blocks": "blok",
+    "blocks_one": "JSON-LD bloğu",
+    "blocks_other": "JSON-LD bloğu",
     "invalid": "{{n}} geçersiz",
     "missingRequired": "{{n}} gerekli eksik",
     "missingRecommended": "{{n}} önerilen eksik",
+    "unknownTypes": "{{n}} hatalı @type",
+    "findingsTitle": "Doğrulama bulguları",
+    "findingMissingRequired": "zorunlu eksik",
+    "findingMissingRecommended": "önerilen eksik",
+    "findingUnknownType": "hatalı @type",
+    "findingsLegacy": "Hangi özelliklerin eksik olduğu bir sonraki taramadan itibaren kaydedilir — ayrıntıları görmek için bu URL’yi yeniden tarayın.",
     "microdataItems": "microdata öğesi",
     "rdfaAttrs": "RDFa özniteliği",
     "empty": "Bu sayfada yapısal veri yok (JSON-LD, microdata veya RDFa yok).",
@@ -970,7 +1038,8 @@
     "emptySuffix": "elementi yok). Başlıksız sayfalar ekran okuyucular için zor, uzun-form sorgularda kötü sıralanabilir.",
     "headings": "başlık",
     "skipped": "Atlandı: önceki h{{n}}",
-    "skippedCount": "{{n}} seviye atlandı",
+    "skippedCount_one": "{{count}} atlanan seviye",
+    "skippedCount_other": "{{count}} atlanan seviye",
     "capped": "(200 ile sınırlı)",
     "emptyHeading": "(boş başlık)",
     "colLevel": "Seviye",
@@ -1085,6 +1154,8 @@
     "cardWordCount": "Kelime Sayısı"
   },
   "imagesTab": {
+    "minSizePlaceholder": "Min boyut (KB)",
+    "minSizeTitle": "Yalnızca en az bu boyuttaki görseller. Boyutlar tarama sonrası görsel boyut sondasından ya da kendi URL'si olarak taranan görsellerden gelir; bir değer girildiğinde boyutu bilinmeyen görseller gizlenir.",
     "searchPlaceholder": "Görsel URL / alt ara…",
     "missingAltOnly": "Yalnızca Alt eksik",
     "emptyAltOnly": "Yalnızca boş Alt",
@@ -1215,7 +1286,8 @@
     "statusMismatch": "dil?",
     "statusMismatchTip": "Bulgular atıldı — sayfa, denetlendiği dilde yazılmış görünmüyor.",
     "langConflict": "Sayfa lang=\"{{declared}}\" bildiriyor ama metni {{detected}} olarak okunuyor. Denetim {{used}} ile yapıldı.",
-    "unsupportedBanner": "{{count}} sayfa denetlenmeden bırakıldı: LanguageTool’un {{langs}} için kuralı yok ve bu metni yerine geçecek bir dille değerlendirmek neredeyse her kelimeye hata bastırırdı. Yanlış bir ayar yok — hiçbir ayar bu motora {{langs}} denetletemez.",
+    "unsupportedBanner_one": "{{count}} sayfa denetlenmedi: LanguageTool {{langs}} için kural içermiyor ve bu metni yerine başka bir dille değerlendirmek neredeyse her kelimede hata bildirirdi. Burada yanlış yapılandırılmış bir şey yok — hiçbir ayar bu motoru {{langs}} denetlemeye ikna edemez.",
+    "unsupportedBanner_other": "{{count}} sayfa denetlenmedi: LanguageTool {{langs}} için kural içermiyor ve bu metni yerine başka bir dille değerlendirmek neredeyse her kelimede hata bildirirdi. Burada yanlış yapılandırılmış bir şey yok — hiçbir ayar bu motoru {{langs}} denetlemeye ikna edemez.",
     "statusOkLocal": "tamam*",
     "statusOkLocalTip": "Çevrimdışı sözlükle denetlendi: yalnızca yazım, dilbilgisi yok. LanguageTool bu dil için kural içermiyor."
   },
@@ -1257,7 +1329,8 @@
     "checkFailed": "Denetim başarısız",
     "skipped": "Atlandı — sayfada denetlenecek kadar düzyazı yok.",
     "clean": "Yazım veya dilbilgisi sorunu bulunamadı.",
-    "summary": "{{n}} bulgu",
+    "summary_one": "{{count}} bulgu",
+    "summary_other": "{{count}} bulgu",
     "language": "Dil",
     "suggestions": "Öneriler",
     "colType": "Tür",
@@ -1325,8 +1398,10 @@
     "presetMobile": "Sayfa Mobil Uyumlu Değil",
     "presetAmp": "AMP URL Geçersiz",
     "presetRich": "Zengin Sonuç Geçersiz",
-    "newUrlsFound": "{{n}} URL Search Console'da görünüyor ama crawl'da bulunamadı.",
-    "newUrlsQueued": "Search Console'da keşfedilen {{n}} yeni URL crawl'a eklendi.",
+    "newUrlsFound_one": "{{count}} URL Search Console'da görünüyor ama crawl tarafından bulunmadı.",
+    "newUrlsFound_other": "{{count}} URL Search Console'da görünüyor ama crawl tarafından bulunmadı.",
+    "newUrlsQueued_one": "Search Console'da keşfedilen {{count}} yeni URL crawl'a eklendi.",
+    "newUrlsQueued_other": "Search Console'da keşfedilen {{count}} yeni URL crawl'a eklendi.",
     "crawlNewUrls": "{{n}} yeni URL'yi crawl et",
     "accountTitle": "Bu projenin hangi bağlı Google hesabını raporlayacağı. Her hesap kendi verisini ayrı saklar."
   },
@@ -1505,7 +1580,8 @@
     "totalLabel": "Toplam satır",
     "noBrokenLinks": "Kırık link yok",
     "noBrokenLinksHint": "Kırık linkleri görmek için harici linkleri de içeren bir crawl çalıştır.",
-    "cellsSelected": "{{n}} hücre seçili",
+    "cellsSelected_one": "{{formatted}} hücre seçildi",
+    "cellsSelected_other": "{{formatted}} hücre seçildi",
     "noBrokenLinksBody": "Taramadaki her bağlantı sağlıklı bir yanıt döndürüyor."
   },
   "urlsTab": {
@@ -1547,11 +1623,13 @@
     "statusSelectedCells": "Seçili Hücreler:",
     "statusSelectedColumns": "Seçili Sütunlar:",
     "copying": "Kopyalanıyor…",
-    "copiedCells": "{{n}} hücre kopyalandı",
+    "copiedCells_one": "{{formatted}} hücre kopyalandı",
+    "copiedCells_other": "{{formatted}} hücre kopyalandı",
     "copiedNothing": "Kopyalanacak bir şey yok",
     "rowHeader": "Satır",
     "rowNumberTitle": "Satır numarası",
     "rowSelectHint": "Satır seçmek için tıkla · birden çok satır için sürükle",
+    "gridAriaLabel": "URL tablosu",
     "resizeHint": "Yeniden boyutlandırmak için sürükle · sıfırlamak için çift tıkla",
     "sortByColumn": "Bu sütuna göre sırala",
     "columnSortedAscHint": "Artan sıralandı — çevirmek için tıkla",
@@ -1578,8 +1656,6 @@
       "title": "Dil",
       "intro": "Arayüz dilini seç. Anında uygulanır.",
       "label": "Arayüz dili",
-      "en": "English",
-      "tr": "Türkçe",
       "note": "Bazı derin paneller ve diyaloglar, çeviri kapsamı genişletilirken hala İngilizce görünebilir."
     },
     "spelling": {
@@ -1590,11 +1666,13 @@
       "levelPicky": "Titiz — stil, tipografi ve gereksiz uzunluğu da işaretler",
       "dictionaryLabel": "Özel Sözlük",
       "dictionaryHint": "Asla işaretlenmeyecek kelimeler — marka adları, ürün adları, sektör jargonu. Her satıra bir tane veya virgülle ayrılmış. Büyük/küçük harf duyarsız.",
-      "dictionaryCount": "{{n}} kelime yok sayılıyor",
+      "dictionaryCount_one": "{{count}} kelime yok sayılıyor",
+      "dictionaryCount_other": "{{count}} kelime yok sayılıyor",
       "languageLabel": "Dil",
       "languageHint": "Algılama bir siteyi yanlış okumadıkça otomatik bırakın. Bir dil sabitlemek her sayfayı o dilde denetler — html[lang] değeri yanlış olan tek dilli siteler için yararlıdır ve inandırıcı olmayan gürültülü sonuçları atan güvenlik kontrolünü de kapatır.",
       "languageAuto": "Otomatik — her sayfanın metninden algıla (önerilen)",
-      "languageCount": "Bu uç nokta {{n}} dil varyantı sunuyor. Bu listenin dışındaki diller — Türkçe, Macarca, Çekçe ve diğerleri — LanguageTool ile hiç denetlenemez."
+      "languageCount_one": "Bu uç nokta {{count}} dil varyantı sunuyor. Bu listenin dışındaki diller — Türkçe, Macarca, Çekçe ve diğerleri — LanguageTool tarafından hiç denetlenemez.",
+      "languageCount_other": "Bu uç nokta {{count}} dil varyantı sunuyor. Bu listenin dışındaki diller — Türkçe, Macarca, Çekçe ve diğerleri — LanguageTool tarafından hiç denetlenemez."
     },
     "storage": {
       "title": "Depolama",
@@ -1609,7 +1687,10 @@
       "placeholder": "(Sistem Belgeler klasörü)",
       "resolvedPath": "Çözümlenen yol",
       "resetTitle": "OS Belgeler klasörüne sıfırla",
-      "note": "Aktif crawl verisi siz Farklı Kaydet diyene kadar uygulamanın kullanıcı veri dizininde durur — yukarıdaki yol yalnızca Farklı Kaydet'in nereden başlayacağını belirler. Bunu değiştirmek mevcut proje dosyalarını taşımaz."
+      "note": "Aktif crawl verisi siz Farklı Kaydet diyene kadar uygulamanın kullanıcı veri dizininde durur — yukarıdaki yol yalnızca Farklı Kaydet'in nereden başlayacağını belirler. Bunu değiştirmek mevcut proje dosyalarını taşımaz.",
+      "autoSaveTitle": "Toplu Kaydetme",
+      "autoSaveLabel": "Projeyi her N taranan URL'de otomatik kaydet — 0 = kapalı",
+      "autoSaveHint": "Tarama sürerken açık .seoproject dosyası bu kadar URL daha tarandığında yeniden yazılır; çökme veya elektrik kesintisi en fazla bir partiye mal olur. Yalnızca proje bir dosyaya kaydedildikten sonra geçerlidir; en az {{min}}. Her kayıt tam bir anlık görüntüdür, büyük sitelerde değeri binlerde tutun."
     },
     "agents": {
       "title": "Ajan Oturumları (MCP)",
@@ -1649,12 +1730,41 @@
       "url": "Uç nokta URL'si",
       "headers": "Başlıklar",
       "headersHint": "Satır başına Ad: değer. Şifreli saklanır, maskeli gösterilir.",
-      "handshake": "{{name}} {{version}} · MCP {{protocol}} · {{n}} araç",
+      "handshake_one": "{{name}} {{version}} · MCP {{protocol}} · {{count}} araç",
+      "handshake_other": "{{name}} {{version}} · MCP {{protocol}} · {{count}} araç",
       "toolPermissions": "Araç izinleri",
       "policyAsk": "Sor",
       "policyAlways": "Her zaman izin ver",
       "policyNever": "Asla izin verme",
       "add": "Sunucu ekle"
+    },
+    "theme": {
+      "intro": "Arayüzün renk temasını seçin. Tüm pencerelere anında uygulanır ve sonraki açılış için hatırlanır.",
+      "label": "Renk teması",
+      "dark": "Koyu (varsayılan)",
+      "light": "Açık",
+      "customCssNote": "Uygulamanın kullanıcı-veri klasöründeki custom-theme.css dosyası her iki temanın üzerine yine enjekte edilir."
+    },
+    "system": {
+      "intro": "FreeCrawl'ın şu an kullandığı kaynaklar ve üzerinde çalıştığı ortam. İki saniyede bir yenilenir.",
+      "memory": "Bellek",
+      "rss": "Süreç (RSS)",
+      "heap": "JS heap (kullanılan / ayrılan)",
+      "external": "Yerel tamponlar",
+      "systemMemory": "Sistem belleği (kullanılan / toplam)",
+      "perUrl": "Taranan URL başına",
+      "projected": "1M URL için öngörü",
+      "limitNote": "Taramayı duraklatan yumuşak bellek sınırı Donanım altında.",
+      "environment": "Ortam",
+      "version": "FreeCrawl",
+      "platform": "Platform",
+      "cpus": "CPU çekirdeği",
+      "uptime": "Çalışma süresi",
+      "storageMode": "Depolama modu",
+      "storageDisk": "Disk",
+      "paths": "Yollar",
+      "userData": "Kullanıcı verisi",
+      "logs": "Günlükler"
     }
   },
   "logAnalyzer": {
@@ -1690,7 +1800,8 @@
     "cardVerified": "Doğrulanmış Bot İsabeti",
     "cardUrls": "Benzersiz URL",
     "cardRange": "Tarih Aralığı",
-    "filesIngested": "{{n}} dosya içe aktarıldı",
+    "filesIngested_one": "{{count}} dosya içe alındı",
+    "filesIngested_other": "{{count}} dosya içe alındı",
     "tabUrls": "URL İsabetleri",
     "tabBots": "Botlar",
     "tabStatus": "Durum Kodları",
@@ -1735,14 +1846,14 @@
     "colDepth": "Derinlik",
     "discoveryHint": "Logda görülen ama crawl'ın hiç ulaşmadığı URL'ler. Çalışan bir crawl'a tohum olarak ekleyin.",
     "seedBtn": "Aktif crawl'a ekle",
-    "seeded": "{{n}} URL aktif crawl'a eklendi",
+    "seeded_one": "Aktif crawl'a {{count}} URL eklendi",
+    "seeded_other": "Aktif crawl'a {{count}} URL eklendi",
     "seedNoActive": "Aktif crawl yok — önce bir crawl başlatın, sonra ekleyin.",
     "seedNoOrigin": "Temel origin türetmek için henüz taranmış URL yok.",
     "seedNone": "Eklenecek yeni bir şey yok.",
     "tabThreats": "Şüpheli İstekler",
     "cardThreats": "Şüpheli İstek",
     "threatIntro": "Saldırı ya da zafiyet taraması gibi görünen istekler — SQL enjeksiyonu, XSS, dizin geçişi, komut enjeksiyonu, tarayıcı yolları, hassas dosya çekme — gönderen IP ve çözülmüş yük ile birlikte.",
-    "threatStats": "{{ips}} IP'den {{hits}} işaretli istek",
     "threatServed": "{{n}} tanesi 2xx aldı — sunucu bu yükleri işledi; sadece log'a değil uygulamaya bakın",
     "threatServedNone": "hiçbiri 2xx almadı",
     "threatCapHit": "Dosya başına üst sınıra ulaşıldı — bu liste eksik.",
@@ -1768,7 +1879,8 @@
     "threatCopyPlain": "Düz IP listesi",
     "threatCopyNginx": "nginx deny kuralları",
     "threatCopyApache": "Apache Require not ip",
-    "threatCopied": "{{n}} IP panoya kopyalandı (arama motoru altyapısı hariç)",
+    "threatCopied_one": "{{count}} IP panoya kopyalandı (arama motoru altyapısı hariç)",
+    "threatCopied_other": "{{count}} IP panoya kopyalandı (arama motoru altyapısı hariç)",
     "threatCopyFailed": "Panoya kopyalanamadı",
     "threatCopyEmpty": "Kopyalanacak IP yok",
     "colTime": "Zaman",
@@ -1792,7 +1904,12 @@
     "urlStatusAll": "Tüm yanıt kodları",
     "urlStatus4xx": "4xx (hatalar)",
     "urlStatus5xx": "5xx (sunucu hataları)",
-    "threatChipIps": "{{n}} farklı IP"
+    "threatChipIps_one": "{{formatted}} ayrı IP",
+    "threatChipIps_other": "{{formatted}} ayrı IP",
+    "threatStatsHits_one": "{{formatted}} işaretli istek",
+    "threatStatsHits_other": "{{formatted}} işaretli istek",
+    "threatStatsIps_one": "{{formatted}} IP adresinden",
+    "threatStatsIps_other": "{{formatted}} IP adresinden"
   },
   "detailExport": {
     "label": "Dışa Aktar",
@@ -1806,7 +1923,8 @@
     "builtinToolsHint": "Açık crawl üzerinde salt-okunur sorgular. Onay istemeden çalışır.",
     "mcpServers": "MCP sunucuları",
     "noServers": "Henüz MCP sunucusu tanımlı değil. Ayarlar → MCP Sunucuları'ndan ekleyin.",
-    "toolCount": "{{n}} araç",
+    "toolCount_one": "{{count}} araç",
+    "toolCount_other": "{{count}} araç",
     "manageServers": "MCP sunucularını yönet",
     "tokens": "{{in}} giriş / {{out}} çıkış token",
     "clear": "Temizle",

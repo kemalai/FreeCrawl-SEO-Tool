@@ -23,6 +23,14 @@ const TICK_THROTTLE_MS = 100;
 // arriving (crawl finished, manual DB edits, etc.). Long interval —
 // the progress-event path drives the in-crawl experience.
 const LIVE_REFRESH_MS = 5000;
+// Rows re-queried around the visible span on each live tick, on top of
+// what the virtualizer currently shows. The tick used to re-fetch every
+// whole chunk the viewport touched — 500 to 1000 full-width rows, up to
+// ten times a second — and the renderer spent its frames deserialising
+// and reconciling rows nobody could see, which on a 25k+ crawl left the
+// table painting black behind a scroll. The viewport plus this margin is
+// ~150 rows; everything else refreshes when it scrolls into view.
+const TICK_PAD_ROWS = 40;
 // After a query fails (a reader timeout, most likely), hold every
 // automatic re-issue — live tick, scroll-driven chunk fetch — for this
 // long. Each of those used to fire again immediately, and against a
@@ -40,6 +48,13 @@ export interface LazyRowsOpts {
   filter?: AdvancedFilter;
   /** Bump to force a full rebuild (e.g. row removed via context menu). */
   refreshKey?: unknown;
+  /**
+   * True while the user is scrolling. A live tick that lands mid-scroll
+   * competes with the rows the scroll needs painted, so the tick waits
+   * for the next event instead; the rows it would have replaced are
+   * leaving the viewport anyway.
+   */
+  isScrolling?: () => boolean;
 }
 
 export interface LazyRowsState {
@@ -97,6 +112,9 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
   const chunkOrder = useRef<number[]>([]);
   const fetching = useRef(new Set<number>());
   const activeRange = useRef<{ first: number; last: number }>({ first: 0, last: 0 });
+  /** Visible row-index span, as the virtualizer last reported it. */
+  const activeRows = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  const isScrolling = opts.isScrolling;
   const resetToken = useRef(0);
 
   // Serialising the filter keeps it part of the cache-key string so
@@ -240,24 +258,26 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
     let lastTickTs = 0;
     const tick = async () => {
       if (inFlight || inBackoff()) return;
+      if (isScrolling?.()) return;
       inFlight = true;
       lastTickTs = Date.now();
       const token = resetToken.current;
       try {
-        const { first, last } = activeRange.current;
-        const spanCount = Math.max(1, last - first + 1);
+        // Only the rows on screen (plus a margin) — one consistent
+        // snapshot of that span, written into the chunks that already
+        // hold it. Chunks the viewport has not reached are left to
+        // `fetchChunk`, which loads them whole when they come into view.
+        const { start, end } = activeRows.current;
+        const from = Math.max(0, start - TICK_PAD_ROWS);
+        const count = Math.max(1, end + TICK_PAD_ROWS - from + 1);
         try {
-          // Atomic snapshot of the visible span: rows + total in one query
-          // so a mid-crawl insert can't shift a row across a chunk boundary
-          // and duplicate its key (the row-overlap bug). See queryRange.
-          const { rows, total: t } = await queryRange(
-            first * CHUNK_SIZE,
-            spanCount * CHUNK_SIZE,
-          );
+          const { rows, total: t } = await queryRange(from, count);
           if (cancelled || token !== resetToken.current) return;
           setTotal(t);
-          for (let c = 0; c < spanCount; c++) {
-            storeChunk(first + c, rows.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE));
+          for (let i = 0; i < rows.length; i++) {
+            const index = from + i;
+            const chunk = chunks.current.get(Math.floor(index / CHUNK_SIZE));
+            if (chunk) chunk[index % CHUNK_SIZE] = rows[i]!;
           }
           setError(null);
         } catch (err) {
@@ -346,6 +366,7 @@ export function useLazyUrlRows(opts: LazyRowsOpts): LazyRowsState {
       const first = Math.max(0, Math.floor(start / CHUNK_SIZE));
       const last = Math.max(0, Math.floor(end / CHUNK_SIZE));
       activeRange.current = { first, last };
+      activeRows.current = { start: Math.max(0, start), end: Math.max(0, end) };
       // Pre-fetch a window of neighbouring chunks so a fast scroll
       // doesn't show "..." placeholders while the next chunk loads —
       // by the time the virtualizer scrolls into the next chunk's

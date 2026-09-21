@@ -68,6 +68,8 @@ export {
 } from './robots.js';
 export {
   aggregateTopWords,
+  createTopWordsAggregator,
+  type TopWordsAggregator,
   tokenizeForTopWords,
   type TopWordsRow,
   type TopWordsOptions,
@@ -81,7 +83,20 @@ export {
   type SitemapExportResult,
 } from './sitemap-export.js';
 export { previewExtractionRules } from './extraction.js';
-export { exportHtmlReport, type HtmlReportOptions } from './html-report.js';
+export { exportHtmlReport, renderHtmlReport, type HtmlReportOptions } from './html-report.js';
+export {
+  fetchForParity,
+  diffParity,
+  type ParityBaseline,
+  type ParityFetchResult,
+} from './mobile-parity-probe.js';
+export {
+  runSeoAuditExport,
+  seoAuditRow,
+  SEO_AUDIT_HEADERS,
+  SEO_AUDIT_FILES,
+  type SeoAuditExportResult,
+} from './seo-audit-export.js';
 export {
   analyseCookies,
   extractSetCookies,
@@ -89,6 +104,7 @@ export {
 } from './cookies.js';
 export {
   postCrawlCompleteWebhook,
+  postWebhookJson,
   type WebhookPayload,
   type WebhookResult,
 } from './webhook.js';

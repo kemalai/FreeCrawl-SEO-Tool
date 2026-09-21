@@ -6,6 +6,7 @@ import { VisualizationView } from './VisualizationView.js';
 import { LogAnalyzerView } from './LogAnalyzerView.js';
 import './styles.css';
 import './i18n/index.js';
+import './theme.js';
 
 // Popup windows load the same renderer bundle with a query flag so the
 // entry point branches on which top-level component to mount. Keeps the

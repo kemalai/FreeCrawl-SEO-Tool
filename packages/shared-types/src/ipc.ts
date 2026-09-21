@@ -1,4 +1,5 @@
 import type { ExportDatasetKey } from './export-datasets.js';
+import type { UiTheme } from './theme.js';
 import type {
   AdvancedFilter,
   BrokenLinkRow,
@@ -15,6 +16,7 @@ import type {
   ExtractionRulesExportResult,
   ExtractionRulesImportResult,
   ImageRow,
+  ImagesSortKey,
   Indexability,
   OverviewCounts,
   UrlCategory,
@@ -134,6 +136,8 @@ export const IPC = {
   agentsList: 'agents:list',
   agentsClose: 'agents:close',
   agentsChanged: 'agents:changed',
+  /** Main → every window: the `uiTheme` pref changed (menu or Settings). */
+  themeChanged: 'theme:changed',
   urlsQuery: 'urls:query',
   urlDetailGet: 'urls:detail',
   urlSourceGet: 'urls:source',
@@ -179,6 +183,9 @@ export const IPC = {
   /** Discard the checkpoint without resuming. */
   crashRecoveryDiscard: 'crash:recovery-discard',
   exportHtmlReport: 'export:html-report',
+  exportPdfReport: 'export:pdf-report',
+  exportSeoAudit: 'export:seo-audit',
+  pickImageFile: 'app:pick-image-file',
   exportBulk: 'export:bulk',
   compareLoad: 'compare:load',
   graphSnapshot: 'graph:snapshot',
@@ -197,6 +204,8 @@ export const IPC = {
   /** Returns live process + system memory stats for the in-app
    * memory monitor (status bar). One-shot pull; renderer polls. */
   memoryStats: 'app:memory-stats',
+  /** Static-ish runtime facts for Settings ▸ System (versions, paths, CPUs). */
+  systemInfo: 'app:system-info',
   prefsGetAllSync: 'prefs:get-all-sync',
   prefsSet: 'prefs:set',
   prefsDelete: 'prefs:delete',
@@ -265,6 +274,8 @@ export const IPC = {
   reportsDepthHistogram: 'reports:depth-histogram',
   reportsResponseTimeHistogram: 'reports:response-time-histogram',
   reportsTopUrls: 'reports:top-urls',
+  reportsPagesOverLinkLimit: 'reports:pages-over-link-limit',
+  reportsMobileParity: 'reports:mobile-parity',
   reportsExternalDomainHealth: 'reports:external-domain-health',
   reportsAnalyticsCoverage: 'reports:analytics-coverage',
   reportsLinkPositions: 'reports:link-positions',
@@ -466,6 +477,18 @@ export type IpcChannel = (typeof IPC)[keyof typeof IPC];
  * survive an app restart, drive the CLI via the OS scheduler (Windows
  * Task Scheduler / launchd / cron); that path is V2.
  */
+/** What a scheduled crawl does with its results once it finishes. */
+export interface ScheduleAfterCrawl {
+  /** Export written into a timestamped sub-folder of `outputDir`. */
+  export: 'none' | 'bulk' | 'html' | 'pdf' | 'seo-audit';
+  /** Parent folder for the export; required for any export other than `none`. */
+  outputDir: string;
+  /** Also push All URLs to a new Google Sheets spreadsheet (needs a connected Google account). */
+  sheets: boolean;
+  /** POST the file list / spreadsheet URL to the project's webhook URL (Settings → Webhook). */
+  webhook: boolean;
+}
+
 export interface ScheduleSpec {
   enabled: boolean;
   /** `hourly` = every hour on the minute. `daily` = once at hourOfDay:
@@ -480,6 +503,8 @@ export interface ScheduleSpec {
   minuteOfHour?: number;
   /** 0 = Sunday … 6 = Saturday. Used by weekly. */
   dayOfWeek?: number;
+  /** Post-crawl export / notification; absent = nothing beyond the crawl itself. */
+  afterCrawl?: ScheduleAfterCrawl;
 }
 
 export interface ScheduleStatus {
@@ -521,6 +546,12 @@ export interface ImagesQueryInput {
   /** Only images whose non-empty alt text is shared by ≥2 distinct images. */
   duplicateAltOnly?: boolean;
   internalOnly?: boolean;
+  /** Only images at least this many bytes. Rows with an unknown size are
+   *  excluded — a null can't satisfy "at least". */
+  minByteSize?: number;
+  /** Server-side sort; default is occurrences desc. */
+  sortBy?: ImagesSortKey;
+  sortDir?: 'asc' | 'desc';
 }
 
 export interface ImagesQueryResult {
@@ -561,6 +592,8 @@ export type MenuEvent =
   | 'toggle-detail-panel'
   | 'export-as'
   | 'export-html-report'
+  | 'export-pdf-report'
+  | 'export-seo-audit'
   | 'export-bulk'
   | 'export-sheets'
   | 'export-bigquery'
@@ -644,6 +677,8 @@ export interface ExportImagesInput {
   /** Free-text URL/alt filter (substring match, case-insensitive).
    *  Mirrors the tab's search box. */
   search?: string;
+  /** Mirrors the tab's minimum-size filter (bytes). */
+  minByteSize?: number;
 }
 
 export interface ExportImagesResult {
@@ -782,6 +817,22 @@ export interface MemoryStats {
   urlsCrawled: number;
 }
 
+/** What Settings ▸ System shows next to the live memory figures. */
+export interface SystemInfo {
+  appVersion: string;
+  electron: string;
+  chromium: string;
+  node: string;
+  /** `process.platform` + `process.arch`, e.g. `win32 x64`. */
+  platform: string;
+  cpuCount: number;
+  /** Seconds since the main process started. */
+  uptimeSec: number;
+  userDataPath: string;
+  logsPath: string;
+  storageModeActive: 'disk' | 'ram';
+}
+
 export interface DataDeleteByDomainResult {
   /** Number of `urls` rows deleted. Cascade handles `links`, `images`,
    *  `headers`, `url_sources`, `urls_issues`. */
@@ -792,6 +843,39 @@ export interface DataDeleteByDomainResult {
 
 export interface ExportHtmlReportInput {
   filePath: string;
+}
+
+/**
+ * White-label settings for the HTML / PDF report (Settings → Reports).
+ * Stored as the `reportBranding` app preference; every field optional.
+ */
+export interface ReportBranding {
+  /** Shown in the report header instead of "FreeCrawl". */
+  brandName?: string;
+  /** "Prepared by …" line under the header. */
+  preparedBy?: string;
+  /** CSS colour for headings and accents, e.g. `#2563eb`. */
+  accentColor?: string;
+  /** `data:` URL of the logo (PNG / JPEG / SVG / WebP, ≤ 1 MB). */
+  logoDataUrl?: string;
+}
+
+export interface ExportPdfReportInput {
+  /** Empty → the main process shows a save dialog. */
+  filePath: string;
+}
+
+export interface ExportPdfReportResult {
+  filePath: string;
+  bytesWritten: number;
+}
+
+/** Folder export in Screaming Frog's file / column layout. */
+export interface ExportSeoAuditResult {
+  /** Empty if the user cancelled the folder picker. */
+  outputDir: string;
+  files: { filePath: string; label: string; rowsWritten: number }[];
+  errors: { label: string; error: string }[];
 }
 
 export interface ExportHtmlReportResult {
@@ -1162,6 +1246,13 @@ export interface TopUrlsInput {
   direction?: 'asc' | 'desc';
 }
 
+export interface PagesOverLinkLimitInput {
+  /** Outlink count above which a page is listed (Settings → Advanced → Max links per page). */
+  threshold: number;
+  /** Default 500, capped at 5000. */
+  limit?: number;
+}
+
 export interface TopUrlsRow {
   url: string;
   /** Numeric value for the chosen metric (ms / count / depth / bytes). */
@@ -1282,6 +1373,13 @@ export interface TopWordsInput {
   minLength?: number;
   /** Stopword set: `en`, `tr`, or `all` (union). Default `all`. */
   locale?: 'en' | 'tr' | 'all';
+  /**
+   * Also count the stored page bodies (main-content prose, boilerplate
+   * stripped) alongside title / meta / H1. Slower — every stored body is
+   * parsed off the main thread — and only pages with a body snapshot
+   * contribute.
+   */
+  includeBody?: boolean;
 }
 
 /**
@@ -1851,6 +1949,8 @@ export interface FreeCrawlApi {
   /** Fires when an agent session is created / closed or its crawl state
    *  changes — the status-bar indicator re-fetches on this. */
   onAgentsChanged(cb: () => void): () => void;
+  /** Fires in every window when the colour theme changes anywhere. */
+  onThemeChanged(cb: (theme: UiTheme) => void): () => void;
   /** Full recent-projects list including archived entries. */
   recentProjectsList(): Promise<RecentProject[]>;
   /** Archive / unarchive a recent project (hides it from Open Recent). */
@@ -1894,6 +1994,12 @@ export interface FreeCrawlApi {
   crashRecoveryResume(): Promise<CrashRecoveryResumeResult>;
   crashRecoveryDiscard(): Promise<void>;
   exportHtmlReport(input: ExportHtmlReportInput): Promise<ExportHtmlReportResult>;
+  /** Same report as the HTML export, rendered to PDF by Chromium (Unicode-safe, no extra fonts). */
+  exportPdfReport(input: ExportPdfReportInput): Promise<ExportPdfReportResult>;
+  /** Screaming-Frog-layout CSV folder (internal_all.csv, page_titles_all.csv, …). */
+  exportSeoAudit(): Promise<ExportSeoAuditResult>;
+  /** Picks an image file and returns it as a `data:` URL (null when cancelled / too large). */
+  pickImageFile(): Promise<string | null>;
   exportBulk(): Promise<BulkExportResult>;
   compareLoad(input: CompareLoadInput): Promise<CompareLoadResult>;
   graphSnapshot(input: GraphSnapshotInput): Promise<GraphSnapshotResult>;
@@ -1902,10 +2008,16 @@ export interface FreeCrawlApi {
   sitemapGenerate(input: SitemapGenerateInput): Promise<SitemapGenerateResult>;
   appVersion(): Promise<string>;
   memoryStats(): Promise<MemoryStats>;
+  systemInfo(): Promise<SystemInfo>;
   prefsGetAll(): Record<string, unknown>;
   prefsGet(key: string): unknown;
   prefsSet(key: string, value: unknown): void;
   prefsDelete(key: string): void;
+  /** The OS's ordered UI language preferences, hydrated synchronously
+   *  alongside the prefs so `resolveInitialLanguage()` can pick the
+   *  startup locale before React mounts. Raw BCP-47 tags — feed them to
+   *  `resolveUiLanguage()` rather than comparing them directly. */
+  systemLanguages(): readonly string[];
   confirmClear(): Promise<ConfirmClearResult>;
   /** Snapshot of the live log ring. `ownerId` (a project window's
    *  webContents.id) scopes the result to that window's crawler entries plus
@@ -1949,6 +2061,10 @@ export interface FreeCrawlApi {
   reportsDepthHistogram(): Promise<DepthHistogramRow[]>;
   reportsResponseTimeHistogram(): Promise<ResponseTimeHistogramRow[]>;
   reportsTopUrls(input: TopUrlsInput): Promise<TopUrlsRow[]>;
+  /** Internal HTML pages whose outlink count exceeds the configured limit. */
+  reportsPagesOverLinkLimit(input: PagesOverLinkLimitInput): Promise<TopUrlsRow[]>;
+  /** Pages whose mobile and desktop fetches differ, most differences first. */
+  reportsMobileParity(limit?: number): Promise<TopUrlsRow[]>;
   reportsExternalDomainHealth(limit?: number): Promise<ExternalDomainHealthRow[]>;
   reportsAnalyticsCoverage(): Promise<AnalyticsCoverageRow[]>;
   reportsLinkPositions(): Promise<LinkPositionRow[]>;

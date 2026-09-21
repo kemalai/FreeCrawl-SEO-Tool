@@ -89,6 +89,8 @@ export type UrlCategory =
   | 'issues:url-non-ascii'
   | 'issues:lang-missing'
   | 'issues:viewport-missing'
+  | 'issues:mobile-parity-mismatch'
+  | 'issues:content-wider-than-screen'
   | 'issues:og-missing'
   | 'issues:twitter-missing'
   | 'issues:hsts-missing'
@@ -102,6 +104,7 @@ export type UrlCategory =
   | 'issues:mixed-content'
   | 'issues:favicon-missing'
   | 'issues:redirect-loop'
+  | 'issues:redirect-canonical-chain'
   | 'issues:redirect-chain-long'
   | 'issues:redirect-self'
   | 'issues:url-many-params'
@@ -125,6 +128,8 @@ export type UrlCategory =
   | 'issues:hreflang-self-ref-missing'
   | 'issues:hreflang-reciprocity-missing'
   | 'issues:hreflang-target-issues'
+  | 'issues:hreflang-unlinked'
+  | 'issues:orphan-page'
   | 'issues:crawled-not-in-sitemap'
   | 'issues:redirect-in-sitemap'
   | 'issues:h1-empty'
@@ -251,6 +256,49 @@ export type Indexability =
 
 export type ContentKind = 'html' | 'css' | 'js' | 'image' | 'pdf' | 'font' | 'other';
 
+/** Which structured-data check a {@link SchemaFinding} failed. */
+export type SchemaFindingKind = 'unknown-type' | 'missing-required' | 'missing-recommended';
+
+/**
+ * One structured-data validation finding on a page — the detail behind
+ * the `schemaUnknownTypes` / `schemaMissingRequired` /
+ * `schemaMissingRecommended` counters, which only say how many nodes
+ * failed. Stored as a JSON array in `CrawlUrlRow.schemaFindings`.
+ */
+export interface SchemaFinding {
+  /** Zero-based index of the `<script type="application/ld+json">` block. */
+  block: number;
+  /** The node's `@type` (the raw string, for a malformed type). */
+  type: string;
+  kind: SchemaFindingKind;
+  /**
+   * The properties the node lacks. A `oneOf` group — where any one of
+   * several would satisfy the rule — is a single entry joined with " | ".
+   * Empty for `unknown-type`.
+   */
+  props: string[];
+}
+
+/** One field that differed between the desktop and mobile fetch of a page. */
+export interface MobileParityField {
+  /** `title` | `h1` | `metaDescription` | `canonical` | `metaRobots` | `wordCount` | `outlinks` | `status` */
+  field: string;
+  /** Value seen by the crawl's own user agent. */
+  crawl: string | null;
+  /** Value seen by the alternate user agent. */
+  alternate: string | null;
+}
+
+/** Result of the post-crawl mobile-parity probe, stored as JSON on the row. */
+export interface MobileParityDiff {
+  /** Which user agent the probe used against the crawl's own. */
+  alternate: 'mobile' | 'desktop';
+  /** HTTP status the alternate fetch returned. */
+  alternateStatus: number | null;
+  checkedAt: string;
+  fields: MobileParityField[];
+}
+
 export interface CrawlUrlRow {
   id: number;
   url: string;
@@ -370,6 +418,13 @@ export interface CrawlUrlRow {
   schemaMissingRequired: number;
   /** Nodes that pass required props but omit one or more Google-recommended props (warning). */
   schemaMissingRecommended: number;
+  /**
+   * JSON array of {@link SchemaFinding} — which block, type and
+   * properties each of the three counters above refers to. Null when the
+   * page has no findings, and for rows crawled before the detail was
+   * recorded (the counters alone were stored then).
+   */
+  schemaFindings: string | null;
   /** Total user-facing form inputs (input/textarea/select, excluding hidden/submit/button/image/reset). */
   formInputCount: number;
   /** Form inputs without label / aria-label / title (WCAG 1.3.1, 4.1.2 violation). */
@@ -594,9 +649,29 @@ export interface CrawlUrlRow {
   hreflangReciprocityMissing: number;
   /** Hreflang targets that are non-200, noindex, or canonicalised away. */
   hreflangTargetIssues: number;
+  /** Crawled hreflang targets no page links to — reachable only via the annotation. */
+  hreflangUnlinked: number;
+  /** JSON {@link MobileParityDiff} from the post-crawl parity probe; null when not probed or identical. */
+  mobileParity: string | null;
+  /** Number of fields that differed between the desktop and mobile fetch (0 = identical / not probed). */
+  mobileParityDiff: number;
+  /**
+   * Horizontal overflow of the page on a 375 px mobile viewport, from the
+   * JS-render mobile-usability audit (`mobile_overflow_px`). `null` when
+   * the page was never audited (`mobile_usable = -1`).
+   */
+  mobileOverflowPx: number | null;
   redirectChainLength: number;
   redirectFinalUrl: string | null;
   redirectLoop: boolean;
+  /**
+   * Canonical hops walked from this page (or, for a 3xx row, from the
+   * redirect's terminal URL) until a page that canonicalises to itself.
+   * 0 = self-canonical / no canonical. Filled by the redirect-chain pass.
+   */
+  canonicalChainLength: number;
+  /** Where the canonical chain ends; null when it never leaves this page or loops. */
+  canonicalFinalUrl: string | null;
   folderDepth: number;
   queryParamCount: number;
   csp: string | null;
@@ -608,6 +683,14 @@ export interface CrawlUrlRow {
   metaRefresh: string | null;
   /** Absolute redirect URL parsed from the meta-refresh content, when present. */
   metaRefreshUrl: string | null;
+  /**
+   * Absolute target of a JavaScript redirect found statically in an
+   * inline `<script>` — `window.location = "…"`, `location.href = "…"`,
+   * `location.replace("…")` / `assign("…")` with a string-literal target.
+   * Null when no such statement is present. Heuristic: the statement may
+   * sit behind a condition the crawler cannot evaluate.
+   */
+  jsRedirectUrl: string | null;
   /**
    * Declared character encoding (lowercased). Sourced from `<meta charset>` /
    * `<meta http-equiv="Content-Type">`, with the HTTP Content-Type
@@ -1041,6 +1124,17 @@ export interface CrawlConfig {
    */
   probeSocialImages: boolean;
   /**
+   * After the crawl, re-fetch a sample of indexable pages with the
+   * *opposite* user agent (mobile when the crawl ran as desktop, desktop
+   * otherwise) and diff the SEO-relevant fields — title, H1, meta
+   * description, canonical, robots, word count, link count, status.
+   * Feeds `issues:mobile-parity-mismatch` and the "Mobile vs Desktop"
+   * report. Default `false`: it re-downloads the sampled pages.
+   */
+  probeMobileParity: boolean;
+  /** Pages the parity probe re-fetches, most-linked first; 0 = all indexable HTML. Default 200. */
+  mobileParitySample: number;
+  /**
    * V2 Faz 16 — after the crawl, fetch each internal PDF (ranged GET,
    * first few MB) and extract document metadata: title, author, page
    * count, creation date, producer. Prefers the XMP packet (uncompressed
@@ -1142,9 +1236,10 @@ export interface CrawlConfig {
   followNofollow: boolean;
   /**
    * Follow JavaScript-style redirects discovered in the HTML body
-   * (`<meta http-equiv="refresh">` content URL, `window.location` JS
-   * statements). Default `false` — these are heuristics; when on,
-   * the meta-refresh URL is also enqueued like a redirect target.
+   * (`<meta http-equiv="refresh">` content URL, `window.location` /
+   * `location.href` / `location.replace()` statements with a literal
+   * target in inline scripts). Default `false` — these are heuristics;
+   * when on, both targets are enqueued like a redirect target.
    */
   followJsRedirects: boolean;
 
@@ -1290,7 +1385,8 @@ export interface CrawlConfig {
   analyseInlinks: boolean;
   /** Compute internal PageRank / link score (0..100) over the link graph. */
   analyseLinkScore: boolean;
-  /** Walk redirect chains, fill `redirect_chain_length` / `redirect_loop`. */
+  /** Walk redirect chains, fill `redirect_chain_length` / `redirect_loop`,
+   * then the canonical chains that continue from each page / redirect terminus. */
   analyseRedirectChains: boolean;
   /** Hreflang reciprocity + invalid code + target health. */
   analyseHreflang: boolean;
@@ -1301,6 +1397,14 @@ export interface CrawlConfig {
   /** Materialise the heavy `urls_issues` counters (Dead External Domain,
    * Duplicate URL post-norm, Canonical Chain Multi-hop). */
   analyseIssues: boolean;
+  /**
+   * Issue checks silenced for this project (Settings → Issues). A
+   * disabled check keeps computing — nothing is deleted — but reads as 0
+   * in the overview counts, drops out of the sidebar, HTML/PDF reports,
+   * bulk export and the crawl-complete webhook, and its filter matches
+   * no rows. Ids are `issues:*` categories from `ISSUE_GROUPS`.
+   */
+  disabledIssues: UrlCategory[];
   /**
    * Page-rendering strategy for the fetch layer.
    *  - `text`  (default) — fetch the raw HTML response as-is. Fast,
@@ -1710,6 +1814,10 @@ export interface OverviewCounts {
     urlNonAscii: number;
     langMissing: number;
     viewportMissing: number;
+    /** Pages whose mobile and desktop renditions disagree on SEO fields. */
+    mobileParityMismatch: number;
+    /** Audited pages whose layout overflows the mobile viewport by >4 px. */
+    contentWiderThanScreen: number;
     ogMissing: number;
     twitterMissing: number;
     hstsMissing: number;
@@ -1733,6 +1841,8 @@ export interface OverviewCounts {
     mixedContentPassive: number;
     faviconMissing: number;
     redirectLoop: number;
+    /** 3xx rows whose terminal page canonicalises somewhere else again. */
+    redirectCanonicalChain: number;
     redirectChainLong: number;
     redirectSelf: number;
     urlManyParams: number;
@@ -1753,6 +1863,9 @@ export interface OverviewCounts {
     hreflangSelfRefMissing: number;
     hreflangReciprocityMissing: number;
     hreflangTargetIssues: number;
+    hreflangUnlinked: number;
+    /** Internal 2xx HTML pages nothing links to (start URL excluded). */
+    orphanPage: number;
     crawledNotInSitemap: number;
     redirectInSitemap: number;
     /** Sitemap URL count that the crawl never reached (in sitemap_urls but not in urls). */
@@ -2040,6 +2153,14 @@ export interface CrawlProgress {
   avgResponseTimeMs: number;
   running: boolean;
   paused: boolean;
+  /**
+   * True from the moment the fetch loop ends (Stop, or the queue draining)
+   * until the post-crawl passes have finished. `running` is already false
+   * here, so the toolbar can show "Finishing…" instead of an idle Start —
+   * on a 62k-page crawl those passes took 36 minutes, during which a
+   * silent Stop button read as a frozen app.
+   */
+  finishing?: boolean;
   startUrl: string;
 }
 
@@ -2121,7 +2242,26 @@ export interface ImageRow {
    *  `image_usages` rows (pre-per-usage crawls), which fall back to one
    *  row per distinct image. */
   fromUrl: string | null;
+  /** `urls.id` of `fromUrl`, so a row click can open that page in the
+   *  Detail panel. Null under the same legacy fallback as `fromUrl`. */
+  fromUrlId: number | null;
+  /** Transfer size in bytes. Comes from the post-crawl HEAD probe
+   *  (`images.byte_size`), falling back to the crawled row's
+   *  `content_length` when the image was fetched as its own URL. Null when
+   *  neither ran — "unknown", never "zero". */
+  byteSize: number | null;
 }
+
+/** Columns the Images tab can order by. Sorting happens in SQL so the
+ *  order holds across the whole result, not just the loaded page. */
+export type ImagesSortKey =
+  | 'src'
+  | 'alt'
+  | 'width'
+  | 'height'
+  | 'byteSize'
+  | 'occurrences'
+  | 'fromUrl';
 
 /** Columns that the Advanced Filter dialog exposes for querying. */
 export type FilterField =
@@ -2310,6 +2450,8 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   probeTlsCerts: true,
   probeManifestJson: true,
   probeSocialImages: true,
+  probeMobileParity: false,
+  mobileParitySample: 200,
   probePdfMetadata: true,
   dedupePreNormalize: true,
   cdnHosts: [],
@@ -2355,6 +2497,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   analyseDuplicates: true,
   analysePagination: true,
   analyseIssues: true,
+  disabledIssues: [],
   cookiePolicy: 'reject-all',
   perHostUserAgents: [],
   proxyProfiles: [],

@@ -18,6 +18,11 @@ export interface ColumnSpec {
   info?: string;
   /** Concrete example/value rendered under "Example" in the header tooltip. */
   example?: string;
+  /**
+   * Per-rule Custom Extraction column: the cell shows this rule's value out
+   * of the page's `extractionResults` JSON instead of the combined blob.
+   */
+  extractionRule?: string;
 }
 
 export function columnId(c: ColumnSpec): string {
@@ -259,6 +264,23 @@ const COL = {
     info: 'Terminal URL the redirect chain resolves to. Empty when this row is itself the terminal (i.e. status is 2xx/4xx/5xx) or when the chain hits a loop.',
     example: 'https://example.com/canonical',
   } as ColumnSpec,
+  canonicalChainLength: {
+    key: 'canonicalChainLength',
+    header: 'Canonical Chain',
+    size: 120,
+    kind: 'number',
+    align: 'right',
+    info: "Canonical hops walked after this page (or, on a redirect row, after the redirect's final URL) until a page that canonicalises to itself. 0 when the canonical is the page itself or absent.",
+    example: '2',
+  } as ColumnSpec,
+  canonicalFinalUrl: {
+    key: 'canonicalFinalUrl',
+    header: 'Final Canonical',
+    size: 360,
+    kind: 'mono',
+    info: 'Where the canonical chain ends. Empty when the page is its own canonical, or when the chain loops.',
+    example: 'https://example.com/product',
+  } as ColumnSpec,
   redirectLoop: {
     key: 'redirectLoop',
     header: 'Loop',
@@ -494,6 +516,14 @@ const COL = {
     info: 'Absolute redirect target parsed from the meta-refresh content. Empty when meta-refresh sets only a delay.',
     example: 'https://example.com/new-path',
   } as ColumnSpec,
+  jsRedirectUrl: {
+    key: 'jsRedirectUrl',
+    header: 'JS Redirect URL',
+    size: 320,
+    kind: 'mono',
+    info: 'Literal target of a JavaScript redirect found in an inline script (`window.location = "…"`, `location.href = "…"`, `location.replace("…")`). Followed when "Follow JavaScript redirects" is on.',
+    example: 'https://example.com/new-path',
+  } as ColumnSpec,
   extractionResults: {
     key: 'extractionResults',
     header: 'Extracted Data',
@@ -641,6 +671,8 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
     COL.url,
     COL.canonical,
     COL.canonicalCount,
+    COL.canonicalChainLength,
+    COL.canonicalFinalUrl,
     COL.indexability,
     COL.indexabilityStatus,
     COL.status,
@@ -661,6 +693,8 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
     COL.redirectChainLength,
     COL.redirectFinalUrl,
     COL.redirectLoop,
+    COL.canonicalChainLength,
+    COL.canonicalFinalUrl,
     COL.inlinks,
   ],
   // V1 Faz 3 — new top-level filter tabs. Each starts with the
@@ -711,6 +745,7 @@ export const COLUMN_SPECS: Record<TabKey, ColumnSpec[]> = {
     COL.indexability,
     COL.metaRefresh,
     COL.metaRefreshUrl,
+    COL.jsRedirectUrl,
     COL.inlinks,
   ],
   'custom-extraction': [

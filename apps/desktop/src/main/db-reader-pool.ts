@@ -47,11 +47,13 @@ const WORKER_PATH = path.join(__dirname, 'db-reader-worker.js');
 // post-crawl recompute phase. Genuine worker hangs are still surfaced
 // — just with a slightly longer detection window than before.
 const REQUEST_TIMEOUT_MS = 30_000;
-// Heavy aggregate queries (the overview sidebar's 130-counter pass and
-// the post-crawl materialiser's counter fan-out) can run past the
-// default budget on million-URL projects, so they get their own
-// bigger ceiling.
-const HEAVY_REQUEST_TIMEOUT_MS = 60_000;
+// Heavy aggregates (the overview sidebar's 130-counter pass) run on
+// their own slot and are single-flighted by the host, so a long one
+// delays nothing but itself. The ceiling is therefore a hang detector,
+// not a latency budget: 60 s used to reject a legitimate aggregate on a
+// 62k-page project every tick, and the re-issued copies then stacked
+// onto every worker in the pool.
+const HEAVY_REQUEST_TIMEOUT_MS = 5 * 60_000;
 const HEAVY_METHODS = new Set<string>([
   'getOverviewCounts',
   'getOverviewCountsAsync',
@@ -67,6 +69,14 @@ const RESTART_WINDOW_MS = 60_000;
 // memory cost. Each worker keeps its own SQLite handle (~5 MB heap)
 // and prepared-statement cache (~10 MB on a populated DB).
 const POOL_SIZE = 4;
+// The last slot is reserved for HEAVY methods and never receives a
+// short query. Before this split a timed-out aggregate kept running on
+// whichever worker it landed on, the next tick landed on the next
+// worker, and within minutes every slot was busy with an abandoned
+// aggregate — so the visible table's 500-row chunk fetch queued behind
+// one, timed out at 30 s, and ran on the main thread instead. Light
+// queries now always find a worker that is never running an aggregate.
+const HEAVY_SLOT = POOL_SIZE - 1;
 
 interface PendingRequest {
   workerIdx: number;
@@ -195,15 +205,22 @@ export class DbReaderPool {
    */
   call<T>(method: string, args: unknown[] = []): Promise<T> {
     if (this.terminated) return Promise.reject(new Error('reader-terminated'));
-    const slotIdx = this.pickSlot();
+    const heavy = HEAVY_METHODS.has(method);
+    const slotIdx = this.pickSlot(heavy);
     if (slotIdx < 0) return Promise.reject(new Error('reader-not-initialised'));
     const slot = this.slots[slotIdx]!;
     const worker = slot.worker;
     if (!worker) return Promise.reject(new Error('reader-not-initialised'));
+    // One aggregate at a time. The host single-flights the overview
+    // call, so a second heavy request here means the previous one
+    // already timed out and is STILL running; queuing another behind it
+    // only doubles the wait. Reject at once — the caller keeps its last
+    // result and asks again on its next tick.
+    if (heavy && slot.pending > 0) {
+      return Promise.reject(new Error(`reader-busy: ${method} already running`));
+    }
     const requestId = this.nextRequestId++;
-    const timeoutMs = HEAVY_METHODS.has(method)
-      ? HEAVY_REQUEST_TIMEOUT_MS
-      : REQUEST_TIMEOUT_MS;
+    const timeoutMs = heavy ? HEAVY_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
     slot.pending++;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -235,13 +252,19 @@ export class DbReaderPool {
    * Pick the slot with the fewest pending requests. Ties are broken
    * by a round-robin cursor so identically-loaded workers don't all
    * receive their next call on the same slot.
+   *
+   * Heavy methods go to `HEAVY_SLOT` only. Light methods use the other
+   * slots, and take the heavy slot solely when every light worker is
+   * down (crashed / respawning) — better one slow answer than none.
    */
-  private pickSlot(): number {
+  private pickSlot(heavy: boolean): number {
+    if (heavy) return this.slots[HEAVY_SLOT]?.worker ? HEAVY_SLOT : -1;
     let best = -1;
     let bestPending = Number.POSITIVE_INFINITY;
+    const lightSlots = this.slots.length > 1 ? this.slots.length - 1 : this.slots.length;
     // Start the scan from the rotating cursor so RR is honoured on ties.
-    for (let i = 0; i < this.slots.length; i++) {
-      const idx = (this.rrCursor + i) % this.slots.length;
+    for (let i = 0; i < lightSlots; i++) {
+      const idx = (this.rrCursor + i) % lightSlots;
       const s = this.slots[idx]!;
       if (!s.worker) continue;
       if (s.pending < bestPending) {
@@ -250,9 +273,13 @@ export class DbReaderPool {
       }
     }
     if (best >= 0) {
-      this.rrCursor = (best + 1) % this.slots.length;
+      this.rrCursor = (best + 1) % lightSlots;
+      return best;
     }
-    return best;
+    // Every light worker is down: fall through to the heavy slot if it
+    // is alive and idle, otherwise report the pool as unavailable.
+    const h = this.slots[HEAVY_SLOT];
+    return h?.worker && h.pending === 0 ? HEAVY_SLOT : -1;
   }
 
   private spawn(slotIdx: number): void {
@@ -422,6 +449,21 @@ export async function callReaderOrFallback<T>(
         'warn',
         'db-reader',
         `'${method}' failed on reader pool (${msg}) — heavy query, NOT retrying on main thread.`,
+      );
+      throw err;
+    }
+    // A timeout means the worker is alive and still executing the very
+    // same query. Re-running it on the main thread blocks IPC, progress
+    // events and rendering for as long as it takes — on a 62k-page
+    // project that was a 1.5–3 s freeze every 35 s for the lifetime of
+    // the window, i.e. the "FPS drops on big crawls" report. The caller
+    // shows its retry affordance instead; with light queries on their
+    // own slots the timeout itself is now the rare case.
+    if (msg.startsWith('reader-timeout')) {
+      logger.log(
+        'warn',
+        'db-reader',
+        `'${method}' timed out on the reader pool — NOT re-running it on the main thread.`,
       );
       throw err;
     }

@@ -248,7 +248,7 @@ function SerpCard({
         {displayUrl(row.url)}
       </div>
       <div
-        className="mb-0.5 line-clamp-1 text-[18px] leading-snug text-[#8ab4f8]"
+        className="mb-0.5 line-clamp-1 text-[18px] leading-snug text-[color:var(--fc-serp-link)]"
         title={title}
       >
         {title.length > TITLE_CHAR_HARD_CAP

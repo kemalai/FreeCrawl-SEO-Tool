@@ -292,8 +292,9 @@ export function AssistantTab() {
                         {status?.connected && (
                           <span className="text-[10px] text-surface-500">
                             {t('assistant.toolCount', {
-                              defaultValue: '{{n}} tool(s)',
-                              n: status.toolCount,
+                              defaultValue_one: '{{count}} tool',
+                              defaultValue_other: '{{count}} tools',
+                              count: status.toolCount,
                             })}
                           </span>
                         )}
@@ -404,7 +405,7 @@ export function AssistantTab() {
             </pre>
             <div className="mt-2 flex gap-1.5">
               <button
-                className="rounded bg-emerald-700 px-2 py-1 text-[11px] text-white hover:bg-emerald-600"
+                className="rounded bg-emerald-600 px-2 py-1 text-[11px] text-white hover:bg-emerald-500"
                 onClick={() => void decide(a.requestId, 'allow-once')}
               >
                 {t('assistant.allowOnce', { defaultValue: 'Allow once' })}
@@ -461,7 +462,7 @@ export function AssistantTab() {
             </button>
           ) : (
             <button
-              className="flex h-8 items-center gap-1 rounded bg-blue-700 px-3 text-[11px] text-white hover:bg-blue-600 disabled:opacity-40"
+              className="flex h-8 items-center gap-1 rounded bg-blue-600 px-3 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
               onClick={() => void send()}
               disabled={!draft.trim()}
             >

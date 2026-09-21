@@ -544,7 +544,12 @@ export function BrokenLinksTab() {
       >
         {selected.size > 0 && (
           <span className="mr-auto text-surface-500">
-            {t('brokenTab.cellsSelected', { defaultValue: '{{n}} cell(s) selected', n: selected.size.toLocaleString() })}
+            {t('brokenTab.cellsSelected', {
+              defaultValue_one: '{{formatted}} cell selected',
+              defaultValue_other: '{{formatted}} cells selected',
+              count: selected.size,
+              formatted: selected.size.toLocaleString(),
+            })}
           </span>
         )}
         <span>

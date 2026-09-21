@@ -132,7 +132,24 @@ class ParserPool {
    * crash. Caller is expected to fall back to inline `parseHtml`
    * if the pool isn't ready.
    */
+  /**
+   * Main-content prose of an HTML document (boilerplate stripped), run on a
+   * worker so corpus-wide text jobs never block the main thread.
+   */
+  prose(html: string, contentAreaSelector?: string): Promise<string> {
+    return this.dispatch(html, '', { contentAreaSelector }, 'prose') as Promise<unknown> as Promise<string>;
+  }
+
   parse(html: string, pageUrl: string, opts: ParseOpts = {}): Promise<ParseResult> {
+    return this.dispatch(html, pageUrl, opts, 'parse');
+  }
+
+  private dispatch(
+    html: string,
+    pageUrl: string,
+    opts: ParseOpts,
+    mode: 'parse' | 'prose',
+  ): Promise<ParseResult> {
     if (this.terminated || this.workers.length === 0) {
       return Promise.reject(new Error('parser-pool: not ready'));
     }
@@ -150,7 +167,7 @@ class ParserPool {
         this.recycleWedged(worker);
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(requestId, { worker, resolve, reject, timer });
-      worker.postMessage({ requestId, html, pageUrl, opts });
+      worker.postMessage({ requestId, html, pageUrl, opts, mode });
     });
   }
 

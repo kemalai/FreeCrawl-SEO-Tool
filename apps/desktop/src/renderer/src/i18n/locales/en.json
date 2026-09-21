@@ -57,6 +57,7 @@
     "recentUrls": "Recent URLs",
     "start": "Start",
     "stop": "Stop",
+    "finishing": "Finishing…",
     "pause": "Pause",
     "resume": "Resume",
     "clear": "Clear",
@@ -86,7 +87,8 @@
     "addList": "Add URL list…",
     "listTitle": "URL list — one per line",
     "listDone": "Done",
-    "listCount": "{{n}} URL(s)",
+    "listCount_one": "{{count}} URL",
+    "listCount_other": "{{count}} URLs",
     "scopeSpiderOnly": "Scope applies to Spider mode only",
     "mode": {
       "spider": "Spider",
@@ -110,7 +112,8 @@
   "agents": {
     "badge": "{{n}} agents",
     "runningBadge": "{{n}} crawling",
-    "indicatorTitle": "{{n}} MCP agent session(s) active — click to manage",
+    "indicatorTitle_one": "{{count}} MCP agent session active — click to manage",
+    "indicatorTitle_other": "{{count}} MCP agent sessions active — click to manage",
     "popoverTitle": "MCP Agent Sessions",
     "popoverSubtitle": "Isolated crawl sessions driven by AI agents over MCP.",
     "statusRunning": "Crawling",
@@ -140,6 +143,7 @@
     "running": "Running",
     "paused": "Paused",
     "idle": "Idle",
+    "finishing": "Finishing…",
     "dismiss": "dismiss",
     "fpsSmoothTitle": "Renderer is smooth (≥ 50 fps)",
     "fpsDegradedTitle": "Renderer is degraded (30–49 fps) — likely competing with crawl IPC",
@@ -266,13 +270,17 @@
     "severityCritical": "Critical Issues",
     "severityWarning": "Warning Issues",
     "severityInfo": "Info Issues",
-    "summary": "{{n}} section(s) · {{c}} column(s)",
     "emptyCols": "Pick a table on the left to load its columns.",
     "errorNoColumn": "Pick at least one column.",
     "errorNoTable": "Pick at least one table.",
-    "successMsg": "Exported {{count}} row(s) to {{path}}",
+    "successMsg_one": "Exported {{formatted}} row to {{path}}",
+    "successMsg_other": "Exported {{formatted}} rows to {{path}}",
     "failedPrefix": "Export failed",
-    "gridFailed": "Export failed: {{detail}}"
+    "gridFailed": "Export failed: {{detail}}",
+    "summarySections_one": "{{count}} section",
+    "summarySections_other": "{{count}} sections",
+    "summaryColumns_one": "{{count}} column",
+    "summaryColumns_other": "{{count}} columns"
   },
   "app": {
     "dropMissingPath": "Couldn't read the dropped path for {{name}}. Use File → Open Project instead.",
@@ -283,9 +291,12 @@
     "crashRecovery": "FreeCrawl detected a previous crawl that didn't finish cleanly:\n\n  Mode: {{mode}}\n  Start URL: {{seed}}\n  Pending URLs: {{pending}}\n\nResume the crawl from where it stopped?\n\nClick OK to resume, Cancel to discard the recovery state and start fresh.",
     "deleteDomainPrompt": "GDPR Domain Wipe — enter the host to delete (case-insensitive, exact match).\n\nExamples: example.com  ·  blog.example.com\n\nThis cannot be undone. Save Project As… first to keep a backup.",
     "deleteDomainConfirm": "Delete every URL hosted on \"{{host}}\", along with its links, headers, images, and source snapshots?\n\nThis action cannot be undone.",
-    "deleteDomainResult": "Deleted {{urls}} URL row(s) from {{host}} (and {{links}} associated link(s)).",
+    "deleteDomainResult_one": "Deleted {{formatted}} URL row from {{host}}.",
+    "deleteDomainResult_other": "Deleted {{formatted}} URL rows from {{host}}.",
     "clearAllConfirm": "Clear ALL data in the active project?\n\nEvery URL, link, image, header, source snapshot, sitemap, and issue will be wiped. This cannot be undone — Save Project As… first if you want a backup.",
-    "clearFailed": "Could not clear the crawl: {{detail}}"
+    "clearFailed": "Could not clear the crawl: {{detail}}",
+    "deleteDomainLinks_one": "{{formatted}} associated link was removed with them.",
+    "deleteDomainLinks_other": "{{formatted}} associated links were removed with them."
   },
   "infoTip": {
     "moreInfo": "More info",
@@ -346,7 +357,9 @@
       "sitemapOrphans": "Sitemap Orphans (Top 1000)",
       "orphanCrossSource": "Orphan Pages — Sitemap + GSC + GA4 (Top 1000)",
       "serverHeaders": "Server Stack (Server Header)",
-      "topWords": "Top Words (Title + Meta + H1, Top 100)"
+      "topWords": "Top Words (Title + Meta + H1, Top 100)",
+      "pagesOverLinkLimit": "Pages Over Max Links per Page",
+      "mobileParity": "Mobile vs Desktop Differences"
     },
     "groupAtDepth": "Group at depth",
     "depthTopLevel": "1 (top-level)",
@@ -364,7 +377,8 @@
     "keyTracker": "Tracker",
     "keyPosition": "Position",
     "keyServer": "Server",
-    "keyWord": "Word"
+    "keyWord": "Word",
+    "includeBody": "Include body text (slower)"
   },
   "sitemap": {
     "title": "Sitemap Validator",
@@ -374,8 +388,10 @@
     "walkInfo": "Walks nested sitemap-index entries up to depth 3 / 100K URLs.",
     "valid": "Valid",
     "truncated": "(truncated)",
-    "findingsCount": "{{n}} finding(s)",
-    "urlsParsed": "URL(s) parsed",
+    "findingsCount_one": "{{count}} finding",
+    "findingsCount_other": "{{count}} findings",
+    "urlsParsed_one": "{{formatted}} URL parsed",
+    "urlsParsed_other": "{{formatted}} URLs parsed",
     "sitemapsTried": "Sitemaps tried",
     "sitemapsParsed": "Sitemaps parsed",
     "urlEntries": "URL entries",
@@ -404,8 +420,10 @@
     "charsCount": "{{n}} chars",
     "lintPrompt": "Paste a draft robots.txt above to lint syntax.",
     "noIssues": "No syntax issues detected.",
-    "errorCount": "{{n}} error(s)",
-    "warningCount": "{{n}} warning(s)"
+    "errorCount_one": "{{count}} error",
+    "errorCount_other": "{{count}} errors",
+    "warningCount_one": "{{count}} warning",
+    "warningCount_other": "{{count}} warnings"
   },
   "spiderCrawl": {
     "intro": "Choose which link types to crawl and store. Crawl fetches the target so it gets its own row; Store keeps what the page declared so the matching tab has data. These settings shape how many URLs are discovered, crawled, and reported.",
@@ -470,7 +488,7 @@
       "sitemapOption": "Sitemap — crawl the URLs listed in a sitemap",
       "urlList": "URL List (one URL per line)",
       "sitemapHint": "Enter the sitemap (or sitemap-index) URL in the top bar, then press Start. Every page listed is crawled once and also recorded for the orphan / sitemap reports.",
-      "seedSitemap": "Seed from sitemap URL(s) — optional"
+      "seedSitemap": "Seed from sitemap URLs — optional"
     },
     "crawler": {
       "intro": "Traversal limits and crawl-scope toggles. Screaming Frog equivalents shown in parentheses.",
@@ -579,10 +597,19 @@
       "importTitle": "Replace current rules with a JSON file. Accepts {rules: [...]} envelope or a bare array.",
       "exportTitle": "Save the current rule set as a JSON file. Versioned envelope, safe to commit to source control.",
       "exportDisabled": "Add at least one rule before exporting.",
-      "importConfirm": "Replace {{existing}} existing rule(s) with {{incoming}} imported rule(s)?",
-      "importSkipped": "Imported {{ok}} rule(s). {{skipped}} entries were skipped (invalid shape or over the 10-rule cap).",
+      "importConfirm_one": "Import {{count}} rule, replacing the current rule set ({{existing}})?",
+      "importConfirm_other": "Import {{count}} rules, replacing the current rule set ({{existing}})?",
+      "importSkipped_one": "Imported {{count}} rule. {{skipped}} entries were skipped (invalid shape or over the 10-rule cap).",
+      "importSkipped_other": "Imported {{count}} rules. {{skipped}} entries were skipped (invalid shape or over the 10-rule cap).",
       "importFailedAlert": "Import failed: {{error}}",
-      "noValidRules": "No valid rules found in the file."
+      "noValidRules": "No valid rules found in the file.",
+      "templates": "Insert template…",
+      "template_price": "Product price + currency (JSON-LD offers)",
+      "template_author": "Author name (JSON-LD, meta fallback)",
+      "template_published": "Publish / modified date",
+      "template_stock": "Stock availability (JSON-LD offers)",
+      "template_rating": "Review rating + count (JSON-LD aggregateRating)",
+      "template_sku": "SKU + brand (JSON-LD Product)"
     },
     "urlRewriting": {
       "intro": "Normalisation applied before URLs are deduplicated and queued.",
@@ -701,12 +728,19 @@
       "hreflang": "Hreflang reciprocity + inconsistent lang",
       "nearDuplicate": "Near-duplicate clustering",
       "paginationGap": "Pagination ordinal-gap detection",
-      "materialiseIssues": "Materialise heavy issue counters"
+      "materialiseIssues": "Materialise heavy issue counters",
+      "mobileParity": "Mobile vs desktop parity probe",
+      "mobileParitySample": "Pages to re-fetch (0 = all)"
     },
     "issues": {
-      "intro": "Per-issue check on/off toggles.",
-      "v2Prefix": "Coming in V2.",
-      "v2Body": "Today every issue check runs unconditionally and surfaces in the sidebar. The plan is to let you silence specific checks per-project (e.g. disable \"Description = Title\" on a CMS that's known to do it intentionally). Until that ships, hide rows you don't care about by collapsing the sidebar group, or filter them out via the Advanced filter on each tab."
+      "intro": "Turn individual issue checks off for this project — for example \"Description = Title\" on a CMS that does it on purpose.",
+      "effect": "A disabled check disappears from the sidebar, the overview counts, HTML/PDF reports, bulk export and the crawl-complete webhook. Nothing is deleted — turn it back on to see its results again.",
+      "search": "Filter checks…",
+      "enableAll": "Enable all",
+      "disableAll": "Disable all",
+      "summary": "Enabled: {{on}} / {{total}}",
+      "groupSummary": "{{on}} / {{total}} on",
+      "noMatch": "No check matches your filter."
     },
     "advanced": {
       "intro": "Lower-level caps and link-follow toggles. Defaults are tuned for typical SEO audits — only touch these if you know why.",
@@ -785,6 +819,19 @@
       "empty": "No per-host overrides yet — add one below.",
       "addRule": "Add per-host UA rule",
       "removeRule": "Remove rule"
+    },
+    "reports": {
+      "intro": "Brand the HTML and PDF reports (File → Export HTML / PDF Report). Changes apply to the next export; leave everything empty for the plain FreeCrawl header.",
+      "brandName": "Brand name",
+      "brandNamePlaceholder": "Acme SEO Agency",
+      "preparedBy": "Prepared by",
+      "accentColor": "Accent colour",
+      "reset": "Reset",
+      "logo": "Logo",
+      "noLogo": "None",
+      "chooseLogo": "Choose…",
+      "removeLogo": "Remove",
+      "logoHint": "PNG, JPEG, SVG or WebP up to 1 MB; shown at up to 44 px tall in the report header."
     }
   },
   "compare": {
@@ -839,7 +886,19 @@
     "hintDisabled": "Disabled — set \"Enabled\" and Save to arm the schedule.",
     "hintEnabled": "Save to compute the next fire time. The schedule only fires while FreeCrawl is open.",
     "confirmRemove": "Remove the scheduled crawl for this project?",
-    "saving": "Saving…"
+    "saving": "Saving…",
+    "afterTitle": "After each scheduled crawl",
+    "afterExport": "Export",
+    "exportNone": "Nothing",
+    "exportBulk": "Bulk export (CSV folder)",
+    "exportSeoAudit": "SEO Audit (Screaming Frog layout)",
+    "exportHtml": "HTML report",
+    "exportPdf": "PDF report",
+    "outputDir": "Folder",
+    "browse": "Browse…",
+    "outputDirHint": "Pick a folder — each run writes into a timestamped sub-folder there.",
+    "sheets": "Also push All URLs to a new Google Sheets spreadsheet",
+    "webhook": "Notify the project webhook with the file list (Settings → Webhook)"
   },
   "serp": {
     "noTitle": "(no title)",
@@ -861,7 +920,8 @@
     "notInCluster": "This URL is not part of a near-duplicate cluster. Run Crawl Analysis on a finished crawl, or lower the Hamming threshold in Settings → Duplicates, to widen what counts as a near-duplicate.",
     "noOtherMembers": "No other members in this cluster. (Cluster size {{n}}.)",
     "cluster": "Cluster",
-    "membersTotal": "{{n}} member(s) total",
+    "membersTotal_one": "{{count}} member total",
+    "membersTotal_other": "{{count}} members total",
     "hammingHint": "(Hamming distance from this URL — lower means more similar)",
     "loadingClusters": "Loading near-duplicate clusters…",
     "noClustersTitle": "No near-duplicate clusters",
@@ -897,7 +957,8 @@
     "subtitle": "Run all configured rules against a single URL to validate selectors / regex before crawling.",
     "noRules": "Add at least one rule (with a name and selector) before previewing.",
     "runTitle": "Fetch the URL and run every rule against the response.",
-    "run": "Run preview ({{n}} rule(s))",
+    "run_one": "Run preview ({{count}} rule)",
+    "run_other": "Run preview ({{count}} rules)",
     "running": "Running…",
     "idle": "Enter a URL above and click Run preview to fetch and apply every rule.",
     "fetching": "Fetching URL and parsing response…",
@@ -908,10 +969,17 @@
     "colValue": "Value"
   },
   "structured": {
-    "blocks": "block(s)",
+    "blocks_one": "JSON-LD block",
+    "blocks_other": "JSON-LD blocks",
     "invalid": "{{n}} invalid",
     "missingRequired": "{{n}} missing required",
     "missingRecommended": "{{n}} missing recommended",
+    "unknownTypes": "{{n}} malformed @type",
+    "findingsTitle": "Validation findings",
+    "findingMissingRequired": "missing required",
+    "findingMissingRecommended": "missing recommended",
+    "findingUnknownType": "malformed @type",
+    "findingsLegacy": "Which properties are missing is recorded from the next crawl on — re-spider this URL to see the details.",
     "microdataItems": "microdata items",
     "rdfaAttrs": "RDFa attrs",
     "empty": "No structured data declared on this page (no JSON-LD, microdata or RDFa).",
@@ -970,7 +1038,8 @@
     "emptySuffix": "elements). Pages without headings are harder for screen readers to navigate and may rank poorly for long-form queries.",
     "headings": "headings",
     "skipped": "Skipped: previous was h{{n}}",
-    "skippedCount": "{{n}} skipped level(s)",
+    "skippedCount_one": "{{count}} skipped level",
+    "skippedCount_other": "{{count}} skipped levels",
     "capped": "(capped at 200)",
     "emptyHeading": "(empty heading)",
     "colLevel": "Level",
@@ -1085,6 +1154,8 @@
     "cardWordCount": "Word Count"
   },
   "imagesTab": {
+    "minSizePlaceholder": "Min size (KB)",
+    "minSizeTitle": "Only images at least this large. Sizes come from the post-crawl image size probe or from images crawled as their own URLs; images with an unknown size are hidden while a value is set.",
     "searchPlaceholder": "Search image URLs / alt…",
     "missingAltOnly": "Missing Alt only",
     "emptyAltOnly": "Empty Alt only",
@@ -1215,7 +1286,8 @@
     "statusMismatch": "lang?",
     "statusMismatchTip": "The findings were discarded — the page does not read as the language it was checked in.",
     "langConflict": "The page declares lang=\"{{declared}}\" but its text reads as {{detected}}. The check used {{used}}.",
-    "unsupportedBanner": "{{count}} page(s) left unchecked: LanguageTool has no rules for {{langs}}, and grading that text against a substitute language would report an error on nearly every word. Nothing here is misconfigured — no setting makes this engine check {{langs}}.",
+    "unsupportedBanner_one": "{{count}} page left unchecked: LanguageTool has no rules for {{langs}}, and grading that text against a substitute language would report an error on nearly every word. Nothing here is misconfigured — no setting makes this engine check {{langs}}.",
+    "unsupportedBanner_other": "{{count}} pages left unchecked: LanguageTool has no rules for {{langs}}, and grading that text against a substitute language would report an error on nearly every word. Nothing here is misconfigured — no setting makes this engine check {{langs}}.",
     "statusOkLocal": "ok*",
     "statusOkLocalTip": "Checked with the offline dictionary: spelling only, no grammar. LanguageTool has no rules for this language."
   },
@@ -1257,7 +1329,8 @@
     "checkFailed": "Check failed",
     "skipped": "Skipped — the page has too little prose to check.",
     "clean": "No spelling or grammar issues found.",
-    "summary": "{{n}} finding(s)",
+    "summary_one": "{{count}} finding",
+    "summary_other": "{{count}} findings",
     "language": "Language",
     "suggestions": "Suggestions",
     "colType": "Type",
@@ -1325,8 +1398,10 @@
     "presetMobile": "Page is Not Mobile Friendly",
     "presetAmp": "AMP URL Invalid",
     "presetRich": "Rich Result Invalid",
-    "newUrlsFound": "{{n}} URL(s) appear in Search Console but were not found by the crawl.",
-    "newUrlsQueued": "{{n}} new URL(s) discovered in Search Console were added to the crawl.",
+    "newUrlsFound_one": "{{count}} URL appears in Search Console but was not found by the crawl.",
+    "newUrlsFound_other": "{{count}} URLs appear in Search Console but were not found by the crawl.",
+    "newUrlsQueued_one": "{{count}} new URL discovered in Search Console was added to the crawl.",
+    "newUrlsQueued_other": "{{count}} new URLs discovered in Search Console were added to the crawl.",
     "crawlNewUrls": "Crawl {{n}} new URLs",
     "accountTitle": "Which linked Google account this project reports on. Each account keeps its own stored data."
   },
@@ -1505,7 +1580,8 @@
     "totalLabel": "Total rows",
     "noBrokenLinks": "No broken links",
     "noBrokenLinksHint": "Run a crawl that includes external links to see broken links.",
-    "cellsSelected": "{{n}} cell(s) selected",
+    "cellsSelected_one": "{{formatted}} cell selected",
+    "cellsSelected_other": "{{formatted}} cells selected",
     "noBrokenLinksBody": "Every link in the crawl resolves to a healthy response."
   },
   "urlsTab": {
@@ -1547,11 +1623,13 @@
     "statusSelectedCells": "Selected Cells:",
     "statusSelectedColumns": "Selected Columns:",
     "copying": "Copying…",
-    "copiedCells": "{{n}} cell(s) copied",
+    "copiedCells_one": "{{formatted}} cell copied",
+    "copiedCells_other": "{{formatted}} cells copied",
     "copiedNothing": "Nothing to copy",
     "rowHeader": "Row",
     "rowNumberTitle": "Row number",
     "rowSelectHint": "Click to select row · drag to select multiple rows",
+    "gridAriaLabel": "URL table",
     "resizeHint": "Drag to resize · double-click to reset",
     "sortByColumn": "Sort by this column",
     "columnSortedAscHint": "Sorted ascending — click to flip",
@@ -1578,8 +1656,6 @@
       "title": "Language",
       "intro": "Select the UI display language. Applied immediately.",
       "label": "UI language",
-      "en": "English",
-      "tr": "Türkçe",
       "note": "Some deep panels and dialogs may still display English while broader coverage is being added."
     },
     "spelling": {
@@ -1590,11 +1666,13 @@
       "levelPicky": "Picky — also flags style, typography and wordiness",
       "dictionaryLabel": "Custom Dictionary",
       "dictionaryHint": "Words to never flag — brand names, product names, industry jargon. One per line, or separated by commas. Case-insensitive.",
-      "dictionaryCount": "{{n}} word(s) ignored",
+      "dictionaryCount_one": "{{count}} word ignored",
+      "dictionaryCount_other": "{{count}} words ignored",
       "languageLabel": "Language",
       "languageHint": "Leave on auto unless detection gets a site wrong. Pinning a language forces every page to be checked in it — useful for a single-language site whose html[lang] is wrong, and it also turns off the safety check that discards implausibly noisy results.",
       "languageAuto": "Auto — detect from each page's text (recommended)",
-      "languageCount": "This endpoint offers {{n}} language variant(s). Languages outside that list — Turkish, Hungarian, Czech and others — cannot be checked by LanguageTool at all."
+      "languageCount_one": "This endpoint offers {{count}} language variant. Languages outside that list — Turkish, Hungarian, Czech and others — cannot be checked by LanguageTool at all.",
+      "languageCount_other": "This endpoint offers {{count}} language variants. Languages outside that list — Turkish, Hungarian, Czech and others — cannot be checked by LanguageTool at all."
     },
     "storage": {
       "title": "Storage",
@@ -1609,7 +1687,10 @@
       "placeholder": "(System Documents folder)",
       "resolvedPath": "Resolved path",
       "resetTitle": "Reset to the OS Documents folder",
-      "note": "Active crawl data lives in the app's user-data directory until you Save As — the path above only controls where Save As starts. Changing this won't move any existing project files."
+      "note": "Active crawl data lives in the app's user-data directory until you Save As — the path above only controls where Save As starts. Changing this won't move any existing project files.",
+      "autoSaveTitle": "Batch Save",
+      "autoSaveLabel": "Auto-save project every N crawled URLs — 0 = off",
+      "autoSaveHint": "While a crawl runs, the open .seoproject file is rewritten each time this many more URLs have been crawled, so a crash or power loss costs at most one batch. Only applies once the project has been saved to a file; minimum {{min}}. Each save is a full snapshot, so keep it in the thousands on large sites."
     },
     "agents": {
       "title": "Agent Sessions (MCP)",
@@ -1649,12 +1730,41 @@
       "url": "Endpoint URL",
       "headers": "Headers",
       "headersHint": "Name: value per line. Stored encrypted and shown masked.",
-      "handshake": "{{name}} {{version}} · MCP {{protocol}} · {{n}} tool(s)",
+      "handshake_one": "{{name}} {{version}} · MCP {{protocol}} · {{count}} tool",
+      "handshake_other": "{{name}} {{version}} · MCP {{protocol}} · {{count}} tools",
       "toolPermissions": "Tool permissions",
       "policyAsk": "Ask",
       "policyAlways": "Always allow",
       "policyNever": "Never allow",
       "add": "Add server"
+    },
+    "theme": {
+      "intro": "Choose the colour theme for the interface. Applied immediately to every window and remembered for the next launch.",
+      "label": "Colour theme",
+      "dark": "Dark (default)",
+      "light": "Light",
+      "customCssNote": "A custom-theme.css file in the app's user-data folder is still injected on top of either theme."
+    },
+    "system": {
+      "intro": "Live view of what FreeCrawl is using right now, plus the runtime it is running on. Refreshes every two seconds.",
+      "memory": "Memory",
+      "rss": "Process (RSS)",
+      "heap": "JS heap (used / reserved)",
+      "external": "Native buffers",
+      "systemMemory": "System memory (used / total)",
+      "perUrl": "Per crawled URL",
+      "projected": "Projected at 1M URLs",
+      "limitNote": "The memory soft limit that pauses the crawl lives under Hardware.",
+      "environment": "Environment",
+      "version": "FreeCrawl",
+      "platform": "Platform",
+      "cpus": "CPU cores",
+      "uptime": "Uptime",
+      "storageMode": "Storage mode",
+      "storageDisk": "Disk",
+      "paths": "Paths",
+      "userData": "User data",
+      "logs": "Logs"
     }
   },
   "logAnalyzer": {
@@ -1690,7 +1800,8 @@
     "cardVerified": "Verified Bot Hits",
     "cardUrls": "Distinct URLs",
     "cardRange": "Date Range",
-    "filesIngested": "{{n}} file(s) ingested",
+    "filesIngested_one": "{{count}} file ingested",
+    "filesIngested_other": "{{count}} files ingested",
     "tabUrls": "URL Hits",
     "tabBots": "Bots",
     "tabStatus": "Status Codes",
@@ -1735,7 +1846,8 @@
     "colDepth": "Depth",
     "discoveryHint": "URLs seen in the log but never reached by the crawl. Seed them into a running crawl.",
     "seedBtn": "Seed into active crawl",
-    "seeded": "Seeded {{n}} URL(s) into the active crawl",
+    "seeded_one": "Seeded {{count}} URL into the active crawl",
+    "seeded_other": "Seeded {{count}} URLs into the active crawl",
     "seedNoActive": "No active crawl — start a crawl first, then seed.",
     "seedNoOrigin": "No crawled URLs yet to derive a base origin from.",
     "seedNone": "Nothing new to seed.",
@@ -1744,7 +1856,6 @@
     "tabThreats": "Suspicious Requests",
     "cardThreats": "Suspicious Requests",
     "threatIntro": "Requests that look like attacks or vulnerability probes — SQL injection, XSS, path traversal, command injection, scanner paths, sensitive-file fetches — with the sender IP and the decoded payload.",
-    "threatStats": "{{hits}} flagged request(s) from {{ips}} IP(s)",
     "threatServed": "{{n}} answered 2xx — the server processed those payloads; check the application, not just the log",
     "threatServedNone": "none answered 2xx",
     "threatCapHit": "The per-file cap was reached — this list is partial.",
@@ -1770,7 +1881,8 @@
     "threatCopyPlain": "Plain IP list",
     "threatCopyNginx": "nginx deny rules",
     "threatCopyApache": "Apache Require not ip",
-    "threatCopied": "Copied {{n}} IP(s) to the clipboard (search-engine infrastructure excluded)",
+    "threatCopied_one": "Copied {{count}} IP to the clipboard (search-engine infrastructure excluded)",
+    "threatCopied_other": "Copied {{count}} IPs to the clipboard (search-engine infrastructure excluded)",
     "threatCopyFailed": "Could not copy to the clipboard",
     "threatCopyEmpty": "No IPs to copy",
     "colTime": "Time",
@@ -1792,7 +1904,12 @@
     "urlStatusAll": "Any status",
     "urlStatus4xx": "4xx (errors)",
     "urlStatus5xx": "5xx (server errors)",
-    "threatChipIps": "{{n}} distinct IP(s)"
+    "threatChipIps_one": "{{formatted}} distinct IP",
+    "threatChipIps_other": "{{formatted}} distinct IPs",
+    "threatStatsHits_one": "{{formatted}} flagged request",
+    "threatStatsHits_other": "{{formatted}} flagged requests",
+    "threatStatsIps_one": "from {{formatted}} IP",
+    "threatStatsIps_other": "from {{formatted}} IPs"
   },
   "detailExport": {
     "label": "Export",
@@ -1806,7 +1923,8 @@
     "builtinToolsHint": "Read-only queries against the open crawl. Run without asking.",
     "mcpServers": "MCP servers",
     "noServers": "No MCP servers configured yet. Add one in Settings → MCP Servers.",
-    "toolCount": "{{n}} tool(s)",
+    "toolCount_one": "{{count}} tool",
+    "toolCount_other": "{{count}} tools",
     "manageServers": "Manage MCP servers",
     "tokens": "{{in}} in / {{out}} out tokens",
     "clear": "Clear",

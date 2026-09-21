@@ -1,10 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
+import { changeLanguage } from '../i18n/index.js';
+import { getTheme, setTheme, subscribeTheme } from '../theme.js';
+import { useMemoryMonitor } from '../hooks/useMemoryMonitor.js';
 import {
-  SUPPORTED_LANGUAGES,
-  changeLanguage,
-  type SupportedLanguage,
-} from '../i18n/index.js';
+  ISSUE_CATEGORIES,
+  ISSUE_GROUPS,
+  UI_LANGUAGE_NAMES,
+  UI_LANGUAGE_PICKER_ORDER,
+  normalizeDisabledIssues,
+  normalizeUiLanguage,
+  type UiLanguage,
+  type UiTheme,
+  type UrlCategory,
+  type SystemInfo,
+} from '@freecrawl/shared-types';
 import { translateLabel } from '../i18n/labels.js';
 import {
   X,
@@ -33,7 +43,9 @@ import {
   Wrench,
   FolderOpen,
   SpellCheck,
+  Activity,
   Languages,
+  Palette,
   Plug,
   ExternalLink,
   BookOpen,
@@ -53,12 +65,18 @@ import type {
   CrawlScope,
   CustomExtractionRule,
   FormLoginStep,
+  ReportBranding,
   HttpAuth,
   IntegrationDef,
   IntegrationsState,
   SpellingLanguageOption,
 } from '@freecrawl/shared-types';
-import { DEFAULT_CRAWL_CONFIG, INTEGRATIONS } from '@freecrawl/shared-types';
+import {
+  DEFAULT_CRAWL_CONFIG,
+  INTEGRATIONS,
+  AUTO_SAVE_MIN_URLS,
+  normalizeAutoSaveEveryUrls,
+} from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip, type FieldInfo } from './InfoTip.js';
 import { ExtractionPreviewDialog } from './ExtractionPreviewDialog.js';
@@ -182,6 +200,10 @@ interface FormState {
   analyseDuplicates: boolean;
   analysePagination: boolean;
   analyseIssues: boolean;
+  probeMobileParity: boolean;
+  mobileParitySample: string;
+  /** Silenced issue checks (Settings → Issues). */
+  disabledIssues: UrlCategory[];
   // content (body snapshot)
   storeBodySnapshots: boolean;
   bodySnapshotMaxBytes: string;
@@ -263,9 +285,12 @@ export type SettingsSectionKey =
   | 'rendering'
   | 'performance-budget'
   | 'storage'
+  | 'reports'
   | 'spelling'
   | 'mcp-servers'
   | 'language'
+  | 'theme'
+  | 'system'
   /** Per-integration sub-page, e.g. `integration:gsc`. Each integration
    *  gets its own page under the "Integrations" group header, so a
    *  provider's credentials and its behaviour settings are never mixed
@@ -317,7 +342,7 @@ const SECTIONS: SectionDef[] = [
     key: 'presets',
     label: 'Presets',
     icon: Sparkles,
-    keywords: 'preset profile fast thorough mobile desktop aggressive',
+    keywords: 'preset profile fast thorough mobile desktop aggressive ecommerce shop news publisher accessibility wcag',
   },
   {
     key: 'mode',
@@ -486,6 +511,12 @@ const SECTIONS: SectionDef[] = [
     keywords: 'storage save folder directory project location path documents disk',
   },
   {
+    key: 'reports',
+    label: 'Reports',
+    icon: FileText,
+    keywords: 'reports branding logo brand pdf html white label accent colour color prepared by',
+  },
+  {
     key: 'spelling',
     label: 'Spelling',
     icon: SpellCheck,
@@ -503,6 +534,18 @@ const SECTIONS: SectionDef[] = [
     label: 'Language',
     icon: Languages,
     keywords: 'language dil locale i18n internationalization english turkish ingilizce türkçe tr en',
+  },
+  {
+    key: 'theme',
+    label: 'Theme',
+    icon: Palette,
+    keywords: 'theme dark light colour color appearance mode tema koyu açık görünüm',
+  },
+  {
+    key: 'system',
+    label: 'System',
+    icon: Activity,
+    keywords: 'system memory ram rss heap cpu version electron chromium node platform uptime paths logs user data sistem bellek',
   },
 ];
 
@@ -613,6 +656,9 @@ function configToForm(c: CrawlConfig): FormState {
     analyseDuplicates: c.analyseDuplicates ?? true,
     analysePagination: c.analysePagination ?? true,
     analyseIssues: c.analyseIssues ?? true,
+    probeMobileParity: c.probeMobileParity ?? false,
+    mobileParitySample: String(c.mobileParitySample ?? 200),
+    disabledIssues: normalizeDisabledIssues(c.disabledIssues),
     storeBodySnapshots: c.storeBodySnapshots ?? true,
     bodySnapshotMaxBytes: String(c.bodySnapshotMaxBytes ?? 1_048_576),
     maxLinksPerPage: String(c.maxLinksPerPage ?? 100),
@@ -954,6 +1000,9 @@ export function SettingsDialog({ open, onClose }: Props) {
       analyseDuplicates: form.analyseDuplicates,
       analysePagination: form.analysePagination,
       analyseIssues: form.analyseIssues,
+      probeMobileParity: form.probeMobileParity,
+      mobileParitySample: Math.max(0, num(form.mobileParitySample, config.mobileParitySample)),
+      disabledIssues: form.disabledIssues,
       storeBodySnapshots: form.storeBodySnapshots,
       bodySnapshotMaxBytes: Math.max(
         0,
@@ -1240,7 +1289,7 @@ export function SettingsDialog({ open, onClose }: Props) {
               {active === 'crawl-analysis' && (
                 <CrawlAnalysisPanel form={form} update={update} />
               )}
-              {active === 'issues' && <IssuesPanel />}
+              {active === 'issues' && <IssuesPanel form={form} update={update} />}
               {active === 'advanced' && (
                 <AdvancedPanel form={form} update={update} />
               )}
@@ -1260,9 +1309,12 @@ export function SettingsDialog({ open, onClose }: Props) {
                 <PerformanceBudgetPanel form={form} update={update} />
               )}
               {active === 'storage' && <StoragePanel />}
+              {active === 'reports' && <ReportsPanel />}
               {active === 'spelling' && <SpellingPanel />}
               {active === 'mcp-servers' && <McpServersSection />}
               {active === 'language' && <LanguagePanel />}
+              {active === 'theme' && <ThemePanel />}
+              {active === 'system' && <SystemPanel />}
             </div>
           </div>
         </div>
@@ -1303,7 +1355,71 @@ interface PanelProps {
   update: <K extends keyof FormState>(key: K, value: FormState[K]) => void;
 }
 
-type PresetKey = 'fast' | 'thorough' | 'mobile' | 'desktop' | 'aggressive';
+type PresetKey =
+  | 'fast'
+  | 'thorough'
+  | 'mobile'
+  | 'desktop'
+  | 'aggressive'
+  | 'ecommerce'
+  | 'news'
+  | 'accessibility';
+
+/** Rules of one Custom Extraction template, for presets that pre-load a set. */
+function templateRules(...keys: string[]): CustomExtractionRule[] {
+  return keys.flatMap((k) => EXTRACTION_TEMPLATES.find((t) => t.key === k)?.rules ?? []);
+}
+
+const EXTRACTION_TEMPLATES: { key: string; label: string; rules: CustomExtractionRule[] }[] = [
+  {
+    key: 'price',
+    label: 'Product price + currency (JSON-LD offers)',
+    rules: [
+      { name: 'Price', type: 'jsonpath', selector: '$..offers[*].price', output: 'text', multi: 'first' },
+      { name: 'Currency', type: 'jsonpath', selector: '$..offers[*].priceCurrency', output: 'text', multi: 'first' },
+    ],
+  },
+  {
+    key: 'author',
+    label: 'Author name (JSON-LD, meta fallback)',
+    rules: [
+      { name: 'Author', type: 'jsonpath', selector: '$..author..name', output: 'text', multi: 'first' },
+      { name: 'Author (meta)', type: 'css', selector: 'meta[name="author"]', attribute: 'content', output: 'attribute', multi: 'first' },
+    ],
+  },
+  {
+    key: 'published',
+    label: 'Publish / modified date',
+    rules: [
+      { name: 'Published', type: 'css', selector: 'meta[property="article:published_time"]', attribute: 'content', output: 'attribute', multi: 'first' },
+      { name: 'Modified', type: 'css', selector: 'meta[property="article:modified_time"]', attribute: 'content', output: 'attribute', multi: 'first' },
+    ],
+  },
+  {
+    key: 'stock',
+    label: 'Stock availability (JSON-LD offers)',
+    rules: [
+      { name: 'Availability', type: 'jsonpath', selector: '$..offers[*].availability', output: 'text', multi: 'first' },
+    ],
+  },
+  {
+    key: 'rating',
+    label: 'Review rating + count (JSON-LD aggregateRating)',
+    rules: [
+      { name: 'Rating', type: 'jsonpath', selector: '$..aggregateRating.ratingValue', output: 'text', multi: 'first' },
+      { name: 'Review Count', type: 'jsonpath', selector: '$..aggregateRating.reviewCount', output: 'text', multi: 'first' },
+    ],
+  },
+  {
+    key: 'sku',
+    label: 'SKU + brand (JSON-LD Product)',
+    rules: [
+      { name: 'SKU', type: 'jsonpath', selector: '$..sku', output: 'text', multi: 'first' },
+      { name: 'Brand', type: 'jsonpath', selector: '$..brand.name', output: 'text', multi: 'first' },
+    ],
+  },
+];
+
 
 interface PresetDef {
   key: PresetKey;
@@ -1408,6 +1524,58 @@ const PRESETS: PresetDef[] = [
       retryAttempts: '2',
       respectRobotsTxt: false,
       crawlExternal: false,
+    },
+  },
+  {
+    key: 'ecommerce',
+    label: 'E-commerce',
+    description:
+      'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.',
+    overrides: {
+      customExtractionRules: templateRules('price', 'stock', 'rating', 'sku'),
+      customSearchTermsText: 'out of stock\nsold out\ncurrently unavailable',
+      crawlQueryStrings: false,
+      checkImages: true,
+      storeImages: true,
+      analyseDuplicates: true,
+      analyseIssues: true,
+      maxConcurrency: '15',
+      maxRps: '15',
+    },
+  },
+  {
+    key: 'news',
+    label: 'News',
+    description:
+      'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.',
+    overrides: {
+      customExtractionRules: templateRules('author', 'published'),
+      crawlHreflang: true,
+      storeHreflang: true,
+      analyseHreflang: true,
+      discoverSitemaps: true,
+      crawlLinkedSitemaps: true,
+      storeMetaRefresh: true,
+      analyseIssues: true,
+      maxConcurrency: '15',
+      maxRps: '15',
+    },
+  },
+  {
+    key: 'accessibility',
+    label: 'Accessibility-focus',
+    description:
+      'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.',
+    overrides: {
+      renderingMode: 'js',
+      jsA11yAudit: true,
+      jsMobileUsability: true,
+      checkImages: true,
+      storeImages: true,
+      analyseIssues: true,
+      maxConcurrency: '4',
+      maxRps: '4',
+      requestTimeoutMs: '30000',
     },
   },
 ];
@@ -1619,7 +1787,7 @@ function ModePanel({ form, update }: PanelProps) {
       )}
       {form.mode === 'spider' && (
         <Area
-          label={t('settingsPanels.mode.seedSitemap', { defaultValue: 'Seed from sitemap URL(s) — optional' })}
+          label={t('settingsPanels.mode.seedSitemap', { defaultValue: 'Seed from sitemap URLs — optional' })}
           value={form.seedSitemapText}
           onChange={(v) => update('seedSitemapText', v)}
           rows={4}
@@ -2732,6 +2900,14 @@ function UrlRewritingPanel({ form, update }: PanelProps) {
   );
 }
 
+/**
+ * Ready-made extraction rules for the fields e-commerce and editorial
+ * audits ask for first. Each leans on schema.org JSON-LD, which is the one
+ * source that survives theme changes; the `<meta>` fallbacks cover sites
+ * without structured data. Rule names are the JSON keys in the results and
+ * the per-rule column headers, so they stay English.
+ */
+
 const DEFAULT_RULE: CustomExtractionRule = {
   name: '',
   type: 'css',
@@ -2797,10 +2973,12 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
               if (rules.length > 0) {
                 const ok = confirm(
                   t('settingsPanels.customExtraction.importConfirm', {
-                    defaultValue:
-                      'Replace {{existing}} existing rule(s) with {{incoming}} imported rule(s)?',
+                    defaultValue_one:
+                      'Import {{count}} rule, replacing the current rule set ({{existing}})?',
+                    defaultValue_other:
+                      'Import {{count}} rules, replacing the current rule set ({{existing}})?',
                     existing: rules.length,
-                    incoming: result.rules.length,
+                    count: result.rules.length,
                   }) as string,
                 );
                 if (!ok) return;
@@ -2809,9 +2987,11 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
               if (result.skippedCount > 0) {
                 alert(
                   t('settingsPanels.customExtraction.importSkipped', {
-                    defaultValue:
-                      'Imported {{ok}} rule(s). {{skipped}} entries were skipped (invalid shape or over the 10-rule cap).',
-                    ok: result.rules.length,
+                    defaultValue_one:
+                      'Imported {{count}} rule. {{skipped}} entries were skipped (invalid shape or over the 10-rule cap).',
+                    defaultValue_other:
+                      'Imported {{count}} rules. {{skipped}} entries were skipped (invalid shape or over the 10-rule cap).',
+                    count: result.rules.length,
                     skipped: result.skippedCount,
                   }) as string,
                 );
@@ -3058,6 +3238,30 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
         </div>
       ))}
 
+      {rules.length < 10 && (
+        <select
+          aria-label={t('settingsPanels.customExtraction.templates', { defaultValue: 'Insert template…' })}
+          value=""
+          onChange={(e) => {
+            const tpl = EXTRACTION_TEMPLATES.find((x) => x.key === e.target.value);
+            if (!tpl) return;
+            const used = new Set(rules.map((r) => r.name));
+            const fresh = tpl.rules.filter((r) => !used.has(r.name));
+            if (fresh.length === 0) return;
+            setRules([...rules, ...fresh].slice(0, 10));
+          }}
+          className="mr-2 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 focus:border-blue-500 focus:outline-none"
+        >
+          <option value="">
+            {t('settingsPanels.customExtraction.templates', { defaultValue: 'Insert template…' })}
+          </option>
+          {EXTRACTION_TEMPLATES.map((tpl) => (
+            <option key={tpl.key} value={tpl.key}>
+              {t(`settingsPanels.customExtraction.template_${tpl.key}`, { defaultValue: tpl.label })}
+            </option>
+          ))}
+        </select>
+      )}
       {rules.length < 10 && (
         <button
           className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
@@ -3799,22 +4003,157 @@ function CrawlAnalysisPanel({ form, update }: PanelProps) {
           onChange={(v) => update('analyseIssues', v)}
           info="Pre-computes Dead External Domain, Duplicate URL post-norm, Canonical Chain Multi-hop. Without this the sidebar shows 0 for those three."
         />
+        <Bool
+          label={t('settingsPanels.crawlAnalysis.mobileParity', { defaultValue: 'Mobile vs desktop parity probe' })}
+          checked={form.probeMobileParity}
+          onChange={(v) => update('probeMobileParity', v)}
+          info="After the crawl, re-fetches a sample of indexable pages with the opposite user agent (mobile when the crawl ran as desktop, desktop otherwise) and compares title, H1, meta description, canonical, robots, word count and link count. Differences feed the 'Mobile / Desktop Mismatch' issue and the report of the same name."
+        />
+        {form.probeMobileParity && (
+          <Num
+            label={t('settingsPanels.crawlAnalysis.mobileParitySample', { defaultValue: 'Pages to re-fetch (0 = all)' })}
+            value={form.mobileParitySample}
+            onChange={(v) => update('mobileParitySample', v)}
+            info="How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl's traffic for that set)."
+            example="200"
+          />
+        )}
       </div>
     </>
   );
 }
 
-function IssuesPanel() {
-  const { t } = useTranslation();
+function IssuesPanel({ form, update }: PanelProps) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
+  const [query, setQuery] = useState('');
+  const disabled = useMemo(() => new Set<string>(form.disabledIssues), [form.disabledIssues]);
+  const commit = (next: Set<string>): void =>
+    update('disabledIssues', normalizeDisabledIssues([...next]));
+  const setOne = (category: string, on: boolean): void => {
+    const next = new Set(disabled);
+    if (on) next.delete(category);
+    else next.add(category);
+    commit(next);
+  };
+  const setMany = (categories: readonly string[], on: boolean): void => {
+    const next = new Set(disabled);
+    for (const c of categories) {
+      if (on) next.delete(c);
+      else next.add(c);
+    }
+    commit(next);
+  };
+  const q = query.trim().toLowerCase();
+  const matches = (label: string): boolean =>
+    q === '' || translateLabel(label, lang).toLowerCase().includes(q) || label.toLowerCase().includes(q);
+  const groups = ISSUE_GROUPS.map((g) => ({
+    group: g,
+    items: matches(g.label) ? g.items : g.items.filter((i) => matches(i.label)),
+  })).filter((g) => g.items.length > 0);
+  const enabledCount = ISSUE_CATEGORIES.length - disabled.size;
   return (
     <>
-      <p className="mb-3 text-[11px] text-surface-400">
-        {t('settingsPanels.issues.intro', { defaultValue: 'Per-issue check on/off toggles.' })}
+      <p className="mb-2 text-[11px] text-surface-400">
+        {t('settingsPanels.issues.intro', {
+          defaultValue:
+            'Turn individual issue checks off for this project — for example "Description = Title" on a CMS that does it on purpose.',
+        })}
       </p>
-      <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
-        <strong>{t('settingsPanels.issues.v2Prefix', { defaultValue: 'Coming in V2.' })}</strong>{' '}
-        {t('settingsPanels.issues.v2Body', { defaultValue: 'Today every issue check runs unconditionally and surfaces in the sidebar. The plan is to let you silence specific checks per-project (e.g. disable "Description = Title" on a CMS that\'s known to do it intentionally). Until that ships, hide rows you don\'t care about by collapsing the sidebar group, or filter them out via the Advanced filter on each tab.' })}
+      <p className="mb-3 text-[11px] text-surface-500">
+        {t('settingsPanels.issues.effect', {
+          defaultValue:
+            'A disabled check disappears from the sidebar, the overview counts, HTML/PDF reports, bulk export and the crawl-complete webhook. Nothing is deleted — turn it back on to see its results again.',
+        })}
+      </p>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('settingsPanels.issues.search', { defaultValue: 'Filter checks…' })}
+          className="min-w-[160px] flex-1 rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={() => setMany(ISSUE_CATEGORIES, true)}
+          disabled={disabled.size === 0}
+          className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {t('settingsPanels.issues.enableAll', { defaultValue: 'Enable all' })}
+        </button>
+        <button
+          type="button"
+          onClick={() => setMany(ISSUE_CATEGORIES, false)}
+          disabled={enabledCount === 0}
+          className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {t('settingsPanels.issues.disableAll', { defaultValue: 'Disable all' })}
+        </button>
+        <span className="text-[11px] text-surface-500">
+          {t('settingsPanels.issues.summary', {
+            defaultValue: 'Enabled: {{on}} / {{total}}',
+            on: enabledCount,
+            total: ISSUE_CATEGORIES.length,
+          })}
+        </span>
       </div>
+      {groups.length === 0 && (
+        <p className="text-[11px] text-surface-500">
+          {t('settingsPanels.issues.noMatch', { defaultValue: 'No check matches your filter.' })}
+        </p>
+      )}
+      {groups.map(({ group, items }) => {
+        const offInGroup = group.items.filter((i) => disabled.has(i.category)).length;
+        const allOn = offInGroup === 0;
+        const allOff = offInGroup === group.items.length;
+        return (
+          <div key={group.key} className="mb-3 rounded border border-surface-800 bg-surface-950/40">
+            <div className="flex items-center justify-between gap-2 border-b border-surface-800 px-3 py-1.5">
+              <label className="flex items-center gap-2 text-[11px] font-medium text-surface-200">
+                <input
+                  type="checkbox"
+                  checked={allOn}
+                  ref={(el) => {
+                    if (el) el.indeterminate = !allOn && !allOff;
+                  }}
+                  onChange={(e) =>
+                    setMany(
+                      group.items.map((i) => i.category),
+                      e.target.checked,
+                    )
+                  }
+                />
+                {translateLabel(group.label, lang)}
+              </label>
+              <span className="text-[10px] tabular-nums text-surface-500">
+                {t('settingsPanels.issues.groupSummary', {
+                  defaultValue: '{{on}} / {{total}} on',
+                  on: group.items.length - offInGroup,
+                  total: group.items.length,
+                })}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 gap-x-4 px-3 py-1.5 sm:grid-cols-2">
+              {items.map((i) => {
+                const off = disabled.has(i.category);
+                return (
+                  <label key={i.key} className="flex items-center gap-2 py-0.5 text-[11px]">
+                    <input
+                      type="checkbox"
+                      checked={!off}
+                      onChange={(e) => setOne(i.category, e.target.checked)}
+                    />
+                    <span className={clsx(off ? 'text-surface-500 line-through' : 'text-surface-300')}>
+                      {translateLabel(i.label, lang)}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
     </>
   );
 }
@@ -5017,8 +5356,11 @@ function SpellingPanel() {
         {languagesLoaded && languages.length > 0 && (
           <p className="mt-1 text-[10px] text-surface-500">
             {t('settings.spelling.languageCount', {
-              defaultValue: "This endpoint offers {{n}} language variant(s). Languages outside that list — Turkish, Hungarian, Czech and others — cannot be checked by LanguageTool at all.",
-              n: languages.length,
+              defaultValue_one:
+                'This endpoint offers {{count}} language variant. Languages outside that list — Turkish, Hungarian, Czech and others — cannot be checked by LanguageTool at all.',
+              defaultValue_other:
+                'This endpoint offers {{count}} language variants. Languages outside that list — Turkish, Hungarian, Czech and others — cannot be checked by LanguageTool at all.',
+              count: languages.length,
             })}
           </p>
         )}
@@ -5072,8 +5414,9 @@ function SpellingPanel() {
         />
         <p className="mt-1 text-[10px] text-surface-500">
           {t('settings.spelling.dictionaryCount', {
-            defaultValue: "{{n}} word(s) ignored",
-            n: wordCount,
+            defaultValue_one: '{{count}} word ignored',
+            defaultValue_other: '{{count}} words ignored',
+            count: wordCount,
           })}
         </p>
       </div>
@@ -5162,6 +5505,108 @@ function AgentSessionsSettings() {
   );
 }
 
+/** White-label settings for the HTML / PDF report — app-wide, saved on change. */
+function ReportsPanel() {
+  const { t } = useTranslation();
+  const [branding, setBranding] = useState<ReportBranding>(() => {
+    const raw = window.freecrawl.prefsGet('reportBranding');
+    return raw && typeof raw === 'object' ? (raw as ReportBranding) : {};
+  });
+  const write = (next: ReportBranding): void => {
+    setBranding(next);
+    const clean: ReportBranding = {};
+    if (next.brandName?.trim()) clean.brandName = next.brandName.trim();
+    if (next.preparedBy?.trim()) clean.preparedBy = next.preparedBy.trim();
+    if (next.accentColor?.trim()) clean.accentColor = next.accentColor.trim();
+    if (next.logoDataUrl) clean.logoDataUrl = next.logoDataUrl;
+    if (Object.keys(clean).length === 0) window.freecrawl.prefsDelete('reportBranding');
+    else window.freecrawl.prefsSet('reportBranding', clean);
+  };
+  const inputClass =
+    'rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none';
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settingsPanels.reports.intro', {
+          defaultValue:
+            'Brand the HTML and PDF reports (File → Export HTML / PDF Report). Changes apply to the next export; leave everything empty for the plain FreeCrawl header.',
+        })}
+      </p>
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3 space-y-3">
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] text-surface-300">{t('settingsPanels.reports.brandName', { defaultValue: 'Brand name' })}</span>
+          <input
+            type="text"
+            value={branding.brandName ?? ''}
+            onChange={(e) => write({ ...branding, brandName: e.target.value })}
+            placeholder={t('settingsPanels.reports.brandNamePlaceholder', { defaultValue: 'Acme SEO Agency' })}
+            className={inputClass}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[11px] text-surface-300">{t('settingsPanels.reports.preparedBy', { defaultValue: 'Prepared by' })}</span>
+          <input
+            type="text"
+            value={branding.preparedBy ?? ''}
+            onChange={(e) => write({ ...branding, preparedBy: e.target.value })}
+            className={inputClass}
+          />
+        </label>
+        <label className="flex items-center gap-3">
+          <span className="text-[11px] text-surface-300">{t('settingsPanels.reports.accentColor', { defaultValue: 'Accent colour' })}</span>
+          <input
+            type="color"
+            value={branding.accentColor && /^#[0-9a-fA-F]{6}$/.test(branding.accentColor) ? branding.accentColor : '#2563eb'}
+            onChange={(e) => write({ ...branding, accentColor: e.target.value })}
+            className="h-6 w-10 cursor-pointer rounded border border-surface-700 bg-surface-950"
+          />
+          <span className="font-mono text-[11px] text-surface-500">{branding.accentColor ?? '—'}</span>
+          {branding.accentColor && (
+            <button
+              type="button"
+              onClick={() => write({ ...branding, accentColor: undefined })}
+              className="text-[11px] text-surface-400 underline decoration-dotted hover:text-surface-200"
+            >
+              {t('settingsPanels.reports.reset', { defaultValue: 'Reset' })}
+            </button>
+          )}
+        </label>
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] text-surface-300">{t('settingsPanels.reports.logo', { defaultValue: 'Logo' })}</span>
+          {branding.logoDataUrl ? (
+            <img src={branding.logoDataUrl} alt="" className="max-h-10 max-w-[160px] rounded bg-white/90 p-1" />
+          ) : (
+            <span className="text-[11px] text-surface-500">{t('settingsPanels.reports.noLogo', { defaultValue: 'None' })}</span>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              void window.freecrawl.pickImageFile().then((dataUrl) => {
+                if (dataUrl) write({ ...branding, logoDataUrl: dataUrl });
+              });
+            }}
+            className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500"
+          >
+            {t('settingsPanels.reports.chooseLogo', { defaultValue: 'Choose…' })}
+          </button>
+          {branding.logoDataUrl && (
+            <button
+              type="button"
+              onClick={() => write({ ...branding, logoDataUrl: undefined })}
+              className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-400 hover:border-red-500 hover:text-red-300"
+            >
+              {t('settingsPanels.reports.removeLogo', { defaultValue: 'Remove' })}
+            </button>
+          )}
+        </div>
+        <p className="text-[11px] text-surface-500">
+          {t('settingsPanels.reports.logoHint', { defaultValue: 'PNG, JPEG, SVG or WebP up to 1 MB; shown at up to 44 px tall in the report header.' })}
+        </p>
+      </div>
+    </>
+  );
+}
+
 function StoragePanel() {
   const { t } = useTranslation();
   const [override, setOverride] = useState<string>(() => {
@@ -5173,6 +5618,18 @@ function StoragePanel() {
     window.freecrawl.prefsGet('storageMode') === 'ram' ? 'ram' : 'disk',
   );
   const [activeMode, setActiveMode] = useState<'disk' | 'ram' | null>(null);
+  const [autoSave, setAutoSaveState] = useState<string>(() =>
+    String(normalizeAutoSaveEveryUrls(window.freecrawl.prefsGet('autoSaveEveryUrls'))),
+  );
+
+  // Persist as typed: a valid interval is stored, anything else (0, blank,
+  // below the floor) clears the pref so the default "off" applies.
+  function setAutoSave(v: string) {
+    setAutoSaveState(v);
+    const n = normalizeAutoSaveEveryUrls(v);
+    if (n > 0) window.freecrawl.prefsSet('autoSaveEveryUrls', n);
+    else window.freecrawl.prefsDelete('autoSaveEveryUrls');
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -5311,8 +5768,131 @@ function StoragePanel() {
         </p>
       </div>
 
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.storage.autoSaveTitle', { defaultValue: 'Batch Save' })}
+        </div>
+        <Num
+          label={t('settings.storage.autoSaveLabel', { defaultValue: 'Auto-save project every N crawled URLs — 0 = off' })}
+          value={autoSave}
+          onChange={setAutoSave}
+        />
+        <p className="mt-1 text-[11px] text-surface-500">
+          {t('settings.storage.autoSaveHint', {
+            defaultValue:
+              'While a crawl runs, the open .seoproject file is rewritten each time this many more URLs have been crawled, so a crash or power loss costs at most one batch. Only applies once the project has been saved to a file; minimum {{min}}. Each save is a full snapshot, so keep it in the thousands on large sites.',
+            min: AUTO_SAVE_MIN_URLS,
+          })}
+        </p>
+      </div>
+
       <div className="rounded border border-surface-800 bg-surface-950/40 p-3 text-[11px] text-surface-400">
         {t('settings.storage.note', { defaultValue: "Active crawl data lives in the app's user-data directory until you Save As — the path above only controls where Save As starts. Changing this won't move any existing project files." })}
+      </div>
+    </>
+  );
+}
+
+function fmtMb(bytes: number): string {
+  return `${(bytes / 1048576).toLocaleString(undefined, { maximumFractionDigits: 0 })} MB`;
+}
+
+function fmtUptime(sec: number): string {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h} h ${m} min` : `${m} min`;
+}
+
+function SystemRow({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 py-1">
+      <span className="text-[11px] text-surface-400">{label}</span>
+      <span className="font-mono text-[11px] text-surface-100">{value ?? '—'}</span>
+    </div>
+  );
+}
+
+function SystemPanel() {
+  const { t } = useTranslation();
+  const mem = useMemoryMonitor();
+  const [info, setInfo] = useState<SystemInfo | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void window.freecrawl.systemInfo().then((i) => {
+      if (!cancelled) setInfo(i);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const systemUsed = mem ? mem.systemTotal - mem.systemFree : 0;
+  const systemPct = mem && mem.systemTotal > 0 ? Math.round((systemUsed / mem.systemTotal) * 100) : 0;
+  const perUrl = mem && mem.urlsCrawled > 0 ? mem.rss / mem.urlsCrawled : null;
+
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settings.system.intro', { defaultValue: 'Live view of what FreeCrawl is using right now, plus the runtime it is running on. Refreshes every two seconds.' })}
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.system.memory', { defaultValue: 'Memory' })}
+        </div>
+        <SystemRow label={t('settings.system.rss', { defaultValue: 'Process (RSS)' })} value={mem ? fmtMb(mem.rss) : null} />
+        <SystemRow
+          label={t('settings.system.heap', { defaultValue: 'JS heap (used / reserved)' })}
+          value={mem ? `${fmtMb(mem.heapUsed)} / ${fmtMb(mem.heapTotal)}` : null}
+        />
+        <SystemRow label={t('settings.system.external', { defaultValue: 'Native buffers' })} value={mem ? fmtMb(mem.external) : null} />
+        <SystemRow
+          label={t('settings.system.systemMemory', { defaultValue: 'System memory (used / total)' })}
+          value={mem ? `${fmtMb(systemUsed)} / ${fmtMb(mem.systemTotal)} (${systemPct}%)` : null}
+        />
+        <div className="my-2 h-1.5 w-full overflow-hidden rounded bg-surface-800">
+          <div className="h-full bg-accent-500" style={{ width: `${systemPct}%` }} />
+        </div>
+        <SystemRow
+          label={t('settings.system.perUrl', { defaultValue: 'Per crawled URL' })}
+          value={perUrl !== null ? `${(perUrl / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} KB` : null}
+        />
+        <SystemRow
+          label={t('settings.system.projected', { defaultValue: 'Projected at 1M URLs' })}
+          value={perUrl !== null ? fmtMb(perUrl * 1_000_000) : null}
+        />
+        <p className="mt-2 text-[11px] text-surface-500">
+          {t('settings.system.limitNote', { defaultValue: 'The memory soft limit that pauses the crawl lives under Hardware.' })}
+        </p>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.system.environment', { defaultValue: 'Environment' })}
+        </div>
+        <SystemRow label={t('settings.system.version', { defaultValue: 'FreeCrawl' })} value={info ? `v${info.appVersion}` : null} />
+        <SystemRow label="Electron" value={info?.electron ?? null} />
+        <SystemRow label="Chromium" value={info?.chromium ?? null} />
+        <SystemRow label="Node.js" value={info?.node ?? null} />
+        <SystemRow label={t('settings.system.platform', { defaultValue: 'Platform' })} value={info?.platform ?? null} />
+        <SystemRow label={t('settings.system.cpus', { defaultValue: 'CPU cores' })} value={info ? String(info.cpuCount) : null} />
+        <SystemRow label={t('settings.system.uptime', { defaultValue: 'Uptime' })} value={info ? fmtUptime(info.uptimeSec) : null} />
+        <SystemRow
+          label={t('settings.system.storageMode', { defaultValue: 'Storage mode' })}
+          value={info ? (info.storageModeActive === 'ram' ? 'RAM' : t('settings.system.storageDisk', { defaultValue: 'Disk' })) : null}
+        />
+      </div>
+
+      <div className="rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.system.paths', { defaultValue: 'Paths' })}
+        </div>
+        <div className="flex flex-col gap-1 text-[11px]">
+          <div className="text-surface-400">{t('settings.system.userData', { defaultValue: 'User data' })}</div>
+          <code className="break-all text-surface-200">{info?.userDataPath ?? '—'}</code>
+          <div className="mt-1 text-surface-400">{t('settings.system.logs', { defaultValue: 'Logs' })}</div>
+          <code className="break-all text-surface-200">{info?.logsPath ?? '—'}</code>
+        </div>
       </div>
     </>
   );
@@ -5323,11 +5903,57 @@ function StoragePanel() {
  * `uiLanguage` app pref via `changeLanguage` and applies it instantly
  * through react-i18next.
  */
+function ThemePanel() {
+  const { t } = useTranslation();
+  const [current, setCurrent] = useState<UiTheme>(() => getTheme());
+  // Follow a change made from the View menu or another window while the
+  // dialog is open, so the radio never disagrees with the page.
+  useEffect(() => subscribeTheme(setCurrent), []);
+
+  const options: { value: UiTheme; label: string }[] = [
+    { value: 'dark', label: t('settings.theme.dark', { defaultValue: 'Dark (default)' }) },
+    { value: 'light', label: t('settings.theme.light', { defaultValue: 'Light' }) },
+  ];
+
+  return (
+    <>
+      <p className="mb-3 text-[11px] text-surface-400">
+        {t('settings.theme.intro', { defaultValue: 'Choose the colour theme for the interface. Applied immediately to every window and remembered for the next launch.' })}
+      </p>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.theme.label', { defaultValue: 'Colour theme' })}
+        </div>
+        <div className="flex flex-col gap-2">
+          {options.map((o) => (
+            <label key={o.value} className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="ui-theme"
+                checked={current === o.value}
+                onChange={() => setTheme(o.value)}
+              />
+              <span className="text-[12px] text-surface-100">{o.label}</span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <p className="text-[11px] text-surface-500">
+        {t('settings.theme.customCssNote', { defaultValue: "A custom-theme.css file in the app's user-data folder is still injected on top of either theme." })}
+      </p>
+    </>
+  );
+}
+
 function LanguagePanel() {
   const { t, i18n } = useTranslation();
-  const current = (i18n.language?.split('-')[0] ?? 'en') as SupportedLanguage;
+  // Don't slice the region off: `pt-BR` and `zh-CN` ARE the locale codes,
+  // so a naive `split('-')[0]` leaves no radio selected for either.
+  const current: UiLanguage = normalizeUiLanguage(i18n.language ?? '') ?? 'en';
 
-  function pick(lng: SupportedLanguage) {
+  function pick(lng: UiLanguage) {
     if (lng === current) return;
     changeLanguage(lng);
   }
@@ -5342,25 +5968,33 @@ function LanguagePanel() {
         <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
           {t('settings.language.label', { defaultValue: "UI language" })}
         </div>
+        {/* Both the native and the English name are shown on every row so
+            the list stays navigable from any starting language — you can
+            find "Русский" when the UI is Hindi, and "Hindi" when it is
+            Russian. */}
         <div className="flex flex-col gap-2">
-          {SUPPORTED_LANGUAGES.map((lng) => (
-            <label key={lng} className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="radio"
-                name="ui-language"
-                checked={current === lng}
-                onChange={() => pick(lng)}
-              />
-              <span className="text-[12px] text-surface-100">
-                {t(`settings.language.${lng}`)}
-              </span>
-            </label>
-          ))}
+          {UI_LANGUAGE_PICKER_ORDER.map((lng) => {
+            const name = UI_LANGUAGE_NAMES[lng];
+            return (
+              <label key={lng} className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="ui-language"
+                  checked={current === lng}
+                  onChange={() => pick(lng)}
+                />
+                <span className="text-[12px] text-surface-100">{name.native}</span>
+                {name.native !== name.english && (
+                  <span className="text-[11px] text-surface-500">{name.english}</span>
+                )}
+              </label>
+            );
+          })}
         </div>
       </div>
 
       <div className="rounded border border-amber-700/40 bg-amber-900/10 p-3 text-[11px] text-amber-200">
-        {t('settings.language.note', { defaultValue: "Some deep panels and dialogs may still display English while broader coverage is being added." })}
+        {t('settings.language.note', { defaultValue: "The [i] tooltip explanations and the integration setup guides are currently English-only outside English and Turkish — the rest of the interface is fully translated." })}
       </div>
     </>
   );

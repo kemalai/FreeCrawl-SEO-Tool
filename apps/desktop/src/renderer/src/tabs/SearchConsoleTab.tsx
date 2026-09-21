@@ -559,14 +559,18 @@ export function SearchConsoleTab() {
           <span>
             {newUrls.queued > 0
               ? t('gscTab.newUrlsQueued', {
-                  defaultValue:
-                    '{{n}} new URL(s) discovered in Search Console were added to the crawl.',
-                  n: newUrls.queued,
+                  defaultValue_one:
+                    '{{count}} new URL discovered in Search Console was added to the crawl.',
+                  defaultValue_other:
+                    '{{count}} new URLs discovered in Search Console were added to the crawl.',
+                  count: newUrls.queued,
                 })
               : t('gscTab.newUrlsFound', {
-                  defaultValue:
-                    '{{n}} URL(s) appear in Search Console but were not found by the crawl.',
-                  n: newUrls.count,
+                  defaultValue_one:
+                    '{{count}} URL appears in Search Console but was not found by the crawl.',
+                  defaultValue_other:
+                    '{{count}} URLs appear in Search Console but were not found by the crawl.',
+                  count: newUrls.count,
                 })}
           </span>
           {newUrls.queued === 0 && (

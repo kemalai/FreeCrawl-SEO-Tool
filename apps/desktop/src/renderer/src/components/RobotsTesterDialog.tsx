@@ -320,11 +320,23 @@ function ValidationPanel({
     <div className="mb-3 rounded border border-amber-700/60 bg-amber-900/15">
       <div className="flex items-center gap-3 border-b border-amber-700/30 px-2 py-1 text-[10px] text-amber-300">
         <span>
-          {errors > 0 && <span className="font-medium">{t('robots.errorCount', { defaultValue: '{{n}} error(s)', n: errors })}</span>}
+          {errors > 0 && (
+            <span className="font-medium">
+              {t('robots.errorCount', {
+                defaultValue_one: '{{count}} error',
+                defaultValue_other: '{{count}} errors',
+                count: errors,
+              })}
+            </span>
+          )}
           {errors > 0 && warnings > 0 && <span> · </span>}
           {warnings > 0 && (
             <span className="font-medium text-amber-200/80">
-              {t('robots.warningCount', { defaultValue: '{{n}} warning(s)', n: warnings })}
+              {t('robots.warningCount', {
+                defaultValue_one: '{{count}} warning',
+                defaultValue_other: '{{count}} warnings',
+                count: warnings,
+              })}
             </span>
           )}
         </span>

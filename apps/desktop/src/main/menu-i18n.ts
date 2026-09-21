@@ -5,15 +5,34 @@
  * The renderer locale files live under `src/renderer/src/i18n/locales/`
  * and electron-vite bundles them into the renderer chunk only. The main
  * process is its own bundle (no renderer dependencies), so we keep an
- * independent copy here. Menu strings are < 40 entries; the duplication
- * cost is tiny compared with cross-bundle import plumbing.
+ * independent copy here, one file per locale under `./menu-locales/`.
+ * Menu strings are ~137 entries; the duplication cost is tiny compared
+ * with cross-bundle import plumbing.
  *
- * When updating menu translations: edit both this file and the
- * renderer's `en.json` / `tr.json` (under the `menu.*` namespace) so
- * the two surfaces stay in sync.
+ * The language *list* and the tag resolver are NOT duplicated — they come
+ * from `@freecrawl/shared-types`, which both bundles can import. That is
+ * what keeps the main process and the renderer from disagreeing about
+ * which locales exist or how `uiLanguage` resolves.
+ *
+ * When updating menu translations: edit the file under `./menu-locales/`
+ * and the renderer's matching `locales/<code>.json` (under the `menu.*`
+ * namespace) so the two surfaces stay in sync.
  */
+import { isUiLanguage, type UiLanguage } from '@freecrawl/shared-types';
+import { MENU_EN } from './menu-locales/en.js';
+import { MENU_TR } from './menu-locales/tr.js';
+import { MENU_AZ } from './menu-locales/az.js';
+import { MENU_ZH_CN } from './menu-locales/zh-CN.js';
+import { MENU_FR } from './menu-locales/fr.js';
+import { MENU_HI } from './menu-locales/hi.js';
+import { MENU_IT } from './menu-locales/it.js';
+import { MENU_KO } from './menu-locales/ko.js';
+import { MENU_PT_BR } from './menu-locales/pt-BR.js';
+import { MENU_RU } from './menu-locales/ru.js';
+import { MENU_ES } from './menu-locales/es.js';
 
-export type MenuLang = 'en' | 'tr';
+/** Alias kept so `menu.ts` and `index.ts` read in menu terms. */
+export type MenuLang = UiLanguage;
 
 export interface MenuLabels {
   file: string;
@@ -33,6 +52,8 @@ export interface MenuLabels {
   sitemapNews: string;
   sitemapVideo: string;
   exportHtmlReport: string;
+  exportPdfReport: string;
+  exportSeoAudit: string;
   bulkExport: string;
   exportSheets: string;
   exportBigquery: string;
@@ -43,6 +64,8 @@ export interface MenuLabels {
   saveProjectAs: string;
   /** Window title shown before a project has been saved to disk. */
   titleUntitledProject: string;
+  /** Window-title prefix while the project snapshot is being written. */
+  titleSaving: string;
   dlgSaveProjectAsTitle: string;
   dlgExportTableTitle: string;
   dlgSaveFailedTitle: string;
@@ -64,6 +87,10 @@ export interface MenuLabels {
   overviewSidebar: string;
   detailPanel: string;
   fullscreen: string;
+  /** View ▸ Theme submenu + its two radio items. */
+  theme: string;
+  themeDark: string;
+  themeLight: string;
   visualization: string;
   openVisualizationWindow: string;
   reports: string;
@@ -159,7 +186,150 @@ export interface MenuLabels {
   dlgBulkExportFolderTitle: string;
   dlgBulkExportCompleteTitle: string;
   dlgHtmlReportSavedTitle: string;
+  dlgPdfReportSavedTitle: string;
+  dlgSeoAuditFolderTitle: string;
+  dlgSeoAuditCompleteTitle: string;
+  dlgPickLogoTitle: string;
+  msgLogoTooLarge: string;
   dlgSitemapGeneratedTitle: string;
+
+  // ── Environment diagnostic dialogs (crawl-time popups) ──
+  /** Every `{n}` / `{name}` style placeholder below is substituted with
+   *  `.replace()` at the call site. The main process has no i18next, so
+   *  count-dependent sentences are written count-neutrally rather than
+   *  pluralised — see the note on `msgDiagResetDone`. */
+  diagDnsRefusedTitle: string;
+  diagDnsRefusedMsg: string;
+  diagDnsRefusedDetail: string;
+  diagDnsDestroyedTitle: string;
+  diagDnsDestroyedMsg: string;
+  diagDnsDestroyedDetail: string;
+  diagTlsTitle: string;
+  diagTlsMsg: string;
+  diagTlsDetail: string;
+  diagSeedTitle: string;
+  diagSeedMsg: string;
+  diagSeedDetail: string;
+  btnOpenLogs: string;
+  btnDismiss: string;
+  dlgDontShowAgain: string;
+
+  // ── Update check / installer download ──
+  /** `{name}` = asset file name. */
+  msgDownloadComplete: string;
+  /** `{path}` = save path. */
+  detailDownloadSaved: string;
+  detailDownloadSmartScreen: string;
+  detailDownloadGatekeeper: string;
+  /** `{name}` = asset file name. */
+  msgDownloadFailed: string;
+  /** `{state}` = Electron download state. */
+  detailDownloadFailed: string;
+  msgUnknownErrorGitHub: string;
+  msgNoReleaseTag: string;
+  /** `{url}` = releases page URL. */
+  detailBrowseReleases: string;
+  /** `{version}` = installed version. */
+  msgUpToDate: string;
+  /** `{tag}` = latest release tag. */
+  detailLatestRelease: string;
+  /** `{date}` = localised publish date. */
+  detailPublished: string;
+  /** `{version}` = latest release tag. */
+  msgUpdateAvailable: string;
+  /** `{installed}` / `{latest}` = version strings. */
+  detailInstalledLatest: string;
+  detailReleaseNotes: string;
+  detailSeeReleasePage: string;
+  dlgDontShowVersionAgain: string;
+
+  // ── Secondary window titles ──
+  /** `{label}` = project name, or `winLabelPrimary` / `titleUntitledProject`. */
+  winLogsTitle: string;
+  winLabelPrimary: string;
+  winVisualizationTitle: string;
+  winLogAnalyzerTitle: string;
+
+  // ── Playwright / Chromium install ──
+  dlgPlaywrightDetail: string;
+  msgBrowserInstallFailed: string;
+
+  // ── Crawl-finished desktop notification ──
+  /** `{urls}` = grouped URL count, `{ms}` = average response time. */
+  notifCrawlFinished: string;
+
+  // ── Encrypted project snapshots ──
+  dlgSaveEncSnapshotTitle: string;
+  /** `{size}` = snapshot size in MB. */
+  msgEncSnapshotWritten: string;
+  detailEncSnapshotKeepPassword: string;
+  dlgOpenEncProjectTitle: string;
+
+  // ── Export / sitemap results ──
+  /** `{format}` = upper-cased format name (CSV / JSON / …). */
+  dlgChooseExportFolderTitle: string;
+  /** `{files}` = file count, `{rows}` = grouped row count. */
+  msgBulkExportWritten: string;
+  detailBulkExportErrors: string;
+  /** `{size}` = report size in KB. */
+  msgHtmlReportWritten: string;
+  /** `{size}` = report size in KB. */
+  msgPdfReportWritten: string;
+  /** `{files}` files, `{rows}` rows. */
+  msgSeoAuditWritten: string;
+  dlgCompareWithProjectTitle: string;
+  /** `{urls}` = grouped URL count, `{parts}` = shard count. */
+  msgSitemapSharded: string;
+  /** `{urls}` = grouped URL count. */
+  msgSitemapWritten: string;
+  msgSitemapWrittenTruncated: string;
+  /** `{parts}` = shard count. */
+  detailSitemapParts: string;
+
+  // ── Project open / import failures ──
+  /** `{path}` = project path. */
+  msgCouldNotOpenPath: string;
+  msgCouldNotOpenSelected: string;
+  /** `{error}` = parser message. */
+  msgImportCannotParseJson: string;
+  /** `{n}` = number of re-enabled warnings. Count-neutral on purpose: the
+   *  main process has no plural engine, so the sentence must read correctly
+   *  for every `n` in all 11 languages. */
+  msgDiagResetDone: string;
+
+  // ── Native file-dialog filter names ──
+  /** Format tokens (`CSV`, `JSON`, `XML`) stay untranslated by policy —
+   *  only the filters carrying prose are localised. */
+  filterFreeCrawlProject: string;
+  filterFreeCrawlEncProject: string;
+  filterAllFiles: string;
+  filterLogFiles: string;
+  filterExcelWorkbook: string;
+  filterHtmlReport: string;
+  filterPdfReport: string;
+  filterImages: string;
+  filterXmlSitemap: string;
+  filterGzXmlSitemap: string;
+
+  // ── Spelling / page-language messages ──
+  /** These are generated during a crawl and persisted to `spelling_results.
+   *  error`, so a project carries the wording of whatever UI language was
+   *  active when it was crawled; changing the language later does not
+   *  rewrite stored rows. Accepted: the alternative is storing a reason
+   *  code and re-rendering in the renderer, which is a schema change.
+   *  `{lang}` is an English language name (`language-detect.ts` LANG_NAMES) —
+   *  translating the ~70 names is deliberately out of scope. */
+  spellUndetermined: string;
+  /** `{lang}` = English language name. */
+  spellUnsupported: string;
+  /** `{lang}` = English language name. */
+  spellMismatchBailout: string;
+  /** `{pct}` = flagged-word percentage, `{lang}` = English language name. */
+  spellMismatchRatio: string;
+  /** `{s}` = timeout in seconds. */
+  spellTimeout: string;
+  /** `{status}` = HTTP status code. */
+  spellHttpError: string;
 
   // ── Clear-crawl confirmation (migrated off inline isTr) ──
   dlgConfirmClearMsg: string;
@@ -167,324 +337,51 @@ export interface MenuLabels {
   dlgDontAskAgain: string;
 }
 
-const MENU_EN: MenuLabels = {
-  file: 'File',
-  newProject: 'New Project',
-  openProject: 'Open Project…',
-  newProjectWindow: 'New Project Window',
-  openRecent: 'Open Recent',
-  manageProjects: 'Manage Projects…',
-  clearRecent: 'Clear Recent',
-  emptyRecent: '(empty)',
-  clearCrawlData: 'Clear Crawl Data',
-  exportAs: 'Export Crawl Data…',
-  generateSitemap: 'Generate XML Sitemap',
-  sitemapStandard: 'Standard…',
-  sitemapImages: 'Images…',
-  sitemapHreflang: 'Hreflang…',
-  sitemapNews: 'News…',
-  sitemapVideo: 'Video…',
-  exportHtmlReport: 'Export HTML Report…',
-  bulkExport: 'Bulk Export…',
-  exportSheets: 'Export to Google Sheets…',
-  exportBigquery: 'Export to BigQuery…',
-  compareWith: 'Compare With Project…',
-  scheduledCrawl: 'Scheduled Crawl…',
-  scheduledCrawlTooltip:
-    'Set up an in-app recurring crawl for the currently-open project. Fires only while FreeCrawl is open; use the CLI + OS scheduler for triggers that survive restarts.',
-  saveProject: 'Save Project',
-  saveProjectAs: 'Save Project As…',
-  titleUntitledProject: 'Untitled project',
-  dlgSaveProjectAsTitle: 'Save Project As…',
-  dlgExportTableTitle: 'Export Table',
-  dlgSaveFailedTitle: 'Could Not Save Project',
-  msgProjectSaved: 'Saved as a single compressed file: {size} MB (from {from} MB).',
-  dlgUnsavedTitle: 'Unsaved Changes',
-  msgUnsavedChanges: 'This project has changes that are not saved yet.',
-  detailUnsavedChanges:
-    'Crawl results live in a working copy until you save them into the project file.',
-  btnSaveChanges: 'Save',
-  btnDiscardChanges: "Don't Save",
-  saveProjectEncrypted: 'Save Encrypted Snapshot…',
-  saveProjectEncryptedTooltip:
-    'Export the active project to an AES-256-GCM-encrypted .seoproject.enc file protected by a password.',
-  openProjectEncrypted: 'Open Encrypted Project…',
-  openProjectEncryptedTooltip:
-    'Decrypt a .seoproject.enc snapshot with its password and open the recovered project.',
-  settings: 'Settings…',
-  edit: 'Edit',
-  copy: 'Copy',
-  view: 'View',
-  overviewSidebar: 'Overview Sidebar',
-  detailPanel: 'Detail Panel',
-  fullscreen: 'Fullscreen',
-  visualization: 'Visualization',
-  openVisualizationWindow: 'Open Visualization Window…',
-  reports: 'Reports',
-  reportsItem: 'Reports…',
-  logAnalyzer: 'Log Analyzer',
-  openLogAnalyzerWindow: 'Open Log Analyzer Window…',
-  openLogAnalyzerWindowTooltip:
-    'Analyze server access logs (Apache / Nginx / IIS) — bot hits per URL, crawl budget, and crawl × log orphan detection in a standalone window.',
-  help: 'Help',
-  documentation: 'Documentation',
-  showLogs: 'Show Logs…',
-  trayShow: 'Show FreeCrawl',
-  trayHide: 'Hide to Tray',
-  trayStopCrawl: 'Stop Crawl',
-  trayQuit: 'Quit FreeCrawl',
-  openLogsFolder: 'Open Logs Folder',
-  openLogsFolderTooltip:
-    'Open the directory where rotated log files are persisted on disk',
-  robotsTester: 'Robots.txt Tester…',
-  sitemapValidator: 'Sitemap Validator…',
-  resetDiagnostics: 'Reset Diagnostic Warnings',
-  resetDiagnosticsTooltip:
-    'Re-enable popup warnings you previously dismissed with "Don\'t show again"',
-  deleteDomainData: 'Delete Domain Data…',
-  deleteDomainDataTooltip:
-    'GDPR-aligned per-domain wipe. Removes every URL row whose host matches the entered domain plus every dependent record (links, headers, images, source snapshots).',
-  clearAllData: 'Clear All Data…',
-  clearAllDataTooltip:
-    'Wipe the entire active project (URLs, links, images, headers, source snapshots, sitemaps). Cannot be undone — Save Project As… first if you want a backup.',
-  checkForUpdates: 'Check for Updates…',
-  checkForUpdatesTooltip:
-    'Fetch the latest GitHub release and compare it with your installed version. No background polling — runs only when you click.',
-  about: 'About FreeCrawl SEO',
-
-  ctxCopy: 'Copy',
-  ctxOpenInBrowser: 'Open in Browser',
-  ctxRespider: 'Re-Spider',
-  ctxStartCrawlFirst: 'Start a crawl first',
-  ctxRemove: 'Remove',
-  ctxOpenRobotsTxt: 'Open robots.txt',
-  ctxCopyNUrls: 'Copy {n} URLs',
-  ctxOpenNUrlsInBrowser: 'Open {n} URLs in Browser',
-  ctxOpenLimitTooltip: 'Limited to 20 URLs to avoid spawning too many tabs',
-  ctxRespiderNUrls: 'Re-Spider {n} URLs',
-  ctxRemoveNUrls: 'Remove {n} URLs',
-  ctxExportNUrlsAsCsv: 'Export {n} URLs as CSV…',
-  ctxCopyCell: 'Copy Cell',
-  ctxCopyNCells: 'Copy {n} Cells',
-  ctxCopyRow: 'Copy Row',
-  ctxCopyNRows: 'Copy {n} Rows',
-  ctxCopyColumn: 'Copy Column',
-  ctxCopyNColumns: 'Copy {n} Columns',
-
-  btnOk: 'OK',
-  btnCancel: 'Cancel',
-  btnClose: 'Close',
-  btnClear: 'Clear',
-  btnOpenFolder: 'Open Folder',
-  btnLater: 'Later',
-  btnOpenReleasePage: 'Open Release Page',
-  btnOpenReleasesPage: 'Open Releases Page',
-  btnDownloadInstaller: 'Download Installer',
-  btnDownloadNow: 'Download now',
-  btnSkipJsRender: 'Skip — disable JS render for this run',
-
-  dlgOpenProjectTitle: 'Open Project',
-  dlgOpenProjectFailedTitle: 'Open Project Failed',
-  dlgLogsFolderUnavailableTitle: 'Logs Folder Unavailable',
-  dlgLogsFolderUnavailableMsg:
-    'Disk logging has not been initialised. Logs are kept in memory only for this session.',
-  dlgDiagResetTitle: 'Diagnostic Warnings Reset',
-  dlgDiagResetNoneMsg: 'No suppressed diagnostic warnings to reset.',
-  dlgDownloadCompleteTitle: 'Download Complete',
-  dlgDownloadFailedTitle: 'Download Failed',
-  dlgDownloadStartFailedMsg: 'Could not start the download.',
-  dlgUpdateCheckFailedTitle: 'Update Check Failed',
-  dlgUpdateCheckFailedMsg: "Couldn't reach the GitHub Releases API.",
-  dlgUpToDateTitle: 'Up to Date',
-  dlgUpdateAvailableTitle: 'Update Available',
-  dlgOpenAccessLogTitle: 'Open Access Log',
-  dlgExportLogAnalysisTitle: 'Export Log Analysis',
-  dlgExportExtractionRulesTitle: 'Export Extraction Rules',
-  dlgImportExtractionRulesTitle: 'Import Extraction Rules',
-  dlgExportSettingsTitle: 'Export Settings',
-  dlgImportSettingsTitle: 'Import Settings',
-  dlgImportFailedTitle: 'Import Failed',
-  dlgImportFailedNoSettingsMsg: 'Imported file does not contain a settings object.',
-  dlgChooseFolderTitle: 'Choose Folder',
-  dlgPlaywrightTitle: 'JavaScript Rendering — Browser Missing',
-  dlgPlaywrightMsg:
-    'Playwright needs to download a Chromium browser before JavaScript rendering can run.',
-  dlgBrowserInstallFailedTitle: 'Browser Install Failed',
-  dlgProjectSavedTitle: 'Project Saved',
-  dlgEncSnapshotSavedTitle: 'Encrypted Snapshot Saved',
-  dlgSaveDecryptedProjectTitle: 'Save Decrypted Project As…',
-  dlgBulkExportFolderTitle: 'Bulk Export — choose output folder',
-  dlgBulkExportCompleteTitle: 'Bulk Export Complete',
-  dlgHtmlReportSavedTitle: 'HTML Report Saved',
-  dlgSitemapGeneratedTitle: 'Sitemap Generated',
-
-  dlgConfirmClearMsg: 'Clear all crawl data?',
-  dlgConfirmClearDetail:
-    'This permanently deletes every crawled URL, link, image, header and source snapshot in the active project. This cannot be undone.',
-  dlgDontAskAgain: "Don't ask me again",
-};
-
-const MENU_TR: MenuLabels = {
-  file: 'Dosya',
-  newProject: 'Yeni Proje',
-  openProject: 'Proje Aç…',
-  newProjectWindow: 'Yeni Proje Penceresi',
-  openRecent: 'Son Açılanlar',
-  manageProjects: 'Projeleri Yönet…',
-  clearRecent: 'Son Açılanları Temizle',
-  emptyRecent: '(boş)',
-  clearCrawlData: 'Crawl Verilerini Temizle',
-  exportAs: 'Crawl Verilerini Dışa Aktar…',
-  generateSitemap: 'XML Sitemap Oluştur',
-  sitemapStandard: 'Standart…',
-  sitemapImages: 'Görseller…',
-  sitemapHreflang: 'Hreflang…',
-  sitemapNews: 'Haber…',
-  sitemapVideo: 'Video…',
-  exportHtmlReport: 'HTML Rapor Dışa Aktar…',
-  bulkExport: 'Toplu Dışa Aktarım…',
-  exportSheets: 'Google Sheets\'e Aktar…',
-  exportBigquery: 'BigQuery\'ye Aktar…',
-  compareWith: 'Projeyle Karşılaştır…',
-  scheduledCrawl: 'Zamanlanmış Crawl…',
-  scheduledCrawlTooltip:
-    'Şu an açık olan proje için uygulama içi tekrarlayan crawl kur. Yalnızca FreeCrawl açıkken çalışır; yeniden başlatmaya dayanan tetikler için CLI + OS zamanlayıcısını kullan.',
-  saveProject: 'Projeyi Kaydet',
-  saveProjectAs: 'Projeyi Farklı Kaydet…',
-  titleUntitledProject: 'Adsız proje',
-  dlgSaveProjectAsTitle: 'Projeyi Farklı Kaydet…',
-  dlgExportTableTitle: 'Tabloyu Dışa Aktar',
-  dlgSaveFailedTitle: 'Proje Kaydedilemedi',
-  msgProjectSaved: 'Tek sıkıştırılmış dosya olarak kaydedildi: {size} MB ({from} MB yerine).',
-  dlgUnsavedTitle: 'Kaydedilmemiş Değişiklikler',
-  msgUnsavedChanges: 'Bu projede henüz kaydedilmemiş değişiklikler var.',
-  detailUnsavedChanges:
-    'Crawl sonuçları, proje dosyasına kaydedene kadar bir çalışma kopyasında tutulur.',
-  btnSaveChanges: 'Kaydet',
-  btnDiscardChanges: 'Kaydetme',
-  saveProjectEncrypted: 'Şifreli Snapshot Kaydet…',
-  saveProjectEncryptedTooltip:
-    'Aktif projeyi parolayla korunan AES-256-GCM şifreli .seoproject.enc dosyasına dışa aktar.',
-  openProjectEncrypted: 'Şifreli Proje Aç…',
-  openProjectEncryptedTooltip:
-    'Bir .seoproject.enc snapshot\'ını parolasıyla çöz ve kurtarılan projeyi aç.',
-  settings: 'Ayarlar…',
-  edit: 'Düzen',
-  copy: 'Kopyala',
-  view: 'Görünüm',
-  overviewSidebar: 'Genel Bakış Kenar Çubuğu',
-  detailPanel: 'Detay Paneli',
-  fullscreen: 'Tam Ekran',
-  visualization: 'Görselleştirme',
-  openVisualizationWindow: 'Görselleştirme Penceresini Aç…',
-  reports: 'Raporlar',
-  reportsItem: 'Raporlar…',
-  logAnalyzer: 'Log Analizi',
-  openLogAnalyzerWindow: 'Log Analiz Penceresini Aç…',
-  openLogAnalyzerWindowTooltip:
-    'Sunucu erişim loglarını analiz et (Apache / Nginx / IIS) — URL başına bot isabeti, crawl bütçesi ve crawl × log yetim tespiti ayrı bir pencerede.',
-  help: 'Yardım',
-  documentation: 'Dokümantasyon',
-  showLogs: 'Logları Göster…',
-  trayShow: 'FreeCrawl\'i Göster',
-  trayHide: 'Tepsiye Gizle',
-  trayStopCrawl: 'Taramayı Durdur',
-  trayQuit: 'FreeCrawl\'ten Çık',
-  openLogsFolder: 'Log Klasörünü Aç',
-  openLogsFolderTooltip:
-    'Diske kayıtlı, dönen log dosyalarının olduğu dizini aç',
-  robotsTester: 'Robots.txt Test Aracı…',
-  sitemapValidator: 'Sitemap Doğrulayıcı…',
-  resetDiagnostics: 'Tanı Uyarılarını Sıfırla',
-  resetDiagnosticsTooltip:
-    'Daha önce "Bir daha gösterme" ile kapattığınız popup uyarılarını yeniden etkinleştir',
-  deleteDomainData: 'Alan Verilerini Sil…',
-  deleteDomainDataTooltip:
-    'GDPR uyumlu, alan başına temizleme. Girdiğiniz alana ait her URL satırını + bağlı kayıtları (linkler, başlıklar, görseller, kaynak snapshot\'ları) siler.',
-  clearAllData: 'Tüm Veriyi Temizle…',
-  clearAllDataTooltip:
-    'Aktif projenin tamamını sil (URL\'ler, linkler, görseller, başlıklar, kaynak snapshot\'ları, sitemap\'ler). Geri alınamaz — yedek istiyorsanız önce Projeyi Farklı Kaydet.',
-  checkForUpdates: 'Güncellemeleri Kontrol Et…',
-  checkForUpdatesTooltip:
-    'En son GitHub release\'ini çek ve kurulu sürümünüzle karşılaştır. Arka planda yoklama yok — yalnızca tıkladığınızda çalışır.',
-  about: 'FreeCrawl SEO Hakkında',
-
-  ctxCopy: 'Kopyala',
-  ctxOpenInBrowser: 'Tarayıcıda Aç',
-  ctxRespider: 'Yeniden Tara',
-  ctxStartCrawlFirst: 'Önce bir crawl başlatın',
-  ctxRemove: 'Kaldır',
-  ctxOpenRobotsTxt: 'robots.txt\'yi Aç',
-  ctxCopyNUrls: '{n} URL\'yi Kopyala',
-  ctxOpenNUrlsInBrowser: '{n} URL\'yi Tarayıcıda Aç',
-  ctxOpenLimitTooltip: 'Çok fazla sekme açılmasını önlemek için 20 URL ile sınırlı',
-  ctxRespiderNUrls: '{n} URL\'yi Yeniden Tara',
-  ctxRemoveNUrls: '{n} URL\'yi Kaldır',
-  ctxExportNUrlsAsCsv: '{n} URL\'yi CSV Olarak Dışa Aktar…',
-  ctxCopyCell: 'Hücreyi Kopyala',
-  ctxCopyNCells: '{n} Hücreyi Kopyala',
-  ctxCopyRow: 'Satırı Kopyala',
-  ctxCopyNRows: '{n} Satırı Kopyala',
-  ctxCopyColumn: 'Sütunu Kopyala',
-  ctxCopyNColumns: '{n} Sütunu Kopyala',
-
-  btnOk: 'Tamam',
-  btnCancel: 'İptal',
-  btnClose: 'Kapat',
-  btnClear: 'Temizle',
-  btnOpenFolder: 'Klasörü Aç',
-  btnLater: 'Sonra',
-  btnOpenReleasePage: 'Release Sayfasını Aç',
-  btnOpenReleasesPage: 'Release Sayfasını Aç',
-  btnDownloadInstaller: 'Kurulumu İndir',
-  btnDownloadNow: 'Şimdi indir',
-  btnSkipJsRender: 'Atla — bu çalıştırmada JS render\'ı devre dışı bırak',
-
-  dlgOpenProjectTitle: 'Proje Aç',
-  dlgOpenProjectFailedTitle: 'Proje Açılamadı',
-  dlgLogsFolderUnavailableTitle: 'Log Klasörü Kullanılamıyor',
-  dlgLogsFolderUnavailableMsg:
-    'Diske log yazma başlatılmadı. Loglar bu oturum için yalnızca bellekte tutuluyor.',
-  dlgDiagResetTitle: 'Tanı Uyarıları Sıfırlandı',
-  dlgDiagResetNoneMsg: 'Sıfırlanacak bastırılmış tanı uyarısı yok.',
-  dlgDownloadCompleteTitle: 'İndirme Tamamlandı',
-  dlgDownloadFailedTitle: 'İndirme Başarısız',
-  dlgDownloadStartFailedMsg: 'İndirme başlatılamadı.',
-  dlgUpdateCheckFailedTitle: 'Güncelleme Kontrolü Başarısız',
-  dlgUpdateCheckFailedMsg: 'GitHub Releases API\'sine ulaşılamadı.',
-  dlgUpToDateTitle: 'Güncel',
-  dlgUpdateAvailableTitle: 'Güncelleme Mevcut',
-  dlgOpenAccessLogTitle: 'Erişim Logu Aç',
-  dlgExportLogAnalysisTitle: 'Log Analizini Dışa Aktar',
-  dlgExportExtractionRulesTitle: 'Çıkarım Kurallarını Dışa Aktar',
-  dlgImportExtractionRulesTitle: 'Çıkarım Kurallarını İçe Aktar',
-  dlgExportSettingsTitle: 'Ayarları Dışa Aktar',
-  dlgImportSettingsTitle: 'Ayarları İçe Aktar',
-  dlgImportFailedTitle: 'İçe Aktarma Başarısız',
-  dlgImportFailedNoSettingsMsg: 'İçe aktarılan dosya bir ayarlar nesnesi içermiyor.',
-  dlgChooseFolderTitle: 'Klasör Seç',
-  dlgPlaywrightTitle: 'JavaScript Render — Tarayıcı Eksik',
-  dlgPlaywrightMsg:
-    'JavaScript render çalışabilmeden önce Playwright\'ın bir Chromium tarayıcısı indirmesi gerekiyor.',
-  dlgBrowserInstallFailedTitle: 'Tarayıcı Kurulumu Başarısız',
-  dlgProjectSavedTitle: 'Proje Kaydedildi',
-  dlgEncSnapshotSavedTitle: 'Şifreli Snapshot Kaydedildi',
-  dlgSaveDecryptedProjectTitle: 'Çözülmüş Projeyi Farklı Kaydet…',
-  dlgBulkExportFolderTitle: 'Toplu Dışa Aktarım — çıktı klasörünü seçin',
-  dlgBulkExportCompleteTitle: 'Toplu Dışa Aktarım Tamamlandı',
-  dlgHtmlReportSavedTitle: 'HTML Rapor Kaydedildi',
-  dlgSitemapGeneratedTitle: 'Sitemap Oluşturuldu',
-
-  dlgConfirmClearMsg: 'Tüm crawl verileri temizlensin mi?',
-  dlgConfirmClearDetail:
-    'Bu işlem, aktif projedeki taranmış her URL, link, görsel, başlık ve kaynak snapshot\'ını kalıcı olarak siler. Geri alınamaz.',
-  dlgDontAskAgain: 'Bir daha sorma',
+const MENU_LABELS: Record<UiLanguage, MenuLabels> = {
+  en: MENU_EN,
+  tr: MENU_TR,
+  az: MENU_AZ,
+  'zh-CN': MENU_ZH_CN,
+  fr: MENU_FR,
+  hi: MENU_HI,
+  it: MENU_IT,
+  ko: MENU_KO,
+  'pt-BR': MENU_PT_BR,
+  ru: MENU_RU,
+  es: MENU_ES,
 };
 
 export function getMenuLabels(lang: MenuLang): MenuLabels {
-  return lang === 'tr' ? MENU_TR : MENU_EN;
+  return MENU_LABELS[lang] ?? MENU_EN;
 }
 
-export function isMenuLang(value: unknown): value is MenuLang {
-  return value === 'en' || value === 'tr';
+/** Narrow a raw `uiLanguage` pref value. Delegates to the shared registry
+ *  so main and renderer can't validate against different lists. */
+export const isMenuLang = isUiLanguage;
+
+/**
+ * Active-language provider, installed by `index.ts` at startup.
+ *
+ * `getMenuLang()` reads the `uiLanguage` pref plus the OS preference
+ * list, and both live in `index.ts`. Modules that produce user-facing
+ * text without a menu (`languagetool.ts`, `language-detect.ts`) would
+ * have to import `index.ts` to reach it — a cycle, since `index.ts`
+ * imports them. Injecting the getter here instead lets every main-process
+ * module call `L()` with no import cycle and no threaded parameter.
+ *
+ * Before `index.ts` installs the real provider the default returns
+ * English, so an early call degrades to readable English rather than
+ * throwing.
+ */
+let activeLangProvider: () => MenuLang = () => 'en';
+
+export function setMenuLangProvider(fn: () => MenuLang): void {
+  activeLangProvider = fn;
+}
+
+/** Localized menu/dialog labels for the active UI language. Lets native
+ *  dialogs pull `L().dlgX` inline without threading a param through
+ *  handlers. */
+export function L(): MenuLabels {
+  return getMenuLabels(activeLangProvider());
 }

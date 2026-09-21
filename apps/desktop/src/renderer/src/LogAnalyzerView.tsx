@@ -364,7 +364,12 @@ function SummaryCards({ overview }: { overview: LogOverview }) {
       </div>
       {overview.files.length > 0 && (
         <div className="mt-1.5 text-[10px] text-surface-500">
-          {t('logAnalyzer.filesIngested', { defaultValue: '{{n}} file(s) ingested', n: overview.files.length })}:{' '}
+          {t('logAnalyzer.filesIngested', {
+            defaultValue_one: '{{count}} file ingested',
+            defaultValue_other: '{{count}} files ingested',
+            count: overview.files.length,
+          })}
+          :{' '}
           {overview.files.map((f) => f.fileName).join(', ')}
         </div>
       )}
@@ -804,7 +809,13 @@ function DiscoveryTab({ version, onToast }: { version: number; onToast: (m: stri
     try {
       const r = await window.freecrawl.logSeedDiscovery(500);
       if (r.enqueued > 0) {
-        onToast(t('logAnalyzer.seeded', { defaultValue: 'Seeded {{n}} URL(s) into the active crawl', n: r.enqueued }));
+        onToast(
+          t('logAnalyzer.seeded', {
+            defaultValue_one: 'Seeded {{count}} URL into the active crawl',
+            defaultValue_other: 'Seeded {{count}} URLs into the active crawl',
+            count: r.enqueued,
+          }),
+        );
       } else if (r.reason === 'no-active-crawl') {
         onToast(t('logAnalyzer.seedNoActive', { defaultValue: 'No active crawl — start a crawl first, then seed.' }));
       } else if (r.reason === 'no-base-origin') {
@@ -1078,8 +1089,11 @@ function ThreatsTab({ version, onToast }: { version: number; onToast: (m: string
       onToast(
         ok
           ? t('logAnalyzer.threatCopied', {
-              defaultValue: 'Copied {{n}} IP(s) to the clipboard (search-engine infrastructure excluded)',
-              n: ips.length,
+              defaultValue_one:
+                'Copied {{count}} IP to the clipboard (search-engine infrastructure excluded)',
+              defaultValue_other:
+                'Copied {{count}} IPs to the clipboard (search-engine infrastructure excluded)',
+              count: ips.length,
             })
           : t('logAnalyzer.threatCopyFailed', { defaultValue: 'Could not copy to the clipboard' }),
       );
@@ -1117,10 +1131,17 @@ function ThreatsTab({ version, onToast }: { version: number; onToast: (m: string
         {summary && hasThreats && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="font-mono text-surface-200">
-              {t('logAnalyzer.threatStats', {
-                defaultValue: '{{hits}} flagged request(s) from {{ips}} IP(s)',
-                hits: summary.totalHits.toLocaleString(),
-                ips: summary.distinctIps.toLocaleString(),
+              {t('logAnalyzer.threatStatsHits', {
+                defaultValue_one: '{{formatted}} flagged request',
+                defaultValue_other: '{{formatted}} flagged requests',
+                count: summary.totalHits,
+                formatted: summary.totalHits.toLocaleString(),
+              })}{' '}
+              {t('logAnalyzer.threatStatsIps', {
+                defaultValue_one: 'from {{formatted}} IP',
+                defaultValue_other: 'from {{formatted}} IPs',
+                count: summary.distinctIps,
+                formatted: summary.distinctIps.toLocaleString(),
               })}
             </span>
             <span className="text-surface-600">·</span>
@@ -1162,8 +1183,10 @@ function ThreatsTab({ version, onToast }: { version: number; onToast: (m: string
                   category={c.category}
                   label={`${catLabel(c.category)} ${c.hits.toLocaleString()}`}
                   title={t('logAnalyzer.threatChipIps', {
-                    defaultValue: '{{n}} distinct IP(s)',
-                    n: c.ips.toLocaleString(),
+                    defaultValue_one: '{{formatted}} distinct IP',
+                    defaultValue_other: '{{formatted}} distinct IPs',
+                    count: c.ips,
+                    formatted: c.ips.toLocaleString(),
                   })}
                 />
               </button>

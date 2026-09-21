@@ -57,6 +57,10 @@ const CRITICAL: UrlCategory[] = [
 
 /** Suboptimal but non-breaking issues worth fixing. */
 const WARNING: UrlCategory[] = [
+  'issues:redirect-canonical-chain',
+  'issues:orphan-page',
+  'issues:mobile-parity-mismatch',
+  'issues:content-wider-than-screen',
   'issues:title-too-long',
   'issues:title-too-short',
   'issues:title-duplicate',
@@ -151,6 +155,7 @@ const WARNING: UrlCategory[] = [
 
 /** Informational / stylistic / nice-to-have signals. */
 const INFO: UrlCategory[] = [
+  'issues:hreflang-unlinked',
   'issues:heading-skipped-level',
   'issues:canonical-self-referencing',
   'issues:canonical-non-self',

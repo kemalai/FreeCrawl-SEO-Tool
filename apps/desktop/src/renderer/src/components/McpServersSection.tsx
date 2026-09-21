@@ -336,11 +336,12 @@ export function McpServersSection() {
             {status?.connected && (
               <p className="mt-1 text-[10px] text-surface-500">
                 {t('settings.mcp.handshake', {
-                  defaultValue: '{{name}} {{version}} · MCP {{protocol}} · {{n}} tool(s)',
+                  defaultValue_one: '{{name}} {{version}} · MCP {{protocol}} · {{count}} tool',
+                  defaultValue_other: '{{name}} {{version}} · MCP {{protocol}} · {{count}} tools',
                   name: status.serverName ?? server.label,
                   version: status.serverVersion ?? '',
                   protocol: status.protocolVersion ?? '',
-                  n: status.toolCount,
+                  count: status.toolCount,
                 })}
               </p>
             )}

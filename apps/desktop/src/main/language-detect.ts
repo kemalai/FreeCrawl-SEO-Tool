@@ -25,6 +25,7 @@
 import { francAll } from 'franc';
 import type { SpellingLanguageOption } from '@freecrawl/shared-types';
 import * as logger from './logger.js';
+import { L } from './menu-i18n.js';
 
 /**
  * Below this many characters of prose detection is guessing. Benchmarked
@@ -621,8 +622,11 @@ export async function resolveCheckLanguage(params: {
       detected,
       declared,
       reason: 'undetermined',
-      message:
-        'Page language could not be determined — it declares no html[lang] and carries too little prose to detect.',
+      // Localised at generation time and stored in `spelling_results.error`
+      // with the row, so a project keeps whatever UI language it was
+      // crawled in. The `{lang}` names below stay English — see the note
+      // on `spellUndetermined` in `menu-i18n.ts`.
+      message: L().spellUndetermined,
       mismatch: false,
       agreed: false,
     };
@@ -634,7 +638,7 @@ export async function resolveCheckLanguage(params: {
       detected,
       declared,
       reason: 'unsupported',
-      message: `${languageName(chosen)} is not supported by this LanguageTool endpoint.`,
+      message: L().spellUnsupported.replace('{lang}', languageName(chosen)),
       mismatch,
       agreed,
     };

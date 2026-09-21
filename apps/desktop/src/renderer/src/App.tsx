@@ -339,13 +339,23 @@ export function App() {
           }
           void window.freecrawl.dataDeleteByDomain({ domain: target }).then((res) => {
             window.alert(
+              // Two independent counts, so two independently-pluralised
+              // sentences rather than one string that can only agree with one
+              // of them.
               t('app.deleteDomainResult', {
-                defaultValue:
-                  'Deleted {{urls}} URL row(s) from {{host}} (and {{links}} associated link(s)).',
-                urls: res.urlsDeleted.toLocaleString(),
+                defaultValue_one: 'Deleted {{formatted}} URL row from {{host}}.',
+                defaultValue_other: 'Deleted {{formatted}} URL rows from {{host}}.',
+                count: res.urlsDeleted,
+                formatted: res.urlsDeleted.toLocaleString(),
                 host: target,
-                links: res.linksDeleted.toLocaleString(),
-              }),
+              }) +
+                ' ' +
+                t('app.deleteDomainLinks', {
+                  defaultValue_one: '{{formatted}} associated link was removed with them.',
+                  defaultValue_other: '{{formatted}} associated links were removed with them.',
+                  count: res.linksDeleted,
+                  formatted: res.linksDeleted.toLocaleString(),
+                }),
             );
           });
           break;
@@ -453,6 +463,12 @@ export function App() {
           break;
         case 'export-html-report':
           void window.freecrawl.exportHtmlReport({ filePath: '' });
+          break;
+        case 'export-pdf-report':
+          void window.freecrawl.exportPdfReport({ filePath: '' });
+          break;
+        case 'export-seo-audit':
+          void window.freecrawl.exportSeoAudit();
           break;
         case 'compare-with-project':
           setCompareOpen(true);

@@ -91,7 +91,21 @@ interface ResponseMessage {
   error?: string;
 }
 
+export interface DbWriterPoolOptions {
+  /** Log tag — `db-writer` (default) or `db-maintenance`. */
+  label?: string;
+  /**
+   * Outstanding-time wedge threshold used when the pool has no
+   * freeze-watchdog heartbeat to read. The maintenance pool runs
+   * `VACUUM INTO` on multi-GB projects, which legitimately takes longer
+   * than the default 20 min, so it raises this.
+   */
+  noSabWedgeTimeoutMs?: number;
+}
+
 export class DbWriterPool {
+  private readonly label: string;
+  private readonly noSabWedgeTimeoutMs: number;
   private worker: Worker | null = null;
   private dbPath: string | null = null;
   private freezeWatchdogSab: SharedArrayBuffer | null = null;
@@ -101,6 +115,11 @@ export class DbWriterPool {
   private restartTimes: number[] = [];
   private terminated = false;
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(opts: DbWriterPoolOptions = {}) {
+    this.label = opts.label ?? 'db-writer';
+    this.noSabWedgeTimeoutMs = opts.noSabWedgeTimeoutMs ?? NO_SAB_WEDGE_TIMEOUT_MS;
+  }
 
   init(dbPath: string, freezeWatchdogSab: SharedArrayBuffer | null = null): void {
     if (this.terminated) {
@@ -200,17 +219,17 @@ export class DbWriterPool {
       });
       w.on('message', (msg: ResponseMessage) => this.handleResponse(msg));
       w.on('error', (err) => {
-        logger.log('error', 'main', `db-writer worker error: ${err.message}`);
+        logger.log('error', 'main', `${this.label} worker error: ${err.message}`);
       });
       w.on('exit', (code) => this.handleExit(code));
       this.worker = w;
       this.startMonitor();
-      logger.log('info', 'main', `db-writer worker spawned for ${this.dbPath}`);
+      logger.log('info', 'main', `${this.label} worker spawned for ${this.dbPath}`);
     } catch (err) {
       logger.log(
         'error',
         'main',
-        `db-writer worker spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+        `${this.label} worker spawn failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       this.worker = null;
     }
@@ -247,7 +266,7 @@ export class DbWriterPool {
         logger.log(
           'warn',
           'main',
-          `db-writer '${p.method}' still running after ${Math.round(elapsed / 1000)}s (worker op: ${op}) — waiting, not falling back`,
+          `${this.label} '${p.method}' still running after ${Math.round(elapsed / 1000)}s (worker op: ${op}) — waiting, not falling back`,
         );
       }
     }
@@ -257,11 +276,11 @@ export class DbWriterPool {
       // check so a genuinely wedged worker still gets recycled instead of
       // hanging every pending write forever. Coarser (no per-op detail) and
       // more patient to avoid killing a slow-but-live query.
-      if (now - oldestStartedAt >= NO_SAB_WEDGE_TIMEOUT_MS) {
+      if (now - oldestStartedAt >= this.noSabWedgeTimeoutMs) {
         logger.log(
           'error',
           'main',
-          `db-writer worker appears wedged: oldest of ${this.pending.size} pending call(s) outstanding for ${Math.round((now - oldestStartedAt) / 1000)}s (no heartbeat available) — terminating and respawning`,
+          `${this.label} worker appears wedged: oldest of ${this.pending.size} pending call(s) outstanding for ${Math.round((now - oldestStartedAt) / 1000)}s (no heartbeat available) — terminating and respawning`,
         );
         void this.worker.terminate().catch(() => undefined);
       }
@@ -273,7 +292,7 @@ export class DbWriterPool {
       logger.log(
         'error',
         'main',
-        `db-writer worker wedged: no JS activity for ${Math.round(heartbeatAge / 1000)}s with ${this.pending.size} call(s) pending (worker op: ${op}) — terminating and respawning`,
+        `${this.label} worker wedged: no JS activity for ${Math.round(heartbeatAge / 1000)}s with ${this.pending.size} call(s) pending (worker op: ${op}) — terminating and respawning`,
       );
       // terminate() fires 'exit' → handleExit rejects pending calls
       // (WriterUnavailableError) and respawns. Fallbacks stay safe:
@@ -310,7 +329,7 @@ export class DbWriterPool {
       logger.log(
         'error',
         'main',
-        `db-writer worker crashed ${MAX_RESTARTS}× within ${RESTART_WINDOW_MS}ms — giving up. Writes fall back to main-thread DB.`,
+        `${this.label} worker crashed ${MAX_RESTARTS}× within ${RESTART_WINDOW_MS}ms — giving up. Writes fall back to main-thread DB.`,
       );
       return;
     }
@@ -318,7 +337,7 @@ export class DbWriterPool {
     logger.log(
       'warn',
       'main',
-      `db-writer worker exited with code ${code}; respawning (${this.restartTimes.length}/${MAX_RESTARTS})`,
+      `${this.label} worker exited with code ${code}; respawning (${this.restartTimes.length}/${MAX_RESTARTS})`,
     );
     this.spawn();
   }

@@ -17,7 +17,7 @@ import type {
   CrawlUrlRow,
   UrlCategory,
 } from '@freecrawl/shared-types';
-import { exportUrlsToCsv } from './csv-export.js';
+import { exportLinksToCsv, exportUrlsToCsv } from './csv-export.js';
 
 export interface BulkExportTask {
   label: string;
@@ -68,7 +68,17 @@ export const BULK_EXPORT_TASKS: BulkExportTask[] = [
   { label: 'Near-Duplicate Content', file: 'issues-near-duplicate.csv', category: 'issues:near-duplicate' },
   { label: 'All Redirects', file: 'all-redirects.csv', category: 'tab:redirects' },
   { label: 'Redirect Chains (Long)', file: 'redirect-chains-long.csv', category: 'issues:redirect-chain-long' },
+  { label: 'Issues — Critical', file: 'issues-critical.csv', category: 'issues:severity-critical' },
+  { label: 'Issues — Warning', file: 'issues-warning.csv', category: 'issues:severity-warning' },
+  { label: 'Issues — Info', file: 'issues-info.csv', category: 'issues:severity-info' },
+  { label: 'Orphan Pages', file: 'orphan-pages.csv', category: 'issues:orphan-page' },
   { label: 'Redirect Loops', file: 'redirect-loops.csv', category: 'issues:redirect-loop' },
+  {
+    label: 'Redirect & Canonical Chains',
+    file: 'redirect-canonical-chains.csv',
+    category: 'issues:redirect-canonical-chain',
+    columns: ['redirectFinalUrl', 'redirectChainLength', 'canonicalFinalUrl', 'canonicalChainLength'],
+  },
   { label: 'Self-Redirects', file: 'redirect-self.csv', category: 'issues:redirect-self' },
   { label: 'All Canonicals', file: 'all-canonicals.csv', category: 'tab:canonicals' },
   { label: 'Canonical — Non Self-Referencing', file: 'canonical-non-self.csv', category: 'issues:canonical-non-self' },
@@ -91,6 +101,7 @@ export const BULK_EXPORT_TASKS: BulkExportTask[] = [
   { label: 'Hreflang — Self-Ref Missing', file: 'hreflang-self-ref-missing.csv', category: 'issues:hreflang-self-ref-missing' },
   { label: 'Hreflang — Target Issues', file: 'hreflang-target-issues.csv', category: 'issues:hreflang-target-issues' },
   { label: 'Hreflang — Inconsistent Language', file: 'hreflang-inconsistent-lang.csv', category: 'issues:hreflang-inconsistent-lang' },
+  { label: 'Hreflang — Unlinked Targets', file: 'hreflang-unlinked.csv', category: 'issues:hreflang-unlinked', columns: ['hreflangs'] },
   { label: 'Duplicate Pages', file: 'duplicate-pages.csv', category: 'tab:duplicates' },
   { label: 'Duplicate Content — Exact', file: 'duplicate-content-exact.csv', category: 'issues:duplicate-content-exact' },
   {
@@ -109,9 +120,13 @@ export const BULK_EXPORT_TASKS: BulkExportTask[] = [
   { label: 'Structured Data — Invalid', file: 'structured-data-invalid.csv', category: 'issues:structured-data-invalid' },
   { label: 'Structured Data — Duplicate @id', file: 'structured-data-duplicate-id.csv', category: 'issues:schema-duplicate-id' },
   { label: 'Structured Data — Missing Required Property', file: 'structured-data-missing-required.csv', category: 'issues:schema-missing-required' },
+  { label: 'Structured Data — Missing Recommended Property', file: 'structured-data-missing-recommended.csv', category: 'issues:schema-missing-recommended', columns: ['schemaFindings'] },
+  { label: 'Structured Data — Malformed @type', file: 'structured-data-unknown-type.csv', category: 'issues:schema-unknown-type', columns: ['schemaFindings'] },
   { label: 'AMP Pages', file: 'amp-pages.csv', category: 'tab:amp' },
+  { label: 'AMP — Validation Errors', file: 'amp-validation-errors.csv', category: 'issues:amp-validation-errors' },
   { label: 'Image — Missing Alt', file: 'image-missing-alt.csv', category: 'issues:image-missing-alt' },
   { label: 'Image — Empty Alt', file: 'image-empty-alt.csv', category: 'issues:image-empty-alt' },
+  { label: 'Image — Duplicate Alt', file: 'image-duplicate-alt.csv', category: 'issues:image-duplicate-alt' },
   { label: 'Image — Too Large', file: 'image-too-large.csv', category: 'issues:image-too-large' },
   { label: 'Image — Broken Src', file: 'image-broken-src.csv', category: 'issues:image-broken-src' },
   {
@@ -146,7 +161,11 @@ export async function runBulkExport(
 ): Promise<BulkExportResult> {
   const files: BulkExportFile[] = [];
   const errors: { label: string; error: string }[] = [];
+  // Silenced checks (Settings → Issues) get no file at all — an empty CSV
+  // for a check the user turned off would read as "nothing found".
+  const disabled = db.getDisabledIssues();
   for (const task of BULK_EXPORT_TASKS) {
+    if (disabled.has(task.category)) continue;
     const filePath = join(outputDir, task.file);
     try {
       const { rowsWritten } = await exportUrlsToCsv(db, filePath, {
@@ -160,6 +179,26 @@ export async function runBulkExport(
       files.push({ filePath, label: task.label, category: task.category, rowsWritten });
     } catch (err) {
       errors.push({ label: task.label, error: (err as Error).message });
+    }
+  }
+  // Link-level files: one row per edge rather than per page.
+  for (const scope of ['internal', 'external'] as const) {
+    const label = scope === 'internal' ? 'Links — Internal' : 'Links — External';
+    const filePath = join(outputDir, `links-${scope}.csv`);
+    try {
+      const { rowsWritten } = await exportLinksToCsv(db, filePath, { scope });
+      if (rowsWritten === 0) {
+        await unlink(filePath).catch(() => undefined);
+        continue;
+      }
+      files.push({
+        filePath,
+        label,
+        category: scope === 'internal' ? 'internal:all' : 'external:all',
+        rowsWritten,
+      });
+    } catch (err) {
+      errors.push({ label, error: (err as Error).message });
     }
   }
   return { outputDir, files, errors };

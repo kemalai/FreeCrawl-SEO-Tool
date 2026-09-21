@@ -272,6 +272,13 @@ export function StatsBar() {
               <span className="text-emerald-400">{t('stats.running')}</span>
             </span>
           )
+        ) : progress?.finishing ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+            <span className="text-amber-400">
+              {t('stats.finishing', { defaultValue: 'Finishing…' })}
+            </span>
+          </span>
         ) : (
           <span className="inline-flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-surface-600" />

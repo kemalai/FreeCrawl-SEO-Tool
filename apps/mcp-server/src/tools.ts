@@ -838,7 +838,7 @@ export function buildTools(): Tool[] {
     {
       name: 'query_images',
       description:
-        'Project-wide image catalogue — every <img> the crawler saw, with src, alt, intrinsic dimensions, byte_size, is_internal. Backs the Images tab.',
+        'Project-wide image catalogue — one row per image USAGE (image × page), with src, alt, declared width/height, occurrences, fromUrl (the page), fromUrlId, and byteSize (from the post-crawl size probe or the crawled image row; null = unknown). Backs the Images tab. For "large images and where they are used", combine `minByteSize` with `sortBy: "byteSize"`.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -853,6 +853,17 @@ export function buildTools(): Tool[] {
             description: 'Only images whose non-empty alt text is shared by ≥2 distinct images.',
           },
           internalOnly: { type: 'boolean' },
+          minByteSize: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Only images at least this many bytes (e.g. 102400 for > 100 KB). Rows with unknown size are excluded.',
+          },
+          sortBy: {
+            type: 'string',
+            enum: ['src', 'alt', 'width', 'height', 'byteSize', 'occurrences', 'fromUrl'],
+            description: 'Server-side order; default occurrences. Unknown values sort last.',
+          },
+          sortDir: { type: 'string', enum: ['asc', 'desc'], description: 'Default desc.' },
           limit: { type: 'integer', minimum: 1, maximum: 5000 },
           offset: { type: 'integer', minimum: 0 },
         },
@@ -866,6 +877,12 @@ export function buildTools(): Tool[] {
           emptyAltOnly: args.emptyAltOnly === true,
           duplicateAltOnly: args.duplicateAltOnly === true,
           internalOnly: args.internalOnly === true,
+          minByteSize:
+            typeof args.minByteSize === 'number' ? clamp(args.minByteSize, 0, 1e12, 0) : undefined,
+          sortBy: (
+            ['src', 'alt', 'width', 'height', 'byteSize', 'occurrences', 'fromUrl'] as const
+          ).find((k) => k === args.sortBy),
+          sortDir: args.sortDir === 'asc' ? 'asc' : args.sortDir === 'desc' ? 'desc' : undefined,
         }),
     },
 
@@ -1506,7 +1523,7 @@ export function buildTools(): Tool[] {
     {
       requiresDb: false,
       name: 'export_images',
-      description: 'Export every image the crawler saw to a CSV with src/alt/dimensions/byte_size/is_internal. Honours the Images tab\'s alt filters (missing / empty / duplicate) and search box.',
+      description: 'Export every image usage the crawler saw to a CSV (Image URL, Alt, Width, Height, Internal, Occurrences, Size (Bytes), Page). Honours the Images tab\'s alt filters (missing / empty / duplicate), search box and minimum-size filter.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1518,6 +1535,11 @@ export function buildTools(): Tool[] {
             description: 'Only images whose non-empty alt is shared by ≥2 distinct images.',
           },
           search: { type: 'string', description: 'Substring filter on src or alt.' },
+          minByteSize: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Only images at least this many bytes; unknown sizes are excluded.',
+          },
         },
         required: ['filePath'],
       },
@@ -1690,7 +1712,7 @@ export function buildTools(): Tool[] {
       requiresDb: false,
       name: 'google_auth_status',
       description:
-        'Read the OAuth connection state of one Google integration (`gsc` / `ga4` / `sheets` / `bigquery` / `pagespeed`). Returns `{connected, email, scopes, expiresAt, error}`. Use this BEFORE `gsc_fetch` / `ga4_fetch` to verify the user has connected; not-connected paths surface a clear "Settings → Integrations → Connect" hint in the response.',
+        'Read the OAuth connection state of one Google integration (`gsc` / `ga4` / `sheets` / `bigquery` / `pagespeed`). Returns `{connected, email, accounts: [{accountId, email, connectedAt}], activeAccountId, activeEmail}`. `email` is the FIRST-linked account; `activeAccountId` / `activeEmail` is the one the open project actually pulls with (null when no project is open) — read those, and switch with `google_account_set`. Use this BEFORE `gsc_fetch` / `ga4_fetch` to verify the user has connected; not-connected paths surface a clear "Settings → Integrations → Connect" hint in the response.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1707,12 +1729,41 @@ export function buildTools(): Tool[] {
 
     {
       requiresDb: false,
+      name: 'google_account_set',
+      description:
+        'Make one of the linked Google accounts the active account for the open project — the same choice as Settings → Integrations → account dropdown, so later `gsc_fetch` / `ga4_fetch` / `gsc_list_sites` / `ga4_list_properties` calls without an explicit `accountId` use it, and the desktop UI follows. Accepts the `accountId` or the email from `google_auth_status`; fails if that account is not linked (connecting a NEW account needs the desktop OAuth flow). Persists in the project file. Returns `{ok, integrationId, activeAccountId, activeEmail}`.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          integrationId: { type: 'string', enum: ['gsc', 'ga4'] },
+          accountId: {
+            type: 'string',
+            description: 'Account id or email address of a linked account (see google_auth_status → accounts).',
+          },
+        },
+        required: ['integrationId', 'accountId'],
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/google-account-set', args),
+    },
+
+    {
+      requiresDb: false,
       name: 'gsc_list_sites',
       description:
         'List every Search Console property the connected Google account has access to. Returns `{ok, sites: [{siteUrl, permissionLevel}]}`. Pass the desired `siteUrl` to `gsc_fetch` next. Requires the GSC integration to be connected (see google_auth_status).',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () =>
-        bridgeRequest<unknown>('POST', '/v1/action/gsc-list-sites', {}),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          accountId: {
+            type: 'string',
+            description:
+              'Which linked Google account to list with (`accountId` from google_auth_status). Omitted = the project\'s active account.',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/gsc-list-sites', args),
     },
 
     {
@@ -1732,6 +1783,11 @@ export function buildTools(): Tool[] {
             enum: [7, 28, 90],
             description: 'Trailing window length in days. Default 28.',
           },
+          accountId: {
+            type: 'string',
+            description:
+              'Which linked Google account to pull with (`accountId` from google_auth_status). Omitted = the project\'s active account.',
+          },
         },
         required: ['property'],
       },
@@ -1749,9 +1805,18 @@ export function buildTools(): Tool[] {
       name: 'ga4_list_properties',
       description:
         'List every GA4 property the connected Google account has access to. Returns `{ok, properties: [{name, displayName, account}]}`. Pass the desired property resource name to `ga4_fetch` next.',
-      inputSchema: { type: 'object', properties: {} },
-      handler: async () =>
-        bridgeRequest<unknown>('POST', '/v1/action/ga4-list-properties', {}),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          accountId: {
+            type: 'string',
+            description:
+              'Which linked Google account to list with (`accountId` from google_auth_status). Omitted = the project\'s active account.',
+          },
+        },
+      },
+      handler: async (args) =>
+        bridgeRequest<unknown>('POST', '/v1/action/ga4-list-properties', args),
     },
 
     {
@@ -1774,6 +1839,11 @@ export function buildTools(): Tool[] {
             type: 'integer',
             enum: [7, 28, 90],
             description: 'Trailing window length in days. Default 28.',
+          },
+          accountId: {
+            type: 'string',
+            description:
+              'Which linked Google account to pull with (`accountId` from google_auth_status). Omitted = the project\'s active account.',
           },
         },
         required: ['property'],

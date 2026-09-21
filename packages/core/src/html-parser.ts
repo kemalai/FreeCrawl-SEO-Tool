@@ -7,6 +7,7 @@ import type {
   DiscoveredResource,
   LinkPathType,
   LinkPosition,
+  SchemaFinding,
 } from '@freecrawl/shared-types';
 import {
   normalizeUrl,
@@ -136,6 +137,11 @@ export interface ParsedPage {
    * (warning-level enrichment signal). One count per node.
    */
   schemaMissingRecommended: number;
+  /**
+   * The detail behind the three schema counters: which block, `@type`
+   * and properties each failed node concerns, in document order.
+   */
+  schemaFindings: SchemaFinding[];
   /** Number of Microdata `itemscope` elements declared on the page. */
   microdataCount: number;
   /** Number of RDFa `typeof` / `vocab` / `property` attribute occurrences. */
@@ -320,6 +326,15 @@ export interface ParsedPage {
    */
   metaRefreshUrl: string | null;
   /**
+   * Absolute target of a statically detectable JavaScript redirect in an
+   * inline `<script>`: `window.location = "…"`, `location.href = "…"`,
+   * `location.replace("…")`, `location.assign("…")` (also `document.` /
+   * `top.` / `self.` prefixes). Only string-literal targets count — a
+   * computed expression cannot be resolved without running the script.
+   * Null when nothing matches.
+   */
+  jsRedirectUrl: string | null;
+  /**
    * Declared character encoding from the document itself — lowercased.
    * Looks at `<meta charset>` first, then `<meta http-equiv="Content-Type">`'s
    * `charset=` parameter. Null when neither is present (the HTTP
@@ -415,6 +430,51 @@ export interface ParsedPage {
  * page. Returns whitespace-collapsed, trimmed text — empty when the
  * document carries no prose.
  */
+/**
+ * Matches `[window.|document.|top.|self.]location[.href] = "url"` and
+ * `location.replace("url")` / `location.assign("url")`, capturing the
+ * quoted target. Both quote styles and template literals without
+ * interpolation are accepted; anything else — a variable, or a literal
+ * followed by `+ …` concatenation — is an expression we cannot evaluate
+ * statically, so the assignment form requires the literal to end the
+ * statement.
+ */
+const JS_REDIRECT_ASSIGN_RE =
+  /(?:^|[^\w.$])(?:window\.|document\.|top\.|self\.)?location(?:\.href)?\s*=\s*(["'`])([^"'`\n$]+?)\1(?=\s*(?:[;\n}]|$))/;
+const JS_REDIRECT_CALL_RE =
+  /(?:^|[^\w.$])(?:window\.|document\.|top\.|self\.)?location\.(?:replace|assign)\s*\(\s*(["'`])([^"'`\n$]+?)\1\s*\)/;
+/** Inline script MIME types that the browser executes as classic JS. */
+const JS_SCRIPT_TYPES = new Set([
+  '',
+  'text/javascript',
+  'application/javascript',
+  'module',
+  'text/ecmascript',
+  'application/ecmascript',
+]);
+
+function findJsRedirect(
+  $: cheerio.CheerioAPI,
+  baseUrl: string,
+  urlRewrites: UrlRewriteOptions | undefined,
+): string | null {
+  let found: string | null = null;
+  $('script:not([src])').each((_, el) => {
+    if (found) return false;
+    const type = ($(el).attr('type') ?? '').trim().toLowerCase();
+    if (!JS_SCRIPT_TYPES.has(type)) return;
+    const code = $(el).text();
+    if (!code || !/location/.test(code)) return;
+    const m = JS_REDIRECT_ASSIGN_RE.exec(code) ?? JS_REDIRECT_CALL_RE.exec(code);
+    const target = m?.[2]?.trim();
+    if (!target || target.startsWith('#') || /^(javascript|data|mailto|tel):/i.test(target)) return;
+    const resolved = normalizeUrl(target, baseUrl, urlRewrites);
+    if (resolved && resolved !== baseUrl) found = resolved;
+    return undefined;
+  });
+  return found;
+}
+
 export function extractProseText(
   html: string,
   contentAreaSelector?: string,
@@ -699,13 +759,21 @@ export function parseHtml(
   let schemaUnknownTypes = 0;
   let schemaMissingRequired = 0;
   let schemaMissingRecommended = 0;
+  const schemaFindings: SchemaFinding[] = [];
   $('script[type="application/ld+json"]').each((_, el) => {
     const raw = $(el).text().trim();
     if (!raw) return;
     try {
       const parsed = JSON.parse(raw) as unknown;
       collectSchemaTypes(parsed, schemaTypeSet);
-      const validation = walkSchemaForValidation(parsed, schemaIdCounts);
+      // Block numbering matches what the Structured Data sub-tab shows:
+      // non-empty blocks in document order, whether or not they parse.
+      const validation = walkSchemaForValidation(
+        parsed,
+        schemaIdCounts,
+        schemaBlockCount + schemaInvalidCount,
+        schemaFindings,
+      );
       schemaUnknownTypes += validation.unknownTypeCount;
       schemaMissingRequired += validation.missingRequiredCount;
       schemaMissingRecommended += validation.missingRecommendedCount;
@@ -1054,6 +1122,12 @@ export function parseHtml(
       metaRefreshUrl = normalizeUrl(urlMatch[1], baseUrl, opts.urlRewrites);
     }
   }
+
+  // JavaScript redirect — the classic `window.location = "/new"` that a
+  // crawler without a JS engine would otherwise treat as a dead end. We
+  // only accept a string-literal target: an expression could evaluate to
+  // anything, and enqueuing a guess would pollute the crawl.
+  const jsRedirectUrl = findJsRedirect($, baseUrl, opts.urlRewrites);
 
   // Document-declared character encoding. HTML5's `<meta charset>` wins;
   // legacy `<meta http-equiv="Content-Type">` is parsed as a fallback so
@@ -1646,6 +1720,7 @@ export function parseHtml(
     schemaUnknownTypes,
     schemaMissingRequired,
     schemaMissingRecommended,
+    schemaFindings,
     microdataCount,
     rdfaCount,
     insecureFormActionCount,
@@ -1689,6 +1764,7 @@ export function parseHtml(
     customSearchHits,
     metaRefresh,
     metaRefreshUrl,
+    jsRedirectUrl,
     charset,
     extractionResults,
     simhash,
@@ -2083,10 +2159,19 @@ const SCHEMA_REQUIRED_PROPS: Record<
  *     Counted once per node — a warning-level enrichment signal, not a
  *     hard validation failure. A node already flagged as missing
  *     *required* props is not double-counted as recommended.
+ *
+ * Every failed node is also appended to `findings` with its `@type` and
+ * the full list of properties it lacks — the counters say how many nodes
+ * failed, the findings say which and why, so the UI can point at the
+ * block instead of leaving the user to diff the payload against the
+ * rule table by hand. `block` is the page-level index of the JSON-LD
+ * block being walked.
  */
 function walkSchemaForValidation(
   node: unknown,
   idCounts: Map<string, number>,
+  block: number,
+  findings: SchemaFinding[],
 ): {
   unknownTypeCount: number;
   missingRequiredCount: number;
@@ -2126,36 +2211,39 @@ function walkSchemaForValidation(
         !/^[A-Z][A-Za-z0-9_]*$/.test(t)
       ) {
         unknownTypeCount++;
+        findings.push({ block, type: t, kind: 'unknown-type', props: [] });
         continue;
       }
-      // Required-prop check for the curated high-traffic types.
+      // Required-prop check for the curated high-traffic types. The
+      // counter moves once per node; the finding lists every gap.
       const rule = SCHEMA_REQUIRED_PROPS[t];
       if (!rule) continue;
-      let nodeMissingRequired = false;
+      const missingRequired: string[] = [];
       for (const key of rule.required) {
-        if (!isTruthyProp(obj[key])) {
-          missingRequiredCount++;
-          nodeMissingRequired = true;
-          break; // one failure per node, not per missing prop
+        if (!isTruthyProp(obj[key])) missingRequired.push(key);
+      }
+      if (rule.oneOf) {
+        for (const group of rule.oneOf) {
+          if (!group.some((k) => isTruthyProp(obj[k]))) missingRequired.push(group.join(' | '));
         }
       }
-      if (!nodeMissingRequired && rule.oneOf) {
-        for (const group of rule.oneOf) {
-          if (!group.some((k) => isTruthyProp(obj[k]))) {
-            missingRequiredCount++;
-            nodeMissingRequired = true;
-            break;
-          }
-        }
+      if (missingRequired.length > 0) {
+        missingRequiredCount++;
+        findings.push({ block, type: t, kind: 'missing-required', props: missingRequired });
+        continue;
       }
       // Recommended-prop check — only when the node is otherwise valid,
       // so a node already failing a required prop isn't double-flagged.
-      if (!nodeMissingRequired && rule.recommended) {
-        for (const key of rule.recommended) {
-          if (!isTruthyProp(obj[key])) {
-            missingRecommendedCount++;
-            break; // one warning per node
-          }
+      if (rule.recommended) {
+        const missingRecommended = rule.recommended.filter((key) => !isTruthyProp(obj[key]));
+        if (missingRecommended.length > 0) {
+          missingRecommendedCount++;
+          findings.push({
+            block,
+            type: t,
+            kind: 'missing-recommended',
+            props: missingRecommended,
+          });
         }
       }
     }

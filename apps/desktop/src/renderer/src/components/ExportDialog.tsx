@@ -625,8 +625,10 @@ export function ExportDialog({
       }
       setStatus(
         t('export.successMsg', {
-          defaultValue: 'Exported {{count}} row(s) to {{path}}',
-          count: result.rowsWritten.toLocaleString(),
+          defaultValue_one: 'Exported {{formatted}} row to {{path}}',
+          defaultValue_other: 'Exported {{formatted}} rows to {{path}}',
+          count: result.rowsWritten,
+          formatted: result.rowsWritten.toLocaleString(),
           path: result.filePath,
         }),
       );
@@ -967,10 +969,16 @@ export function ExportDialog({
 
         <div className="flex items-center justify-between gap-2 border-t border-surface-800 px-4 py-2.5">
           <div className="text-[11px] text-surface-500">
-            {t('export.summary', {
-              defaultValue: '{{n}} section(s) · {{c}} column(s)',
-              n: totalLeafSelections,
-              c: pickedColumnCount,
+            {t('export.summarySections', {
+              defaultValue_one: '{{count}} section',
+              defaultValue_other: '{{count}} sections',
+              count: totalLeafSelections,
+            })}
+            {' · '}
+            {t('export.summaryColumns', {
+              defaultValue_one: '{{count}} column',
+              defaultValue_other: '{{count}} columns',
+              count: pickedColumnCount,
             })}
           </div>
           <div className="flex gap-2">

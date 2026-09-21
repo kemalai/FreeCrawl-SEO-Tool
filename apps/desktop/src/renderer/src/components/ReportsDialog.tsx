@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useAppStore } from '../store.js';
 import type {
   PagesPerDirectoryRow,
   StatusCodeHistogramRow,
@@ -52,7 +53,9 @@ type ReportKind =
   | 'sitemap-orphans'
   | 'orphan-cross-source'
   | 'server-headers'
-  | 'top-words';
+  | 'top-words'
+  | 'pages-over-link-limit'
+  | 'mobile-parity';
 
 interface ReportRow {
   /** Display key (directory path / status code / depth label). */
@@ -93,6 +96,8 @@ const REPORT_LABELS: Record<ReportKind, string> = {
   'orphan-cross-source': 'Orphan Pages — Sitemap + GSC + GA4 (Top 1000)',
   'server-headers': 'Server Stack (Server Header)',
   'top-words': 'Top Words (Title + Meta + H1, Top 100)',
+  'pages-over-link-limit': 'Pages Over Max Links per Page',
+  'mobile-parity': 'Mobile vs Desktop Differences',
 };
 
 const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
@@ -120,6 +125,8 @@ const TOP_URL_METRIC: Record<ReportKind, TopUrlMetric | null> = {
   'orphan-cross-source': null,
   'server-headers': null,
   'top-words': null,
+  'pages-over-link-limit': null,
+  'mobile-parity': null,
 };
 
 const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
@@ -152,12 +159,16 @@ const VALUE_FORMAT: Record<ReportKind, (v: number | null) => string> = {
   'orphan-cross-source': (v) => (v ?? 0).toLocaleString(),
   'server-headers': (v) => (v ?? 0).toLocaleString(),
   'top-words': (v) => (v ?? 0).toLocaleString(),
+  'pages-over-link-limit': (v) => (v ?? 0).toLocaleString(),
+  'mobile-parity': (v) => (v ?? 0).toLocaleString(),
 };
 
 export function ReportsDialog({ open, onClose }: Props) {
   const { t } = useTranslation();
+  const maxLinksPerPage = useAppStore((s) => s.config.maxLinksPerPage);
   const [kind, setKind] = useState<ReportKind>('pages-per-dir');
   const [depth, setDepth] = useState(1);
+  const [includeBody, setIncludeBody] = useState(false);
   const [rows, setRows] = useState<ReportRow[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -188,6 +199,10 @@ export function ReportsDialog({ open, onClose }: Props) {
     'orphan-cross-source': t('reports.report.orphanCrossSource', { defaultValue: REPORT_LABELS['orphan-cross-source'] }),
     'server-headers': t('reports.report.serverHeaders', { defaultValue: REPORT_LABELS['server-headers'] }),
     'top-words': t('reports.report.topWords', { defaultValue: REPORT_LABELS['top-words'] }),
+    'pages-over-link-limit': t('reports.report.pagesOverLinkLimit', {
+      defaultValue: REPORT_LABELS['pages-over-link-limit'],
+    }),
+    'mobile-parity': t('reports.report.mobileParity', { defaultValue: REPORT_LABELS['mobile-parity'] }),
   }), [t]);
   const keyLabels = useMemo<Record<ReportKind, string>>(() => ({
     'pages-per-dir': t('reports.keyDirectory', { defaultValue: 'Directory' }),
@@ -214,6 +229,8 @@ export function ReportsDialog({ open, onClose }: Props) {
     'orphan-cross-source': 'URL',
     'server-headers': t('reports.keyServer', { defaultValue: 'Server' }),
     'top-words': t('reports.keyWord', { defaultValue: 'Word' }),
+    'pages-over-link-limit': 'URL',
+    'mobile-parity': 'URL',
   }), [t]);
 
   useEffect(() => {
@@ -398,7 +415,7 @@ export function ReportsDialog({ open, onClose }: Props) {
           if (!cancelled)
             setRows(r.map((x: ServerHeaderRow) => ({ key: x.server, count: x.count })));
         } else if (kind === 'top-words') {
-          const r = await window.freecrawl.reportsTopWords({ limit: 100, minLength: 3 });
+          const r = await window.freecrawl.reportsTopWords({ limit: 100, minLength: 3, includeBody });
           if (!cancelled)
             setRows(
               r.map((x: TopWordsRow) => ({
@@ -411,6 +428,29 @@ export function ReportsDialog({ open, onClose }: Props) {
                 valueLabel: `${x.count.toLocaleString()} hits · ${x.pages.toLocaleString()} page${
                   x.pages === 1 ? '' : 's'
                 }`,
+              })),
+            );
+        } else if (kind === 'mobile-parity') {
+          const r = await window.freecrawl.reportsMobileParity(500);
+          if (!cancelled)
+            setRows(
+              r.map((x: TopUrlsRow) => ({
+                key: x.url,
+                count: x.value ?? 0,
+                valueLabel: VALUE_FORMAT[kind](x.value),
+              })),
+            );
+        } else if (kind === 'pages-over-link-limit') {
+          // Threshold follows Settings → Advanced → Max links per page;
+          // 0 ("disabled") falls back to the sidebar's 100-link check.
+          const threshold = maxLinksPerPage > 0 ? maxLinksPerPage : 100;
+          const r = await window.freecrawl.reportsPagesOverLinkLimit({ threshold, limit: 500 });
+          if (!cancelled)
+            setRows(
+              r.map((x: TopUrlsRow) => ({
+                key: x.url,
+                count: x.value ?? 0,
+                valueLabel: VALUE_FORMAT[kind](x.value),
               })),
             );
         } else {
@@ -441,7 +481,7 @@ export function ReportsDialog({ open, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [open, kind, depth]);
+  }, [open, kind, depth, maxLinksPerPage, includeBody]);
 
   useEffect(() => {
     if (!open) return;
@@ -506,6 +546,19 @@ export function ReportsDialog({ open, onClose }: Props) {
               ))}
             </select>
           </label>
+          {kind === 'top-words' && (
+            <label className="flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={includeBody}
+                onChange={(e) => setIncludeBody(e.target.checked)}
+                className="h-3.5 w-3.5 accent-blue-500"
+              />
+              <span className="text-surface-400">
+                {t('reports.includeBody', { defaultValue: 'Include body text (slower)' })}
+              </span>
+            </label>
+          )}
           {(kind === 'pages-per-dir' || kind === 'word-count-per-dir') && (
             <label className="flex items-center gap-1.5">
               <span className="text-surface-400">{t('reports.groupAtDepth', { defaultValue: 'Group at depth' })}</span>

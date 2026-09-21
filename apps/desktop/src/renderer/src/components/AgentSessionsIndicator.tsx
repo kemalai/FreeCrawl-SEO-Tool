@@ -115,8 +115,9 @@ export function AgentSessionsIndicator() {
         )}
         onClick={() => setOpen((v) => !v)}
         title={t('agents.indicatorTitle', {
-          defaultValue: '{{n}} MCP agent session(s) active — click to manage',
-          n: sessions.length,
+          defaultValue_one: '{{count}} MCP agent session active — click to manage',
+          defaultValue_other: '{{count}} MCP agent sessions active — click to manage',
+          count: sessions.length,
         })}
       >
         <span

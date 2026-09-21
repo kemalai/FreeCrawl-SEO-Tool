@@ -2,26 +2,33 @@
 
 # FreeCrawl SEO Tool
 
-<img src="Freecrawl.gif" alt="FreeCrawl SEO Tool in action — dense table view, live crawl progress, and detail panel" width="100%" />
+<img src="Freecrawl.gif" alt="FreeCrawl SEO Tool in action: dense table view, live crawl progress, and detail panel" width="100%" />
 
-### Open-source desktop SEO crawler — a free, cross-platform alternative to Screaming Frog
+### Open-source desktop SEO crawler. A free, cross-platform alternative to Screaming Frog.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-black?style=for-the-badge)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/kemalai/FreeCrawl-SEO-Tool?style=for-the-badge&color=blue)](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases)
 [![Stars](https://img.shields.io/github/stars/kemalai/FreeCrawl-SEO-Tool?style=for-the-badge&color=yellow)](https://github.com/kemalai/FreeCrawl-SEO-Tool/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/kemalai/FreeCrawl-SEO-Tool?style=for-the-badge&color=green)](https://github.com/kemalai/FreeCrawl-SEO-Tool/commits/main)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=for-the-badge)](#-quick-start)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=for-the-badge)](#-download)
+[![Support on Patreon](https://img.shields.io/badge/Patreon-support-f96854?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/kemalacar)
 
 **[🌐 Website](https://freecrawl.net/)** ·
-**[📦 Download](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases)** ·
+**[📦 Download](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases/latest)** ·
 **[🐛 Report Bug](https://github.com/kemalai/FreeCrawl-SEO-Tool/issues)** ·
-**[📝 Changelog](CHANGELOG.md)**
+**[📝 Changelog](CHANGELOG.md)** ·
+**[❤️ Support on Patreon](https://www.patreon.com/kemalacar)**
 
 <br />
 
-A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog–style UI, **167 SEO issue checks**, and zero native dependencies.
+A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog-style UI, **172 SEO issue checks**, an interface in **11 languages** with dark and light themes, and zero native dependencies.
 
 </div>
+
+<br />
+
+> [!IMPORTANT]
+> **v1.0.0 is the full release.** Everything planned for 1.0 ships in this build, and it is ready for daily audit work. Development does not stop here: further updates will follow based on user feedback and bug reports, so if something gets in your way, [open an issue](https://github.com/kemalai/FreeCrawl-SEO-Tool/issues).
 
 <br />
 
@@ -29,15 +36,41 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 ## ✨ What FreeCrawl Does
 
-FreeCrawl crawls your website and checks it for SEO problems — a free, desktop alternative to Screaming Frog. It handles very large sites (**1M+ URLs on one machine**) and streams the results into a fast, dense table while the crawl is still running.
+FreeCrawl crawls your website and checks it for SEO problems. It is a free desktop alternative to Screaming Frog that handles very large sites (**1M+ URLs on one machine**) and streams the results into a fast, dense table while the crawl is still running.
 
-It runs **167 SEO checks across 32 tabs** — page titles, meta descriptions, headings, duplicate content, broken links, redirects, canonicals, hreflang, structured data, security headers, readability, and more. It can also render JavaScript pages with a real headless browser to capture the final DOM, screenshots, and Core Web Vitals.
+It runs **172 SEO checks across 32 tabs**: page titles, meta descriptions, headings, duplicate content, broken links, redirects, canonicals, hreflang, structured data, security headers, readability, mobile usability, and more. It can also render JavaScript pages with a real headless browser to capture the final DOM, screenshots, and Core Web Vitals. Any check you do not care about can be switched off per project.
 
-Every link type — images, CSS, JavaScript, media, canonicals, pagination, hreflang, AMP, iframes — has its own **Crawl** and **Store** switch, so you decide exactly what gets fetched and what gets reported. Right-click any table selection to copy cells, rows, or columns straight to the clipboard.
+Every link type (images, CSS, JavaScript, media, canonicals, pagination, hreflang, AMP, iframes) has its own **Crawl** and **Store** switch, so you decide exactly what gets fetched and what gets reported. Right-click any table selection to copy cells, rows, or columns straight to the clipboard.
 
-Pull in real data from **Google Search Console, Analytics 4, PageSpeed Insights, and Chrome UX Report**, check spelling and grammar with **LanguageTool** — with a **bundled offline dictionary** for languages LanguageTool has no rules for, such as Turkish — and run your own **AI prompts** on each page (OpenAI, Claude, or Ollama). Open several projects side by side, each in its own window running its own crawl, and manage them from a Projects dialog with search, tags, and starter templates.
+Pull in real data from **Google Search Console, Analytics 4, PageSpeed Insights, and Chrome UX Report**, check spelling and grammar with **LanguageTool** (with a **bundled offline dictionary** for languages LanguageTool has no rules for, such as Turkish), and run your own **AI prompts** on each page (OpenAI, Claude, or Ollama). Open several projects side by side, each in its own window running its own crawl, and manage them from a Projects dialog with search, tags, and starter templates.
 
-Export to **Excel, CSV, JSON, XML**, an HTML report, sitemaps, **Google Sheets**, or **BigQuery**, save each project as **one compressed file** (or a **password-protected encrypted file**), and export any URL Details sub-table on its own. A built-in **MCP server** (100+ tools) lets AI agents like Claude drive crawls live and read every result — every action a human can take in the desktop is callable from an agent, and **several agents can run in parallel**, each in its own isolated crawl session. Everything runs **fully local** — no telemetry, no cloud, MIT-licensed.
+Export to **Excel, CSV, JSON, XML**, an HTML or brandable **PDF report**, sitemaps, a Screaming Frog-compatible **SEO Audit** folder, **Google Sheets**, or **BigQuery**. Save each project as **one compressed file** (or a **password-protected encrypted file**), and export any URL Details sub-table on its own. A built-in **MCP server** (100+ tools) lets AI agents like Claude drive crawls live and read every result. Every action a human can take in the desktop is callable from an agent, and **several agents can run in parallel**, each in its own isolated crawl session.
+
+The interface speaks **11 languages** (English, Turkish, Spanish, French, Portuguese, Italian, Russian, Chinese, Korean, Hindi, Azerbaijani), follows your system language on first launch, and comes in **dark and light themes**. Everything runs **fully local**: no telemetry, no cloud, MIT-licensed.
+
+<br />
+
+---
+
+## 📥 Download
+
+Grab the prebuilt app from the [Releases page](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases/latest). Every file name says which platform and CPU it is for, so pick the row that matches your machine (`<version>` stands for the release number, for example `1.0.0`).
+
+| Your machine | File to download | Notes |
+| :--- | :--- | :--- |
+| 🪟 **Windows 10 / 11** (64-bit) | `FreeCrawl-SEO-Tool-<version>-Windows-Setup.exe` | Installer with Start Menu and desktop shortcuts |
+| 🪟 **Windows, no install** | `FreeCrawl-SEO-Tool-<version>-Windows-Portable.exe` | Single file, runs from anywhere, including a USB stick |
+| 🍎 **Mac with Apple Silicon** (M1, M2, M3, M4 and newer) | `FreeCrawl-SEO-Tool-<version>-macOS-Apple-Silicon.dmg` | Native build, fastest on these Macs |
+| 🍎 **Mac with an Intel processor** | `FreeCrawl-SEO-Tool-<version>-macOS-Intel.dmg` | For Intel-based Macs (2020 and earlier models) |
+| 🐧 **Linux, any distribution** | `FreeCrawl-SEO-Tool-<version>-Linux-x86_64.AppImage` | Make it executable and run, no install |
+| 🐧 **Linux, Debian / Ubuntu** | `FreeCrawl-SEO-Tool-<version>-Linux-amd64.deb` | `sudo apt install ./FreeCrawl-SEO-Tool-<version>-Linux-amd64.deb` |
+| 🐧 **Linux, Fedora / RHEL** | `FreeCrawl-SEO-Tool-<version>-Linux-x86_64.rpm` | `sudo dnf install ./FreeCrawl-SEO-Tool-<version>-Linux-x86_64.rpm` |
+
+> **Not sure which Mac you have?** Open the Apple menu and choose **About This Mac**. A line that says **Chip: Apple M...** means Apple Silicon; a line that says **Processor: Intel...** means Intel. If you already run the Intel build on an Apple Silicon Mac, **Help → Check for Updates** offers the native build.
+
+> **macOS Gatekeeper:** the builds are not yet notarized. On first launch, right-click the app and choose **Open**, then confirm. If macOS still reports the app as damaged, run `xattr -cr "/Applications/FreeCrawl SEO Tool.app"` once in Terminal.
+
+The Playwright Chromium browser is bundled in every installer, so JavaScript rendering works on first launch without an extra download. All files are built by the same [GitHub Actions workflow](.github/workflows/release.yml) on every release, and the `.yml` and `.blockmap` files listed next to them are build metadata you can ignore.
 
 <br />
 
@@ -64,12 +97,13 @@ Export to **Excel, CSV, JSON, XML**, an HTML report, sitemaps, **Google Sheets**
 | 🪟 **Desktop shell** | Electron 41 |
 | ⚡ **Build** | electron-vite 5 / Vite 7 |
 | 🎨 **UI** | React 19 + Tailwind 3.4 + Zustand 5 |
-| 📊 **Tables** | `@tanstack/react-table` + `@tanstack/react-virtual` |
+| 📊 **Tables** | Canvas-rendered URL grid + `@tanstack/react-table` + `@tanstack/react-virtual` |
 | 🌐 **HTTP** | undici 8 |
 | 🔎 **HTML parse** | cheerio (htmlparser2 fast path) |
 | 📥 **Queue** | p-queue 8 |
 | 🤖 **robots** | robots-parser 3 |
-| 💾 **Storage** | `node:sqlite` + WAL — **zero native deps** |
+| 💾 **Storage** | `node:sqlite` + WAL, **zero native deps** |
+| 🌍 **i18n** | i18next, 11 UI languages |
 | 📦 **Distribution** | electron-builder 26 |
 
 <br />
@@ -79,16 +113,14 @@ Export to **Excel, CSV, JSON, XML**, an HTML report, sitemaps, **Google Sheets**
 ## 🚀 Quick Start
 
 > [!TIP]
-> **End users**: download the prebuilt installer from the [Releases page](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases) — no setup required.
+> **End users**: you do not need any of this. Download the prebuilt app from the [table above](#-download) and run it. The steps below are for running or building from source.
 
 <details>
-<summary><b>🪟 Windows</b> — easiest path is the <code>.bat</code> launcher</summary>
+<summary><b>🪟 Windows</b>: easiest path is the <code>.bat</code> launcher</summary>
 
 <br />
 
 Double-click **`FreeCrawl-SEO-Tool-Start.bat`** at the repo root. It verifies Node.js, runs `npm install` on first launch, then starts the app with `npm run dev`.
-
-> **Don't want to install?** Grab the **portable `.exe`** from the [Releases page](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases) — runs without installation.
 
 Or manually:
 
@@ -102,11 +134,11 @@ npm run dev
 </details>
 
 <details>
-<summary><b>🍎 macOS</b> — Apple Silicon + Intel</summary>
+<summary><b>🍎 macOS</b>: Apple Silicon + Intel</summary>
 
 <br />
 
-Easiest path is the **`FreeCrawl-SEO-Tool-Start.sh`** launcher at the repo root — same one-click flow as the Windows `.bat` (verifies Node, prompts to install on first run, then starts the app).
+Easiest path is the **`FreeCrawl-SEO-Tool-Start.sh`** launcher at the repo root. It is the same one-click flow as the Windows `.bat`: it verifies Node, prompts to install on first run, then starts the app.
 
 ```bash
 chmod +x FreeCrawl-SEO-Tool-Start.sh
@@ -118,7 +150,7 @@ Or manually:
 ```bash
 # 1. Install prerequisites (skip any you already have)
 brew install node@22 git
-xcode-select --install      # Command Line Tools — required once
+xcode-select --install      # Command Line Tools, required once
 
 # 2. Clone and run
 git clone https://github.com/kemalai/FreeCrawl-SEO-Tool.git
@@ -130,19 +162,19 @@ npm run dev
 If macOS Gatekeeper blocks an unsigned local build (`"App is damaged"`):
 
 ```bash
-xattr -cr "/Applications/FreeCrawl SEO.app"
+xattr -cr "/Applications/FreeCrawl SEO Tool.app"
 ```
 
 </details>
 
 <details>
-<summary><b>🐧 Linux</b> — Debian / Ubuntu / Fedora / Arch</summary>
+<summary><b>🐧 Linux</b>: Debian / Ubuntu / Fedora / Arch</summary>
 
 <br />
 
 Easiest path is the **`FreeCrawl-SEO-Tool-Start.sh`** launcher at the repo root (same as macOS).
 
-Prebuilt installers are available for all three families: **`.AppImage`** (universal), **`.deb`** (Debian / Ubuntu), and **`.rpm`** (Fedora / RHEL).
+Prebuilt packages are available for all three families: **`.AppImage`** (universal), **`.deb`** (Debian / Ubuntu), and **`.rpm`** (Fedora / RHEL). See the [download table](#-download).
 
 ```bash
 # 1. Install Node.js 22 LTS (Debian / Ubuntu via NodeSource)
@@ -174,15 +206,15 @@ npx tsc -b apps/cli     # builds the CLI + its workspace packages
 node apps/cli/dist/index.js https://example.com --depth 2 --max 500 --out out.csv
 node apps/cli/dist/index.js --list urls.txt --out out.json     # list mode + JSON
 
-# Log file analysis — parse an access log into the project for crawl × log reporting
+# Log file analysis: parse an access log into the project for crawl x log reporting
 node apps/cli/dist/index.js analyze-logs samples/apache-access.txt --project crawl.seoproject
 node apps/cli/dist/index.js analyze-logs access.log --format iis-w3c --verify-bots --json
 node apps/cli/dist/index.js analyze-logs access_log-Jul.gz              # gzipped logs work as-is
 ```
 
-> **Sample logs** ship in [`samples/`](samples/) (`apache-access.txt`, `iis-access.txt`) so you can try the Log File Analyzer immediately — in the desktop app, open **Log Analyzer → Open Log Analyzer Window…** and import one.
+> **Sample logs** ship in [`samples/`](samples/) (`apache-access.txt`, `iis-access.txt`) so you can try the Log File Analyzer immediately. In the desktop app, open **Log Analyzer → Open Log Analyzer Window…** and import one.
 
-**CI / CD recipes** — ready-to-use [GitHub Actions](docs/ci/github-actions-example.yml) and [GitLab CI](docs/ci/gitlab-ci-example.yml) examples that crawl your site on a schedule, fail the build when broken-URL count exceeds a threshold, and upload the crawl as an artifact. See the [CI/CD guide](docs/ci/README.md) for the exit-code contract and a regression-gate recipe.
+**CI / CD recipes**: ready-to-use [GitHub Actions](docs/ci/github-actions-example.yml) and [GitLab CI](docs/ci/gitlab-ci-example.yml) examples that crawl your site on a schedule, fail the build when the broken-URL count exceeds a threshold, and upload the crawl as an artifact. See the [CI/CD guide](docs/ci/README.md) for the exit-code contract and a regression-gate recipe.
 
 </details>
 
@@ -198,19 +230,21 @@ npm --workspace apps/desktop run build:mac     # macOS DMG (arm64 + x64)
 npm --workspace apps/desktop run build:linux   # AppImage / .deb / .rpm
 ```
 
+A local `build:mac` names the images `-macOS-arm64.dmg` / `-macOS-x64.dmg`; the release workflow builds each architecture on its own runner and renames them to `-macOS-Apple-Silicon.dmg` / `-macOS-Intel.dmg`.
+
 </details>
 
 <details>
-<summary><b>🤖 MCP server</b> — query AND drive crawls from Claude / any MCP client</summary>
+<summary><b>🤖 MCP server</b>: query AND drive crawls from Claude / any MCP client</summary>
 
 <br />
 
 FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the active `.seoproject` to AI agents over stdio. Two capabilities in one server:
 
-1. **Read-only data access** to the SQLite project — runs alongside the desktop app without contention (WAL allows concurrent readers).
-2. **Live crawl control** — when the desktop app is open, an agent can start / pause / resume / stop crawls and poll progress in real time. This goes through a localhost-only HTTP bridge (127.0.0.1, ephemeral random port, 32-byte Bearer token auth, discovery file written to `<userData>/mcp-bridge.json` on app launch).
+1. **Read-only data access** to the SQLite project. It runs alongside the desktop app without contention (WAL allows concurrent readers).
+2. **Live crawl control**: when the desktop app is open, an agent can start / pause / resume / stop crawls and poll progress in real time. This goes through a localhost-only HTTP bridge (127.0.0.1, ephemeral random port, 32-byte Bearer token auth, discovery file written to `<userData>/mcp-bridge.json` on app launch).
 
-**100+ tools** — every action a human can take in the desktop is callable from an agent, plus multi-agent session management so several agents can work in parallel. Representative groups:
+**100+ tools**: every action a human can take in the desktop is callable from an agent, plus multi-agent session management so several agents can work in parallel. Representative groups:
 
 | Group | Tools |
 | :--- | :--- |
@@ -227,9 +261,9 @@ FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the acti
 | 🕷 **Crawl control** (desktop must be open) | `start_crawl`, `stop_crawl`, `pause_crawl`, `resume_crawl`, `clear_crawl`, `get_crawl_progress`, `get_desktop_project` |
 | 🧑‍🤝‍🧑 **Agent sessions** (parallel agents) | `session_create`, `session_close`, `session_save`, `session_list`, `session_status` |
 
-`start_crawl` accepts a `startUrl` plus optional whitelisted overrides (scope, maxDepth, maxUrls, maxConcurrency, maxRps, crawlDelayMs, requestTimeoutMs, respectRobotsTxt, followRedirects, crawlExternal, userAgent, include/excludePatterns) — anything you don't override keeps the desktop user's saved value. Crawls launched via MCP go through the **same code path** as the UI's Start button, so progress shows up in the desktop app live as the agent drives it. Call `clear_crawl` first when you want a fresh BFS after a completed crawl with the same seed URL (otherwise the crawler treats the re-start as a resume and exits because every URL is already in the DB).
+`start_crawl` accepts a `startUrl` plus optional whitelisted overrides (scope, maxDepth, maxUrls, maxConcurrency, maxRps, crawlDelayMs, requestTimeoutMs, respectRobotsTxt, followRedirects, crawlExternal, userAgent, include/excludePatterns). Anything you don't override keeps the desktop user's saved value. Crawls launched via MCP go through the **same code path** as the UI's Start button, so progress shows up in the desktop app live as the agent drives it. Call `clear_crawl` first when you want a fresh BFS after a completed crawl with the same seed URL (otherwise the crawler treats the re-start as a resume and exits because every URL is already in the DB).
 
-**Several agents at once.** Multiple MCP clients can drive one running desktop app safely. Crawl control is a *lease*: `start_crawl` returns a `crawlId` you own, a second start against a busy session fails with `crawl-in-progress` (or, with `onBusy: "queue"`, waits its turn — or `"takeover"` to replace it), and `stop`/`pause`/`resume` refuse to touch a crawl owned by another client unless you pass `force: true`. `clear_crawl` won't wipe the desktop window's project when it has unsaved work. For full isolation, call **`session_create`** to get your own headless session inside the same app — its own database, crawler and worker pool — so each agent crawls its own project without seeing the others; the MCP read tools automatically repoint to it. `session_create({ mode: "open", projectPath })` reopens a saved `.seoproject` to keep working on it (PageSpeed, spelling, exports, re-crawl), and `session_save` / `session_close({ save: true })` persist it — so the data no longer disappears when the session that produced it ends. Sessions are capped and idle ones are auto-closed (saving first if they have a document).
+**Several agents at once.** Multiple MCP clients can drive one running desktop app safely. Crawl control is a *lease*: `start_crawl` returns a `crawlId` you own, a second start against a busy session fails with `crawl-in-progress` (or, with `onBusy: "queue"`, waits its turn, or `"takeover"` to replace it), and `stop`/`pause`/`resume` refuse to touch a crawl owned by another client unless you pass `force: true`. `clear_crawl` won't wipe the desktop window's project when it has unsaved work. For full isolation, call **`session_create`** to get your own headless session inside the same app, with its own database, crawler and worker pool, so each agent crawls its own project without seeing the others; the MCP read tools automatically repoint to it. `session_create({ mode: "open", projectPath })` reopens a saved `.seoproject` to keep working on it (PageSpeed, spelling, exports, re-crawl), and `session_save` / `session_close({ save: true })` persist it, so the data no longer disappears when the session that produced it ends. Sessions are capped and idle ones are auto-closed (saving first if they have a document).
 
 **1. Build it once:**
 
@@ -285,7 +319,7 @@ Run the binary directly with stdio transport:
 node apps/mcp-server/dist/index.js
 ```
 
-The server speaks newline-delimited JSON-RPC 2.0 — point any MCP-compatible client at it.
+The server speaks newline-delimited JSON-RPC 2.0, so point any MCP-compatible client at it.
 
 </details>
 
@@ -332,7 +366,7 @@ By default the server reads `<userData>/projects/default.seoproject` (the same f
 | **npm** | 10+ (ships with Node) | bundled |
 | **Git** | any recent | [git-scm.com](https://git-scm.com/) |
 
-> **Why no Python / MSBuild / node-gyp?** FreeCrawl uses Node 22's built-in `node:sqlite` instead of `better-sqlite3`. There are zero native dependencies — `npm install` never invokes a C++ compiler.
+> **Why no Python / MSBuild / node-gyp?** FreeCrawl uses Node 22's built-in `node:sqlite` instead of `better-sqlite3`. There are zero native dependencies, so `npm install` never invokes a C++ compiler.
 
 Verify your setup:
 
@@ -348,8 +382,8 @@ npm --version     # 10+
 
 <br />
 
-- **Outbound HTTPS access** to the sites you crawl. Behind a corporate proxy? Set `HTTPS_PROXY=http://your-proxy:port` before launch, or enter a proxy URL in **Settings → Network** — HTTP/HTTPS proxies route through undici's `ProxyAgent`, and **SOCKS5 / SOCKS4 proxies** (`socks5://…`, including the `h` / `4a` remote-DNS variants — handy for routing crawls through Tor / a SSH tunnel) are tunnelled automatically.
-- **TLS root certificates**. Node ships with the Mozilla CA bundle. If your antivirus or company proxy performs HTTPS inspection (Kaspersky, ESET, Zscaler, BlueCoat, …), set `NODE_EXTRA_CA_CERTS=C:\path\to\corp-ca-bundle.crt` — otherwise crawls fail with `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
+- **Outbound HTTPS access** to the sites you crawl. Behind a corporate proxy? Set `HTTPS_PROXY=http://your-proxy:port` before launch, or enter a proxy URL in **Settings → Network**. HTTP/HTTPS proxies route through undici's `ProxyAgent`, and **SOCKS5 / SOCKS4 proxies** (`socks5://…`, including the `h` / `4a` remote-DNS variants, handy for routing crawls through Tor or an SSH tunnel) are tunnelled automatically.
+- **TLS root certificates**. Node ships with the Mozilla CA bundle. If your antivirus or company proxy performs HTTPS inspection (Kaspersky, ESET, Zscaler, BlueCoat, …), set `NODE_EXTRA_CA_CERTS=C:\path\to\corp-ca-bundle.crt`; otherwise crawls fail with `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
 
 </details>
 
@@ -361,7 +395,7 @@ npm --version     # 10+
 | Resource | Size |
 | :--- | :--- |
 | `node_modules` after `npm install` | ~600 MB |
-| Production Electron build | ~150 MB |
+| Production Electron build | ~150 MB (installers are larger because Chromium for JS rendering is bundled) |
 | Peak RAM, 100K-URL crawl | ~100 MB |
 | 1M-URL crawl | comfortably under 1 GB |
 
@@ -406,11 +440,11 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **Active development — feature-complete for daily SEO audits.** All 32 analysis tabs, 167 issue checks, JavaScript rendering (screenshots, LCP candidate, Mobile Usability), multi-window projects, the link visualiser, every Google integration (Search Console / GA4 / PageSpeed / CrUX), LanguageTool spelling, AI per-URL prompts, SEO Authority providers, Google Sheets + BigQuery export, encrypted projects, the MCP server with live crawl control, and the standalone Log File Analyzer all ship today.
+> **v1.0.0, the full release.** All 32 analysis tabs, 172 issue checks (each one can be disabled per project), JavaScript rendering (screenshots, LCP candidate, mobile usability), multi-window projects, the link visualiser, every Google integration (Search Console / GA4 / PageSpeed / CrUX), LanguageTool spelling, AI per-URL prompts, SEO Authority providers, Google Sheets + BigQuery export, HTML and PDF reports, the Screaming Frog-compatible SEO Audit export, scheduled crawls with automatic exports and webhooks, encrypted projects, the MCP server with live crawl control, the standalone Log File Analyzer, dark and light themes, and an interface in 11 languages all ship today.
 >
-> Cross-platform installers ship for Windows (`.exe` + portable), macOS (`.dmg`, arm64 + x64), and Linux (`.AppImage` / `.deb` / `.rpm`), with Playwright Chromium bundled so JS rendering works on first launch. The virtualized 1M-row table streams the first row in ~1 s, and long crawls are tuned for Apple Silicon (see [docs](docs/macos-apple-silicon-performance.md)).
+> Cross-platform installers ship for Windows (setup + portable), macOS (Apple Silicon + Intel), and Linux (`.AppImage` / `.deb` / `.rpm`), with Playwright Chromium bundled so JS rendering works on first launch. The canvas-rendered URL table stays smooth on 25K+ row crawls, streams the first row in about 1 s, and long crawls are tuned for Apple Silicon (see [docs](docs/macos-apple-silicon-performance.md)).
 >
-> **Upcoming:** Plugin system, Light theme, Code-signing + auto-update.
+> **After 1.0:** updates continue based on user feedback and bug reports. Still on the list: a plugin system, code-signing and notarization, and in-app auto-update.
 
 <br />
 
@@ -424,8 +458,9 @@ graph LR
 | :---: | :---: |
 | 🐛 **Found a bug?** | [Open an issue](https://github.com/kemalai/FreeCrawl-SEO-Tool/issues) |
 | 💡 **Have a feature idea?** | [Start a discussion](https://github.com/kemalai/FreeCrawl-SEO-Tool/issues) |
-| 📦 **Want the prebuilt app?** | [Download a release](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases) |
+| 📦 **Want the prebuilt app?** | [Download a release](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases/latest) |
 | 🌐 **Project website** | [freecrawl.net](https://freecrawl.net/) |
+| ❤️ **Like the tool?** | [Support development on Patreon](https://www.patreon.com/kemalacar) |
 
 </div>
 
@@ -437,7 +472,7 @@ graph LR
 
 ### 📜 License
 
-**MIT** — see [LICENSE](LICENSE)
+**MIT**, see [LICENSE](LICENSE)
 
 <sub>Built with ❤ for SEO professionals who want a fast, free, open alternative to Screaming Frog.</sub>
 
