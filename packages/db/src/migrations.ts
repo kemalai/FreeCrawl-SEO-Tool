@@ -2366,6 +2366,24 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 95,
+    name: 'add_host_certs_legacy_protocol',
+    // `host_certs.protocol` is the best version a default handshake
+    // negotiates, so it never shows TLS 1.0 / 1.1 support. The TLS probe
+    // now makes a second handshake capped at TLS 1.1 and stores the
+    // version the server accepted here (null when it refused). Clear the
+    // cached rows so unprobedHttpsHosts() returns those hosts and the next
+    // crawl re-probes them.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(host_certs)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'legacy_protocol'))
+        db.exec('ALTER TABLE host_certs ADD COLUMN legacy_protocol TEXT');
+      db.exec('DELETE FROM host_certs');
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

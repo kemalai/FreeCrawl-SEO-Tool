@@ -6668,8 +6668,7 @@ export class ProjectDb {
          AND EXISTS (
            SELECT 1 FROM host_certs hc
             WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
-              AND hc.protocol IS NOT NULL
-              AND hc.protocol IN ('TLSv1', 'TLSv1.1', 'SSLv3', 'SSLv2')
+              AND hc.legacy_protocol IN ('TLSv1', 'TLSv1.1')
          )`,
       ),
       sslSignatureWeak: countWhere(
@@ -8715,6 +8714,7 @@ export class ProjectDb {
     subject: string | null;
     signatureAlgorithm: string | null;
     protocol: string | null;
+    legacyProtocol?: string | null;
     chainLength?: number | null;
     chainSubjects?: string[] | null;
     probeStatus: number;
@@ -8724,12 +8724,12 @@ export class ProjectDb {
       .prepare(
         `INSERT INTO host_certs (
            host, port, valid_from, valid_to, days_until_expiry,
-           issuer, subject, signature_algorithm, protocol,
+           issuer, subject, signature_algorithm, protocol, legacy_protocol,
            chain_length, chain_subjects,
            probe_status, probe_error, probed_at
          ) VALUES (
            :host, :port, :valid_from, :valid_to, :days_until_expiry,
-           :issuer, :subject, :signature_algorithm, :protocol,
+           :issuer, :subject, :signature_algorithm, :protocol, :legacy_protocol,
            :chain_length, :chain_subjects,
            :probe_status, :probe_error, CURRENT_TIMESTAMP
          )
@@ -8741,6 +8741,7 @@ export class ProjectDb {
            subject = excluded.subject,
            signature_algorithm = excluded.signature_algorithm,
            protocol = excluded.protocol,
+           legacy_protocol = excluded.legacy_protocol,
            chain_length = excluded.chain_length,
            chain_subjects = excluded.chain_subjects,
            probe_status = excluded.probe_status,
@@ -8757,6 +8758,7 @@ export class ProjectDb {
         subject: input.subject,
         signature_algorithm: input.signatureAlgorithm,
         protocol: input.protocol,
+        legacy_protocol: input.legacyProtocol ?? null,
         chain_length: input.chainLength ?? null,
         chain_subjects:
           input.chainSubjects && input.chainSubjects.length > 0
@@ -11165,14 +11167,13 @@ export function categoryWhereClause(
               )`;
     case 'issues:ssl-protocol-old':
       // TLSv1.0 / TLSv1.1 are deprecated by all major browsers (2020).
-      // Sites still negotiating them fail PCI-DSS and many corporate
-      // proxies block them.
+      // Sites that still accept them (a second probe handshake capped at
+      // TLS 1.1) fail PCI-DSS and many corporate proxies block them.
       return `is_external = 0 AND content_kind = 'html' AND url LIKE 'https://%'
               AND EXISTS (
                 SELECT 1 FROM host_certs hc
                  WHERE hc.host = LOWER(SUBSTR(urls.url, 9, INSTR(SUBSTR(urls.url, 9), '/') - 1))
-                   AND hc.protocol IS NOT NULL
-                   AND hc.protocol IN ('TLSv1', 'TLSv1.1', 'SSLv3', 'SSLv2')
+                   AND hc.legacy_protocol IN ('TLSv1', 'TLSv1.1')
               )`;
     case 'issues:ssl-signature-weak':
       // SHA-1 / MD5 signature algorithms are cryptographically broken
