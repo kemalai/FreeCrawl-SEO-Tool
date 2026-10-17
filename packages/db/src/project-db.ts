@@ -10005,14 +10005,16 @@ function urlHostSql(col: string): string {
 }
 
 /** Post-normalisation form of a URL column — query string stripped,
- *  lowercased, trailing slash trimmed — the identity two "duplicate
- *  URL" rows share. */
+ *  scheme and host lowercased, trailing slash trimmed — the identity two
+ *  "duplicate URL" rows share. */
 /**
  * The key two URLs are compared on for the Duplicate URL check. Honours
  * Settings → Duplicates → "Normalise URLs before duplicate-URL check"
  * (`dedupePreNormalize`, mirrored into `project_meta` by the desktop):
- * on (default) compares the lower-cased, query-stripped, slash-trimmed
- * form; off compares the stored URL byte-for-byte. The uncorrelated
+ * on (default) compares the query-stripped, slash-trimmed form with
+ * scheme and host lower-cased (paths are case-sensitive, so `/Pricing`
+ * and `/pricing` stay distinct); off compares the stored URL
+ * byte-for-byte. The uncorrelated
  * scalar subquery is evaluated once per statement, not per row.
  */
 function urlDedupeKeySql(col: string): string {
@@ -10021,13 +10023,16 @@ function urlDedupeKeySql(col: string): string {
 }
 
 function urlPostNormSql(col: string): string {
+  // First '/' after '://' (one past the end when there is none), then the
+  // URL with only the part before it lowercased. LOWER keeps the length, so
+  // the '?' position found on the raw URL still marks where to cut.
+  const slash = `(INSTR(${col}, '://') + 2 + INSTR(SUBSTR(${col}, INSTR(${col}, '://') + 3) || '/', '/'))`;
+  const hostLowered = `(LOWER(SUBSTR(${col}, 1, ${slash} - 1)) || SUBSTR(${col}, ${slash}))`;
   return `RTRIM(
-    LOWER(
-      CASE
-        WHEN INSTR(${col}, '?') > 0 THEN SUBSTR(${col}, 1, INSTR(${col}, '?') - 1)
-        ELSE ${col}
-      END
-    ),
+    CASE
+      WHEN INSTR(${col}, '?') > 0 THEN SUBSTR(${hostLowered}, 1, INSTR(${col}, '?') - 1)
+      ELSE ${hostLowered}
+    END,
     '/'
   )`;
 }

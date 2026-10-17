@@ -265,20 +265,62 @@ const A11Y_AUDIT_FN = `(() => {
   } catch (e) { /* ignore */ }
   if (focusVisibleRestores) focusSuppressed = false;
   // Tap-target sizing — WCAG 2.5.8 (AA) wants interactive controls to be at
-  // least 24x24 CSS px. Sample visible interactive elements and count those
-  // rendered smaller in either dimension. Measured at the render viewport.
+  // least 24x24 CSS px. Count visible targets rendered smaller in either
+  // dimension unless an exception holds: inline links in running text,
+  // user-agent-sized checkboxes/radios, or spacing (a 24 px circle on the
+  // target's centre touches no other target nor another undersized target's
+  // circle). Measured at the render viewport.
+  // ponytail: "user-agent sized" is read as appearance != none; an author
+  // resize that keeps native appearance is missed.
   let tapSmall = 0, tapSampled = 0;
-  const interactive = document.querySelectorAll(
-    'a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [onclick]',
-  );
-  for (const el of interactive) {
-    if (tapSampled >= 500) break;
+  const TARGET_SEL =
+    'a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], [onclick]';
+  // True when the parent's inline content (its own text plus inline-level
+  // non-target descendants) holds letters or digits: a link in a sentence,
+  // not a list of links split by spaces or "|", nor a nav under a heading.
+  // Cached per parent, so a flat list of links walks its parent once.
+  const runningText = new Map();
+  const hasInlineText = (node) => {
+    for (const c of node.childNodes) {
+      if (c.nodeType === 3 && /[\\p{L}\\p{N}]/u.test(c.nodeValue)) return true;
+      if (c.nodeType !== 1 || c.matches(TARGET_SEL)) continue;
+      if (getComputedStyle(c).display.startsWith('inline') && hasInlineText(c)) return true;
+    }
+    return false;
+  };
+  const inRunningText = (el) => {
+    const parent = el.parentElement;
+    if (!parent) return false;
+    if (!runningText.has(parent)) runningText.set(parent, hasInlineText(parent));
+    return runningText.get(parent);
+  };
+  // Every visible target is a spacing neighbour. Only the first 500 are
+  // sampled and reported.
+  const targets = [];
+  for (const el of document.querySelectorAll(TARGET_SEL)) {
     const cs2 = getComputedStyle(el);
     if (cs2.visibility === 'hidden' || cs2.display === 'none' || parseFloat(cs2.opacity || '1') === 0) continue;
     const r = el.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) continue;
-    tapSampled++;
-    if (r.width < 24 || r.height < 24) tapSmall++;
+    // <= 1 px also drops visually-hidden (sr-only) clip boxes.
+    if (r.width <= 1 || r.height <= 1) continue;
+    const small =
+      (r.width < 24 || r.height < 24) &&
+      !(cs2.display === 'inline' && inRunningText(el)) &&
+      !(el.matches('input[type="checkbox"], input[type="radio"]') && cs2.appearance !== 'none');
+    targets.push({ el, r, small, x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  }
+  const sample = targets.slice(0, 500);
+  tapSampled = sample.length;
+  for (const a of sample) {
+    if (!a.small) continue;
+    const crowded = targets.some((b) => {
+      if (b === a || a.el.contains(b.el) || b.el.contains(a.el)) return false;
+      if (b.small && Math.hypot(a.x - b.x, a.y - b.y) < 24) return true;
+      const dx = a.x - Math.max(b.r.left, Math.min(a.x, b.r.right));
+      const dy = a.y - Math.max(b.r.top, Math.min(a.y, b.r.bottom));
+      return Math.hypot(dx, dy) < 12;
+    });
+    if (crowded) tapSmall++;
   }
   return {
     lowContrast: low,
