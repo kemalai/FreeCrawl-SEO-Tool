@@ -92,6 +92,8 @@ export interface ParsedPage {
   ogTitle: string | null;
   ogDescription: string | null;
   ogImage: string | null;
+  /** `ogImage` resolved and normalised like `images.src`; null when unusable. */
+  ogImageSrc: string | null;
   /** `og:type` value (e.g. `website`, `article`, `product`), lowercased. */
   ogType: string | null;
   /** Raw `og:url` attribute value — verbatim, not resolved. */
@@ -240,6 +242,14 @@ export interface ParsedPage {
   complexWordCount: number;
   /** Number of `<img>` with explicit `alt=""` (decorative — distinct from missing alt). */
   imagesEmptyAlt: number;
+  /**
+   * Number of `<img src>` elements. `images` holds every distinct URL,
+   * including srcset / `<picture>` candidates and og/twitter cards, so its
+   * length is not an element count.
+   */
+  imagesCount: number;
+  /** Number of `<img src>` elements with no `alt` attribute. */
+  imagesMissingAlt: number;
   /**
    * Number of `<img>` declaring `loading="lazy"`. Combined with the total
    * image count this lets the UI surface pages where lazy-loading isn't
@@ -1550,6 +1560,8 @@ export function parseHtml(
   });
 
   let imagesEmptyAlt = 0;
+  let imagesCount = 0;
+  let imagesMissingAlt = 0;
   let imagesLazy = 0;
   let imagesResponsive = 0;
   const imageMap = new Map<string, DiscoveredImage>();
@@ -1583,19 +1595,27 @@ export function parseHtml(
     alt: string | null,
     width: number | null,
     height: number | null,
+    lazy: boolean,
   ): void => {
     if (!rawUrl) return;
     if (rawUrl.startsWith('data:')) return;
     const normalized = normalizeUrl(rawUrl, baseUrl, opts.urlRewrites);
     if (!normalized) return;
     if (!/^https?:/.test(normalized)) return;
-    if (imageMap.has(normalized)) return;
+    const prev = imageMap.get(normalized);
+    if (prev) {
+      // An eager use of the URL anywhere on the page wins over a lazy one.
+      if (!lazy) prev.lazy = false;
+      return;
+    }
     imageMap.set(normalized, {
       src: normalized,
       alt,
       width,
       height,
       isInternal: isSameHost(pageUrl, normalized, opts),
+      role: 'variant',
+      lazy,
     });
   };
 
@@ -1628,15 +1648,16 @@ export function parseHtml(
       // image_usages rows whose alt is null.
       if (altAttr.trim() === '') imagesEmptyAlt++;
     }
+    imagesCount++;
+    if (alt === null) imagesMissingAlt++;
     const width = parseIntAttr($el.attr('width'));
     const height = parseIntAttr($el.attr('height'));
     const isInternal = isSameHost(pageUrl, normalized, opts);
 
     // Lazy-loading adoption — `loading="lazy"` is the native browser
     // attribute and the only signal that's reliable without rendering JS.
-    if (($el.attr('loading') ?? '').trim().toLowerCase() === 'lazy') {
-      imagesLazy++;
-    }
+    const lazy = ($el.attr('loading') ?? '').trim().toLowerCase() === 'lazy';
+    if (lazy) imagesLazy++;
 
     // Responsive imagery — an `<img>` is "responsive" if it carries
     // `srcset` itself OR is wrapped in `<picture>` (the parent supplies
@@ -1648,13 +1669,25 @@ export function parseHtml(
     const inPicture = $el.parent('picture').length > 0;
     if (srcsetAttr || inPicture) imagesResponsive++;
 
-    if (!imageMap.has(normalized)) {
+    // The same URL in several `<img>`: `alt` keeps the first real alt for
+    // the alt-text checks, and `altMissing` records that any of them had
+    // none. An eager load on any of them wins. An earlier `<img>`'s srcset
+    // may already hold this URL as a variant; the element's own alt wins
+    // over the variant stub.
+    const prev = imageMap.get(normalized);
+    if (prev && !prev.role) {
+      if (alt === null) prev.altMissing = true;
+      else if (prev.alt === null) prev.alt = alt;
+      if (!lazy) prev.lazy = false;
+    } else {
       imageMap.set(normalized, {
         src: normalized,
         alt,
         width,
         height,
         isInternal,
+        altMissing: alt === null,
+        lazy: lazy && prev?.lazy !== false,
       });
     }
 
@@ -1662,7 +1695,7 @@ export function parseHtml(
     // pages that trigger Broken-Image / Large-Image probes pick them up.
     if (srcsetAttr) {
       for (const candidate of parseSrcset(srcsetAttr)) {
-        addImageCandidate(candidate, alt, null, null);
+        addImageCandidate(candidate, alt, null, null, lazy);
       }
     }
   });
@@ -1674,8 +1707,9 @@ export function parseHtml(
   $('picture > source[srcset]').each((_, el) => {
     const srcsetAttr = ($(el).attr('srcset') ?? '').trim();
     if (!srcsetAttr) return;
+    const lazy = ($(el).siblings('img').attr('loading') ?? '').trim().toLowerCase() === 'lazy';
     for (const candidate of parseSrcset(srcsetAttr)) {
-      addImageCandidate(candidate, null, null, null);
+      addImageCandidate(candidate, null, null, null, lazy);
     }
   });
 
@@ -1685,11 +1719,16 @@ export function parseHtml(
   // Facebook/Twitter will refuse to render the card. We stub them as
   // image rows with no alt/dimensions; the existing size-probe pass
   // will fill `byte_size` automatically post-crawl.
-  for (const ogish of [ogImage, twitterImage]) {
+  let ogImageSrc: string | null = null;
+  for (const [ogish, role] of [
+    [ogImage, 'og'],
+    [twitterImage, 'twitter'],
+  ] as const) {
     if (!ogish) continue;
     const normalized = normalizeUrl(ogish, baseUrl, opts.urlRewrites);
     if (!normalized) continue;
     if (!/^https?:/.test(normalized)) continue;
+    if (role === 'og') ogImageSrc = normalized;
     if (imageMap.has(normalized)) continue;
     imageMap.set(normalized, {
       src: normalized,
@@ -1697,6 +1736,7 @@ export function parseHtml(
       width: null,
       height: null,
       isInternal: isSameHost(pageUrl, normalized, opts),
+      role,
     });
   }
 
@@ -1723,6 +1763,7 @@ export function parseHtml(
     ogTitle,
     ogDescription,
     ogImage,
+    ogImageSrc,
     ogType,
     ogUrl,
     ogSiteName,
@@ -1772,6 +1813,8 @@ export function parseHtml(
     sentenceCount: readability.sentenceCount,
     complexWordCount: readability.complexWordCount,
     imagesEmptyAlt,
+    imagesCount,
+    imagesMissingAlt,
     imagesLazy,
     imagesResponsive,
     pictureCount,

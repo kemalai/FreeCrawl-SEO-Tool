@@ -2366,6 +2366,61 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 95,
+    name: 'add_image_usages_role',
+    // NULL for an `<img src>`; 'variant' / 'og' / 'twitter' for srcset and
+    // `<picture>` candidates and share-card images. Those rows have no alt
+    // attribute of their own, so the alt checks skip them. `alt_missing` is
+    // 1 when any `<img>` with the URL on that page has no alt, while `alt`
+    // keeps the first real alt for the empty / duplicate alt checks.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(image_usages)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'role')) {
+        db.exec('ALTER TABLE image_usages ADD COLUMN role TEXT');
+      }
+      if (!cols.some((c) => c.name === 'alt_missing')) {
+        db.exec('ALTER TABLE image_usages ADD COLUMN alt_missing INTEGER');
+      }
+      // Duplicate Alt Text groups `<img>` usages by alt, then counts the
+      // distinct images per alt. The WHERE matches the check's own filter.
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_image_usages_alt ON image_usages(alt, image_id)
+                 WHERE role IS NULL AND alt IS NOT NULL AND alt != ''`);
+    },
+  },
+  {
+    version: 96,
+    name: 'add_urls_og_image_src',
+    // The og:image resolved and normalised the way `images.src` is, so OG
+    // Image >5MB can match a relative or entity-escaped og:image to its
+    // probed image row. `og_image` keeps the raw value for the
+    // not-absolute check.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(urls)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'og_image_src')) {
+        db.exec('ALTER TABLE urls ADD COLUMN og_image_src TEXT');
+      }
+    },
+  },
+  {
+    version: 97,
+    name: 'add_image_usages_lazy',
+    // 1 / 0 for whether the `<img>` behind this usage has loading="lazy";
+    // NULL for share-card images and rows from before this column. Lets
+    // Slow-Loading Images test the large image itself, not the page.
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(image_usages)').all() as unknown as {
+        name: string;
+      }[];
+      if (!cols.some((c) => c.name === 'lazy')) {
+        db.exec('ALTER TABLE image_usages ADD COLUMN lazy INTEGER');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

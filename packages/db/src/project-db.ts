@@ -442,6 +442,7 @@ export interface UpsertUrlInput {
   ogTitle?: string | null;
   ogDescription?: string | null;
   ogImage?: string | null;
+  ogImageSrc?: string | null;
   twitterCard?: string | null;
   twitterTitle?: string | null;
   twitterDescription?: string | null;
@@ -625,7 +626,7 @@ const UPSERT_URL_SQL = `
     canonical_cross_domain, canonical_count, canonical_http, meta_robots, x_robots_tag,
     content_type, content_length, response_time_ms, depth, outlinks, redirect_target,
     images_count, images_missing_alt,
-    lang, viewport, og_title, og_description, og_image,
+    lang, viewport, og_title, og_description, og_image, og_image_src,
     twitter_card, twitter_title, twitter_description, twitter_image,
     meta_keywords, meta_author, meta_generator, theme_color,
     hsts, x_frame_options, x_content_type_options, content_encoding,
@@ -668,7 +669,7 @@ const UPSERT_URL_SQL = `
     :canonical_cross_domain, :canonical_count, :canonical_http, :meta_robots, :x_robots_tag,
     :content_type, :content_length, :response_time_ms, :depth, :outlinks, :redirect_target,
     :images_count, :images_missing_alt,
-    :lang, :viewport, :og_title, :og_description, :og_image,
+    :lang, :viewport, :og_title, :og_description, :og_image, :og_image_src,
     :twitter_card, :twitter_title, :twitter_description, :twitter_image,
     :meta_keywords, :meta_author, :meta_generator, :theme_color,
     :hsts, :x_frame_options, :x_content_type_options, :content_encoding,
@@ -744,6 +745,7 @@ const UPSERT_URL_SQL = `
     og_title = excluded.og_title,
     og_description = excluded.og_description,
     og_image = excluded.og_image,
+    og_image_src = excluded.og_image_src,
     twitter_card = excluded.twitter_card,
     twitter_title = excluded.twitter_title,
     twitter_description = excluded.twitter_description,
@@ -885,11 +887,21 @@ const DUPLICATE_ALT_PREDICATE = `alt IS NOT NULL AND alt != '' AND alt IN (
   SELECT alt FROM images WHERE alt IS NOT NULL AND alt != '' GROUP BY alt HAVING COUNT(*) > 1
 )`;
 
-// Per-usage duplicate-alt: a usage whose alt text is shared by >1 usage.
-// Operates on `image_usages.alt` to match the per-usage Images view.
-const USAGE_DUPLICATE_ALT_PREDICATE = `iu.alt IS NOT NULL AND iu.alt != '' AND iu.alt IN (
-  SELECT alt FROM image_usages WHERE alt IS NOT NULL AND alt != '' GROUP BY alt HAVING COUNT(*) > 1
-)`;
+// Per-usage duplicate-alt: an `<img>` usage whose alt text is also used on
+// at least one other image file. Operates on `image_usages.alt` to match the
+// per-usage Images view. One image reused on many pages with the same alt is
+// not a duplicate, and srcset / share-card rows (`role` set) carry no alt.
+const USAGE_DUPLICATE_ALT_PREDICATE = `iu.role IS NULL AND iu.alt IS NOT NULL AND iu.alt != ''
+  AND iu.alt IN (
+    SELECT alt FROM image_usages
+     WHERE role IS NULL AND alt IS NOT NULL AND alt != ''
+     GROUP BY alt HAVING COUNT(DISTINCT image_id) > 1
+  )`;
+
+// Per-usage missing alt: an `<img>` usage where some occurrence on the page
+// had no alt attribute (`alt_missing`; `alt IS NULL` for rows stored before
+// that column). srcset / share-card rows (`role` set) carry no alt.
+const USAGE_MISSING_ALT_PREDICATE = 'iu.role IS NULL AND (iu.alt IS NULL OR iu.alt_missing = 1)';
 
 // Missing / empty alt are computed from PER-USAGE truth (`image_usages.alt`):
 // the Images tab, its sidebar counters and the CSV export are all per-usage
@@ -2129,6 +2141,7 @@ export class ProjectDb {
       og_title: input.ogTitle ?? null,
       og_description: input.ogDescription ?? null,
       og_image: input.ogImage ?? null,
+      og_image_src: input.ogImageSrc ?? null,
       twitter_card: input.twitterCard ?? null,
       twitter_title: input.twitterTitle ?? null,
       twitter_description: input.twitterDescription ?? null,
@@ -4186,9 +4199,13 @@ export class ProjectDb {
        RETURNING id`,
     );
     const upsertUsage = this.db.prepare(
-      `INSERT INTO image_usages (from_url_id, image_id, alt)
-       VALUES (?, ?, ?)
-       ON CONFLICT(from_url_id, image_id) DO UPDATE SET alt = excluded.alt`,
+      `INSERT INTO image_usages (from_url_id, image_id, alt, role, alt_missing, lazy)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(from_url_id, image_id) DO UPDATE SET
+         alt = excluded.alt,
+         role = excluded.role,
+         alt_missing = excluded.alt_missing,
+         lazy = excluded.lazy`,
     );
     const ownsTx = !this.isInTransaction();
     if (ownsTx) this.db.exec('BEGIN');
@@ -4201,7 +4218,14 @@ export class ProjectDb {
           img.height,
           img.isInternal ? 1 : 0,
         ) as { id: number };
-        upsertUsage.run(fromUrlId, row.id, img.alt);
+        upsertUsage.run(
+          fromUrlId,
+          row.id,
+          img.alt,
+          img.role ?? null,
+          img.altMissing ? 1 : 0,
+          img.lazy === undefined ? null : img.lazy ? 1 : 0,
+        );
       }
       if (ownsTx) this.db.exec('COMMIT');
     } catch (err) {
@@ -5876,7 +5900,7 @@ export class ProjectDb {
       const where: string[] = [];
       const args: (string | number)[] = [];
       if (params.internalOnly) where.push('i.is_internal = 1');
-      if (params.missingAltOnly) where.push('iu.alt IS NULL');
+      if (params.missingAltOnly) where.push(USAGE_MISSING_ALT_PREDICATE);
       if (params.emptyAltOnly) where.push("iu.alt = ''");
       if (params.duplicateAltOnly) where.push(USAGE_DUPLICATE_ALT_PREDICATE);
       if (params.search) {
@@ -6231,7 +6255,14 @@ export class ProjectDb {
     // tab shows exactly the rows this headline counts.
     const totalIndexable = countCategory('indexability:indexable');
     const totalNonIndexable = countCategory('indexability:non-indexable');
-    const totalImages = this.scalarCount('SELECT COUNT(*) AS c FROM images');
+    // Denominator of the alt percentages. Those counters count Images tab
+    // rows (one per image + page), so the base is the tab's row count;
+    // legacy projects without usage rows count distinct images.
+    const totalImages = this.scalarCount(
+      `SELECT (CASE WHEN EXISTS(SELECT 1 FROM image_usages)
+         THEN (SELECT COUNT(*) FROM image_usages)
+         ELSE (SELECT COUNT(*) FROM images) END) AS c`,
+    );
 
     return {
       summary: {
@@ -6489,15 +6520,21 @@ export class ProjectDb {
         // Per-usage to match the per-usage Images tab (count = table). Legacy
         // projects with no usage rows fall back to the distinct-image count.
         `SELECT (CASE WHEN EXISTS(SELECT 1 FROM image_usages)
-           THEN (SELECT COUNT(*) FROM image_usages WHERE alt IS NULL)
+           THEN (SELECT COUNT(*) FROM image_usages iu WHERE ${USAGE_MISSING_ALT_PREDICATE})
            ELSE (SELECT COUNT(*) FROM images WHERE alt IS NULL) END) AS c`,
       ),
-      // Distinct images sharing a non-empty alt with ≥1 other image —
-      // non-descriptive / templated alt reuse. Counted image-level (the
-      // `images` table is deduped by src) so it lines up with the Images
-      // tab drill-down and with Missing/Empty Alt.
+      // Images sharing a non-empty alt with ≥1 other image — non-descriptive
+      // / templated alt reuse. Per-usage like Missing Alt, so the count is
+      // the Images tab row count. Legacy projects fall back to `images`.
       imageDuplicateAlt: this.scalarCount(
-        `SELECT COUNT(*) AS c FROM images WHERE ${DUPLICATE_ALT_PREDICATE}`,
+        `SELECT (CASE WHEN EXISTS(SELECT 1 FROM image_usages)
+           THEN (SELECT COALESCE(SUM(n), 0) FROM (
+             -- Same rows as USAGE_DUPLICATE_ALT_PREDICATE, in one grouped
+             -- pass over idx_image_usages_alt instead of a scan per usage.
+             SELECT COUNT(*) AS n FROM image_usages
+              WHERE role IS NULL AND alt IS NOT NULL AND alt != ''
+              GROUP BY alt HAVING COUNT(DISTINCT image_id) > 1))
+           ELSE (SELECT COUNT(*) FROM images WHERE ${DUPLICATE_ALT_PREDICATE}) END) AS c`,
       ),
       metaRefreshUsed: countWhere(
         `${html} AND meta_refresh IS NOT NULL AND meta_refresh != ''`,
@@ -7483,7 +7520,7 @@ export class ProjectDb {
     const minBytes = Math.max(0, Math.floor(options.minByteSize ?? 0));
     // Per-usage export to match the per-usage Images tab (one row per page).
     if (this.hasImageUsages()) {
-      if (options.missingAltOnly) where.push('iu.alt IS NULL');
+      if (options.missingAltOnly) where.push(USAGE_MISSING_ALT_PREDICATE);
       if (options.emptyAltOnly) where.push("iu.alt = ''");
       if (options.duplicateAltOnly) where.push(USAGE_DUPLICATE_ALT_PREDICATE);
       if (options.search) {
@@ -10218,16 +10255,15 @@ export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string
   ],
   [
     'issues:image-slow-loading',
-    // ≥1 image > 200 KB AND the page is missing lazy-loading on at least
-    // one image (images_lazy < images_count). The size join is on the
-    // per-image probed `byte_size`; lazy adoption stays page-level.
+    // ≥1 image > 200 KB that the page loads without loading="lazy". Both
+    // tests apply to the same usage, so a lazy hero plus a small eager
+    // logo is not flagged. Share cards (`lazy` NULL) are not page images.
     `is_external = 0 AND content_kind = 'html'
-     AND images_count > 0 AND images_lazy < images_count
      AND id IN (
        SELECT iu.from_url_id
          FROM image_usages iu
          JOIN images i ON i.id = iu.image_id
-        WHERE i.byte_size > 204800
+        WHERE i.byte_size > 204800 AND iu.lazy = 0
      )`,
   ],
   [
@@ -10244,9 +10280,15 @@ export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string
   ],
   [
     'issues:og-image-too-large',
+    // `og_image` is the raw meta value while `images.src` is normalised, so
+    // a relative or `&amp;`-escaped og:image only matches through
+    // `og_image_src`. The raw match covers rows stored before that column.
     `is_external = 0 AND content_kind = 'html'
      AND og_image IS NOT NULL AND og_image != ''
-     AND og_image IN (SELECT src FROM images WHERE byte_size > 5242880)`,
+     AND (
+       og_image_src IN (SELECT src FROM images WHERE byte_size > 5242880)
+       OR og_image IN (SELECT src FROM images WHERE byte_size > 5242880)
+     )`,
   ],
   [
     'issues:twitter-image-too-large',
@@ -10834,6 +10876,14 @@ export function categoryWhereClause(
               AND EXISTS (SELECT 1 FROM sitemap_urls s WHERE s.url = urls.url)`;
     case 'issues:image-missing-alt':
       return "is_external = 0 AND content_kind = 'html' AND images_missing_alt > 0";
+    case 'issues:image-duplicate-alt':
+      // The Images tab lists the image rows; URL-level consumers (bulk
+      // export, severity tiers) get the pages that use them.
+      return `is_external = 0 AND content_kind = 'html'
+              AND id IN (
+                SELECT iu.from_url_id FROM image_usages iu
+                 WHERE ${USAGE_DUPLICATE_ALT_PREDICATE}
+              )`;
     case 'issues:meta-refresh-used':
       // Any HTML page that declares a `<meta http-equiv="refresh">` —
       // Google explicitly recommends 301 over meta refresh, so every

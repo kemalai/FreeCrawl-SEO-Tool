@@ -1451,16 +1451,6 @@ export class Crawler extends EventEmitter {
       this.setOp('post-crawl:pagination-sequence');
       await this.runDbPass('recomputePaginationSequence');
     }
-    if (this.config.analyseIssues) {
-      await yieldToEventLoop();
-      this.emit('info', 'Materialising issue counters…');
-      this.setOp('post-crawl:materialise-issues');
-      // Route through the injected hook — in the desktop host this
-      // dispatches to the writer-worker, keeping the 70+ correlated
-      // subqueries off the main thread. CLI / tests fall back to
-      // running inline via `db.recomputeUrlsIssuesYielding`.
-      await this.recomputeIssues(EXPENSIVE_ISSUE_DEFINITIONS);
-    }
     await yieldToEventLoop();
     this.setOp('post-crawl:image-probes');
     await this.runImageSizeProbes();
@@ -1479,6 +1469,18 @@ export class Crawler extends EventEmitter {
     await yieldToEventLoop();
     this.setOp('post-crawl:pdf-probes');
     await this.runPdfMetadataProbes();
+    if (this.config.analyseIssues) {
+      await yieldToEventLoop();
+      this.emit('info', 'Materialising issue counters…');
+      this.setOp('post-crawl:materialise-issues');
+      // Route through the injected hook — in the desktop host this
+      // dispatches to the writer-worker, keeping the 70+ correlated
+      // subqueries off the main thread. CLI / tests fall back to
+      // running inline via `db.recomputeUrlsIssuesYielding`. Runs after
+      // the probes: several definitions read what they write (image
+      // `probe_status` / `byte_size`), and nothing recomputes later.
+      await this.recomputeIssues(EXPENSIVE_ISSUE_DEFINITIONS);
+    }
     await yieldToEventLoop();
     this.setOp('post-crawl:performance-budget');
     this.runBudgetPass();
@@ -1659,26 +1661,84 @@ export class Crawler extends EventEmitter {
           writes.push({ method: 'setImageSize', args: [entry.id, null, 0] });
           continue;
         }
-        // Only send the crawl's auth/custom headers to in-scope image hosts;
-        // third-party / CDN image URLs must not receive the start site's creds.
-        const imgInScope = isInScope(this.config.startUrl, entry.src, this.config.scope);
-        const controller = new AbortController();
-        const timeout = setTimeout(
-          () => controller.abort(),
-          Math.max(2_000, this.config.requestTimeoutMs / 2),
-        );
+        const timeoutMs = Math.max(2_000, this.config.requestTimeoutMs / 2);
         try {
-          const res = await undiciFetch(entry.src, {
-            method: 'HEAD',
-            headers: defaultRequestHeaders(
-              this.resolveUserAgent(entry.src),
-              this.config.acceptLanguage,
-              imgInScope ? this.config.customHeaders : {},
-              imgInScope ? this.config.auth : undefined,
-            ),
-            redirect: 'follow',
-            signal: controller.signal,
-          });
+          // Redirects are followed by hand (max 20 hops, undici's follow
+          // limit) so the SSRF guard above also applies to every Location: a
+          // public image can 30x to an internal address. A hop to a private
+          // host is not requested; its 3xx status is recorded instead. Every
+          // request after the first (paced by probeTick) waits for its own
+          // maxRps slot, and its timeout starts once the slot is granted.
+          let redirectLimit = false;
+          const probe = async (method: 'HEAD' | 'GET') => {
+            let url = entry.src;
+            for (let hop = 0; ; hop++) {
+              if (method === 'GET' || hop > 0) await this.acquireRateSlot();
+              // Only send the crawl's auth/custom headers to in-scope image
+              // hosts; third-party / CDN image URLs must not receive the
+              // start site's creds.
+              const inScope = isInScope(this.config.startUrl, url, this.config.scope);
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), timeoutMs);
+              let res: Awaited<ReturnType<typeof undiciFetch>>;
+              try {
+                res = await undiciFetch(url, {
+                  method,
+                  headers: defaultRequestHeaders(
+                    this.resolveUserAgent(url),
+                    this.config.acceptLanguage,
+                    inScope ? this.config.customHeaders : {},
+                    inScope ? this.config.auth : undefined,
+                  ),
+                  redirect: 'manual',
+                  signal: controller.signal,
+                });
+              } finally {
+                clearTimeout(timeout);
+              }
+              const loc = res.headers.get('location');
+              if (!loc || res.status < 300 || res.status >= 400) return res;
+              let next: string;
+              try {
+                next = new URL(loc, url).toString();
+              } catch {
+                return res;
+              }
+              if (isPrivateHost(next) && !isPrivateHost(this.config.startUrl)) return res;
+              try {
+                await res.body?.cancel();
+              } catch {
+                /* ignore */
+              }
+              // Too many redirects: no image is reachable. 508 (Loop
+              // Detected) keeps it inside the Broken Image Src range.
+              if (hop >= 20) {
+                redirectLimit = true;
+                return { status: 508, headers: new Headers(), body: null };
+              }
+              url = next;
+            }
+          };
+          let res: Awaited<ReturnType<typeof probe>> | undefined;
+          try {
+            res = await probe('HEAD');
+          } catch (err) {
+            if (this.stopped) throw err;
+          }
+          // Same rule as the page checker: CDNs/WAFs often refuse HEAD
+          // (403/405/5xx), or drop the connection, for an image a GET serves
+          // fine. Only the headers are read; the body is cancelled below.
+          if (
+            !res ||
+            (!redirectLimit && (res.status >= 500 || HEAD_UNRELIABLE_STATUSES.has(res.status)))
+          ) {
+            try {
+              await res?.body?.cancel();
+            } catch {
+              /* ignore */
+            }
+            res = await probe('GET');
+          }
           const lenStr = res.headers.get('content-length');
           const len = lenStr !== null ? Number.parseInt(lenStr, 10) : null;
           writes.push({
@@ -1693,7 +1753,8 @@ export class Crawler extends EventEmitter {
             large++;
           }
           probed++;
-          // Drain body — HEAD has none, but undici treats 1xx/204 weirdly.
+          // Drain body — HEAD has none (undici treats 1xx/204 weirdly); a
+          // GET retry's body is never read.
           try {
             await res.body?.cancel();
           } catch {
@@ -1702,8 +1763,6 @@ export class Crawler extends EventEmitter {
         } catch {
           // Mark with status 0 so we don't re-probe on the next crawl.
           writes.push({ method: 'setImageSize', args: [entry.id, null, 0] });
-        } finally {
-          clearTimeout(timeout);
         }
       }
     };
@@ -4307,7 +4366,6 @@ export class Crawler extends EventEmitter {
         }
       }
 
-      const imagesMissingAlt = parsed.images.filter((img) => img.alt === null).length;
       // Phase 1b — Build the entire per-URL write payload up front and
       // ship it across the writer-worker boundary in one shot. The
       // worker runs the upsert + headers + body snapshot + links +
@@ -4358,13 +4416,14 @@ export class Crawler extends EventEmitter {
           ttfbMs,
           depth: item.depth,
           outlinks: storableLinks.length,
-          imagesCount: parsed.images.length,
-          imagesMissingAlt,
+          imagesCount: parsed.imagesCount,
+          imagesMissingAlt: parsed.imagesMissingAlt,
           lang: parsed.lang,
           viewport: parsed.viewport,
           ogTitle: parsed.ogTitle,
           ogDescription: parsed.ogDescription,
           ogImage: parsed.ogImage,
+          ogImageSrc: parsed.ogImageSrc,
           ogType: parsed.ogType,
           ogUrl: parsed.ogUrl,
           ogSiteName: parsed.ogSiteName,
