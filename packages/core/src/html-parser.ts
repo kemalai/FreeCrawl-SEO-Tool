@@ -807,10 +807,25 @@ export function parseHtml(
   // occurrences (not the type vocabulary), because the data model varies
   // per author and the Issues panel only needs presence/absence to flag a
   // missing-structured-data page. Schema.org microdata uses `itemscope`;
-  // RDFa uses `typeof` / `vocab` / `property`.
+  // RDFa uses `typeof` / `vocab` / `property`. Open Graph, Facebook and
+  // Twitter `<meta property>` tags are not structured data, so they don't
+  // count as RDFa.
   const microdataCount = $('[itemscope]').length;
+  const SOCIAL_META_PROPERTY = /^(og|fb|twitter|article|book|profile|music|video):/i;
   const rdfaCount =
-    $('[typeof]').length + $('[vocab]').length + $('[property]').length;
+    $('[typeof], [vocab]').length +
+    $('[property]')
+      .not('[typeof], [vocab]')
+      .filter(
+        (_, el) =>
+          !(
+            el.tagName === 'meta' &&
+            ($(el).attr('property') ?? '')
+              .trim()
+              .split(/\s+/)
+              .every((token) => SOCIAL_META_PROPERTY.test(token))
+          ),
+      ).length;
 
   // Insecure form action — HTTPS page with `<form action="http://…">`.
   // Browsers warn ("not secure" interstitial) when the user submits.
@@ -2215,9 +2230,12 @@ function walkSchemaForValidation(
     if (typeof n !== 'object') return;
     const obj = n as Record<string, unknown>;
 
-    // Record `@id` for cross-block duplicate detection.
+    // Record `@id` for cross-block duplicate detection. Only nodes that
+    // define an entity count: a reference-only node like `{"@id": "#org"}`
+    // (optionally with other `@` keywords such as `@context`) links to a
+    // node defined elsewhere and is valid JSON-LD.
     const idVal = obj['@id'];
-    if (typeof idVal === 'string' && idVal) {
+    if (typeof idVal === 'string' && idVal && Object.keys(obj).some((k) => !k.startsWith('@'))) {
       idCounts.set(idVal, (idCounts.get(idVal) ?? 0) + 1);
     }
 
@@ -2274,8 +2292,9 @@ function walkSchemaForValidation(
     }
 
     // Recurse into nested objects/arrays (e.g. `@graph`, `mainEntity`).
-    for (const value of Object.values(obj)) {
-      if (value && (typeof value === 'object' || Array.isArray(value))) {
+    // `@context` holds term definitions, not entities, so skip it.
+    for (const [key, value] of Object.entries(obj)) {
+      if (key !== '@context' && value && (typeof value === 'object' || Array.isArray(value))) {
         visit(value);
       }
     }
