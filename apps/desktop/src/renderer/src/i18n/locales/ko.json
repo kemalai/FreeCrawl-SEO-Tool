@@ -2324,5 +2324,11 @@
     "stop": "중지",
     "send": "보내기",
     "toolCount_other": "도구 {{count}}개"
+  },
+  "projectOpen": {
+    "openingTitle": "프로젝트 여는 중…",
+    "upgradingTitle": "이 버전에 맞게 프로젝트 업데이트 중",
+    "upgradingNote": "이전 버전으로 저장한 프로젝트에서 한 번만 진행됩니다. 완료되면 바로 프로젝트가 열립니다.",
+    "step": "{{steps}}단계 중 {{step}}단계"
   }
 }

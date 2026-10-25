@@ -1,14 +1,25 @@
 import type { DatabaseSync } from 'node:sqlite';
 
+/** Where `runMigrations` is: which pending migration, and how far into it. */
+export interface MigrationProgress {
+  /** 1-based number of the migration being applied, out of `steps` pending. */
+  step: number;
+  steps: number;
+  /** Share of this step done (0–1); null while it cannot tell. */
+  fraction: number | null;
+}
+
 interface Migration {
   version: number;
   name: string;
   /**
    * Either raw SQL executed once, or a function that receives the db and
    * performs conditional work (used to repair schemas whose version
-   * counter was bumped by an earlier, since-removed migration).
+   * counter was bumped by an earlier, since-removed migration). A pass
+   * that rewrites a large table reports the share it has done (0–1)
+   * through `progress`, so an upgrade dialog can show it.
    */
-  up: string | ((db: DatabaseSync) => void);
+  up: string | ((db: DatabaseSync, progress: (fraction: number) => void) => void);
 }
 
 const MIGRATIONS: Migration[] = [
@@ -2545,7 +2556,11 @@ const MIGRATIONS: Migration[] = [
     // NULL status with `non-indexable:client-error`: those are requests that
     // got no answer (or, for private addresses, were never sent) and are moved
     // to the states they belong to. A real 4xx always has a status.
-    up: (db) => {
+    //
+    // On 3M links the self-link pass takes ~1.3 s and the index ~2.6 s, so
+    // the pass walks `links` in id ranges and reports after each one; the
+    // index build is a single statement and only reports when it is done.
+    up: (db, progress) => {
       db.exec(`
         INSERT OR IGNORE INTO project_meta (key, value)
         SELECT 'inlinksComputed', '1'
@@ -2555,15 +2570,29 @@ const MIGRATIONS: Migration[] = [
       if (!cols.some((c) => c.name === 'is_self')) {
         db.exec('ALTER TABLE links ADD COLUMN is_self INTEGER NOT NULL DEFAULT 0');
       }
-      db.exec(`
-        UPDATE links SET is_self = 1
-        WHERE is_self = 0
-          AND EXISTS (SELECT 1 FROM urls u WHERE u.id = links.from_url_id AND u.url = links.to_url)
-      `);
+      const span = db.prepare('SELECT MIN(id) AS lo, MAX(id) AS hi FROM links').get() as {
+        lo: number | null;
+        hi: number | null;
+      };
+      if (span.lo !== null && span.hi !== null) {
+        const markSelfLinks = db.prepare(`
+          UPDATE links SET is_self = 1
+          WHERE id BETWEEN ? AND ? AND is_self = 0
+            AND EXISTS (SELECT 1 FROM urls u WHERE u.id = links.from_url_id AND u.url = links.to_url)
+        `);
+        const CHUNK = 250_000;
+        const total = span.hi - span.lo + 1;
+        for (let start = span.lo; start <= span.hi; start += CHUNK) {
+          const end = Math.min(start + CHUNK - 1, span.hi);
+          markSelfLinks.run(start, end);
+          progress((0.35 * (end - span.lo + 1)) / total);
+        }
+      }
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_links_to_internal_self ON links(to_url, is_internal, is_self);
         DROP INDEX IF EXISTS idx_links_to_internal;
       `);
+      progress(0.95);
       db.exec(`
         UPDATE urls SET
           indexability = 'unknown:skipped',
@@ -2579,7 +2608,20 @@ const MIGRATIONS: Migration[] = [
   },
 ];
 
-export function runMigrations(db: DatabaseSync): void {
+/** Schema version a fully migrated project carries. */
+export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
+
+/**
+ * Share of a step's progress bar given to the migration's own work when it
+ * reports progress; the rest is its COMMIT, which writes every page the
+ * pass changed (~1.3 s of the ~5 s migration 104 takes on 3M links).
+ */
+const UP_SHARE = 0.8;
+
+export function runMigrations(
+  db: DatabaseSync,
+  onProgress?: (progress: MigrationProgress) => void,
+): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER PRIMARY KEY,
@@ -2592,15 +2634,23 @@ export function runMigrations(db: DatabaseSync): void {
     0;
 
   const pending = MIGRATIONS.filter((m) => m.version > currentVersion);
-  for (const migration of pending) {
+  const steps = pending.length;
+  for (const [i, migration] of pending.entries()) {
+    const step = i + 1;
+    let reported = false;
+    onProgress?.({ step, steps, fraction: null });
     db.exec('BEGIN');
     try {
       if (typeof migration.up === 'string') {
         db.exec(migration.up);
       } else {
-        migration.up(db);
+        migration.up(db, (fraction) => {
+          reported = true;
+          onProgress?.({ step, steps, fraction: Math.min(Math.max(fraction, 0), 1) * UP_SHARE });
+        });
       }
       db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(migration.version);
+      if (reported) onProgress?.({ step, steps, fraction: UP_SHARE });
       db.exec('COMMIT');
     } catch (err) {
       db.exec('ROLLBACK');

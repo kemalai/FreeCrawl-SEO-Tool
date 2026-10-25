@@ -2414,5 +2414,11 @@
     "toolCount_one": "{{count}} outil",
     "toolCount_many": "{{count}} d'outils",
     "toolCount_other": "{{count}} outils"
+  },
+  "projectOpen": {
+    "openingTitle": "Ouverture du projet…",
+    "upgradingTitle": "Mise à jour du projet pour cette version",
+    "upgradingNote": "Cette opération n'a lieu qu'une fois, pour les projets enregistrés avec une version antérieure. Le projet s'ouvre dès qu'elle est terminée.",
+    "step": "Étape {{step}} sur {{steps}}"
   }
 }

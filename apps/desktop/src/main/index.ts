@@ -167,6 +167,7 @@ import {
   type SpellingMatchesResult,
   type SpellingLevel,
   type RecentProject,
+  type ProjectOpenProgress,
   type GoogleAuthState,
   type GoogleAuthResult,
   type GscListSitesResult,
@@ -393,6 +394,7 @@ import {
   setWriterPoolResolver,
   WriterUnavailableError,
 } from './db-writer-pool.js';
+import { upgradeProjectOffThread } from './project-upgrade.js';
 import { freezeWatchdog } from './freeze-watchdog.js';
 import { parserPool, ParserTimeoutError } from './parser-pool.js';
 import { parseHtml as inlineParseHtml } from '@freecrawl/core';
@@ -556,6 +558,13 @@ class ProjectSession {
   autoSaveMark = 0;
   /** A batch auto-save is mid-flight; the next threshold waits for it. */
   autoSaveInFlight = false;
+  /** Progress of the project open in flight, null when none — pulled by a
+   *  renderer that mounts after the open began (cold-start file open). */
+  openProgress: ProjectOpenProgress | null = null;
+  /** Tail of this session's opens. A second Open issued while the first is
+   *  still upgrading waits for it, rather than racing it to the pool swap
+   *  and possibly finishing first (leaving the older choice on screen). */
+  openQueue: Promise<void> = Promise.resolve();
   readonly readerPool: DbReaderPool;
   readonly writerPool: DbWriterPool;
   /**
@@ -632,9 +641,7 @@ class ProjectSession {
     // can't be shared across connections.
     const ramMode = this.kind !== 'headless' && prefsCache['storageMode'] === 'ram';
     this.storageModeActive = ramMode ? 'ram' : 'disk';
-    const path =
-      this.scratchPath ??
-      join(app.getPath('userData'), 'projects', 'default.seoproject');
+    const path = this.scratchPath ?? defaultScratchPath();
     this.scratchPath = path;
     mkdirSync(dirname(path), { recursive: true });
     const database = new ProjectDb(ramMode ? ':memory:' : path);
@@ -747,6 +754,12 @@ class ProjectSession {
   send(channel: string, ...args: unknown[]): void {
     const w = this.window;
     if (w && !w.isDestroyed()) w.webContents.send(channel, ...args);
+  }
+
+  /** Record + push where the current project open is (`ProjectOpenProgress`). */
+  setOpenProgress(progress: ProjectOpenProgress): void {
+    this.openProgress = progress.phase === 'done' ? null : progress;
+    this.send(IPC.projectOpenProgress, progress);
   }
 
   /** Stable per-window tag for log entries — the owning window's
@@ -2474,8 +2487,20 @@ function parseConfigWithEncryptedSecrets(raw: string): Partial<CrawlConfig> | nu
   }
 }
 
+/** The primary window's scratch project, wiped and reused on every launch. */
+function defaultScratchPath(): string {
+  return join(app.getPath('userData'), 'projects', 'default.seoproject');
+}
+
 /** Monotonic suffix so each open gets its own working file. */
 let workingDbCounter = 0;
+
+/**
+ * Working copies an open is still preparing (unpack, schema upgrade): live,
+ * but not yet any session's `scratchPath`. An open finishing in another
+ * window meanwhile sweeps stale copies, and must not take this one.
+ */
+const pendingWorkingPaths = new Set<string>();
 
 /**
  * Allocate a fresh working-copy path under userData.
@@ -2507,7 +2532,7 @@ function newWorkingDbPath(): string {
  * fresh empty file — and its crawl is gone at restart.
  */
 function liveWorkingPaths(extra?: string): ReadonlySet<string> {
-  const live = new Set<string>();
+  const live = new Set<string>(pendingWorkingPaths);
   if (extra) live.add(extra);
   for (const s of [
     defaultSession,
@@ -2603,8 +2628,21 @@ function restoreProjectConfig(db: ProjectDb): CrawlConfig | null {
  * keep opening — they simply become containers the next time they are
  * saved.
  */
-async function openProjectAtPath(documentPath: string): Promise<void> {
+function openProjectAtPath(documentPath: string): Promise<void> {
   const s = currentSession();
+  const open = s.openQueue.then(async () => {
+    s.setOpenProgress({ phase: 'opening' });
+    try {
+      await openProjectInSession(s, documentPath);
+    } finally {
+      s.setOpenProgress({ phase: 'done' });
+    }
+  });
+  s.openQueue = open.catch(() => undefined);
+  return open;
+}
+
+async function openProjectInSession(s: ProjectSession, documentPath: string): Promise<void> {
   const format = detectProjectFormat(documentPath);
   if (format === 'unknown') {
     throw new Error(
@@ -2618,12 +2656,35 @@ async function openProjectAtPath(documentPath: string): Promise<void> {
     'main',
     `Opening project ${documentPath} (${format}) → working copy ${workingPath}`,
   );
-  if (format === 'archive') {
-    await unpackProject(documentPath, workingPath);
-  } else {
-    // Legacy project: a bare database. Copy rather than open in place so
-    // the user's file stops accumulating SQLite sidecars.
-    await copyFile(documentPath, workingPath);
+  // Everything from here to `s.scratchPath = workingPath` below is
+  // synchronous, so the copy is live from the moment it leaves this set.
+  pendingWorkingPaths.add(workingPath);
+  try {
+    if (format === 'archive') {
+      await unpackProject(documentPath, workingPath);
+    } else {
+      // Legacy project: a bare database. Copy rather than open in place so
+      // the user's file stops accumulating SQLite sidecars.
+      await copyFile(documentPath, workingPath);
+    }
+    // A project saved by an older version is upgraded on a worker while the
+    // current project stays open: the window keeps responding, the dialog
+    // shows the progress, and a failed upgrade leaves the open project as
+    // it was. The `new ProjectDb` below then has nothing left to migrate.
+    await upgradeProjectOffThread(workingPath, {
+      onProgress: (p) => s.setOpenProgress({ phase: 'upgrading', ...p }),
+    });
+  } catch (err) {
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        rmSync(workingPath + suffix, { force: true });
+      } catch {
+        /* still open on Windows — the startup sweep removes it */
+      }
+    }
+    throw err;
+  } finally {
+    pendingWorkingPaths.delete(workingPath);
   }
 
   const running = s.activeCrawler;
@@ -3980,6 +4041,16 @@ function createProjectWindow(): void {
     'projects',
     `window-${++projectWindowSeq}.seoproject`,
   );
+  // This run's window numbers only go up, so a file by this name was left
+  // by a run that crashed. It would be wiped on open anyway; opening it
+  // first would also migrate that stale crawl on the main thread.
+  for (const suffix of ['', '-wal', '-shm']) {
+    try {
+      rmSync(scratchPath + suffix, { force: true });
+    } catch {
+      /* best-effort — reset() empties it on open regardless */
+    }
+  }
   const sess = new ProjectSession({
     readerPool: new DbReaderPool(),
     writerPool: new DbWriterPool(),
@@ -9628,6 +9699,10 @@ function registerIpc(): void {
   // Per-project settings — read/write the active project's saved crawl
   // config. On the default scratch DB (no `currentSession().currentProjectPath`) these are
   // no-ops and the renderer keeps using its global-prefs config.
+  registerHandle(
+    IPC.projectOpenProgressGet,
+    (): ProjectOpenProgress | null => currentSession().openProgress,
+  );
   registerHandle(IPC.projectConfigGet, (): CrawlConfig | null => {
     if (!currentSession().currentProjectPath) return null;
     try {
@@ -11105,6 +11180,24 @@ void app.whenReady().then(async () => {
     );
   }
   loadPrefs();
+  // The scratch project left by the previous run opens on the main thread
+  // at the window's first IPC, migrating there if this version added any.
+  // Upgrade it first, on a worker, before IPC can reach it. It is wiped as
+  // soon as it opens, so its crawl rows are dropped instead of rewritten:
+  // milliseconds, where upgrading a large crawl could take seconds.
+  if (prefsCache['storageMode'] !== 'ram') {
+    try {
+      await upgradeProjectOffThread(defaultSession.scratchPath ?? defaultScratchPath(), {
+        discardCrawlData: true,
+      });
+    } catch (err) {
+      logger.log(
+        'warn',
+        'main',
+        `Scratch project upgrade failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   rebuildMenu();
   registerIpc();
   createWindow();

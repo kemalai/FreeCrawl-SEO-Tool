@@ -186,3 +186,44 @@
     @apply border-accent-500 text-surface-50;
   }
 }
+
+/* Progress bar of the project open / upgrade dialog (ProjectOpenDialog).
+   The sheen keeps a bar that waits on one long statement (an index build)
+   visibly alive, so it never reads as frozen. */
+@keyframes project-open-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+@keyframes project-open-sheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+.project-open-indeterminate {
+  animation: project-open-slide 1.4s ease-in-out infinite;
+}
+.project-open-fill {
+  overflow: hidden;
+}
+.project-open-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.35), transparent);
+  animation: project-open-sheen 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .project-open-indeterminate {
+    animation-duration: 3s;
+  }
+  .project-open-fill::after {
+    animation: none;
+  }
+}

@@ -5,6 +5,7 @@ import {
   type BrowserInstallState,
   type ConfirmClearResult,
   type CrawlConfig,
+  type ProjectOpenProgress,
   type RecentProject,
   type CrawlProgress,
   type CrawlSummary,
@@ -236,6 +237,10 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.projectConfigSet, config),
   onProjectConfigChanged: (cb: (config: CrawlConfig | null) => void) =>
     subscribe<CrawlConfig | null>(IPC.projectConfigChanged, cb),
+  onProjectOpenProgress: (cb: (progress: ProjectOpenProgress) => void) =>
+    subscribe<ProjectOpenProgress>(IPC.projectOpenProgress, cb),
+  projectOpenProgressGet: (): Promise<ProjectOpenProgress | null> =>
+    ipcRenderer.invoke(IPC.projectOpenProgressGet),
   browserInstallGet: (): Promise<BrowserInstallState> =>
     ipcRenderer.invoke(IPC.browserInstallGet),
   browserInstallStart: (): Promise<BrowserInstallState> =>

@@ -2369,5 +2369,11 @@
     "send": "Göndər",
     "toolCount_one": "{{count}} alət",
     "toolCount_other": "{{count}} alət"
+  },
+  "projectOpen": {
+    "openingTitle": "Layihə açılır…",
+    "upgradingTitle": "Layihə bu versiyaya yenilənir",
+    "upgradingNote": "Bu, əvvəlki versiyada saxlanmış layihələr üçün yalnız bir dəfə edilir. Bitən kimi layihə açılır.",
+    "step": "Addım {{step}}/{{steps}}"
   }
 }

@@ -79,7 +79,7 @@ import {
   minhashSlot,
   minhashSimilarity,
 } from '@freecrawl/shared-types';
-import { runMigrations } from './migrations.js';
+import { runMigrations, type MigrationProgress } from './migrations.js';
 
 /** `meta` key holding the JSON list of silenced issue categories. */
 export const DISABLED_ISSUES_META_KEY = 'disabledIssues';
@@ -1322,8 +1322,14 @@ export class ProjectDb {
    *
    *   Cache is set tighter on read-only connections (32 MB vs 128 MB)
    *   so the two SQLite connections don't double-allocate RAM.
+   *
+   *   `onMigrationProgress` — called while pending migrations run (see
+   *   `upgradeProjectFile`, which the desktop app runs on a worker).
    */
-  constructor(filePath: string, opts: { readOnly?: boolean } = {}) {
+  constructor(
+    filePath: string,
+    opts: { readOnly?: boolean; onMigrationProgress?: (p: MigrationProgress) => void } = {},
+  ) {
     const readOnly = opts.readOnly === true;
     this.readOnly = readOnly;
     // node:sqlite's `DatabaseSync` constructor type-asserts the second
@@ -1366,7 +1372,7 @@ export class ProjectDb {
     if (!readOnly) {
       this.db.exec('PRAGMA page_size = 4096');
       this.db.exec('PRAGMA wal_autocheckpoint = 2000');
-      runMigrations(this.db);
+      runMigrations(this.db, opts.onMigrationProgress);
       // Projects written before this existed carry no `sqlite_stat1` at
       // all, and a crawl that starts on an empty DB would otherwise plan
       // every query as if the tables were still empty. See `optimize()`

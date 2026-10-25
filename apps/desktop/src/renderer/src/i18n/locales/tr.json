@@ -2369,5 +2369,11 @@
     "placeholder": "ör. Başlık sorunları en kötü olan sayfalar hangileri, neden? (Göndermek için {{mod}}+Enter)",
     "stop": "Durdur",
     "send": "Gönder"
+  },
+  "projectOpen": {
+    "openingTitle": "Proje açılıyor…",
+    "upgradingTitle": "Proje bu sürüme güncelleniyor",
+    "upgradingNote": "Bu işlem, önceki bir sürümle kaydedilmiş projelerde yalnızca bir kez yapılır. Biter bitmez proje açılır.",
+    "step": "Adım {{step}}/{{steps}}"
   }
 }

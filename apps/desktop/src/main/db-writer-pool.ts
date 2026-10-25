@@ -208,6 +208,9 @@ export class DbWriterPool {
     if (this.worker) {
       const old = this.worker;
       this.worker = null;
+      // Its exit is ignored below (not the live worker any more), so its
+      // in-flight calls are settled here. `swap` has already done so.
+      this.failPendingWith('writer-swapped');
       void old.terminate().catch(() => undefined);
     }
     try {
@@ -221,7 +224,9 @@ export class DbWriterPool {
       w.on('error', (err) => {
         logger.log('error', 'main', `${this.label} worker error: ${err.message}`);
       });
-      w.on('exit', (code) => this.handleExit(code));
+      // Pass the worker itself: the exit of the worker this one REPLACED
+      // arrives after `w` is installed (see `handleExit`).
+      w.on('exit', (code) => this.handleExit(code, w));
       this.worker = w;
       this.startMonitor();
       logger.log('info', 'main', `${this.label} worker spawned for ${this.dbPath}`);
@@ -314,7 +319,15 @@ export class DbWriterPool {
     }
   }
 
-  private handleExit(code: number): void {
+  private handleExit(code: number, worker: Worker): void {
+    // Same guard as the reader pool's. A worker replaced by `spawn` (Open
+    // Project → `swap`) exits after its successor is installed; treated as
+    // a crash, that late exit nulled the LIVE worker (orphaning its thread
+    // and SQLite handle), failed the calls just sent to it — so the issue
+    // pass queued on open fell back to the main thread, a 1.5 s freeze on a
+    // 3M-link project — respawned a second worker, and counted toward
+    // MAX_RESTARTS, so a few opens a minute disabled the pool entirely.
+    if (worker !== this.worker) return;
     this.worker = null;
     if (this.terminated) return;
     // Settle in-flight writes BEFORE the clean-exit early return. The pool

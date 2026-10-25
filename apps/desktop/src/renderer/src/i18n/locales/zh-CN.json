@@ -2324,5 +2324,11 @@
     "stop": "停止",
     "send": "发送",
     "toolCount_other": "{{count}} 个工具"
+  },
+  "projectOpen": {
+    "openingTitle": "正在打开项目…",
+    "upgradingTitle": "正在将项目更新到此版本",
+    "upgradingNote": "此操作只对使用早期版本保存的项目执行一次。完成后项目会立即打开。",
+    "step": "第 {{step}} 步，共 {{steps}} 步"
   }
 }

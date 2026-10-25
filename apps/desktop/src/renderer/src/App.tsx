@@ -14,6 +14,7 @@ import { CompareDialog } from './components/CompareDialog.js';
 import { ScheduledCrawlDialog } from './components/ScheduledCrawlDialog.js';
 import { ProjectsDialog } from './components/ProjectsDialog.js';
 import { PasswordPromptDialog } from './components/PasswordPromptDialog.js';
+import { ProjectOpenDialog } from './components/ProjectOpenDialog.js';
 import { ExportDialog } from './components/ExportDialog.js';
 import { UrlsTab } from './tabs/UrlsTab.js';
 import { ImagesTab } from './tabs/ImagesTab.js';
@@ -669,6 +670,7 @@ export function App() {
           activeCategory={activeCategory}
         />
       )}
+      <ProjectOpenDialog />
       <PasswordPromptDialog
         open={passwordPrompt !== null}
         title={

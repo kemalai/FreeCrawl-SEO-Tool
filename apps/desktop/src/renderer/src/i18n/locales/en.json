@@ -2369,5 +2369,11 @@
     "placeholder": "e.g. Which pages have the worst title problems, and why? ({{mod}}+Enter to send)",
     "stop": "Stop",
     "send": "Send"
+  },
+  "projectOpen": {
+    "openingTitle": "Opening project…",
+    "upgradingTitle": "Updating project for this version",
+    "upgradingNote": "This happens only once, for projects saved with an earlier version. The project opens as soon as it is done.",
+    "step": "Step {{step}} of {{steps}}"
   }
 }

@@ -110,6 +110,11 @@ export const IPC = {
   projectConfigGet: 'project:config-get',
   projectConfigSet: 'project:config-set',
   projectConfigChanged: 'project:config-changed',
+  /** Pushed main→renderer while a project opens (`ProjectOpenProgress`);
+   *  `projectOpenProgressGet` returns the open still in flight, for a
+   *  renderer that mounts after it started (cold-start file open). */
+  projectOpenProgress: 'project:open-progress',
+  projectOpenProgressGet: 'project:open-progress-get',
   /** Recent-projects management (archiving / tagging). `recentProjectsList`
    *  returns the full list incl. archived; the mutators toggle the archived
    *  flag, replace tags, or drop an entry. */
@@ -2012,6 +2017,17 @@ export interface LogEntry {
 }
 
 /**
+ * Where an Open Project is. `opening` while the file is unpacked into its
+ * working copy, `upgrading` while a project saved by an older version gets
+ * the current schema (step `step` of `steps`; `fraction` 0–1 of that step,
+ * null while it cannot tell), `done` once it is open or the open failed.
+ */
+export type ProjectOpenProgress =
+  | { phase: 'opening' }
+  | { phase: 'upgrading'; step: number; steps: number; fraction: number | null }
+  | { phase: 'done' };
+
+/**
  * Provisioning state of the Chromium build JS rendering needs.
  *
  * `unknown` until the app has looked; `downloading` while the in-app
@@ -2045,6 +2061,10 @@ export interface FreeCrawlApi {
   /** Fires when the active project changes; payload is the project's saved
    *  config, or null when it has none yet / is the scratch DB. */
   onProjectConfigChanged(cb: (config: CrawlConfig | null) => void): () => void;
+  /** Progress of a project open; see `ProjectOpenProgress`. */
+  onProjectOpenProgress(cb: (progress: ProjectOpenProgress) => void): () => void;
+  /** The open in flight for this window, or null when there is none. */
+  projectOpenProgressGet(): Promise<ProjectOpenProgress | null>;
   /** Current JS-rendering browser provisioning state. */
   browserInstallGet(): Promise<BrowserInstallState>;
   /** Start (or retry) the in-app Chromium download. */
