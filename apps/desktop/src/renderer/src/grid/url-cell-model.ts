@@ -206,7 +206,11 @@ export function cellPaint(row: CrawlUrlRow, spec: ColumnSpec, lang: string): Cel
       kind: 'text',
       text: translateLabel(indexabilityHeadline(v), lang),
       color:
-        v === 'indexable' ? GRID_COLORS.good : v === 'unknown:bot-blocked' ? GRID_COLORS.rowNum : GRID_COLORS.warn,
+        v === 'indexable'
+          ? GRID_COLORS.good
+          : v === 'unknown:bot-blocked' || v === 'unknown:skipped'
+            ? GRID_COLORS.rowNum
+            : GRID_COLORS.warn,
       mono: false,
       title: v,
       marker: false,
@@ -384,7 +388,7 @@ export function formatExtractionCell(raw: string): string {
 function indexabilityHeadline(v: CrawlUrlRow['indexability']): string {
   if (v === 'indexable') return 'Indexable';
   // Not crawled, so not known — search engines are usually let through.
-  if (v === 'unknown:bot-blocked') return 'Unknown';
+  if (v === 'unknown:bot-blocked' || v === 'unknown:skipped') return 'Unknown';
   return 'Non-Indexable';
 }
 
@@ -404,8 +408,12 @@ export function indexabilityStatusLabel(v: CrawlUrlRow['indexability']): string 
       return 'Client Error';
     case 'non-indexable:server-error':
       return 'Server Error';
+    case 'non-indexable:no-response':
+      return 'No Response';
     case 'unknown:bot-blocked':
       return 'Blocked by bot protection';
+    case 'unknown:skipped':
+      return 'Skipped (private address)';
     default:
       return v;
   }

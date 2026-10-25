@@ -1704,9 +1704,10 @@ export function parseHtml(
     if (existing) {
       if (existing.rel?.includes('nofollow') && !rel?.includes('nofollow')) {
         existing.rel = rel;
-        // A followable content link also carries the more useful anchor
-        // text than an icon-only nav link, so take it when we had none.
-        if (!existing.anchor && anchor) existing.anchor = anchor;
+        // The stored record describes the followable occurrence, so its
+        // anchor text replaces the nofollow one's; an empty anchor keeps
+        // the text we already had.
+        if (anchor) existing.anchor = anchor;
       }
       // The page is flagged above for a too-long / generic anchor even when
       // the same target is also linked with a fine one (a product card's

@@ -811,8 +811,12 @@ function indexabilityLabel(value: string, t: Translate): string {
       return t('reports.indexability.clientError', { defaultValue: 'Non-indexable — 4xx' });
     case 'non-indexable:server-error':
       return t('reports.indexability.serverError', { defaultValue: 'Non-indexable — 5xx' });
+    case 'non-indexable:no-response':
+      return t('reports.indexability.noResponse', { defaultValue: 'Non-indexable — no response' });
     case 'unknown:bot-blocked':
       return t('reports.indexability.botBlocked', { defaultValue: 'Unknown — blocked by bot protection' });
+    case 'unknown:skipped':
+      return t('reports.indexability.skipped', { defaultValue: 'Unknown — skipped (private address)' });
     default:
       return value;
   }

@@ -2526,6 +2526,57 @@ const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 104,
+    name: 'backfill_inlinks_computed_flag',
+    // Projects whose inlinks were computed before the `inlinksComputed` flag
+    // existed carry real counts but no flag, so they would read as "not
+    // computed". A positive inlink count proves the pass ran. No index on
+    // `inlinks`: EXISTS stops at the first matching row, and a project that
+    // never computed them scans the table once (milliseconds at 300k rows).
+    //
+    // `links.is_self` marks a link whose target is the page it sits on. It is
+    // written with the link, so the inlink count stays a single GROUP BY
+    // instead of looking up every link target's id. The (to_url, is_internal)
+    // index gains `is_self` and replaces the old one (same leading columns),
+    // so the aggregate still reads the index alone, without fetching 3M rows.
+    //
+    // Rows stored before the no-response state had its own handling carry a
+    // NULL status with `non-indexable:client-error`: those are requests that
+    // got no answer (or, for private addresses, were never sent) and are moved
+    // to the states they belong to. A real 4xx always has a status.
+    up: (db) => {
+      db.exec(`
+        INSERT OR IGNORE INTO project_meta (key, value)
+        SELECT 'inlinksComputed', '1'
+        WHERE EXISTS (SELECT 1 FROM urls WHERE is_external = 0 AND inlinks > 0)
+      `);
+      const cols = db.prepare('PRAGMA table_info(links)').all() as { name: string }[];
+      if (!cols.some((c) => c.name === 'is_self')) {
+        db.exec('ALTER TABLE links ADD COLUMN is_self INTEGER NOT NULL DEFAULT 0');
+      }
+      db.exec(`
+        UPDATE links SET is_self = 1
+        WHERE is_self = 0
+          AND EXISTS (SELECT 1 FROM urls u WHERE u.id = links.from_url_id AND u.url = links.to_url)
+      `);
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_links_to_internal_self ON links(to_url, is_internal, is_self);
+        DROP INDEX IF EXISTS idx_links_to_internal;
+      `);
+      db.exec(`
+        UPDATE urls SET
+          indexability = 'unknown:skipped',
+          indexability_reason = 'Private or internal address, not requested'
+        WHERE status_code IS NULL AND indexability = 'non-indexable:client-error'
+          AND status_text LIKE 'Skipped: private/internal address%'
+      `);
+      db.exec(`
+        UPDATE urls SET indexability = 'non-indexable:no-response', indexability_reason = 'No response'
+        WHERE status_code IS NULL AND indexability = 'non-indexable:client-error'
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync): void {

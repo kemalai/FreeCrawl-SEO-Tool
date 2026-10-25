@@ -8,7 +8,9 @@
     "siteBotBlocked": "Bot koruması taramanın bir kısmını engelledi",
     "siteBotBlockedHint": "Sitenin bot koruması bu sayfalar yerine bir doğrulama sayfasıyla yanıt verdi. Bu sayfalar taranmadı; kırık bağlantı ve sitemap kontrollerinin dışında tutuldu. Tarama hızını düşürün ya da tarayıcının user agent’ını izin listesine ekleyin, sonra yeniden tarayın.",
     "checkOff": "Kapalı",
-    "cookiesOffHint": "Taramanın çerez politikası \"Tümünü reddet\" olduğu için çerez kontrolleri kapalı. Set-Cookie başlıklarını incelemek için Ayarlar → Çerezler altında \"Tümünü kabul et\" veya \"Üçüncü tarafları engelle\" seçin."
+    "cookiesOffHint": "Taramanın çerez politikası \"Tümünü reddet\" olduğu için çerez kontrolleri kapalı. Set-Cookie başlıklarını incelemek için Ayarlar → Çerezler altında \"Tümünü kabul et\" veya \"Üçüncü tarafları engelle\" seçin.",
+    "notComputed": "Hesaplanmadı",
+    "notComputedHint": "Gelen bağlantılar henüz hesaplanmadığı için yetim sayfalar sayılamıyor. \"Inlink'leri yeniden hesapla\" açık olan bir taramanın sonunda hesaplanırlar."
   },
   "integrations": {
     "intro": "Harici servisleri kendi kimlik bilgilerinle bağla. API anahtarları ve secret'lar işletim sisteminin güvenli depolaması ile şifreli saklanır ve bu makineden asla çıkmaz.",
@@ -464,6 +466,7 @@
       "redirect": "İndekslenemez — yönlendirme",
       "clientError": "İndekslenemez — 4xx",
       "serverError": "İndekslenemez — 5xx",
+      "noResponse": "İndekslenemez — yanıt yok",
       "botBlocked": "Bilinmiyor — bot korumasına takıldı"
     },
     "kind": {

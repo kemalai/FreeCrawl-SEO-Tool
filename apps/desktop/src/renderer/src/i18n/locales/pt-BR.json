@@ -8,7 +8,9 @@
     "siteBotBlocked": "A proteção contra bots bloqueou parte do rastreamento",
     "siteBotBlockedHint": "A proteção contra bots do site respondeu com um desafio no lugar destas páginas. Elas não foram rastreadas e ficam fora das verificações de links quebrados e de sitemap. Reduza a velocidade de rastreamento ou libere o user agent do rastreador e rastreie-as novamente.",
     "checkOff": "Desativado",
-    "cookiesOffHint": "As verificações de cookies estão desativadas porque a política de cookies do rastreamento é \"Rejeitar tudo\". Escolha \"Aceitar tudo\" ou \"Bloquear terceiros\" em Configurações → Cookies para analisar os cabeçalhos Set-Cookie."
+    "cookiesOffHint": "As verificações de cookies estão desativadas porque a política de cookies do rastreamento é \"Rejeitar tudo\". Escolha \"Aceitar tudo\" ou \"Bloquear terceiros\" em Configurações → Cookies para analisar os cabeçalhos Set-Cookie.",
+    "notComputed": "Não calculado",
+    "notComputedHint": "Os links de entrada ainda não foram calculados, então as páginas órfãs não podem ser contadas. Eles são calculados no fim de um rastreamento com \"Recalcular links de entrada\" ativado."
   },
   "integrations": {
     "intro": "Conecte serviços externos com suas próprias credenciais. As chaves de API e os segredos são criptografados em repouso pelo armazenamento seguro do seu sistema operacional e nunca saem desta máquina.",
@@ -480,6 +482,7 @@
       "redirect": "Não indexável — redirecionamento",
       "clientError": "Não indexável — 4xx",
       "serverError": "Não indexável — 5xx",
+      "noResponse": "Não indexável — sem resposta",
       "botBlocked": "Desconhecida — bloqueada pela proteção contra bots"
     },
     "kind": {

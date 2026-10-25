@@ -280,6 +280,8 @@ export function BottomDetailPanel() {
             toUrl: d.row.url,
             toStatusCode: l.toStatusCode,
             toSize: l.toSize,
+            toFinalUrl: l.toFinalUrl,
+            toFinalStatusCode: l.toFinalStatusCode,
             type: l.type,
             anchor: l.anchor,
             altText: l.altText,
@@ -307,6 +309,8 @@ export function BottomDetailPanel() {
             toUrl: l.toUrl,
             toStatusCode: l.toStatusCode,
             toSize: l.toSize,
+            toFinalUrl: l.toFinalUrl,
+            toFinalStatusCode: l.toFinalStatusCode,
             type: l.type,
             anchor: l.anchor,
             altText: l.altText,
@@ -471,6 +475,8 @@ export function BottomDetailPanel() {
                     toUrl: detail.row.url,
                     toStatusCode: l.toStatusCode,
                     toSize: l.toSize,
+                    toFinalUrl: l.toFinalUrl,
+                    toFinalStatusCode: l.toFinalStatusCode,
                     type: l.type,
                     anchor: l.anchor,
                     altText: l.altText,
@@ -513,6 +519,8 @@ export function BottomDetailPanel() {
                     toUrl: l.toUrl,
                     toStatusCode: l.toStatusCode,
                     toSize: l.toSize,
+                    toFinalUrl: l.toFinalUrl,
+                    toFinalStatusCode: l.toFinalStatusCode,
                     type: l.type,
                     anchor: l.anchor,
                     altText: l.altText,
@@ -2442,7 +2450,7 @@ interface LinksColumn {
   width: number;
 }
 
-/** Canonical 16-column schema for Inlinks / Outlinks (Screaming Frog parity). */
+/** Canonical 17-column schema for Inlinks / Outlinks (Screaming Frog parity). */
 const LINK_COLUMNS: LinksColumn[] = [
   { id: 'type', header: 'Type', width: 90 },
   { id: 'from', header: 'From', width: 320 },
@@ -2454,6 +2462,7 @@ const LINK_COLUMNS: LinksColumn[] = [
   { id: 'rel', header: 'Rel', width: 110 },
   { id: 'status-code', header: 'Status Code', width: 90 },
   { id: 'status', header: 'Status', width: 110 },
+  { id: 'final-target', header: 'Final Target', width: 260 },
   { id: 'path-type', header: 'Path Type', width: 130 },
   { id: 'link-path', header: 'Link Path', width: 200 },
   { id: 'link-position', header: 'Link Position', width: 110 },
@@ -2467,6 +2476,8 @@ interface LinkFactsRow {
   toUrl: string;
   toStatusCode: number | null;
   toSize: number | null;
+  toFinalUrl: string | null;
+  toFinalStatusCode: number | null;
   type: LinkType;
   anchor: string | null;
   altText: string | null;
@@ -2478,7 +2489,7 @@ interface LinkFactsRow {
   linkOrigin: LinkOrigin;
 }
 
-/** Collapse a full link record into the 16 column cells shown in the UI. */
+/** Collapse a full link record into the 17 column cells shown in the UI. */
 function buildLinkRow(r: LinkFactsRow): string[] {
   const follow = r.rel?.toLowerCase().includes('nofollow') ? 'False' : 'True';
   const size = formatSize(r.toSize);
@@ -2494,6 +2505,10 @@ function buildLinkRow(r: LinkFactsRow): string[] {
     r.toStatusCode?.toString() ?? '',
     r.toStatusCode !== null && r.toStatusCode !== undefined
       ? httpStatusText(r.toStatusCode)
+      : '',
+    // "final URL (status)" when the target redirects; empty otherwise.
+    r.toFinalUrl
+      ? `${r.toFinalUrl}${r.toFinalStatusCode != null ? ` (${r.toFinalStatusCode})` : ''}`
       : '',
     r.pathType ? capitalisePathType(r.pathType) : '',
     r.linkPath ?? '',

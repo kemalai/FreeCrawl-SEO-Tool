@@ -1237,7 +1237,7 @@ export interface StatusCodeHistogramRow {
 
 export interface IndexabilityDistributionRow {
   /** `indexable` or one of `non-indexable:noindex` / `:canonical` /
-   *  `:robots-blocked` / `:redirect` / `:client-error` / `:server-error`. */
+   *  `:robots-blocked` / `:redirect` / `:client-error` / `:server-error` / `:no-response`. */
   indexability: string;
   count: number;
 }

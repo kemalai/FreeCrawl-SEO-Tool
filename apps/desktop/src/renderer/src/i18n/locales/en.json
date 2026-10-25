@@ -8,7 +8,9 @@
     "siteBotBlocked": "Bot protection blocked part of the crawl",
     "siteBotBlockedHint": "The site's bot protection answered with a challenge instead of these pages. They were not crawled and are left out of the broken-link and sitemap checks. Lower the crawl speed or allowlist the crawler's user agent, then re-crawl them.",
     "checkOff": "Off",
-    "cookiesOffHint": "Cookie checks are off because the crawl's cookie policy is \"Reject all\". Choose \"Accept all\" or \"Block third-party\" under Settings → Cookies to analyse Set-Cookie headers."
+    "cookiesOffHint": "Cookie checks are off because the crawl's cookie policy is \"Reject all\". Choose \"Accept all\" or \"Block third-party\" under Settings → Cookies to analyse Set-Cookie headers.",
+    "notComputed": "Not computed",
+    "notComputedHint": "Inlinks have not been computed yet, so orphan pages cannot be counted. They are computed at the end of a crawl that has \"Recompute inlinks\" on."
   },
   "integrations": {
     "intro": "Connect external services with your own credentials. API keys and secrets are encrypted at rest using your operating system's secure storage and never leave this machine.",
@@ -464,6 +466,7 @@
       "redirect": "Non-indexable — redirect",
       "clientError": "Non-indexable — 4xx",
       "serverError": "Non-indexable — 5xx",
+      "noResponse": "Non-indexable — no response",
       "botBlocked": "Unknown — blocked by bot protection"
     },
     "kind": {

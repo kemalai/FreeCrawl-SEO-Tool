@@ -120,6 +120,7 @@ const ALLOWED_METHODS = new Set<string>([
   'setMeta',
   'updateExternalProbe',
   'recomputeInlinks',
+  'markInlinksStale',
   'recomputeRedirectChains',
   'recomputeCanonicalChains',
   'recomputeLinkScore',

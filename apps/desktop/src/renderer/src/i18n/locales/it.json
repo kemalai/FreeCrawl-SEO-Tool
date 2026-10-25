@@ -8,7 +8,9 @@
     "siteBotBlocked": "La protezione anti-bot ha bloccato parte della scansione",
     "siteBotBlockedHint": "La protezione anti-bot del sito ha risposto con una verifica al posto di queste pagine. Non sono state scansionate e sono escluse dai controlli su link interrotti e sitemap. Riduci la velocità di scansione o autorizza lo user agent del crawler, poi scansionale di nuovo.",
     "checkOff": "Disattivato",
-    "cookiesOffHint": "I controlli sui cookie sono disattivati perché la politica dei cookie della scansione è \"Rifiuta tutto\". Scegli \"Accetta tutto\" o \"Blocca terze parti\" in Impostazioni → Cookie per analizzare le intestazioni Set-Cookie."
+    "cookiesOffHint": "I controlli sui cookie sono disattivati perché la politica dei cookie della scansione è \"Rifiuta tutto\". Scegli \"Accetta tutto\" o \"Blocca terze parti\" in Impostazioni → Cookie per analizzare le intestazioni Set-Cookie.",
+    "notComputed": "Non calcolato",
+    "notComputedHint": "I link in entrata non sono ancora stati calcolati, quindi le pagine orfane non possono essere contate. Vengono calcolati al termine di una scansione con \"Ricalcola i link in entrata\" attivo."
   },
   "integrations": {
     "intro": "Collega servizi esterni con le tue credenziali. Le chiavi API e i segreti sono cifrati a riposo tramite l'archivio sicuro del tuo sistema operativo e non lasciano mai questa macchina.",
@@ -480,6 +482,7 @@
       "redirect": "Non indicizzabile — reindirizzamento",
       "clientError": "Non indicizzabile — 4xx",
       "serverError": "Non indicizzabile — 5xx",
+      "noResponse": "Non indicizzabile — nessuna risposta",
       "botBlocked": "Sconosciuta — bloccata dalla protezione anti-bot"
     },
     "kind": {

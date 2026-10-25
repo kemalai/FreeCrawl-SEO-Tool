@@ -1135,6 +1135,10 @@ export class Crawler extends EventEmitter {
 
     this.setOp(`crawl:start:${this.config.startUrl}`);
 
+    // New pages arrive with inlinks = 0 until the end-of-crawl pass runs, so
+    // the orphan count is meaningless from here on (also for respider runs).
+    await this.runDbPass('markInlinksStale');
+
     // Fire an immediate progress event so the UI can flip to "Running"
     // before we block on resolveStartUrl (which can spend several seconds
     // probing HTTPS then HTTP on unreachable hosts).
@@ -3086,6 +3090,7 @@ export class Crawler extends EventEmitter {
           statusCode: null,
           statusText: 'Skipped: private/internal address (SSRF guard)',
           responseTimeMs: 0,
+          skipped: 'Private or internal address, not requested',
         },
       ]);
       return;
@@ -5244,7 +5249,7 @@ export class Crawler extends EventEmitter {
           contentKind: detectContentKind(item.url, null),
           statusCode: null,
           statusText: detail,
-          indexability: 'non-indexable:client-error',
+          indexability: 'non-indexable:no-response',
           indexabilityReason: `Network error: ${detail}`,
           responseTimeMs: elapsed,
           depth: item.depth,

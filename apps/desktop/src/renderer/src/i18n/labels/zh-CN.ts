@@ -662,6 +662,7 @@ export const ZH_CN_LABELS: Record<string, string> = {
   'Path Type': '路径类型',
   'Link Path': '链接路径',
   'Link Position': '链接位置',
+  'Final Target': '最终目标',
   'Link Origin': '链接来源',
   Transferred: '已传输',
 

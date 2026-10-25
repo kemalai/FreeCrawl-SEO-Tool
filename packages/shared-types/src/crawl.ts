@@ -263,10 +263,16 @@ export type Indexability =
   | 'non-indexable:redirect'
   | 'non-indexable:client-error'
   | 'non-indexable:server-error'
+  // The request got no HTTP answer at all: timeout, refused connection, DNS.
+  | 'non-indexable:no-response'
   // Bot protection (Cloudflare challenge, WAF block) or a rate limit
   // answered instead of the page. Not "non-indexable": search engines are
   // usually let through, the crawler wasn't — indexability is unknown.
-  | 'unknown:bot-blocked';
+  | 'unknown:bot-blocked'
+  // An external link the crawler chose not to request (a private or internal
+  // address). Nothing was asked, so there is no answer to judge: not a
+  // failure, not a broken link.
+  | 'unknown:skipped';
 
 export type ContentKind = 'html' | 'css' | 'js' | 'image' | 'pdf' | 'font' | 'other';
 
@@ -1960,8 +1966,11 @@ export interface OverviewCounts {
     hreflangReciprocityMissing: number;
     hreflangTargetIssues: number;
     hreflangUnlinked: number;
-    /** Internal 2xx HTML pages nothing links to (start URL excluded). */
-    orphanPage: number;
+    /**
+     * Internal 2xx HTML pages nothing links to (start URL excluded); null when
+     * inlinks were never computed, so the count would be meaningless.
+     */
+    orphanPage: number | null;
     crawledNotInSitemap: number;
     redirectInSitemap: number;
     /** Sitemap URL count that the crawl never reached (in sitemap_urls but not in urls). */
@@ -2466,6 +2475,9 @@ export interface InlinkRow {
   /** Status code of the page the inlink points *to* (the detail panel URL). */
   toStatusCode: number | null;
   toSize: number | null;
+  /** Where a redirecting target ends up (`redirect_final_url`) and that page's status; null when the target does not redirect. */
+  toFinalUrl: string | null;
+  toFinalStatusCode: number | null;
   type: LinkType;
   anchor: string | null;
   altText: string | null;
@@ -2481,6 +2493,9 @@ export interface OutlinkRow {
   toUrl: string;
   toStatusCode: number | null;
   toSize: number | null;
+  /** Where a redirecting target ends up (`redirect_final_url`) and that page's status; null when the target does not redirect. */
+  toFinalUrl: string | null;
+  toFinalStatusCode: number | null;
   type: LinkType;
   anchor: string | null;
   altText: string | null;

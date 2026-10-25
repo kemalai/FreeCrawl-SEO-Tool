@@ -87,15 +87,19 @@ export const DISABLED_ISSUES_META_KEY = 'disabledIssues';
 export const DEDUPE_PRE_NORMALIZE_META_KEY = 'dedupePreNormalize';
 /** JSON `Soft404ProbeResult` of the last crawl's missing-page probe; '' when clean. */
 export const SOFT404_PROBE_META_KEY = 'soft404Probe';
+/** `project_meta` key set by `recomputeInlinks`; orphans mean nothing before it. */
+export const INLINKS_COMPUTED_META_KEY = 'inlinksComputed';
 /**
  * Orphan page: an internal 2xx HTML page nothing links to. The start URL
  * is exempt (nothing links to a homepage from inside the site by
  * definition); sitemap-seeded and list-mode pages are exactly the ones
- * this check exists for.
+ * this check exists for. Until inlinks were computed every page has
+ * `inlinks = 0`, so the check flags nothing rather than every page.
  */
 const ORPHAN_PAGE_SQL = `is_external = 0 AND content_kind = 'html'
   AND status_code >= 200 AND status_code < 300 AND inlinks = 0
-  AND url != COALESCE((SELECT value FROM project_meta WHERE key = 'lastStartUrl'), '')`;
+  AND url != COALESCE((SELECT value FROM project_meta WHERE key = 'lastStartUrl'), '')
+  AND EXISTS (SELECT 1 FROM project_meta WHERE key = '${INLINKS_COMPUTED_META_KEY}')`;
 const EMPTY_DISABLED: ReadonlySet<UrlCategory> = new Set();
 
 const SPELLING_STATUSES: readonly SpellingStatus[] = [
@@ -1276,6 +1280,16 @@ export type ProbeWrite =
   | { method: 'setPdfMetadata'; args: Parameters<ProjectDb['setPdfMetadata']> }
   | { method: 'setMobileParity'; args: Parameters<ProjectDb['setMobileParity']> };
 
+/**
+ * Link-target predicate (alias `t`) of the Broken Links report: a 4xx/5xx
+ * answer, or a probe that got none (timeout, refused connection, DNS) —
+ * stored with a NULL status and `non-indexable:no-response`. Unprobed
+ * external stubs also have a NULL status but keep their placeholder
+ * indexability, so they are not reported.
+ */
+const BROKEN_TARGET_SQL = `((t.status_code >= 400 AND t.status_code < 600)
+    OR t.indexability = 'non-indexable:no-response')`;
+
 export class ProjectDb {
   /** Parse cache for `getDisabledIssues()` — keyed by the raw meta string. */
   private disabledIssuesRaw: string | null = null;
@@ -2258,6 +2272,12 @@ export class ProjectDb {
       redirectTarget?: string | null;
       /** Bot protection answered instead of the page — e.g. "Cloudflare challenge (HTTP 403)". */
       botBlocked?: string | null;
+      /**
+       * The probe was deliberately not sent (e.g. a private address). Stored
+       * with a NULL status like a failure, but as its own state with this
+       * reason, so it never reads as a link that did not answer.
+       */
+      skipped?: string | null;
     },
   ): void {
     // Re-classify the external stub's content_kind from the probed
@@ -2279,8 +2299,11 @@ export class ProjectDb {
       // external link".
       indexability = 'unknown:bot-blocked';
       indexabilityReason = `Blocked by bot protection — ${patch.botBlocked}`;
+    } else if (patch.skipped) {
+      indexability = 'unknown:skipped';
+      indexabilityReason = patch.skipped;
     } else if (status === null) {
-      indexability = 'non-indexable:client-error';
+      indexability = 'non-indexable:no-response';
       indexabilityReason = 'No response';
     } else if (status >= 500) {
       indexability = 'non-indexable:server-error';
@@ -2547,6 +2570,13 @@ export class ProjectDb {
   insertLinks(fromUrlId: number, links: DiscoveredLink[], fromDepth: number): void {
     if (links.length === 0) return;
     const CHUNK = 200;
+    // A link back to the page it sits on is marked here, where the page URL
+    // is known, so counting inlinks never has to look targets up.
+    const pageUrl = (
+      this.db.prepare('SELECT url FROM urls WHERE id = ?').get(fromUrlId) as
+        | { url: string }
+        | undefined
+    )?.url;
     // Skip the inner BEGIN when the caller already opened a transaction
     // via `runInTransaction` — SQLite forbids nested BEGINs and the
     // outer transaction will commit our work atomically anyway.
@@ -2559,7 +2589,7 @@ export class ProjectDb {
       for (let i = 0; i < links.length; i += CHUNK) {
         const slice = links.slice(i, i + CHUNK);
         const placeholders = slice
-          .map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
           .join(',');
         const args: (string | number | null)[] = [];
         for (const link of slice) {
@@ -2576,13 +2606,14 @@ export class ProjectDb {
             link.linkPath,
             link.linkPosition,
             link.linkOrigin,
+            link.toUrl === pageUrl ? 1 : 0,
           );
         }
         this.db
           .prepare(
             `INSERT INTO links (
                from_url_id, to_url, anchor, rel, is_internal,
-               type, alt_text, target, path_type, link_path, link_position, link_origin
+               type, alt_text, target, path_type, link_path, link_position, link_origin, is_self
              ) VALUES ${placeholders}`,
           )
           .run(...args);
@@ -2980,6 +3011,11 @@ export class ProjectDb {
     });
   }
 
+  /** A crawl is about to add pages: stored inlinks no longer cover them. */
+  markInlinksStale(): void {
+    this.db.prepare('DELETE FROM project_meta WHERE key = ?').run(INLINKS_COMPUTED_META_KEY);
+  }
+
   recomputeInlinks(): void {
     // One-pass aggregate via temp table: GROUP BY links.to_url once, then
     // join. The naive correlated-subquery form (UPDATE … = (SELECT COUNT…))
@@ -2992,6 +3028,10 @@ export class ProjectDb {
           SELECT to_url AS url, COUNT(*) AS c
           FROM links
           WHERE is_internal = 1
+            -- A page linking to itself (a skip link, a logo on the home page)
+            -- is not an inlink: it must not hide an orphan. The row stays in
+            -- the links table; insertLinks marks it when it is written.
+            AND is_self = 0
           GROUP BY to_url
       `);
       this.db.exec('CREATE INDEX _inlink_counts_url ON _inlink_counts(url)');
@@ -3002,6 +3042,7 @@ export class ProjectDb {
         )
       `);
       this.db.exec('DROP TABLE _inlink_counts');
+      this.setMeta(INLINKS_COMPUTED_META_KEY, '1');
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
@@ -4466,8 +4507,8 @@ export class ProjectDb {
   }
 
   /**
-   * Indexability distribution across internal URLs. Seven buckets —
-   * `indexable` + the six `non-indexable:…` reasons — give the user a
+   * Indexability distribution across internal URLs. `indexable` plus one
+   * bucket per `non-indexable:…` reason gives the user a
    * one-glance breakdown of why pages are or aren't reaching Google.
    * Ordered by `count DESC` so the dominant bucket sits at the top.
    */
@@ -4675,7 +4716,8 @@ export class ProjectDb {
   }
 
   /**
-   * Return link rows whose destination is a 4xx/5xx URL. Joins the link
+   * Return link rows whose destination is a 4xx/5xx URL or never answered
+   * (timeout, refused connection, DNS failure). Joins the link
    * catalogue to the URL table twice — once for the source page's status,
    * once for the destination's. `internal` filter: 'all' | 'internal' | 'external'.
    */
@@ -4685,7 +4727,7 @@ export class ProjectDb {
     internal?: 'all' | 'internal' | 'external';
     search?: string;
   }): { rows: BrokenLinkRow[]; total: number; uniqueTargets: number } {
-    const where: string[] = ['t.status_code >= 400 AND t.status_code < 600'];
+    const where: string[] = [BROKEN_TARGET_SQL];
     const args: (string | number)[] = [];
     const internal = params.internal ?? 'all';
     if (internal === 'internal') where.push('l.is_internal = 1');
@@ -7063,7 +7105,11 @@ export class ProjectDb {
       ),
       hreflangTargetIssues: countWhere(`${html} AND hreflang_target_issues > 0`),
       hreflangUnlinked: countWhere(`${html} AND hreflang_unlinked > 0`),
-      orphanPage: countWhere(ORPHAN_PAGE_SQL),
+      // null = inlinks never computed (crawl stopped early, old project).
+      orphanPage:
+        this.getMeta(INLINKS_COMPUTED_META_KEY) === null
+          ? null
+          : countWhere(ORPHAN_PAGE_SQL),
       crawledNotInSitemap: countWhere(
         `${html} AND status_code >= 200 AND status_code < 300
          AND indexability = 'indexable'
@@ -7434,6 +7480,8 @@ export class ProjectDb {
       `SELECT COUNT(*) AS c FROM links l
          WHERE l.to_url IN (
            SELECT url FROM urls WHERE status_code >= 400 AND status_code < 600
+           UNION
+           SELECT url FROM urls WHERE indexability = 'non-indexable:no-response'
          ) ${scope}`,
     );
   }
@@ -7501,7 +7549,9 @@ export class ProjectDb {
     // `image_usages` and `resource_usages` — the tab was empty for every
     // such row while this read `links` alone.
     const hyperTotal = (
-      this.db.prepare('SELECT COUNT(*) AS c FROM links WHERE to_url = ?').get(url) as { c: number }
+      this.db
+        .prepare('SELECT COUNT(*) AS c FROM links WHERE to_url = ? AND is_self = 0')
+        .get(url) as { c: number }
     ).c;
     const imageTotal = (
       this.db
@@ -7525,6 +7575,8 @@ export class ProjectDb {
       from_status_code: number | null;
       to_status_code: number | null;
       to_size: number | null;
+      to_final_url: string | null;
+      to_final_status_code: number | null;
       type: string | null;
       anchor: string | null;
       alt_text: string | null;
@@ -7542,12 +7594,15 @@ export class ProjectDb {
            f.status_code AS from_status_code,
            t.status_code AS to_status_code,
            t.content_length AS to_size,
+           t.redirect_final_url AS to_final_url,
+           ft.status_code AS to_final_status_code,
            l.type, l.anchor, l.alt_text, l.rel, l.target,
            l.path_type, l.link_path, l.link_position, l.link_origin
          FROM links l
          JOIN urls f ON l.from_url_id = f.id
          LEFT JOIN urls t ON l.to_url = t.url
-         WHERE l.to_url = ?
+         LEFT JOIN urls ft ON ft.url = t.redirect_final_url
+         WHERE l.to_url = ? AND l.is_self = 0
          LIMIT ?`,
       )
       .all(url, limit) as unknown as Row[];
@@ -7560,12 +7615,15 @@ export class ProjectDb {
                f.status_code AS from_status_code,
                t.status_code AS to_status_code,
                t.content_length AS to_size,
+           t.redirect_final_url AS to_final_url,
+           ft.status_code AS to_final_status_code,
                'image' AS type, NULL AS anchor, iu.alt AS alt_text, NULL AS rel, NULL AS target,
                NULL AS path_type, NULL AS link_path, NULL AS link_position, 'html' AS link_origin
              FROM image_usages iu
              JOIN images i ON i.id = iu.image_id
              JOIN urls f ON f.id = iu.from_url_id
              LEFT JOIN urls t ON t.url = i.src
+         LEFT JOIN urls ft ON ft.url = t.redirect_final_url
              WHERE i.src = ?
              LIMIT ?`,
           )
@@ -7581,6 +7639,8 @@ export class ProjectDb {
                f.status_code AS from_status_code,
                t.status_code AS to_status_code,
                t.content_length AS to_size,
+           t.redirect_final_url AS to_final_url,
+           ft.status_code AS to_final_status_code,
                CASE r.kind WHEN 'css' THEN 'stylesheet' WHEN 'js' THEN 'script'
                            WHEN 'image' THEN 'image' ELSE 'other' END AS type,
                NULL AS anchor, NULL AS alt_text, NULL AS rel, NULL AS target,
@@ -7589,6 +7649,7 @@ export class ProjectDb {
              JOIN resources r ON r.id = ru.resource_id
              JOIN urls f ON f.id = ru.from_url_id
              LEFT JOIN urls t ON t.url = r.url
+         LEFT JOIN urls ft ON ft.url = t.redirect_final_url
              WHERE r.url = ?
              LIMIT ?`,
           )
@@ -7602,6 +7663,8 @@ export class ProjectDb {
         fromStatusCode: r.from_status_code,
         toStatusCode: r.to_status_code,
         toSize: r.to_size,
+        toFinalUrl: r.to_final_url,
+        toFinalStatusCode: r.to_final_status_code,
         type: (r.type as InlinkRow['type']) ?? 'hyperlink',
         anchor: r.anchor,
         altText: r.alt_text,
@@ -7627,11 +7690,14 @@ export class ProjectDb {
            l.to_url,
            t.status_code AS to_status_code,
            t.content_length AS to_size,
+           t.redirect_final_url AS to_final_url,
+           ft.status_code AS to_final_status_code,
            l.type, l.anchor, l.alt_text, l.rel, l.target,
            l.path_type, l.link_path, l.link_position, l.link_origin,
            l.is_internal
          FROM links l
          LEFT JOIN urls t ON l.to_url = t.url
+         LEFT JOIN urls ft ON ft.url = t.redirect_final_url
          WHERE l.from_url_id = ?
          LIMIT ?`,
       )
@@ -7639,6 +7705,8 @@ export class ProjectDb {
       to_url: string;
       to_status_code: number | null;
       to_size: number | null;
+      to_final_url: string | null;
+      to_final_status_code: number | null;
       type: string | null;
       anchor: string | null;
       alt_text: string | null;
@@ -7656,6 +7724,8 @@ export class ProjectDb {
         toUrl: r.to_url,
         toStatusCode: r.to_status_code,
         toSize: r.to_size,
+        toFinalUrl: r.to_final_url,
+        toFinalStatusCode: r.to_final_status_code,
         type: (r.type as OutlinkRow['type']) ?? 'hyperlink',
         anchor: r.anchor,
         altText: r.alt_text,
@@ -8159,7 +8229,7 @@ export class ProjectDb {
     internal: 'all' | 'internal' | 'external' = 'all',
     search?: string,
   ): IterableIterator<BrokenLinkRow> {
-    const where: string[] = ['t.status_code >= 400 AND t.status_code < 600'];
+    const where: string[] = [BROKEN_TARGET_SQL];
     if (internal === 'internal') where.push('l.is_internal = 1');
     else if (internal === 'external') where.push('l.is_internal = 0');
     // Same search predicate as `queryBrokenLinks` so the export mirrors the
@@ -11136,9 +11206,11 @@ export function categoryWhereClause(
       // that failed to answer. Counting them here made "No Response"
       // read as N failures on a crawl whose failure count was zero, and
       // double-counted them against the sibling Blocked by Robots row.
-      // Bot-blocked URLs did answer — just not with the page.
+      // Bot-blocked URLs did answer — just not with the page. Skipped
+      // external links (private addresses) were never requested at all.
       return `status_code IS NULL
-              AND indexability NOT IN ('non-indexable:robots-blocked', 'unknown:bot-blocked')`;
+              AND indexability NOT IN (
+                'non-indexable:robots-blocked', 'unknown:bot-blocked', 'unknown:skipped')`;
     case 'status:2xx':
       return 'status_code >= 200 AND status_code < 300';
     case 'status:3xx':

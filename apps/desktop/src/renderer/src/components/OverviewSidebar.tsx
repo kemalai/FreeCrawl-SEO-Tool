@@ -15,7 +15,8 @@ interface Node {
   key: string;
   label: string;
   category?: UrlCategory;
-  count?: number;
+  /** `null` = the counter exists but was never computed ("Not computed"). */
+  count?: number | null;
   /** Denominator for this node's "% of Total". Defaults to the tree-wide
    *  total (internal URLs). Nodes whose count isn't internal-scoped override
    *  it: image nodes use the total image count (so an image ÷ page ratio is
@@ -179,6 +180,11 @@ export function OverviewSidebar() {
     [overview, disabledSet, cookiesOff],
   );
   const offLabel = t('sidebar.checkOff', { defaultValue: 'Off' });
+  const notComputedLabel = t('sidebar.notComputed', { defaultValue: 'Not computed' });
+  const notComputedHint = t('sidebar.notComputedHint', {
+    defaultValue:
+      'Inlinks have not been computed yet, so orphan pages cannot be counted. They are computed at the end of a crawl that has "Recompute inlinks" on.',
+  });
   const cookiesOffHint = t('sidebar.cookiesOffHint', {
     defaultValue:
       'Cookie checks are off because the crawl\'s cookie policy is "Reject all". Choose "Accept all" or "Block third-party" under Settings → Cookies to analyse Set-Cookie headers.',
@@ -264,6 +270,8 @@ export function OverviewSidebar() {
               lang={lang}
               offLabel={offLabel}
               offHint={cookiesOffHint}
+              notComputedLabel={notComputedLabel}
+              notComputedHint={notComputedHint}
             />
           ))}
         </div>
@@ -283,6 +291,8 @@ const TreeNode = memo(function TreeNode({
   lang,
   offLabel,
   offHint,
+  notComputedLabel,
+  notComputedHint,
 }: {
   node: Node;
   depth: number;
@@ -294,6 +304,8 @@ const TreeNode = memo(function TreeNode({
   lang: string;
   offLabel: string;
   offHint: string;
+  notComputedLabel: string;
+  notComputedHint: string;
 }) {
   const isExpanded = expanded.has(node.key);
   const isActive = node.category && node.category === activeCategory;
@@ -327,7 +339,15 @@ const TreeNode = memo(function TreeNode({
             {offLabel}
           </span>
         )}
-        {!node.off && node.count !== undefined && (
+        {!node.off && node.count === null && (
+          <span
+            className="shrink-0 whitespace-nowrap text-right font-mono italic text-surface-500"
+            title={notComputedHint}
+          >
+            {notComputedLabel}
+          </span>
+        )}
+        {!node.off && node.count != null && (
           <>
             <span className="font-mono tabular-nums text-surface-300">
               {node.count.toLocaleString()}
@@ -355,6 +375,8 @@ const TreeNode = memo(function TreeNode({
             lang={lang}
             offLabel={offLabel}
             offHint={offHint}
+            notComputedLabel={notComputedLabel}
+            notComputedHint={notComputedHint}
           />
         ))}
     </>

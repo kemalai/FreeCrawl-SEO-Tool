@@ -670,6 +670,7 @@ export const RU_LABELS: Record<string, string> = {
   'Path Type': 'Тип пути',
   'Link Path': 'Путь ссылки',
   'Link Position': 'Позиция ссылки',
+  'Final Target': 'Конечная цель',
   'Link Origin': 'Происхождение ссылки',
   Transferred: 'Передано',
 

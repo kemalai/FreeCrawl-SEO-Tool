@@ -675,6 +675,7 @@ export const ES_LABELS: Record<string, string> = {
   'Path Type': 'Tipo de ruta',
   'Link Path': 'Ruta del enlace',
   'Link Position': 'Posición del enlace',
+  'Final Target': 'Destino final',
   'Link Origin': 'Origen del enlace',
   Transferred: 'Transferido',
 

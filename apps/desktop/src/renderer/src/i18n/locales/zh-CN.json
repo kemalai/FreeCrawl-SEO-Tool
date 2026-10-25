@@ -8,7 +8,9 @@
     "siteBotBlocked": "机器人防护拦截了部分抓取",
     "siteBotBlockedHint": "站点的机器人防护以验证页面代替了这些页面的响应。它们未被抓取，也不计入失效链接和站点地图检查。请降低抓取速度或将抓取器的 User-Agent 加入白名单，然后重新抓取。",
     "checkOff": "已关闭",
-    "cookiesOffHint": "由于抓取的 Cookie 策略为“全部拒绝”，Cookie 检查已关闭。请在 设置 → Cookie 中选择“全部接受”或“拦截第三方”以分析 Set-Cookie 标头。"
+    "cookiesOffHint": "由于抓取的 Cookie 策略为“全部拒绝”，Cookie 检查已关闭。请在 设置 → Cookie 中选择“全部接受”或“拦截第三方”以分析 Set-Cookie 标头。",
+    "notComputed": "未计算",
+    "notComputedHint": "尚未计算入链，因此无法统计孤立页面。入链会在开启“重新计算入链”的抓取结束时计算。"
   },
   "integrations": {
     "intro": "使用你自己的凭据连接外部服务。API 密钥和机密会通过操作系统的安全存储在本地加密保存，绝不会离开这台机器。",
@@ -448,6 +450,7 @@
       "redirect": "不可索引——重定向",
       "clientError": "不可索引——4xx",
       "serverError": "不可索引——5xx",
+      "noResponse": "不可索引——无响应",
       "botBlocked": "未知——被机器人防护拦截"
     },
     "kind": {

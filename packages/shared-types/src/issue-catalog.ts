@@ -395,11 +395,11 @@ export const ISSUE_COUNT_KEY: ReadonlyMap<UrlCategory, IssueCountKey> = new Map(
   ),
 );
 
-/** Reads a check's counter, summing composite ones. */
-export function issueCount(issues: OverviewCounts['issues'], def: IssueCheckDef): number {
+/** Reads a check's counter, summing composite ones; null = not computed. */
+export function issueCount(issues: OverviewCounts['issues'], def: IssueCheckDef): number | null {
   return typeof def.count === 'string'
     ? issues[def.count]
-    : def.count.reduce((acc, k) => acc + issues[k], 0);
+    : def.count.reduce((acc, k) => acc + (issues[k] ?? 0), 0);
 }
 
 /** Every toggleable issue category, in sidebar order. */

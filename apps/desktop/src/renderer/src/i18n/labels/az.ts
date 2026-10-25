@@ -675,6 +675,7 @@ export const AZ_LABELS: Record<string, string> = {
   'Path Type': 'Yol tipi',
   'Link Path': 'Keçid yolu',
   'Link Position': 'Keçidin mövqeyi',
+  'Final Target': 'Son hədəf',
   'Link Origin': 'Keçidin mənbəyi',
   Transferred: 'Ötürülmüş',
 

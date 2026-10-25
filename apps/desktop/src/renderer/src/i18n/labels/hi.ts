@@ -668,6 +668,7 @@ export const HI_LABELS: Record<string, string> = {
   'Path Type': 'पथ प्रकार',
   'Link Path': 'लिंक पथ',
   'Link Position': 'लिंक की स्थिति',
+  'Final Target': 'अंतिम लक्ष्य',
   'Link Origin': 'लिंक का उद्गम',
   Transferred: 'स्थानांतरित',
 

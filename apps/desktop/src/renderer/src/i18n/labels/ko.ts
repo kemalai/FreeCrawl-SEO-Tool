@@ -663,6 +663,7 @@ export const KO_LABELS: Record<string, string> = {
   'Path Type': '경로 유형',
   'Link Path': '링크 경로',
   'Link Position': '링크 위치',
+  'Final Target': '최종 대상',
   'Link Origin': '링크 출처',
   Transferred: '전송됨',
 

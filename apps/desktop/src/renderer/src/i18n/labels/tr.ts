@@ -658,6 +658,7 @@ export const TR_LABELS: Record<string, string> = {
   'Path Type': 'Yol Türü',
   'Link Path': 'Link Yolu',
   'Link Position': 'Link Konumu',
+  'Final Target': 'Son Hedef',
   'Link Origin': 'Link Kaynağı',
   Transferred: 'Aktarılan',
 

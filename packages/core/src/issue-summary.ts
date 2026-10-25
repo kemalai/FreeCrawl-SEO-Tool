@@ -45,7 +45,7 @@ export function summarizeIssues(counts: OverviewCounts): IssueSummary[] {
     for (const item of group.items) {
       if (typeof item.count !== 'string') continue;
       const count = counts.issues[item.count];
-      if (!(count > 0)) continue;
+      if (count == null || !(count > 0)) continue;
       const severity = ISSUE_SEVERITY[item.category] ?? 'info';
       out.push({
         category: item.category,
