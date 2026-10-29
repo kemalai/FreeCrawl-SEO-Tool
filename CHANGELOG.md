@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.1.2] — 2026-10-29
+
+### Added
+- Proxy-Seller sponsor card in Settings → Network with a proxy setup guide and a 15% promo code, plus a banner in the empty URL table.
+- Inlinks and outlinks now show where a redirecting link finally lands, in a new Final Target column (thanks @danzerzine).
+- Opening a project saved by an older version now upgrades it in the background with a progress bar instead of freezing the window.
+- Bot challenge pages served with HTTP 200, such as "One moment, please...", are reported as blocked instead of as indexable pages.
+
+### Changed
+- Adaptive speed paces retries with the rest of the crawl and can slow to one request every 10 s, so strict rate limits no longer stall it.
+- A 429 on a single page no longer pauses or slows the whole crawl while the rest of the site answers normally.
+
+### Fixed
+- JavaScript rendering and browser login now go through the configured proxy instead of your own IP address.
+- Retries after a long Retry-After are now sent instead of failing as timeouts, and Stop or Pause ends the wait at once.
+- Response times and the status bar average no longer include the time spent waiting before a retry.
+- The Failed counter no longer counts pages that came back in the end-of-crawl retry.
+- Opening a project no longer freezes the window for a moment or turns off background checks after a few opens.
+- Links to pages that time out or refuse the connection now count as broken links (thanks @danzerzine).
+- Self-links no longer count as inlinks, and the orphan count waits until inlinks are computed (thanks @danzerzine).
+
 ## [1.1.1] — 2026-10-25
 
 ### Added
