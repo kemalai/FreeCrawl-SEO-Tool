@@ -4,6 +4,7 @@ export {
   BrowserPool,
   PlaywrightBrowserMissingError,
   resolveChromiumBinaries,
+  toBrowserProxy,
   type BrowserPoolOptions,
   type ChromiumBinaries,
 } from './browser-pool.js';
@@ -46,6 +47,8 @@ export {
   MOBILE_USER_AGENT,
   MOBILE_VIEWPORT,
   MOBILE_DEVICE_SCALE_FACTOR,
+  configuredProxyUrl,
+  effectiveProxyUrl,
 } from './http-client.js';
 export { exportUrlsToJson, type JsonExportOptions } from './json-export.js';
 export { exportUrlsToXml } from './xml-export.js';

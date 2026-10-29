@@ -85,6 +85,7 @@ import { GscSettingsSection } from './GscSettingsSection.js';
 import { Ga4SettingsSection } from './Ga4SettingsSection.js';
 import { McpServersSection } from './McpServersSection.js';
 import { GoogleAccountsSection } from './GoogleAccountsSection.js';
+import { SponsorCard } from './SponsorCard.js';
 
 interface Props {
   open: boolean;
@@ -3677,6 +3678,8 @@ function NetworkPanel({ form, update }: PanelProps) {
       <p className="mb-3 text-[11px] text-surface-400">
         {t('settingsPanels.network.intro', { defaultValue: 'Network-level controls: proxy override, file-extension exclusion, redirect hop cap.' })}
       </p>
+
+      <SponsorCard />
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
         <Text

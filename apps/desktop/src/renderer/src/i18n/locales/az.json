@@ -2375,5 +2375,20 @@
     "upgradingTitle": "Layihə bu versiyaya yenilənir",
     "upgradingNote": "Bu, əvvəlki versiyada saxlanmış layihələr üçün yalnız bir dəfə edilir. Bitən kimi layihə açılır.",
     "step": "Addım {{step}}/{{steps}}"
+  },
+  "sponsor": {
+    "needProxy": "Proksi lazımdır?",
+    "sponsored": "Sponsorlu",
+    "proxySellerTagline": "HTTP(S) və SOCKS5 dəstəkli rezident, mobil, ISP və data-mərkəz proksiləri.",
+    "promo": "{{code}} kodu ilə {{discount}}% endirim",
+    "copyCode": "Kodu kopyala",
+    "copied": "Kopyalandı",
+    "visit": "{{name}} saytına keçin",
+    "setupTitle": "Necə qurulur",
+    "setupOrder": "Proksi sifariş edin. Sifariş e-poçtunda və Proxy-Seller panelinizdə onun IP-si, logini, şifrəsi, HTTP və SOCKS5 portları göstərilir.",
+    "setupPaste": "Onu aşağıdakı Proksi URL-i sahəsinə bu formalardan biri ilə daxil edin:",
+    "setupResidential": "Rezident proksilər üçün əvvəlcə paneldə siyahı yaradın (ölkə, rotasiya) və onun göstərdiyi qoşulma məlumatlarından istifadə edin.",
+    "setupJsRender": "JavaScript renderi açıq olanda HTTP formasından istifadə edin: brauzer şifrə tələb edən SOCKS5 proksidən istifadə edə bilmir.",
+    "hide": "Gizlət"
   }
 }

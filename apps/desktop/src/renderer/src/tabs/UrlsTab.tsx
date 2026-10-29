@@ -46,6 +46,7 @@ import { UrlTreeView } from '../components/UrlTreeView.js';
 import { ErrorBoundary } from '../components/ErrorBoundary.js';
 import { ExportDialog } from '../components/ExportDialog.js';
 import { InfoTip } from '../components/InfoTip.js';
+import { SponsorBanner } from '../components/SponsorBanner.js';
 import { translateLabel } from '../i18n/labels.js';
 import {
   copySelection,
@@ -1583,6 +1584,7 @@ export function UrlsTab() {
                   defaultValue: 'Start a crawl or choose a different category.',
                 })}
               </div>
+              <SponsorBanner />
             </div>
           </div>
         )}

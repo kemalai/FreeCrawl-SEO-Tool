@@ -2330,5 +2330,20 @@
     "upgradingTitle": "正在将项目更新到此版本",
     "upgradingNote": "此操作只对使用早期版本保存的项目执行一次。完成后项目会立即打开。",
     "step": "第 {{step}} 步，共 {{steps}} 步"
+  },
+  "sponsor": {
+    "needProxy": "需要代理？",
+    "sponsored": "赞助",
+    "proxySellerTagline": "住宅、移动、ISP 和数据中心代理，支持 HTTP(S) 和 SOCKS5。",
+    "promo": "使用优惠码 {{code}} 享 {{discount}}% 折扣",
+    "copyCode": "复制优惠码",
+    "copied": "已复制",
+    "visit": "访问 {{name}}",
+    "setupTitle": "如何设置",
+    "setupOrder": "订购一个代理。订单邮件和 Proxy-Seller 控制台中会列出其 IP、登录名、密码以及 HTTP 和 SOCKS5 端口。",
+    "setupPaste": "按以下任一格式填入下方的“代理 URL”字段：",
+    "setupResidential": "住宅代理需要先在控制台中创建一个列表（国家、轮换），再使用列表显示的连接信息。",
+    "setupJsRender": "开启 JavaScript 渲染时请使用 HTTP 格式：浏览器无法使用需要密码的 SOCKS5 代理。",
+    "hide": "隐藏"
   }
 }

@@ -2420,5 +2420,20 @@
     "upgradingTitle": "Aggiornamento del progetto per questa versione",
     "upgradingNote": "Succede una sola volta, per i progetti salvati con una versione precedente. Il progetto si apre appena ha finito.",
     "step": "Passaggio {{step}} di {{steps}}"
+  },
+  "sponsor": {
+    "needProxy": "Ti serve un proxy?",
+    "sponsored": "Sponsorizzato",
+    "proxySellerTagline": "Proxy residenziali, mobili, ISP e datacenter con supporto HTTP(S) e SOCKS5.",
+    "promo": "{{discount}}% di sconto con il codice {{code}}",
+    "copyCode": "Copia codice",
+    "copied": "Copiato",
+    "visit": "Visita {{name}}",
+    "setupTitle": "Come configurarlo",
+    "setupOrder": "Ordina un proxy. L'e-mail dell'ordine e la tua dashboard Proxy-Seller riportano IP, login, password e le porte HTTP e SOCKS5.",
+    "setupPaste": "Inseriscilo nel campo URL del proxy qui sotto in uno di questi formati:",
+    "setupResidential": "Per i proxy residenziali, crea prima una lista nella dashboard (paese, rotazione) e usa i dati di connessione che mostra.",
+    "setupJsRender": "Con il rendering JavaScript attivo, usa il formato HTTP: il browser non può usare un proxy SOCKS5 che richiede una password.",
+    "hide": "Nascondi"
   }
 }

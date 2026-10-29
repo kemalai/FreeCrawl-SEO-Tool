@@ -147,6 +147,39 @@ export interface BrowserPoolOptions {
    * how `CrawlConfig.jsRender.prerenderJs` is read (once at launch).
    */
   prerenderJs?: string;
+  /**
+   * The crawl's effective proxy URL, so rendered pages and their
+   * sub-resources leave from the same IP as the raw fetches. Without it the
+   * browser connects directly and exposes the user's own address.
+   */
+  proxyUrl?: string;
+}
+
+/**
+ * Map a crawl proxy URL onto Playwright's `proxy` launch option. Chromium
+ * cannot authenticate to a SOCKS proxy, so a SOCKS URL with credentials is
+ * rejected — launching without the proxy would silently go direct.
+ * `socks5h` / `socks4a` map to their plain forms: Chromium already sends
+ * host names to the SOCKS proxy for resolution.
+ */
+export function toBrowserProxy(proxyUrl: string): NonNullable<LaunchOptions['proxy']> {
+  const u = new URL(proxyUrl.trim());
+  const scheme = u.protocol.slice(0, -1).toLowerCase();
+  const username = decodeURIComponent(u.username);
+  const password = decodeURIComponent(u.password);
+  if (scheme.startsWith('socks')) {
+    if (username || password) {
+      throw new Error(
+        'JavaScript rendering cannot use a SOCKS proxy that needs a login (Chromium does not support SOCKS authentication). Use the proxy\'s HTTP port instead.',
+      );
+    }
+    return { server: `${scheme.startsWith('socks4') ? 'socks4' : 'socks5'}://${u.host}` };
+  }
+  return {
+    server: `${u.protocol}//${u.host}`,
+    ...(username ? { username } : {}),
+    ...(password ? { password } : {}),
+  };
 }
 
 /** Cap on automatic Chromium relaunches after a `disconnected` event.
@@ -213,6 +246,7 @@ export class BrowserPool {
     };
     if (this.opts.channel) launchOpts.channel = this.opts.channel;
     if (this.opts.executablePath) launchOpts.executablePath = this.opts.executablePath;
+    if (this.opts.proxyUrl) launchOpts.proxy = toBrowserProxy(this.opts.proxyUrl);
 
     // Pre-flight check — Playwright's own error is a multi-line ASCII
     // banner emitted PER navigation, which the crawler then logs once

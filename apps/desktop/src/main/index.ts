@@ -276,6 +276,8 @@ import {
   MOBILE_USER_AGENT,
   MOBILE_VIEWPORT,
   MOBILE_DEVICE_SCALE_FACTOR,
+  configuredProxyUrl,
+  effectiveProxyUrl,
   Crawler,
   renderUrl,
   auditMobileUsability,
@@ -8057,6 +8059,7 @@ function registerIpc(): void {
         // each page accumulated across reused slots; a long crawl
         // ran the snippet N times per navigation.
         prerenderJs: config.jsRender.prerenderJs || undefined,
+        proxyUrl: effectiveProxyUrl(configuredProxyUrl(config)) || undefined,
       });
       sess.activeBrowserPool = pool;
 

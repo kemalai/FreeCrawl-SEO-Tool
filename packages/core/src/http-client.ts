@@ -85,20 +85,7 @@ export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsR
     dns.setDefaultResultOrder('ipv4first');
   }
 
-  // Corporate proxy detection — env vars are the universal contract,
-  // matching curl / git / npm / pip behaviour. A non-empty config
-  // override (Settings → Network → Proxy URL) takes precedence so the
-  // user can route a single project through a different proxy.
-  // ECMAScript forbids mixing `||` with `??` in the same expression
-  // without parentheses (SyntaxError on parse). The `??` chain must be
-  // grouped, then OR'd with the override.
-  const envProxy =
-    process.env['HTTPS_PROXY'] ??
-    process.env['https_proxy'] ??
-    process.env['HTTP_PROXY'] ??
-    process.env['http_proxy'] ??
-    null;
-  const proxyUrl = (opts.proxyOverride && opts.proxyOverride.trim()) || envProxy || '';
+  const proxyUrl = effectiveProxyUrl(opts.proxyOverride);
 
   const key = proxyUrl || '<direct>';
   if (key === lastProxyKey) return;
@@ -147,6 +134,42 @@ export function initHttpClient(opts: { proxyOverride?: string; onDnsEvent?: DnsR
   });
 
   setGlobalDispatcher(agent);
+}
+
+/**
+ * The proxy URL a crawl config asks for: the active saved profile, else the
+ * Proxy URL field (Settings → Network). Empty = none configured, in which
+ * case {@link effectiveProxyUrl} falls back to the environment.
+ */
+export function configuredProxyUrl(config: {
+  proxyUrl?: string;
+  proxyProfiles?: readonly { name: string; url: string }[];
+  proxyProfileActive?: string;
+}): string {
+  const active = (config.proxyProfileActive ?? '').trim();
+  if (active) {
+    const hit = (config.proxyProfiles ?? []).find((p) => p.name === active);
+    if (hit && hit.url.trim()) return hit.url.trim();
+  }
+  return config.proxyUrl ?? '';
+}
+
+/**
+ * The proxy crawl traffic actually goes through: a non-empty override (the
+ * configured proxy) wins, else the HTTPS_PROXY / HTTP_PROXY env vars — the
+ * universal contract, matching curl / git / npm / pip. '' = direct.
+ */
+export function effectiveProxyUrl(override?: string): string {
+  // ECMAScript forbids mixing `||` with `??` in the same expression
+  // without parentheses (SyntaxError on parse). The `??` chain must be
+  // grouped, then OR'd with the override.
+  const envProxy =
+    process.env['HTTPS_PROXY'] ??
+    process.env['https_proxy'] ??
+    process.env['HTTP_PROXY'] ??
+    process.env['http_proxy'] ??
+    null;
+  return (override && override.trim()) || envProxy || '';
 }
 
 /**

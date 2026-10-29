@@ -19,7 +19,11 @@
  */
 
 import type { LaunchOptions } from 'playwright';
-import { PlaywrightBrowserMissingError, resolveChromiumBinaries } from './browser-pool.js';
+import {
+  PlaywrightBrowserMissingError,
+  resolveChromiumBinaries,
+  toBrowserProxy,
+} from './browser-pool.js';
 
 export interface BrowserLoginInput {
   loginUrl: string;
@@ -46,6 +50,8 @@ export interface BrowserLoginOptions {
   viewport?: { width: number; height: number };
   /** Per-step timeout (navigation, selector waits), ms. Default 30000. */
   timeoutMs?: number;
+  /** The crawl's effective proxy URL (see {@link toBrowserProxy}). */
+  proxyUrl?: string;
 }
 
 /** A single captured cookie — shape compatible with Playwright's
@@ -96,6 +102,7 @@ export async function runBrowserLogin(
   }
   if (opts.channel) launchOpts.channel = opts.channel;
   if (opts.executablePath) launchOpts.executablePath = opts.executablePath;
+  if (opts.proxyUrl) launchOpts.proxy = toBrowserProxy(opts.proxyUrl);
 
   const timeout = Math.max(5000, opts.timeoutMs ?? 30_000);
   // Lazy import — see the note in browser-pool.ts: a module-scope

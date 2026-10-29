@@ -52,6 +52,8 @@ import {
   type DigestChallenge,
   formatFetchError,
   initHttpClient,
+  configuredProxyUrl,
+  effectiveProxyUrl,
   directModeLookup,
   MOBILE_USER_AGENT,
   parseDigestChallenge,
@@ -283,6 +285,38 @@ export function detectBotProtection(
   if (status === 403 && headers.get('x-datadome')) return `DataDome block (HTTP ${status})`;
   if (status === 429) return `Rate limited (HTTP ${status})`;
   return null;
+}
+
+/** Titles of bot-challenge interstitials, matched on the whole title. */
+const CHALLENGE_TITLES = [
+  /^one moment, please\.{0,3}$/i,
+  /^just a moment\.{0,3}$/i,
+  /^attention required! \| cloudflare$/i,
+  /^checking your browser\b/i,
+  /^ddos-guard$/i,
+  /^vercel security checkpoint$/i,
+];
+
+/** Above this many words a page is content, whatever its title says. */
+const CHALLENGE_MAX_WORDS = 60;
+
+/**
+ * A bot challenge served with 2xx and no marking header, which
+ * {@link detectBotProtection} cannot see: some servers' bot protection
+ * answers every request with a "One moment, please..." page and HTTP 200.
+ * Recognised by an interstitial's title on a page with next to no text, so
+ * a real page that happens to share the title still counts as a page.
+ * Taken for content, one crawl of thinpo.com reported 521 indexable pages
+ * titled "One moment, please..." and found none of the site's links.
+ */
+export function detectChallengePage(
+  status: number,
+  title: string | null,
+  wordCount: number,
+): string | null {
+  if (status < 200 || status >= 300 || !title || wordCount > CHALLENGE_MAX_WORDS) return null;
+  const t = title.replace(/\s+/g, ' ').trim();
+  return CHALLENGE_TITLES.some((re) => re.test(t)) ? `challenge page "${t}" (HTTP ${status})` : null;
 }
 
 /** Back-compat convenience wrapper. */
@@ -848,14 +882,7 @@ export class Crawler extends EventEmitter {
     // and present in `proxyProfiles`, its URL wins over the legacy
     // `proxyUrl` field; if the named profile doesn't resolve we fall
     // back to `proxyUrl`, then to env vars (handled inside initHttpClient).
-    const resolvedProxy = (() => {
-      const active = (config.proxyProfileActive ?? '').trim();
-      if (active) {
-        const hit = (config.proxyProfiles ?? []).find((p) => p.name === active);
-        if (hit && hit.url.trim()) return hit.url.trim();
-      }
-      return config.proxyUrl ?? '';
-    })();
+    const resolvedProxy = configuredProxyUrl(config);
     this.resolvedProxy = resolvedProxy;
     initHttpClient({ proxyOverride: resolvedProxy });
     this.config = config;
@@ -1032,11 +1059,13 @@ export class Crawler extends EventEmitter {
   private calendarTraps = new Set<string>();
   private calendarTrapDropped = 0;
   /**
-   * URLs whose latest answer came from bot protection / a rate limit (see
-   * `detectBotProtection`). Kept per URL so the end-of-crawl retry neither
-   * counts a URL as failed twice nor leaves it failed once it got through.
+   * URLs counted as failed that stay pending for the end-of-crawl retry:
+   * answered by bot protection / a rate limit (see `detectBotProtection`) or
+   * by no response at all. Kept per URL so the retry neither counts a URL
+   * as failed twice nor leaves it failed once it got through — a crawl
+   * whose ten timed-out images all came back 200 still showed "Failed 10".
    */
-  private botBlockedUrls = new Set<string>();
+  private pendingFailedUrls = new Set<string>();
 
   private isCalendarTrapped(url: string): boolean {
     if (this.calendarTraps.size === 0) return false;
@@ -2093,12 +2122,12 @@ export class Crawler extends EventEmitter {
     if (this.config.respectRobotsTxt && !this.robotsAllows(probeUrl)) return;
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
+    const timer = abortAfter(controller, this.config.requestTimeoutMs);
     let verdict: { status: number; finalUrl: string | null } | null = null;
     try {
       let url = probeUrl;
       for (let hop = 0; hop <= 5; hop++) {
-        const res = await this.fetchWithRetry(url, controller.signal);
+        const res = await this.fetchWithRetry(url, controller.signal, timer);
         const status = res.status;
         if (status >= 300 && status < 400) {
           const location = res.headers.get('location');
@@ -2130,13 +2159,15 @@ export class Crawler extends EventEmitter {
         if (read.overCap) break;
         const page = parseHtml(new TextDecoder().decode(read.bytes), url);
         if (page.hasNoindex || page.jsNoindexWrite || page.metaRefresh || page.jsRedirectUrl) break;
+        // A bot challenge answers every path alike — says nothing about 404s.
+        if (detectChallengePage(status, page.title, page.wordCount)) break;
         verdict = { status, finalUrl: url === probeUrl ? null : url };
         break;
       }
     } catch {
       /* inconclusive — timeouts and network errors say nothing about 404 handling */
     } finally {
-      clearTimeout(timer);
+      timer.clear();
     }
     if (!verdict) return;
     this.emit(
@@ -3874,14 +3905,17 @@ export class Crawler extends EventEmitter {
    * synchronous (no await between), so concurrent workers get distinct,
    * evenly-spaced slots. `maxRps <= 0` disables the gate (unlimited).
    */
-  private async acquireRateSlot(): Promise<void> {
+  private async acquireRateSlot(signal?: AbortSignal): Promise<void> {
+    // A retry passes its request's signal so Stop / Pause end the wait.
+    const wait = (ms: number): Promise<void> =>
+      signal ? sleepUnlessAborted(ms, signal) : sleep(ms);
     // Adaptive speed (opt-in): honour a hard cooldown set by a 429/503 or a
     // `Retry-After` header before this dispatch even reserves a slot. The
     // cooldown is a *global* pause — every worker waits it out — which is
     // exactly how a server's rate-limit window works.
     if (this.config.adaptiveSpeed && this.adaptiveCooldownUntil > 0) {
       const waitCooldown = this.adaptiveCooldownUntil - Date.now();
-      if (waitCooldown > 0 && !this.stopped) await sleep(waitCooldown);
+      if (waitCooldown > 0 && !this.stopped) await wait(waitCooldown);
     }
     // A robots.txt `Crawl-delay` means "one request every N seconds to this
     // origin" — a *global* spacing, not a per-worker one. Applying it as a
@@ -3906,7 +3940,7 @@ export class Crawler extends EventEmitter {
     const scheduled = Math.max(now, this.nextDispatchAt);
     this.nextDispatchAt = scheduled + minInterval;
     const waitMs = scheduled - now;
-    if (waitMs > 0 && !this.stopped) await sleep(waitMs);
+    if (waitMs > 0 && !this.stopped) await wait(waitMs);
   }
 
   // ==================================================================
@@ -3922,7 +3956,8 @@ export class Crawler extends EventEmitter {
   // and branch here is dead unless the opt-in is set.
   // ==================================================================
 
-  /** Current fraction (0.1–1) of the configured rate/concurrency in effect. */
+  /** Current fraction (down to {@link adaptiveMinScale}, up to 1) of the
+   *  configured rate/concurrency in effect. */
   private adaptiveRateScale = 1;
   /** Dispatch is paused until this epoch-ms (Retry-After / 429 breather). */
   private adaptiveCooldownUntil = 0;
@@ -3930,9 +3965,19 @@ export class Crawler extends EventEmitter {
   private adaptiveCleanStreak = 0;
   /** Last time the rate was cut — dedups a burst of 429s into one step. */
   private lastAdaptiveCutTs = 0;
-  private static readonly ADAPTIVE_MIN_SCALE = 0.1;
+  /**
+   * Slowest the controller goes: one request every 10 s. The floor used to
+   * be a tenth of the configured rate, which at 10 RPS is still 1 URL/s —
+   * fast enough to keep tripping a Cloudflare rule that allows about five
+   * requests per window, so the crawl stalled in back-to-back penalties
+   * (thinpo.com). An absolute floor lets it find the rate the site allows.
+   */
+  private static readonly ADAPTIVE_MIN_RPS = 0.1;
   private static readonly ADAPTIVE_CUT_COOLDOWN_MS = 1_000;
   private static readonly ADAPTIVE_RECOVERY_STREAK = 25;
+  /** Recovery multiplies the scale by this — an additive step (it was +0.1)
+   *  jumps a rate near the floor 5–10× at once and re-trips the limit. */
+  private static readonly ADAPTIVE_RECOVERY_FACTOR = 1.25;
   private static readonly ADAPTIVE_MAX_COOLDOWN_MS = 120_000;
 
   /** Base rate the scale is applied to, for user-facing rate messages. */
@@ -3940,12 +3985,51 @@ export class Crawler extends EventEmitter {
     return this.config.maxRps > 0 ? this.config.maxRps : Math.max(1, this.config.maxConcurrency);
   }
 
+  /** Scale at which the adaptive rate reaches {@link ADAPTIVE_MIN_RPS}. */
+  private adaptiveMinScale(): number {
+    return Math.min(1, Crawler.ADAPTIVE_MIN_RPS / this.adaptiveBaseRps());
+  }
+
+  /** When each URL last drew a 429/503 — see {@link isUrlOwnLimit}. */
+  private rateLimitedAt = new Map<string, number>();
+  /** URLs shown to have a limit of their own; it holds for the crawl. */
+  private ownLimitUrls = new Set<string>();
+  /** Per host, the send time of the latest request that came back clean. */
+  private lastCleanSentAt = new Map<string, number>();
+
+  /**
+   * A 429/503 is this URL's own limit — a form page, a per-path rule, a
+   * user-agent block on one route — when a request to the same host sent
+   * after this URL's previous 429 came back clean: a site-wide limit would
+   * have stopped that one too. Such a URL backs off alone. Treating it as
+   * site-wide paused the whole crawl for two minutes per retry while every
+   * other page answered 200 (thinpo.com's `/ekibe-dahil-ol/`). Records this
+   * 429 for the next decision; the first one per URL can't tell, so it
+   * still counts as site-wide. Once shown, it sticks for the crawl: its
+   * last retries and the end-of-crawl drain often run when no other page is
+   * being fetched to show it again.
+   */
+  private isUrlOwnLimit(url: string, sentAt: number): boolean {
+    if (this.ownLimitUrls.has(url)) return true;
+    const prev = this.rateLimitedAt.get(url);
+    this.rateLimitedAt.set(url, sentAt);
+    if (prev === undefined || (this.lastCleanSentAt.get(hostOf(url)) ?? 0) <= prev) return false;
+    this.ownLimitUrls.add(url);
+    return true;
+  }
+
   /**
    * React to a rate-limit signal (HTTP 429/503, optionally with a
    * `Retry-After`). Sets the cooldown pause and, at most once per
    * {@link ADAPTIVE_CUT_COOLDOWN_MS}, halves the effective rate + concurrency.
+   *
+   * `sentAt` is when the limited request went out. One sent before the last
+   * cut was paced by the old rate, so it says nothing about the new one:
+   * it still honours the cooldown but does not cut again. Without this the
+   * requests already in flight at the first 429 halved the rate once each,
+   * driving it far below what the server allows.
    */
-  private noteRateLimited(retryAfterMs: number | null): void {
+  private noteRateLimited(retryAfterMs: number | null, sentAt?: number): void {
     if (!this.config.adaptiveSpeed || !this.running) return;
     const now = Date.now();
     const cooldown =
@@ -3954,10 +4038,11 @@ export class Crawler extends EventEmitter {
         : 2_000;
     this.adaptiveCooldownUntil = Math.max(this.adaptiveCooldownUntil, now + cooldown);
     this.adaptiveCleanStreak = 0;
+    if (sentAt !== undefined && sentAt < this.lastAdaptiveCutTs) return;
     if (now - this.lastAdaptiveCutTs < Crawler.ADAPTIVE_CUT_COOLDOWN_MS) return;
     this.lastAdaptiveCutTs = now;
     const prev = this.adaptiveRateScale;
-    this.adaptiveRateScale = Math.max(Crawler.ADAPTIVE_MIN_SCALE, this.adaptiveRateScale * 0.5);
+    this.adaptiveRateScale = Math.max(this.adaptiveMinScale(), this.adaptiveRateScale * 0.5);
     // Concurrency is trimmed through the shared throttle map (composes with
     // thermal / multi-session sources via minimum), so this never fights the
     // OS-pressure throttle.
@@ -3979,13 +4064,15 @@ export class Crawler extends EventEmitter {
    * consecutive non-limited responses past the cooldown window, nudge the
    * rate + concurrency one step back toward the configured ceiling.
    */
-  private noteCleanResponse(): void {
+  private noteCleanResponse(url: string, sentAt: number): void {
     if (!this.config.adaptiveSpeed || !this.running) return;
+    const host = hostOf(url);
+    this.lastCleanSentAt.set(host, Math.max(this.lastCleanSentAt.get(host) ?? 0, sentAt));
     if (this.adaptiveRateScale >= 1) return;
     if (Date.now() < this.adaptiveCooldownUntil) return;
     if (++this.adaptiveCleanStreak < Crawler.ADAPTIVE_RECOVERY_STREAK) return;
     this.adaptiveCleanStreak = 0;
-    this.adaptiveRateScale = Math.min(1, this.adaptiveRateScale + 0.1);
+    this.adaptiveRateScale = Math.min(1, this.adaptiveRateScale * Crawler.ADAPTIVE_RECOVERY_FACTOR);
     this.setThrottleScale(this.adaptiveRateScale, 'adaptive');
     // setThrottleScale raises the ceiling but never grows the live worker
     // count on its own; step it up by one so recovery is visible even when
@@ -4049,14 +4136,14 @@ export class Crawler extends EventEmitter {
     // are bounded by ~concurrency / maxRps, so Stop stays responsive.
     await this.acquireRateSlot();
     if (this.stopped) return;
-    // A retry of a URL bot protection blocked earlier: it is failed again
-    // only if it is blocked again.
-    if (this.botBlockedUrls.delete(item.url)) this.failed--;
+    // A retry of a URL that failed earlier (blocked, or no response): it is
+    // failed again only if it fails again.
+    if (this.pendingFailedUrls.delete(item.url)) this.failed--;
 
     const t0 = Date.now();
     const controller = new AbortController();
     this.inFlightFetchControllers.add(controller);
-    const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
+    const timeout = abortAfter(controller, this.config.requestTimeoutMs);
     // Wave 3 — Optional max-response-time hard cap. Distinct from
     // `requestTimeoutMs` (which is the connect+headers timeout): this
     // is an upper bound on the *total* request lifetime including body
@@ -4064,11 +4151,23 @@ export class Crawler extends EventEmitter {
     // lowering the overall fetch timeout.
     const respTimeTimer =
       this.config.maxResponseTimeMs > 0
-        ? setTimeout(
-            () => controller.abort(),
-            this.config.maxResponseTimeMs,
-          )
+        ? abortAfter(controller, this.config.maxResponseTimeMs)
         : null;
+    // Both clocks measure one attempt; a retry's backoff runs off the clock.
+    // So does the recorded response time: it is the answering attempt's,
+    // not minutes of Retry-After waiting before it.
+    let attemptStart = t0;
+    const deadline: RequestDeadline = {
+      pause: () => {
+        timeout.pause();
+        respTimeTimer?.pause();
+      },
+      restart: () => {
+        attemptStart = Date.now();
+        timeout.restart();
+        respTimeTimer?.restart();
+      },
+    };
 
     try {
       // Manual redirect handling — each hop becomes its own row so the
@@ -4079,9 +4178,9 @@ export class Crawler extends EventEmitter {
       // timeout, outside this request's AbortController, and is awaited
       // only at write time, after the body is read.
       const alpnProbe = item.url.startsWith('https:') ? this.negotiatedProtocol(item.url) : null;
-      const res = await this.fetchWithRetry(item.url, controller.signal);
+      const res = await this.fetchWithRetry(item.url, controller.signal, deadline);
 
-      const responseTimeMs = Date.now() - t0;
+      const responseTimeMs = Date.now() - attemptStart;
       this.totalResponseTimeMs += responseTimeMs;
 
       // Wave 3 — Optional max file size filter. When the response's
@@ -4144,7 +4243,9 @@ export class Crawler extends EventEmitter {
             statusCode === 403
               ? 'bot/WAF block (try a browser-like User-Agent in Settings)'
               : statusCode === 429
-                ? 'rate limited (lower max RPS / concurrency in Settings)'
+                ? res.ownRateLimit
+                  ? 'limited on this URL only (other pages answer normally; check its User-Agent or per-path rules)'
+                  : 'rate limited (lower max RPS / concurrency in Settings)'
                 : statusCode === 451
                   ? 'legal block / geofence'
                   : statusCode >= 500
@@ -4158,9 +4259,12 @@ export class Crawler extends EventEmitter {
       // counts toward recovering it. No-op unless the opt-in is set.
       if (this.config.adaptiveSpeed) {
         if (statusCode === 429 || statusCode === 503) {
-          this.noteRateLimited(parseRetryAfterMs(res.headers.get('retry-after')));
+          // A limit on this URL alone leaves the crawl's pace untouched.
+          if (!res.ownRateLimit) {
+            this.noteRateLimited(parseRetryAfterMs(res.headers.get('retry-after')), attemptStart);
+          }
         } else if (statusCode < 400) {
-          this.noteCleanResponse();
+          this.noteCleanResponse(item.url, attemptStart);
         }
       }
       // Bot protection answered instead of the page. Recorded as "not
@@ -4176,10 +4280,10 @@ export class Crawler extends EventEmitter {
           /* ignore */
         }
         if (this.config.adaptiveSpeed && statusCode !== 429 && statusCode !== 503) {
-          this.noteRateLimited(null);
+          this.noteRateLimited(null, attemptStart);
         }
         this.failed++;
-        this.botBlockedUrls.add(item.url);
+        this.pendingFailedUrls.add(item.url);
         await this.dbCall<number>('upsertUrl', [
           {
             url: item.url,
@@ -4658,6 +4762,33 @@ export class Crawler extends EventEmitter {
         customExtractionRules: this.config.customExtractionRules,
         contentAreaSelector: this.config.contentAreaSelector,
       });
+
+      // A bot challenge served with 200: recorded as blocked like the
+      // header-marked ones above, not as an indexable page whose links
+      // never existed. Checked on what was parsed, so a JS render that got
+      // past the interstitial counts as the page. It stays pending, so the
+      // end-of-crawl drain asks for it once more.
+      const challenge = detectChallengePage(statusCode, parsed.title, parsed.wordCount);
+      if (challenge) {
+        if (this.config.adaptiveSpeed) this.noteRateLimited(null, attemptStart);
+        this.failed++;
+        this.pendingFailedUrls.add(item.url);
+        await this.dbCall<number>('upsertUrl', [
+          {
+            url: item.url,
+            urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
+            urlTrap: this.trapKind(item.url),
+            contentKind: detectContentKind(item.url, null),
+            statusCode: null,
+            statusText: challenge,
+            indexability: 'unknown:bot-blocked',
+            indexabilityReason: `Blocked by bot protection — ${challenge}`,
+            responseTimeMs,
+            depth: item.depth,
+          },
+        ]);
+        return;
+      }
 
       // Charset resolution — prefer the document's own declaration (HTML5
       // `<meta charset>` or legacy `<meta http-equiv>`); fall back to the
@@ -5228,9 +5359,12 @@ export class Crawler extends EventEmitter {
           .catch(() => undefined);
         return;
       }
+      // The row below is written with no status, so the end-of-crawl drain
+      // fetches it again; tracked so a recovery takes it off the count.
       this.failed++;
+      this.pendingFailedUrls.add(item.url);
       const detail = formatFetchError(err);
-      const elapsed = Date.now() - t0;
+      const elapsed = Date.now() - attemptStart;
       // Distinguish the seed URL (depth 0 means the user's start URL or a
       // top-level list entry) — its failure is much higher-signal because
       // the crawl can't make any progress without it.
@@ -5257,8 +5391,8 @@ export class Crawler extends EventEmitter {
       ]);
     } finally {
       this.inFlightFetchControllers.delete(controller);
-      clearTimeout(timeout);
-      if (respTimeTimer) clearTimeout(respTimeTimer);
+      timeout.clear();
+      respTimeTimer?.clear();
       // Politeness delay — applied per worker *after* each request so a
       // higher concurrency still honours a "one request every N ms per slot"
       // contract on top of the global RPS cap. This is the user's own
@@ -5550,6 +5684,10 @@ export class Crawler extends EventEmitter {
             ? { width: jr.viewportWidth, height: jr.viewportHeight }
             : undefined,
           timeoutMs: Math.max(5000, this.config.requestTimeoutMs),
+          // Log in through the crawl's proxy too: the login must not leave
+          // from the user's own IP, and some sites tie a session to the
+          // address it was created from.
+          proxyUrl: effectiveProxyUrl(this.resolvedProxy) || undefined,
         },
       );
       const jar = new SessionCookieJar();
@@ -5577,13 +5715,28 @@ export class Crawler extends EventEmitter {
   private async fetchWithRetry(
     url: string,
     signal: AbortSignal,
-  ): Promise<Response & { ttfbMs: number }> {
+    deadline?: RequestDeadline,
+  ): Promise<FetchedResponse> {
     const maxAttempts = Math.max(0, this.config.retryAttempts) + 1;
     const baseDelay = Math.max(0, this.config.retryInitialDelayMs);
     let lastError: unknown = null;
+    // Backoff waits stop the request clock and end early on Stop / Pause.
+    const backOff = async (ms: number): Promise<void> => {
+      deadline?.pause();
+      await sleepUnlessAborted(ms, signal);
+    };
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (this.stopped) throw lastError ?? new Error('crawler stopped');
+      if (attempt > 0) {
+        // A retry is a request like any other: it waits out the global
+        // rate-limit cooldown and takes a dispatch slot. Retries that backed
+        // off together used to fire in one burst the moment the wait ended,
+        // re-tripping the limit they were waiting out.
+        await this.acquireRateSlot(signal);
+        if (this.stopped) throw lastError ?? new Error('crawler stopped');
+        deadline?.restart();
+      }
       try {
         // TTFB is the time between request dispatch and headers received.
         // `await undiciFetch(...)` resolves once the response status line +
@@ -5650,12 +5803,22 @@ export class Crawler extends EventEmitter {
         // Keep the login session alive — capture any rotated session cookies.
         this.refreshSessionJar(url, res);
         const ttfbMs = Date.now() - tStart;
+        const rateLimited =
+          this.config.adaptiveSpeed && (res.status === 429 || res.status === 503);
+        const ownLimit = rateLimited && this.isUrlOwnLimit(url, tStart);
+        const retryAfterMs = rateLimited ? parseRetryAfterMs(res.headers.get('retry-after')) : null;
+        // This URL alone is limited and the server wants longer than a retry
+        // would wait: asking sooner only draws another 429. It stays pending,
+        // so the end-of-crawl drain asks once more.
+        const giveUp = ownLimit && (retryAfterMs ?? 0) > Crawler.ADAPTIVE_MAX_COOLDOWN_MS;
         // Final attempt or non-retryable status — return as-is. We attach
         // ttfbMs as a non-enumerable property so the existing call sites
         // can read it without breaking the Response shape elsewhere.
-        if (attempt === maxAttempts - 1 || !isRetryableStatus(res.status)) {
-          (res as unknown as { ttfbMs: number }).ttfbMs = ttfbMs;
-          return res as unknown as Response & { ttfbMs: number };
+        if (attempt === maxAttempts - 1 || !isRetryableStatus(res.status) || giveUp) {
+          const out = res as unknown as FetchedResponse;
+          out.ttfbMs = ttfbMs;
+          out.ownRateLimit = ownLimit;
+          return out;
         }
         // Drain body so the connection can be reused, then back off.
         try {
@@ -5668,22 +5831,22 @@ export class Crawler extends EventEmitter {
         // *global* dispatch rate widens for every worker, and its
         // `Retry-After` drives this URL's own backoff instead of the fixed
         // exponential curve — retrying faster than the server allows is what
-        // deepens a Cloudflare penalty window.
-        let adaptiveRetryMs: number | null = null;
-        if (this.config.adaptiveSpeed && (res.status === 429 || res.status === 503)) {
-          adaptiveRetryMs = parseRetryAfterMs(res.headers.get('retry-after'));
-          this.noteRateLimited(adaptiveRetryMs);
-        }
+        // deepens a Cloudflare penalty window. A limit on this URL alone
+        // only drives its own backoff.
+        const adaptiveRetryMs = retryAfterMs;
+        if (rateLimited && !ownLimit) this.noteRateLimited(adaptiveRetryMs, tStart);
         this.emit(
           'warn',
-          `Retry ${attempt + 1}/${maxAttempts - 1} for ${url}: HTTP ${res.status} after ${ttfbMs}ms`,
+          `Retry ${attempt + 1}/${maxAttempts - 1} for ${url}: HTTP ${res.status} after ${ttfbMs}ms${
+            ownLimit ? ' (this URL only — the crawl keeps its pace)' : ''
+          }`,
         );
         if (adaptiveRetryMs !== null) {
           const wait = Math.min(
             Math.max(adaptiveRetryMs, baseDelay * 2 ** attempt),
             Crawler.ADAPTIVE_MAX_COOLDOWN_MS,
           );
-          if (!this.stopped) await sleep(wait);
+          if (!this.stopped) await backOff(wait);
           continue;
         }
       } catch (err) {
@@ -5711,7 +5874,7 @@ export class Crawler extends EventEmitter {
         );
       }
       const delay = baseDelay * 2 ** attempt;
-      await sleep(delay);
+      await backOff(delay);
     }
     // Unreachable — the loop above always returns or throws — but TS wants it.
     throw lastError ?? new Error('retry loop exhausted');
@@ -5909,6 +6072,63 @@ export class Crawler extends EventEmitter {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A response from `fetchWithRetry`, with what the retry loop learned. */
+type FetchedResponse = Response & {
+  /** Time to headers of the answering attempt. */
+  ttfbMs: number;
+  /** A 429/503 limiting this URL alone — see `Crawler.isUrlOwnLimit`. */
+  ownRateLimit: boolean;
+};
+
+/** Lower-cased host of a URL, or '' when it does not parse. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * A per-request timeout that a retry stops while it backs off and restarts
+ * for its next attempt. The backoff — a `Retry-After` can ask for two
+ * minutes — is not time spent on the request; counted against the timeout,
+ * it aborted the controller mid-wait and the retry failed unsent.
+ */
+interface RequestDeadline {
+  pause(): void;
+  restart(): void;
+}
+
+/** Abort `controller` once `ms` pass; see {@link RequestDeadline}. */
+function abortAfter(controller: AbortController, ms: number): RequestDeadline & { clear(): void } {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const clear = (): void => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  const restart = (): void => {
+    clear();
+    timer = setTimeout(() => controller.abort(), ms);
+  };
+  restart();
+  return { pause: clear, restart, clear };
+}
+
+/** Sleep that ends early when `signal` aborts, so Stop / Pause cut a backoff short. */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }
 
 /**

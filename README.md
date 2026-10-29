@@ -34,6 +34,20 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 ---
 
+## 💎 Sponsor
+
+<div align="center">
+
+<a href="https://proxy-seller.com/?partner=OZRC99N33QJEWQ"><img src="docs/sponsors/proxy-seller.png" alt="Proxy-Seller: 220+ GEOs, residential, ISP, IPv4 and IPv6 proxies" width="600" /></a>
+
+</div>
+
+**[Proxy-Seller](https://proxy-seller.com/?partner=OZRC99N33QJEWQ)** gives you reliable proxy infrastructure for any workflow: private residential, mobile (4G/5G/LTE), ISP, and datacenter IPv4/IPv6 proxies, all with HTTP(S) and SOCKS5 support. Tap into 47M+ residential IPs across 220+ locations, target exactly the country, city, or ISP you need, and count on 99.7% uptime backed by 24/7 support. FreeCrawl users get **15% off** with promo code **`FREECRAWL`**.
+
+<br />
+
+---
+
 ## ✨ What FreeCrawl Does
 
 FreeCrawl crawls your website and checks it for SEO problems. It is a free desktop alternative to Screaming Frog that handles very large sites (**1M+ URLs on one machine**) and streams the results into a fast, dense table while the crawl is still running.

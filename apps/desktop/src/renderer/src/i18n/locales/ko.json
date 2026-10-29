@@ -2330,5 +2330,20 @@
     "upgradingTitle": "이 버전에 맞게 프로젝트 업데이트 중",
     "upgradingNote": "이전 버전으로 저장한 프로젝트에서 한 번만 진행됩니다. 완료되면 바로 프로젝트가 열립니다.",
     "step": "{{steps}}단계 중 {{step}}단계"
+  },
+  "sponsor": {
+    "needProxy": "프록시가 필요하신가요?",
+    "sponsored": "스폰서",
+    "proxySellerTagline": "HTTP(S)와 SOCKS5를 지원하는 주거용, 모바일, ISP, 데이터센터 프록시.",
+    "promo": "코드 {{code}}로 {{discount}}% 할인",
+    "copyCode": "코드 복사",
+    "copied": "복사됨",
+    "visit": "{{name}} 방문",
+    "setupTitle": "설정 방법",
+    "setupOrder": "프록시를 주문하세요. 주문 이메일과 Proxy-Seller 대시보드에 IP, 로그인, 비밀번호, HTTP 및 SOCKS5 포트가 나와 있습니다.",
+    "setupPaste": "아래 프록시 URL 필드에 다음 형식 중 하나로 입력하세요:",
+    "setupResidential": "주거용 프록시는 먼저 대시보드에서 목록(국가, 로테이션)을 만들고 목록에 표시되는 연결 정보를 사용하세요.",
+    "setupJsRender": "JavaScript 렌더링을 켠 경우 HTTP 형식을 사용하세요. 브라우저는 비밀번호가 필요한 SOCKS5 프록시를 사용할 수 없습니다.",
+    "hide": "숨기기"
   }
 }

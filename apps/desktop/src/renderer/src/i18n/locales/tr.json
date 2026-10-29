@@ -2375,5 +2375,20 @@
     "upgradingTitle": "Proje bu sürüme güncelleniyor",
     "upgradingNote": "Bu işlem, önceki bir sürümle kaydedilmiş projelerde yalnızca bir kez yapılır. Biter bitmez proje açılır.",
     "step": "Adım {{step}}/{{steps}}"
+  },
+  "sponsor": {
+    "needProxy": "Proxy mi lazım?",
+    "sponsored": "Sponsorlu",
+    "proxySellerTagline": "HTTP(S) ve SOCKS5 destekli residential, mobil, ISP ve datacenter proxy'ler.",
+    "promo": "{{code}} koduyla %{{discount}} indirim",
+    "copyCode": "Kodu kopyala",
+    "copied": "Kopyalandı",
+    "visit": "{{name}} sitesine git",
+    "setupTitle": "Nasıl kurulur?",
+    "setupOrder": "Bir proxy sipariş edin. Sipariş e-postasında ve Proxy-Seller panelinizde IP, kullanıcı adı, şifre ve HTTP ile SOCKS5 portları yer alır.",
+    "setupPaste": "Bunu aşağıdaki Proxy URL alanına şu biçimlerden biriyle girin:",
+    "setupResidential": "Residential proxy'lerde önce panelde bir liste oluşturun (ülke, IP değişimi) ve listenin gösterdiği bağlantı bilgilerini kullanın.",
+    "setupJsRender": "JavaScript Render açıkken HTTP biçimini kullanın: tarayıcı, şifre isteyen bir SOCKS5 proxy'yi kullanamaz.",
+    "hide": "Gizle"
   }
 }
