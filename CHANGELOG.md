@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.3] — 2026-11-01
+
+### Added
+- Bot-protection detection now recognises block, challenge and rate-limit pages from more than 60 WAF and CDN vendors, so they are no longer reported as broken links.
+
+### Changed
+- MCP agents no longer receive saved passwords, tokens or proxy credentials, and leaving them blank in set_crawl_config keeps the stored values.
+- HTTP auth password and token fields are now masked in Settings, and their tooltip no longer claims they are stored as plain text.
+
+### Fixed
+- Security: HTTP authentication and custom headers are now sent only to the site being crawled, never to other hosts, ports, external links or redirect targets (thanks @caerrot).
+- A project saved after its first crawl now reopens with its own crawl settings instead of the defaults.
+- Opening another project now asks to save unsaved crawl results instead of discarding them.
+- The status bar no longer shows 0 discovered URLs once a crawl finishes.
+- A single click on Start now starts the crawl while the recent URLs list is open.
+- Various UI fixes: no stray horizontal scrollbar in Settings, Escape closes the Projects dialog, and recent projects are no longer listed twice.
+
 ## [1.1.2] — 2026-10-29
 
 ### Added
