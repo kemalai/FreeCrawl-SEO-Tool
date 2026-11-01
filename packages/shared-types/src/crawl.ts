@@ -912,10 +912,12 @@ export interface CrawlConfig {
    */
   storeNofollowLinks: boolean;
   /**
-   * Extra headers sent on every request — key/value pairs added on top of
-   * the defaults (User-Agent, Accept-Language, Accept-Encoding). User
-   * values override defaults when keys collide (case-insensitive).
-   * Typical uses: auth tokens, custom routing hints, X-Forwarded-For.
+   * Extra headers — key/value pairs added on top of the defaults
+   * (User-Agent, Accept-Language, Accept-Encoding). User values override
+   * defaults when keys collide (case-insensitive). Typical uses: auth
+   * tokens, custom routing hints, X-Forwarded-For. Like `auth`, sent only
+   * to URLs inside the credential boundary (`createCredentialGate`), never
+   * to external hosts.
    */
   customHeaders: Record<string, string>;
   /**
@@ -1584,6 +1586,9 @@ export interface JsRenderConfig {
   spaRouting: boolean;
 }
 
+/** HTTP authentication for the crawled site. Sent only to URLs inside the
+ *  credential boundary (`createCredentialGate`): the start URL's origin
+ *  (or the listed URLs in List mode), never to external hosts. */
 export interface HttpAuth {
   /**
    *  - `none`   — no Authorization header.

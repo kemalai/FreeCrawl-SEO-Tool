@@ -1,5 +1,8 @@
-import { fetch as undiciFetch } from 'undici';
-import { defaultRequestHeaders } from './http-client.js';
+import {
+  fetchFollowingRedirects,
+  scopedRequestHeaders,
+  type ScopedCredentials,
+} from './http-client.js';
 import type { CrawlConfig } from '@freecrawl/shared-types';
 
 /**
@@ -34,7 +37,7 @@ const PROBE_TIMEOUT_MS = 8_000;
  */
 export async function probeManifest(
   manifestUrl: string,
-  config: Pick<CrawlConfig, 'userAgent' | 'acceptLanguage' | 'customHeaders' | 'auth'>,
+  config: Pick<CrawlConfig, 'userAgent' | 'acceptLanguage'> & ScopedCredentials,
 ): Promise<ManifestProbeResult> {
   const empty: ManifestProbeResult = {
     rawJson: null,
@@ -48,15 +51,10 @@ export async function probeManifest(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
-    const res = await undiciFetch(manifestUrl, {
-      method: 'GET',
-      headers: defaultRequestHeaders(
-        config.userAgent,
-        config.acceptLanguage,
-        config.customHeaders,
-        config.auth,
-      ),
-      redirect: 'follow',
+    // The manifest is often on a CDN or another host entirely — credentials
+    // go only where the crawl's gate allows, re-checked on every redirect.
+    const res = await fetchFollowingRedirects(manifestUrl, {
+      headersFor: (u) => scopedRequestHeaders(u, config.userAgent, config.acceptLanguage, config),
       signal: controller.signal,
     });
     if (!res.ok) {

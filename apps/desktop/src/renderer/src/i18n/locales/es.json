@@ -762,7 +762,7 @@
       "url": "URL del webhook"
     },
     "auth": {
-      "intro": "Autenticación HTTP aplicada en cada petición. Útil para entornos de preproducción detrás de autenticación Basic/Digest, o para API que requieren un token Bearer. Para sitios detrás de un formulario de inicio de sesión HTML, usa en su lugar el inicio de sesión por formulario de más abajo.",
+      "intro": "Autenticación HTTP enviada solo al sitio que se rastrea (el origen de la URL inicial, o las URL de la lista en el modo Lista) — nunca a enlaces externos, CDN u otros hosts. Útil para entornos de preproducción detrás de autenticación Basic/Digest, o para API que requieren un token Bearer. Para sitios detrás de un formulario de inicio de sesión HTML, usa en su lugar el inicio de sesión por formulario de más abajo.",
       "scheme": "Esquema de autenticación",
       "schemeNone": "Ninguno",
       "schemeBasic": "Basic (usuario + contraseña)",

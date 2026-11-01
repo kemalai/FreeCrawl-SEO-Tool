@@ -740,7 +740,7 @@
       "url": "Webhook URL"
     },
     "auth": {
-      "intro": "HTTP authentication applied on every request. Useful for staging environments behind Basic/Digest auth, or APIs that require a Bearer token. For sites behind an HTML login form, use Form Login below instead.",
+      "intro": "HTTP authentication sent only to the site being crawled (the start URL's origin, or the listed URLs in List mode) — never to external links, CDNs or other hosts. Useful for staging environments behind Basic/Digest auth, or APIs that require a Bearer token. For sites behind an HTML login form, use Form Login below instead.",
       "scheme": "Auth scheme",
       "schemeNone": "None",
       "schemeBasic": "Basic (username + password)",

@@ -320,8 +320,8 @@ export const TR_INFO_TIPS: Record<string, string> = {
     "Ağ hatalarında ve 408/425/429/5xx yanıtlarında, vazgeçmeden önce en fazla N kez daha dener. Her deneme URL'in yanıt süresi bütçesine dahil olur.",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'Mobil kullanıcı deneyimini denetlerken veya PageSpeed tarzı mobil önizlemeler alırken açık.',
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "Her satıra bir başlık, 'Anahtar: Değer' biçiminde. Her isteğe eklenir — kimlik doğrulama token'ları veya özel yönlendirme ipuçları için kullanışlıdır. Anahtarlar çakıştığında kullanıcı değerleri varsayılanları geçersiz kılar.",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "Her satıra bir başlık, 'Anahtar: Değer' biçiminde. HTTP kimlik doğrulaması gibi yalnızca taranan siteye gönderilir — dış bağlantılara veya diğer sunuculara asla gönderilmez. Kimlik doğrulama token'ları veya özel yönlendirme ipuçları için kullanışlıdır. Anahtarlar çakıştığında kullanıcı değerleri varsayılanları geçersiz kılar.",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     "Her satıra bir sitemap URL'i. Başlangıç URL'inden bağlantı takibine ek olarak crawler bu sitemap'leri çeker ve listeledikleri her sayfayı ekstra başlangıç noktası olarak kuyruğa alır — daha hızlı ve eksiksiz keşif, ayrıca sitemap standart dışı bir yolda olsa bile güvenilir orphan tespiti. Devre dışı bırakmak için boş bırakın.",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -351,8 +351,8 @@ export const TR_INFO_TIPS: Record<string, string> = {
     'Tarama bittikten sonra dizinlenebilir sayfaların bir örneklemini karşı kullanıcı aracısıyla (tarama masaüstü ise mobil, değilse masaüstü) yeniden çeker ve başlık, H1, meta açıklama, canonical, robots, kelime sayısı ve link sayısını karşılaştırır. Farklar \'Mobil / Masaüstü Uyuşmazlığı\' issue\'sunu ve aynı adlı raporu besler.',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     'Mobil parite sondasının yeniden çektiği sayfa sayısı, en çok link alanlar önce. 0 = dizinlenebilir her HTML sayfa (o küme için tarama trafiğini ikiye katlar).',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "Diğer sunuculara giden bağlantıları sınar (yalnızca HEAD); böylece Kırık Bağlantılar görünümü ölü dış bağlantıları yakalar. Screaming Frog karşılığı: 'External Links' (Configuration → Spider → Crawl).",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "Diğer sunuculara giden bağlantıları ayrıca tam olarak (GET) getirir; durum kodları her koşulda denetlenir, böylece Kırık Bağlantılar görünümü ölü dış bağlantıları yakalar. HTTP kimlik doğrulaması ve özel başlıklar diğer sunuculara asla gönderilmez. Screaming Frog karşılığı: 'External Links' (Configuration → Spider → Crawl).",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     'Ham `Content-Security-Policy` yanıt başlığı. Yoksa boştur.',
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -412,8 +412,8 @@ export const TR_INFO_TIPS: Record<string, string> = {
     "Tam site denetimleri için Spider; bilinen bir sayfa kümesini yeniden kontrol etmek için Liste; sitemap.xml'de yayımlananı birebir denetlemek için Sitemap.",
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     'Standart CSS seçicisi — `document.querySelectorAll` ile aynı sözdizimi.',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    'Yerel tercihler dosyanızda düz metin olarak saklanır. Dosyayı buna göre koruyun.',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    'Kaydedilirken, varsa işletim sisteminizin anahtar zinciriyle şifrelenir ve dışa aktarılan ayarlara dahil edilmez.',
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     'Siteniz /foo (eğik çizgisiz) biçimine kanonikleşiyorsa Kaldır; /foo/ biçimine kanonikleşen siteler için Ekle.',
   ['Sunset over the mountain ridge']: 'Dağ sırtında gün batımı',

@@ -762,7 +762,7 @@
       "url": "URL du webhook"
     },
     "auth": {
-      "intro": "Authentification HTTP appliquée à chaque requête. Utile pour les environnements de préproduction derrière une authentification Basic/Digest, ou les API qui exigent un jeton Bearer. Pour les sites derrière un formulaire de connexion HTML, utilisez plutôt la connexion par formulaire ci-dessous.",
+      "intro": "Authentification HTTP envoyée uniquement au site exploré (l'origine de l'URL de départ, ou les URL listées en mode Liste) — jamais aux liens externes, aux CDN ni à d'autres hôtes. Utile pour les environnements de préproduction derrière une authentification Basic/Digest, ou les API qui exigent un jeton Bearer. Pour les sites derrière un formulaire de connexion HTML, utilisez plutôt la connexion par formulaire ci-dessous.",
       "scheme": "Schéma d'authentification",
       "schemeNone": "Aucun",
       "schemeBasic": "Basic (utilisateur + mot de passe)",

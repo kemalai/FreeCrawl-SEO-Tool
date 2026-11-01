@@ -320,8 +320,8 @@ export const FR_INFO_TIPS: Record<string, string> = {
     "Sur erreurs réseau et réponses 408/425/429/5xx, réessayer jusqu'à N fois supplémentaires avant d'abandonner. Chaque nouvel essai compte dans le budget de temps de réponse de l'URL.",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     "Activé pour auditer l'UX mobile ou capturer des aperçus mobiles façon PageSpeed.",
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "Un en-tête par ligne au format 'Clé: Valeur'. Ajouté à chaque requête — utile pour les jetons d'authentification ou des indications de routage personnalisées. Les valeurs de l'utilisateur remplacent les valeurs par défaut en cas de collision de clés.",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "Un en-tête par ligne au format 'Clé: Valeur'. Envoyé uniquement au site exploré, comme l'authentification HTTP — jamais aux liens externes ni à d'autres hôtes. Utile pour les jetons d'authentification ou des indications de routage personnalisées. Les valeurs de l'utilisateur remplacent les valeurs par défaut en cas de collision de clés.",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     "Une URL de sitemap par ligne. En plus de suivre les liens depuis l'URL de départ, l'explorateur récupère ces sitemaps et met en file chaque page listée comme graine supplémentaire — découverte plus rapide/complète, et détection fiable des orphelines même lorsque le sitemap se trouve à un chemin non standard. Laissez vide pour désactiver.",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -351,8 +351,8 @@ export const FR_INFO_TIPS: Record<string, string> = {
     'Après l\'exploration, recharge un échantillon de pages indexables avec l\'agent utilisateur opposé (mobile si l\'exploration était bureau, et inversement) et compare titre, H1, meta description, canonical, robots, nombre de mots et de liens. Les écarts alimentent le problème « Écart mobile / bureau » et le rapport du même nom.',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     'Nombre de pages que la sonde de parité mobile recharge, les plus liées d\'abord. 0 = toutes les pages HTML indexables (double le trafic de l\'exploration pour cet ensemble).',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "Sonder les liens sortants vers d'autres hôtes (HEAD uniquement) pour que la vue Liens cassés détecte les externes morts. Screaming Frog : 'External Links' (Configuration → Spider → Crawl).",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "Télécharger aussi intégralement (GET) les liens sortants vers d'autres hôtes ; leur statut est vérifié dans tous les cas, pour que la vue Liens cassés détecte les externes morts. L'authentification HTTP et les en-têtes personnalisés ne sont jamais envoyés à d'autres hôtes. Screaming Frog : 'External Links' (Configuration → Spider → Crawl).",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     "En-tête de réponse `Content-Security-Policy` brut. Vide lorsqu'il est absent.",
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -412,8 +412,8 @@ export const FR_INFO_TIPS: Record<string, string> = {
     'Spider pour des audits complets de site ; Liste pour revérifier un ensemble connu de pages ; Sitemap pour auditer exactement ce qui est publié dans sitemap.xml.',
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     'Sélecteur CSS standard — même syntaxe que `document.querySelectorAll`.',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    'Stocké dans votre fichier de préférences local en texte clair. Traitez le fichier en conséquence.',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    "Chiffré avec le trousseau de votre système d'exploitation lorsqu'il est disponible, et exclu des paramètres exportés.",
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     'Retirer si votre site canonise /foo (sans barre) ; Ajouter pour les sites qui canonisent /foo/.',
   ['Sunset over the mountain ridge']: 'Coucher de soleil sur la crête de la montagne',

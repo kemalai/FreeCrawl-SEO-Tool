@@ -317,8 +317,8 @@ export const HI_INFO_TIPS: Record<string, string> = {
     'नेटवर्क त्रुटियों और 408/425/429/5xx प्रतिक्रियाओं पर हार मानने से पहले N बार और पुनः प्रयास करें। हर पुनः प्रयास URL के प्रतिक्रिया समय बजट में गिना जाता है।',
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'मोबाइल UX ऑडिट या PageSpeed-शैली मोबाइल पूर्वावलोकन कैप्चर करते समय चालू।',
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "'Key: Value' प्रारूप में प्रति पंक्ति एक हेडर। हर अनुरोध में जोड़ा जाता है — प्रमाणीकरण टोकन या कस्टम रूटिंग संकेतों के लिए उपयोगी। कुंजियाँ टकराने पर उपयोगकर्ता मान डिफ़ॉल्ट को ओवरराइड करते हैं।",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "'Key: Value' प्रारूप में प्रति पंक्ति एक हेडर। HTTP प्रमाणीकरण की तरह केवल क्रॉल की जा रही साइट को भेजा जाता है — बाहरी लिंक या अन्य होस्ट को कभी नहीं। प्रमाणीकरण टोकन या कस्टम रूटिंग संकेतों के लिए उपयोगी। कुंजियाँ टकराने पर उपयोगकर्ता मान डिफ़ॉल्ट को ओवरराइड करते हैं।",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     'प्रति पंक्ति एक साइटमैप URL। शुरुआती URL से लिंक फ़ॉलो करने के अलावा क्रॉलर ये साइटमैप फ़ेच करता है और उनमें सूचीबद्ध हर पेज को अतिरिक्त सीड के रूप में कतार में डालता है — तेज़/अधिक पूर्ण खोज, और साइटमैप गैर-मानक पथ पर हो तब भी विश्वसनीय अनाथ पहचान। बंद करने के लिए खाली छोड़ें।',
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -348,8 +348,8 @@ export const HI_INFO_TIPS: Record<string, string> = {
     'क्रॉल के बाद अनुक्रमणीय पृष्ठों के एक नमूने को विपरीत यूज़र एजेंट (डेस्कटॉप क्रॉल हो तो मोबाइल, अन्यथा डेस्कटॉप) से फिर लाता है और शीर्षक, H1, मेटा विवरण, कैनोनिकल, robots, शब्द संख्या और लिंक संख्या की तुलना करता है। अंतर \'मोबाइल / डेस्कटॉप असंगति\' इशू और उसी नाम की रिपोर्ट में जाते हैं।',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     'मोबाइल समानता जाँच कितने पृष्ठ फिर से लाती है, सबसे अधिक लिंक वाले पहले। 0 = हर अनुक्रमणीय HTML पृष्ठ (उस सेट के लिए क्रॉल ट्रैफ़िक दोगुना)।',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "अन्य होस्ट पर आउटबाउंड लिंक जाँचें (केवल HEAD) ताकि 'टूटे लिंक' दृश्य मृत बाहरी लिंक पकड़े। Screaming Frog: 'External Links' (Configuration → Spider → Crawl)।",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "अन्य होस्ट पर आउटबाउंड लिंक को पूरा (GET) भी लाएँ; उनकी स्थिति हर हाल में जाँची जाती है, ताकि 'टूटे लिंक' दृश्य मृत बाहरी लिंक पकड़े। HTTP प्रमाणीकरण और कस्टम हेडर अन्य होस्ट को कभी नहीं भेजे जाते। Screaming Frog: 'External Links' (Configuration → Spider → Crawl)।",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     'कच्चा `Content-Security-Policy` प्रतिक्रिया हेडर। अनुपस्थित होने पर खाली।',
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -408,8 +408,8 @@ export const HI_INFO_TIPS: Record<string, string> = {
     'पूरी साइट के ऑडिट के लिए Spider; ज्ञात पेज सेट की पुनः जाँच के लिए सूची; sitemap.xml में प्रकाशित सामग्री का ठीक-ठीक ऑडिट करने के लिए साइटमैप।',
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     'मानक CSS सेलेक्टर — `document.querySelectorAll` जैसा ही सिंटैक्स।',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    'आपकी स्थानीय प्रेफ़्स फ़ाइल में सादे टेक्स्ट में संग्रहीत। फ़ाइल को उसी के अनुसार सुरक्षित रखें।',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    'उपलब्ध होने पर आपके ऑपरेटिंग सिस्टम के कीचेन से एन्क्रिप्ट किया जाता है, और निर्यात की गई सेटिंग्स में शामिल नहीं होता।',
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     'यदि आपकी साइट /foo (बिना स्लैश) पर कैनोनिकल करती है तो हटाएँ; /foo/ पर कैनोनिकल करने वाली साइटों के लिए जोड़ें।',
   ['Sunset over the mountain ridge']: 'पर्वत श्रृंखला पर सूर्यास्त',

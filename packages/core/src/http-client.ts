@@ -1,6 +1,13 @@
 import dns from 'node:dns';
 import crypto from 'node:crypto';
-import { Agent, ProxyAgent, buildConnector, setGlobalDispatcher } from 'undici';
+import {
+  Agent,
+  ProxyAgent,
+  buildConnector,
+  fetch as undiciFetch,
+  setGlobalDispatcher,
+  type Response,
+} from 'undici';
 import { SocksClient, type SocksProxy } from 'socks';
 import { createResilientLookup, type DnsResolverHook } from './dns-resolver.js';
 
@@ -518,6 +525,75 @@ export function defaultRequestHeaders(
     headers[key] = value;
   }
   return headers;
+}
+
+/** A crawl's secrets plus the gate deciding which URLs may receive them
+ *  (`createCredentialGate` in shared-types). */
+export interface ScopedCredentials {
+  customHeaders: Record<string, string>;
+  auth: Parameters<typeof defaultRequestHeaders>[3];
+  credentialsFor: (url: string) => boolean;
+}
+
+/** `defaultRequestHeaders` with the auth + custom headers attached only
+ *  when `creds.credentialsFor(url)` allows it. */
+export function scopedRequestHeaders(
+  url: string,
+  userAgent: string,
+  acceptLanguage: string,
+  creds: ScopedCredentials,
+): Record<string, string> {
+  return creds.credentialsFor(url)
+    ? defaultRequestHeaders(userAgent, acceptLanguage, creds.customHeaders, creds.auth)
+    : defaultRequestHeaders(userAgent, acceptLanguage);
+}
+
+const FOLLOWED_REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * GET with redirects followed by hand, rebuilding the request headers for
+ * every hop through `headersFor(url)`. undici's `redirect: 'follow'` keeps
+ * custom headers (bypass tokens, a `Cookie:` value) across a cross-origin
+ * hop — the fetch spec strips only `Authorization` — so any request that
+ * may carry crawl credentials has to let the credential gate see each
+ * hop's URL. Throws like `redirect: 'follow'` once the chain is too long.
+ */
+export async function fetchFollowingRedirects(
+  url: string,
+  opts: {
+    headersFor: (url: string) => Record<string, string>;
+    signal?: AbortSignal;
+    maxRedirects?: number;
+  },
+): Promise<Response> {
+  const maxRedirects = opts.maxRedirects ?? 20;
+  let current = url;
+  for (let hop = 0; ; hop++) {
+    const res = await undiciFetch(current, {
+      method: 'GET',
+      headers: opts.headersFor(current),
+      redirect: 'manual',
+      signal: opts.signal,
+    });
+    const location = FOLLOWED_REDIRECT_STATUSES.has(res.status)
+      ? res.headers.get('location')
+      : null;
+    if (!location) return res;
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      return res;
+    }
+    if (next.protocol !== 'http:' && next.protocol !== 'https:') return res;
+    try {
+      await res.body?.cancel();
+    } catch {
+      /* ignore */
+    }
+    if (hop >= maxRedirects) throw new TypeError('fetch failed: redirect count exceeded');
+    current = next.href;
+  }
 }
 
 /* ------------------------------------------------------------------ */

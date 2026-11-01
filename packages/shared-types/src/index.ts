@@ -1,4 +1,5 @@
 export * from './crawl.js';
+export * from './credential-scope.js';
 export * from './issue-severity.js';
 export * from './issue-catalog.js';
 export * from './hreflang.js';

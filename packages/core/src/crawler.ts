@@ -12,6 +12,12 @@ import type {
   Indexability,
 } from '@freecrawl/shared-types';
 import {
+  createCredentialGate,
+  credentialSeeds,
+  isSameSite as isSameCredentialSite,
+  type CredentialGate,
+} from '@freecrawl/shared-types';
+import {
   type ProjectDb,
   type ProbeWrite,
   EXPENSIVE_ISSUE_DEFINITIONS,
@@ -58,6 +64,7 @@ import {
   MOBILE_USER_AGENT,
   parseDigestChallenge,
   redactUrlSecrets,
+  type ScopedCredentials,
 } from './http-client.js';
 import { setActiveDnsHook } from './dns-resolver.js';
 import { probeAlpn } from './alpn-probe.js';
@@ -65,6 +72,17 @@ import { discoverSitemapUrls, fetchSitemaps, type SitemapEntry } from './sitemap
 import { runJsonExtractionRules } from './extraction.js';
 import { SessionCookieJar } from './cookie-jar.js';
 import { runBrowserLogin } from './browser-login.js';
+import {
+  BLOCK_PAGE_SCAN_BYTES,
+  detectBlockPage,
+  detectBotProtection,
+  detectBotProtectionVerdict,
+  detectChallengePage,
+  wantsBlockPageBody,
+  type BlockVerdict,
+} from './bot-protection.js';
+
+export { detectBlockPage, detectBotProtection, detectChallengePage } from './bot-protection.js';
 
 export interface CrawlerEvents {
   progress: (p: CrawlProgress) => void;
@@ -255,68 +273,19 @@ export function xRobotsTagDirectives(
 }
 
 /**
- * Name the bot protection (or rate limit) that answered instead of the
- * site, or null. Only explicit signals count, so no real error page is
- * ever re-labelled: Cloudflare marks its challenges `cf-mitigated:
- * challenge`, Vercel `x-vercel-mitigated`, AWS WAF `x-amzn-waf-action`,
- * Sucuri `x-sucuri-block`, DataDome stamps `x-datadome` on what it blocks;
- * and a 429 is "too many requests" on any server. None of them says the
- * page is broken — counting them as 4xx filled Broken Links and Non-200
- * in Sitemap with pages that work (a live crawl of a Cloudflare site
- * reported 266 pages with broken links, all challenge pages).
+ * Bot protection, WAF or rate limit answering instead of the site — see
+ * `bot-protection.ts`. Judged on the headers first; an error response the
+ * headers don't settle has the head of its body read (and so consumed) for
+ * the vendor's block page. Nothing downstream reads a 4xx/5xx body, so the
+ * read costs only the bytes; 2xx/3xx bodies are never touched here.
  */
-export function detectBotProtection(
-  status: number,
-  headers: { get(name: string): string | null },
-): string | null {
-  // AWS WAF's JavaScript challenge answers 202 with `x-amzn-waf-action:
-  // challenge` and an interstitial body — a success code for a page that
-  // was never served — so it is checked before the 4xx gate.
-  const aws = headers.get('x-amzn-waf-action');
-  if (aws && (status >= 400 || status === 202)) {
-    return `AWS WAF ${aws.trim().toLowerCase()} (HTTP ${status})`;
-  }
-  if (status < 400) return null;
-  const cf = headers.get('cf-mitigated');
-  if (cf) return `Cloudflare ${cf.trim().toLowerCase()} (HTTP ${status})`;
-  const vercel = headers.get('x-vercel-mitigated');
-  if (vercel) return `Vercel ${vercel.trim().toLowerCase()} (HTTP ${status})`;
-  if (headers.get('x-sucuri-block')) return `Sucuri block (HTTP ${status})`;
-  if (status === 403 && headers.get('x-datadome')) return `DataDome block (HTTP ${status})`;
-  if (status === 429) return `Rate limited (HTTP ${status})`;
-  return null;
-}
-
-/** Titles of bot-challenge interstitials, matched on the whole title. */
-const CHALLENGE_TITLES = [
-  /^one moment, please\.{0,3}$/i,
-  /^just a moment\.{0,3}$/i,
-  /^attention required! \| cloudflare$/i,
-  /^checking your browser\b/i,
-  /^ddos-guard$/i,
-  /^vercel security checkpoint$/i,
-];
-
-/** Above this many words a page is content, whatever its title says. */
-const CHALLENGE_MAX_WORDS = 60;
-
-/**
- * A bot challenge served with 2xx and no marking header, which
- * {@link detectBotProtection} cannot see: some servers' bot protection
- * answers every request with a "One moment, please..." page and HTTP 200.
- * Recognised by an interstitial's title on a page with next to no text, so
- * a real page that happens to share the title still counts as a page.
- * Taken for content, one crawl of thinpo.com reported 521 indexable pages
- * titled "One moment, please..." and found none of the site's links.
- */
-export function detectChallengePage(
-  status: number,
-  title: string | null,
-  wordCount: number,
-): string | null {
-  if (status < 200 || status >= 300 || !title || wordCount > CHALLENGE_MAX_WORDS) return null;
-  const t = title.replace(/\s+/g, ' ').trim();
-  return CHALLENGE_TITLES.some((re) => re.test(t)) ? `challenge page "${t}" (HTTP ${status})` : null;
+async function detectBlockedResponse(res: Response): Promise<BlockVerdict | null> {
+  const byHeader = detectBotProtectionVerdict(res.status, res.headers);
+  // A 429 is a limit whatever the body says; the body only names who set it
+  // ("Cloudflare rate limit (error 1015…)" over a bare "Rate limited").
+  if ((byHeader && res.status !== 429) || !wantsBlockPageBody(res.status, res.headers)) return byHeader;
+  const byPage = detectBlockPage(res.status, res.headers, await readBodyPrefix(res, BLOCK_PAGE_SCAN_BYTES));
+  return byPage ?? byHeader;
 }
 
 /** Back-compat convenience wrapper. */
@@ -393,6 +362,9 @@ export class Crawler extends EventEmitter {
   private queue: PQueue;
   private externalQueue: PQueue;
   private seen = new Set<string>();
+  /** `seen.size` when the set was released at the end of a crawl, so the
+   *  final progress frames still report how many URLs were discovered. */
+  private discoveredAtEnd = 0;
   private externalSeen = new Set<string>();
   private pending = 0;
   private crawled = 0;
@@ -710,6 +682,8 @@ export class Crawler extends EventEmitter {
    * re-spider updates rows in place, it does not start a new data set.
    */
   private readonly respiderSeeds: string[] | null;
+  /** Host callback after a new-site project wipe — see the constructor. */
+  private readonly onProjectReset: (() => void) | null;
 
   /** True when this run resumes an interrupted crawl from a checkpoint. */
   private readonly resumeOnly: boolean;
@@ -840,11 +814,21 @@ export class Crawler extends EventEmitter {
        * the whole site again".
        */
       resumeOnly?: boolean;
+      /**
+       * Runs right after `start()` has wiped the project for a different
+       * site (spider or list mode). The wipe empties `project_meta`, so a
+       * host that stored its own per-project entries before calling
+       * `start()` — the desktop's saved crawl config — writes them back
+       * here; without it a project saved after its first crawl reopened
+       * with default settings.
+       */
+      onProjectReset?: () => void;
     } = {},
   ) {
     super();
     this.respiderSeeds = opts.respiderSeeds ?? null;
     this.resumeOnly = opts.resumeOnly === true;
+    this.onProjectReset = opts.onProjectReset ?? null;
     // The watchdog's operation label doubles as the progress phase shown
     // in the status bar; a new op resets the per-phase counters.
     const hostSetOp = opts.setOp ?? ((): void => undefined);
@@ -886,6 +870,11 @@ export class Crawler extends EventEmitter {
     this.resolvedProxy = resolvedProxy;
     initHttpClient({ proxyOverride: resolvedProxy });
     this.config = config;
+    // Captured now, before `start()` resolves the start URL and List /
+    // Sitemap mode rewrite `startUrl` / `scope`: the credential boundary is
+    // what the user typed, not where a redirect went.
+    this.credentialSeedUrls = credentialSeeds(config);
+    this.credentialIncludeSubdomains = config.mode === 'spider' && config.scope === 'all-subdomains';
     this.db = db;
     const concurrency = Math.max(1, Math.min(200, config.maxConcurrency));
     // Rate-limit (interval + intervalCap) intentionally NOT set on
@@ -1148,6 +1137,7 @@ export class Crawler extends EventEmitter {
 
   async start(): Promise<void> {
     this.startedAt = Date.now();
+    this.discoveredAtEnd = 0;
     this.stopped = false;
     this.running = true;
 
@@ -1242,6 +1232,11 @@ export class Crawler extends EventEmitter {
     // Persist the resolved URL back into the active config so scope checks,
     // progress events, and link classification all see the same canonical value.
     this.config = { ...this.config, startUrl: start };
+    // `example.com` → `shop.example.com` is still the site the user named;
+    // a start URL that redirected off-site is not, and gets no credentials.
+    if (this.credentialSeedUrls.some((seed) => isSameCredentialSite(seed, start))) {
+      this.trustCredentialSeeds([start]);
+    }
 
     this.applyProcessPriority();
     this.startMemoryMonitor();
@@ -1270,6 +1265,7 @@ export class Crawler extends EventEmitter {
     if (!isSameSite && !isRespider) {
       this.db.reset();
       this.db.setMeta('startUrl', start);
+      this.onProjectReset?.();
     }
     // The missing-page probe describes the crawl that is starting; it is
     // re-run at the end (a stopped crawl simply has no verdict).
@@ -1564,6 +1560,7 @@ export class Crawler extends EventEmitter {
     this.stopMemoryMonitor();
     // Release per-URL dedup sets — at 1M URLs this is ~80–120 MB of string
     // heap that's no longer needed once the queue is drained.
+    this.discoveredAtEnd = this.seen.size;
     this.seen.clear();
     this.externalSeen.clear();
     this.emitProgressFinal();
@@ -1955,9 +1952,10 @@ export class Crawler extends EventEmitter {
     let url = src;
     for (let hop = 0; ; hop++) {
       if (method === 'GET' || hop > 0) await this.acquireRateSlot();
-      // Only send the crawl's auth/custom headers to in-scope image hosts;
-      // third-party / CDN image URLs must not receive the start site's creds.
-      const inScope = isInScope(this.config.startUrl, url, this.config.scope);
+      // Only send the crawl's auth/custom headers inside the credential
+      // boundary; third-party / CDN image URLs (and every redirect hop to
+      // one) must not receive the start site's creds.
+      const trusted = this.credentialsAllowed(url);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       let res: Awaited<ReturnType<typeof undiciFetch>>;
@@ -1967,8 +1965,8 @@ export class Crawler extends EventEmitter {
           headers: defaultRequestHeaders(
             this.resolveUserAgent(url),
             this.config.acceptLanguage,
-            inScope ? this.config.customHeaders : {},
-            inScope ? this.config.auth : undefined,
+            trusted ? this.config.customHeaders : {},
+            trusted ? this.config.auth : undefined,
           ),
           redirect: 'manual',
           signal: controller.signal,
@@ -2056,8 +2054,7 @@ export class Crawler extends EventEmitter {
           const result = await probeManifest(url, {
             userAgent: this.resolveUserAgent(url),
             acceptLanguage: this.config.acceptLanguage,
-            customHeaders: this.config.customHeaders,
-            auth: this.config.auth,
+            ...this.scopedCredentials(),
           });
           writes.push({
             method: 'setManifestForReferrers',
@@ -2132,7 +2129,8 @@ export class Crawler extends EventEmitter {
         if (status >= 300 && status < 400) {
           const location = res.headers.get('location');
           await res.body?.cancel().catch(() => undefined);
-          if (!location) break;
+          // A hop to a captcha / waiting room says nothing about 404s either.
+          if (!location || detectBotProtection(status, res.headers)) break;
           url = new URL(location, url).href;
           continue;
         }
@@ -2157,10 +2155,11 @@ export class Crawler extends EventEmitter {
         }
         const read = await readBodyCapped(res, this.config.maxFileSizeBytes);
         if (read.overCap) break;
-        const page = parseHtml(new TextDecoder().decode(read.bytes), url);
+        const html = new TextDecoder().decode(read.bytes);
+        const page = parseHtml(html, url);
         if (page.hasNoindex || page.jsNoindexWrite || page.metaRefresh || page.jsRedirectUrl) break;
         // A bot challenge answers every path alike — says nothing about 404s.
-        if (detectChallengePage(status, page.title, page.wordCount)) break;
+        if (detectChallengePage(status, page.title, page.wordCount, html)) break;
         verdict = { status, finalUrl: url === probeUrl ? null : url };
         break;
       }
@@ -2231,8 +2230,7 @@ export class Crawler extends EventEmitter {
           dims = await probeSocialImageDimensions(src, {
             userAgent: this.resolveUserAgent(src),
             acceptLanguage: this.config.acceptLanguage,
-            customHeaders: this.config.customHeaders,
-            auth: this.config.auth,
+            ...this.scopedCredentials(),
           });
         } catch {
           dims = null;
@@ -2313,8 +2311,7 @@ export class Crawler extends EventEmitter {
         await this.probeTick(progress);
         const fetched = await fetchForParity(src.url, userAgent, {
           acceptLanguage: this.config.acceptLanguage,
-          customHeaders: this.config.customHeaders,
-          auth: this.config.auth,
+          ...this.scopedCredentials(),
         });
         let page: ParsedPage | null = null;
         if (fetched.html) {
@@ -2395,8 +2392,7 @@ export class Crawler extends EventEmitter {
           const result = await probePdfMetadata(url, {
             userAgent: this.resolveUserAgent(url),
             acceptLanguage: this.config.acceptLanguage,
-            customHeaders: this.config.customHeaders,
-            auth: this.config.auth,
+            ...this.scopedCredentials(),
           });
           const hasMeta =
             result.title !== null ||
@@ -2607,6 +2603,9 @@ export class Crawler extends EventEmitter {
       this.finishEmptyFixedCrawl();
       return;
     }
+    // Every listed URL is one the user named — their normalised forms
+    // (URL rewrites, forced https) carry the credentials too.
+    this.trustCredentialSeeds(urls);
     // Fingerprint: list signature is "list:<count>:<first-url>". Two crawls
     // with the same first URL + same count look identical — good enough
     // heuristic; users who really want a fresh start can use Clear.
@@ -2744,6 +2743,7 @@ export class Crawler extends EventEmitter {
     if (!this.resumeOnly) {
       if (previousStart !== fingerprint) {
         this.db.reset();
+        this.onProjectReset?.();
       }
       this.db.setMeta('startUrl', fingerprint);
     }
@@ -2806,6 +2806,7 @@ export class Crawler extends EventEmitter {
     await this.runPostCrawlPasses();
     this.running = false;
     this.stopMemoryMonitor();
+    this.discoveredAtEnd = this.seen.size;
     this.seen.clear();
     this.externalSeen.clear();
     this.finishing = false;
@@ -3127,14 +3128,14 @@ export class Crawler extends EventEmitter {
       return;
     }
 
-    // Only attach the crawl's Authorization / custom headers when the probe
-    // host is within the crawl's own scope. Sending the start site's Basic
-    // auth or a bypass header (`X-Vercel-Protection-Bypass`, …) to an
-    // arbitrary third-party host is a credential leak — the fetch spec only
-    // strips auth on cross-origin REDIRECTS, not on a direct fetch.
-    const inScope = isInScope(this.config.startUrl, url, this.config.scope);
-    const probeAuth = inScope ? this.config.auth : undefined;
-    const probeHeaders = inScope ? this.config.customHeaders : {};
+    // Only attach the crawl's Authorization / custom headers inside the
+    // credential boundary. Sending the start site's Basic auth or a bypass
+    // header (`X-Vercel-Protection-Bypass`, …) to an arbitrary third-party
+    // host is a credential leak — the fetch spec only strips auth on
+    // cross-origin REDIRECTS, not on a direct fetch.
+    const trusted = this.credentialsAllowed(url);
+    const probeAuth = trusted ? this.config.auth : undefined;
+    const probeHeaders = trusted ? this.config.customHeaders : {};
 
     const t0 = Date.now();
     const cfgUa = this.resolveUserAgent(url);
@@ -3250,6 +3251,9 @@ export class Crawler extends EventEmitter {
 
     const responseTimeMs = Date.now() - t0;
     if (res) {
+      // Judged before the body is dropped: an error the headers don't settle
+      // needs its body to tell a vendor's block page from a broken link.
+      const botBlock = (await detectBlockedResponse(res))?.label ?? null;
       try {
         await res.body?.cancel();
       } catch {
@@ -3262,7 +3266,6 @@ export class Crawler extends EventEmitter {
         const loc = res.headers.get('location');
         if (loc) redirectTarget = normalizeUrl(loc, url) ?? loc;
       }
-      const botBlock = detectBotProtection(res.status, res.headers);
       await this.dbCall<void>('updateExternalProbe', [
         url,
         {
@@ -4271,15 +4274,25 @@ export class Crawler extends EventEmitter {
       // crawled" (NULL status, unknown indexability) rather than as the
       // page's 4xx — see `detectBotProtection`. The URL stays pending, so
       // the end-of-crawl drain asks for it once more (such blocks often
-      // lift after a pause), and a later Start retries it again.
-      const botBlock = detectBotProtection(statusCode, res.headers);
-      if (botBlock) {
+      // lift after a pause), and a later Start retries it again. An error
+      // the headers don't settle has its body head read here to find the
+      // vendor's block page — nothing below needs a 4xx/5xx body.
+      const blockVerdict = await detectBlockedResponse(res);
+      if (blockVerdict) {
+        const botBlock = blockVerdict.label;
         try {
           await res.body?.cancel();
         } catch {
           /* ignore */
         }
-        if (this.config.adaptiveSpeed && statusCode !== 429 && statusCode !== 503) {
+        // A geo block is about where the crawl comes from, not how fast:
+        // slowing down would cost every other page and lift nothing.
+        if (
+          this.config.adaptiveSpeed &&
+          statusCode !== 429 &&
+          statusCode !== 503 &&
+          blockVerdict.kind !== 'geo'
+        ) {
           this.noteRateLimited(null, attemptStart);
         }
         this.failed++;
@@ -4768,7 +4781,7 @@ export class Crawler extends EventEmitter {
       // never existed. Checked on what was parsed, so a JS render that got
       // past the interstitial counts as the page. It stays pending, so the
       // end-of-crawl drain asks for it once more.
-      const challenge = detectChallengePage(statusCode, parsed.title, parsed.wordCount);
+      const challenge = detectChallengePage(statusCode, parsed.title, parsed.wordCount, parseBody);
       if (challenge) {
         if (this.config.adaptiveSpeed) this.noteRateLimited(null, attemptStart);
         this.failed++;
@@ -5457,12 +5470,48 @@ export class Crawler extends EventEmitter {
     { challenge: DigestChallenge; nc: number }
   >();
 
+  /**
+   * The URLs this crawl's HTTP auth + custom headers belong to: what the
+   * user typed (start URL, or every listed URL in List mode), captured in
+   * the constructor before the start URL is resolved, plus the resolved
+   * start URL when it stays on the same site. See `createCredentialGate`.
+   */
+  private credentialSeedUrls: string[] = [];
+  private credentialIncludeSubdomains = false;
+  private credentialGate: CredentialGate | null = null;
+
+  /** May `url` receive the crawl's HTTP auth and custom headers? Every
+   *  request path that can attach them asks this first. */
+  private credentialsAllowed(url: string): boolean {
+    this.credentialGate ??= createCredentialGate(this.credentialSeedUrls, {
+      includeSubdomains: this.credentialIncludeSubdomains,
+    });
+    return this.credentialGate(url);
+  }
+
+  /** Widen the credential boundary with more user-named URLs. */
+  private trustCredentialSeeds(urls: readonly string[]): void {
+    for (const u of urls) this.credentialSeedUrls.push(u);
+    this.credentialGate = null;
+  }
+
+  /** The crawl's secrets with this crawl's gate, for the post-crawl probes. */
+  private scopedCredentials(): ScopedCredentials {
+    return {
+      customHeaders: this.config.customHeaders,
+      auth: this.config.auth,
+      credentialsFor: (u) => this.credentialsAllowed(u),
+    };
+  }
+
   /** Compute a proactive Digest Authorization header for `fetchUrl` from a
    *  previously-cached same-origin challenge, bumping the nonce count.
-   *  Returns null when digest auth isn't configured or the origin's realm
-   *  hasn't been learned yet (that first request still pays one 401). */
+   *  Returns null when digest auth isn't configured, the origin is outside
+   *  the credential boundary, or its realm hasn't been learned yet (that
+   *  first request still pays one 401). */
   private digestAuthHeader(fetchUrl: string, method = 'GET'): string | null {
     if (this.config.auth.type !== 'digest' || !(this.config.auth.username ?? '')) return null;
+    if (!this.credentialsAllowed(fetchUrl)) return null;
     let origin: string;
     try {
       origin = new URL(fetchUrl).origin;
@@ -5484,16 +5533,20 @@ export class Crawler extends EventEmitter {
 
   /**
    * Build request headers for a crawl fetch: defaults + auth + any
-   * established session cookies. A user-supplied `Cookie` header (via
-   * customHeaders) always wins over the session jar; `extra` (e.g. a
-   * computed Digest Authorization) is applied last.
+   * established session cookies. Auth and custom headers are attached only
+   * inside the credential boundary — an in-scope link on another port, an
+   * `http:` downgrade or an external URL crawled with `crawlExternal` gets
+   * neither. A user-supplied `Cookie` header (via customHeaders) wins over
+   * the session jar; `extra` (e.g. a computed Digest Authorization) is
+   * applied last.
    */
   private requestHeaders(url: string, extra?: Record<string, string>): Record<string, string> {
+    const trusted = this.credentialsAllowed(url);
     const headers = defaultRequestHeaders(
       this.resolveUserAgent(url),
       this.config.acceptLanguage,
-      this.config.customHeaders,
-      this.config.auth,
+      trusted ? this.config.customHeaders : {},
+      trusted ? this.config.auth : undefined,
     );
     if (this.sessionJar) {
       const hasCookie = Object.keys(headers).some((k) => k.toLowerCase() === 'cookie');
@@ -5540,12 +5593,22 @@ export class Crawler extends EventEmitter {
     const vars: Record<string, string> = {};
     const interp = (s: string): string =>
       s.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (_m, name: string) => vars[name] ?? '');
+    // The login endpoints the user typed (an SSO host, say) join the
+    // crawl's credential boundary for the login only. A template whose
+    // origin is a `{{var}}` placeholder never parses as a URL, so values
+    // captured from a response cannot steer credentials elsewhere, and
+    // neither can a post-login redirect.
+    const loginGate = createCredentialGate(
+      [...this.credentialSeedUrls, ...cfg.steps.map((s) => s.url)],
+      { includeSubdomains: this.credentialIncludeSubdomains },
+    );
     const cookieHeaderFor = (target: string): Record<string, string> => {
+      const trusted = loginGate(target);
       const h = defaultRequestHeaders(
         this.config.userAgent,
         this.config.acceptLanguage,
-        this.config.customHeaders,
-        this.config.auth,
+        trusted ? this.config.customHeaders : {},
+        trusted ? this.config.auth : undefined,
       );
       const ck = jar.cookieHeader(target);
       if (ck && !Object.keys(h).some((k) => k.toLowerCase() === 'cookie')) h['cookie'] = ck;
@@ -5767,11 +5830,14 @@ export class Crawler extends EventEmitter {
         // HTTP Digest — a 401 carries the `WWW-Authenticate: Digest`
         // challenge (or a fresh nonce on `stale=true`); cache it per-origin,
         // recompute the Authorization header, and retry once. Only when
-        // digest auth is configured with a username.
+        // digest auth is configured with a username, and only for an origin
+        // inside the credential boundary: answering a foreign server's
+        // challenge hands it a hash of the password to brute-force offline.
         if (
           res.status === 401 &&
           this.config.auth.type === 'digest' &&
-          (this.config.auth.username ?? '')
+          (this.config.auth.username ?? '') &&
+          this.credentialsAllowed(fetchUrl)
         ) {
           const challenge = parseDigestChallenge(res.headers.get('www-authenticate'));
           if (challenge) {
@@ -6050,7 +6116,7 @@ export class Crawler extends EventEmitter {
     const avgResponseTimeMs =
       this.responseSamples > 0 ? Math.round(this.totalResponseTimeMs / this.responseSamples) : 0;
     const progress: CrawlProgress = {
-      discovered: this.seen.size,
+      discovered: Math.max(this.seen.size, this.discoveredAtEnd),
       crawled: this.crawled,
       failed: this.failed,
       pending: this.pending,
@@ -6215,6 +6281,43 @@ function effectiveBodyCap(configured: number): number {
  * `capBytes` (after cancelling the stream); otherwise the raw bytes, which the
  * caller decodes with the page's actual charset (NOT forced UTF-8).
  */
+/**
+ * The first `maxBytes` of a response body as UTF-8 text, the rest of the
+ * stream cancelled. For pattern-matching a block page, where a partial body
+ * is as good as a whole one and a large one must not be buffered. A read
+ * that fails part-way returns what arrived; never throws.
+ */
+async function readBodyPrefix(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return '';
+  const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let done = false;
+  try {
+    while (total < maxBytes) {
+      const next = await reader.read();
+      if (next.done) {
+        done = true;
+        break;
+      }
+      if (next.value) {
+        chunks.push(next.value);
+        total += next.value.byteLength;
+      }
+    }
+    if (!done) await reader.cancel().catch(() => undefined);
+  } catch {
+    /* keep what arrived */
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
+  }
+  return Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8');
+}
+
 async function readBodyCapped(
   res: Response,
   capBytes: number,

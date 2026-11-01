@@ -740,7 +740,7 @@
       "url": "Webhook URL"
     },
     "auth": {
-      "intro": "Her istekte uygulanan HTTP kimlik doğrulaması. Basic/Digest auth arkasındaki staging ortamları veya Bearer token gerektiren API'ler için faydalı. HTML giriş formu arkasındaki siteler için aşağıdaki Form Login'i kullanın.",
+      "intro": "Yalnızca taranan siteye (başlangıç URL'sinin kökenine ya da List modunda listelenen URL'lere) gönderilen HTTP kimlik doğrulaması — dış bağlantılara, CDN'lere veya diğer sunuculara asla gönderilmez. Basic/Digest auth arkasındaki staging ortamları veya Bearer token gerektiren API'ler için faydalı. HTML giriş formu arkasındaki siteler için aşağıdaki Form Login'i kullanın.",
       "scheme": "Auth şeması",
       "schemeNone": "Yok",
       "schemeBasic": "Basic (kullanıcı adı + şifre)",

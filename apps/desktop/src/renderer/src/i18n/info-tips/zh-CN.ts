@@ -310,8 +310,8 @@ export const ZH_CN_INFO_TIPS: Record<string, string> = {
     '遇到网络错误及 408/425/429/5xx 响应时，最多再重试 N 次后放弃。每次重试都计入该 URL 的响应时间预算。',
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     '审计移动端 UX 或捕获 PageSpeed 风格的移动端预览时开启。',
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "每行一个响应头，格式为 'Key: Value'。添加到每个请求——适用于认证令牌或自定义路由提示。键冲突时用户值覆盖默认值。",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "每行一个请求头，格式为 'Key: Value'。与 HTTP 认证一样，仅发送到正在抓取的站点——绝不发送到外部链接或其他主机。适用于认证令牌或自定义路由提示。键冲突时用户值覆盖默认值。",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     '每行一个 sitemap URL。除了从起始 URL 跟踪链接外，抓取器还会获取这些 sitemap 并将其列出的每个页面作为额外种子入队——发现更快/更完整，即使 sitemap 位于非标准路径也能可靠检测孤立页面。留空则禁用。',
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -341,8 +341,8 @@ export const ZH_CN_INFO_TIPS: Record<string, string> = {
     '抓取完成后，用相反的用户代理（桌面抓取则用移动端，反之亦然）重新获取一部分可索引页面，比较标题、H1、meta 描述、canonical、robots、字数和链接数。差异会进入"移动端 / 桌面端不一致"问题和同名报告。',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     '移动端一致性探测重新获取的页面数，内链最多的优先。0 = 所有可索引 HTML 页面（该集合的抓取流量翻倍）。',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "探测指向其他主机的出站链接（仅 HEAD），使“断链”视图能捕获失效的外链。Screaming Frog：'External Links'（Configuration → Spider → Crawl）。",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "另外以完整的 GET 请求获取指向其他主机的出站链接；无论是否开启都会检查其状态，使“断链”视图能捕获失效的外链。HTTP 认证和自定义请求头绝不会发送到其他主机。Screaming Frog：'External Links'（Configuration → Spider → Crawl）。",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     '原始 `Content-Security-Policy` 响应头。缺失时为空。',
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -400,8 +400,8 @@ export const ZH_CN_INFO_TIPS: Record<string, string> = {
     '全站审计用 Spider；重新检查已知页面集用列表；精确审计 sitemap.xml 中发布的内容用 Sitemap。',
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     '标准 CSS 选择器——语法与 `document.querySelectorAll` 相同。',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    '以明文存储在你的本地偏好设置文件中。请相应地保护该文件。',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    '保存时会使用操作系统的钥匙串加密（如可用），且不会包含在导出的设置中。',
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     '站点规范化为 /foo（无斜杠）用“去除”；规范化为 /foo/ 的站点用“添加”。',
   ['Sunset over the mountain ridge']: '山脊上的日落',

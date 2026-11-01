@@ -321,8 +321,8 @@ export const IT_INFO_TIPS: Record<string, string> = {
     "Su errori di rete e risposte 408/425/429/5xx, ritenta fino a N volte in più prima di rinunciare. Ogni tentativo conta nel budget di tempo di risposta dell'URL.",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'Attivato quando verifichi la UX mobile o catturi anteprime mobile in stile PageSpeed.',
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "Un header per riga nel formato 'Chiave: Valore'. Aggiunto a ogni richiesta — utile per token di autenticazione o suggerimenti di routing personalizzati. I valori dell'utente sovrascrivono i predefiniti quando le chiavi coincidono.",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "Un header per riga nel formato 'Chiave: Valore'. Inviato solo al sito scansionato, come l'autenticazione HTTP — mai ai link esterni o ad altri host. Utile per token di autenticazione o suggerimenti di routing personalizzati. I valori dell'utente sovrascrivono i predefiniti quando le chiavi coincidono.",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     "Un URL di sitemap per riga. Oltre a seguire i link dall'URL iniziale, il crawler recupera queste sitemap e accoda ogni pagina elencata come seme aggiuntivo — scoperta più rapida/completa e rilevamento affidabile delle pagine orfane anche quando la sitemap si trova in un percorso non standard. Lascia vuoto per disabilitare.",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -352,8 +352,8 @@ export const IT_INFO_TIPS: Record<string, string> = {
     'Dopo la scansione riscarica un campione di pagine indicizzabili con lo user agent opposto (mobile se la scansione era desktop, e viceversa) e confronta titolo, H1, meta description, canonical, robots, numero di parole e di link. Le differenze alimentano il problema \'Discrepanza mobile / desktop\' e il report omonimo.',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     'Quante pagine riscarica la sonda di parità mobile, prima le più linkate. 0 = tutte le pagine HTML indicizzabili (raddoppia il traffico della scansione per quell\'insieme).',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "Sonda i link in uscita verso altri host (solo HEAD) così la vista Link interrotti cattura gli esterni morti. Screaming Frog: 'External Links' (Configuration → Spider → Crawl).",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "Scarica anche per intero (GET) i link in uscita verso altri host; il loro stato viene verificato in ogni caso, così la vista Link interrotti cattura gli esterni morti. L'autenticazione HTTP e gli header personalizzati non vengono mai inviati ad altri host. Screaming Frog: 'External Links' (Configuration → Spider → Crawl).",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     'Header di risposta `Content-Security-Policy` grezzo. Vuoto quando assente.',
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -413,8 +413,8 @@ export const IT_INFO_TIPS: Record<string, string> = {
     'Spider per audit completi del sito; Lista per ricontrollare un insieme noto di pagine; Sitemap per verificare esattamente ciò che è pubblicato in sitemap.xml.',
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     'Selettore CSS standard — stessa sintassi di `document.querySelectorAll`.',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    'Memorizzato nel tuo file di preferenze locale in testo in chiaro. Tratta il file di conseguenza.',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    'Cifrato con il portachiavi del sistema operativo quando disponibile ed escluso dalle impostazioni esportate.',
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     'Rimuovi se il tuo sito canonicalizza /foo (senza barra); Aggiungi per siti che canonicalizzano /foo/.',
   ['Sunset over the mountain ridge']: 'Tramonto sul crinale della montagna',

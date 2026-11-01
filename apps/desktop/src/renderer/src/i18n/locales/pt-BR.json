@@ -762,7 +762,7 @@
       "url": "URL do webhook"
     },
     "auth": {
-      "intro": "Autenticação HTTP aplicada em cada requisição. Útil para ambientes de homologação atrás de autenticação Basic/Digest, ou APIs que exigem um token Bearer. Para sites atrás de um formulário de login HTML, use o login por formulário abaixo.",
+      "intro": "Autenticação HTTP enviada apenas ao site rastreado (a origem da URL inicial, ou as URLs listadas no modo Lista) — nunca a links externos, CDNs ou outros hosts. Útil para ambientes de homologação atrás de autenticação Basic/Digest, ou APIs que exigem um token Bearer. Para sites atrás de um formulário de login HTML, use o login por formulário abaixo.",
       "scheme": "Esquema de autenticação",
       "schemeNone": "Nenhum",
       "schemeBasic": "Basic (usuário + senha)",

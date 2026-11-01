@@ -13,8 +13,8 @@ upgrading is the recommended remediation path.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| Latest stable (currently `0.9.x`) | Yes |
-| Older `0.x` releases              | No  |
+| Latest stable (currently `1.1.3`) | Yes |
+| Older releases                    | No  |
 
 Release artifacts are published at:
 <https://github.com/kemalai/FreeCrawl-SEO-Tool/releases>
@@ -60,7 +60,7 @@ possible:
   layer (`@freecrawl/db`), desktop shell, MCP server, or CLI
 - **Affected version(s)** — output of `Help → About`, or the `version`
   field in `package.json`
-- **Operating system + architecture** — Windows 10/11, macOS 13 or newer
+- **Operating system + architecture** — Windows 10/11, macOS 12 or newer
   (Intel or Apple Silicon), or your Linux distribution
 - **Reproduction steps** — minimal sequence that triggers the issue
 - **Proof-of-concept** — screenshot, video, or minimal code
@@ -106,7 +106,9 @@ The following are considered valid security issues:
 - **Sandbox escape** from the renderer to the main process bypassing
   contextBridge isolation
 - **Credential leakage** — API keys, project paths, or crawl data
-  accidentally written to logs, telemetry, or remote services
+  accidentally written to logs, telemetry, or remote services, and crawl
+  credentials (HTTP authentication, custom headers) sent to any host other
+  than the site being crawled
 - **Denial-of-service** on a normal site crawl that the user could
   reasonably expect to complete (e.g. catastrophic memory growth on a
   modestly-sized site, parser infinite loops, deadlocks under normal
@@ -167,9 +169,17 @@ page above, **do not run it** — please report it via the channels above.
   etc.) are stored locally via the OS-native keychain when configured by
   the user, and are never transmitted to FreeCrawl-controlled servers.
 - **No telemetry is collected** — the application does not phone home,
-  beacon, or report usage data. The only outbound network requests are
-  the crawls the user explicitly initiates and (when enabled) the
-  on-demand "Check for Updates" call to the GitHub Releases API.
+  beacon, or report usage data. On its own it only checks the GitHub
+  Releases API for a newer version (once shortly after launch, and from
+  Help → Check for Updates) and, if the bundled Chromium for JavaScript
+  rendering is missing, downloads it once. Every other request — crawls
+  and the Google / Yandex / AI / LanguageTool integrations — happens only
+  when the user starts it.
+- **Crawl credentials stay with the crawled site** — HTTP authentication
+  and custom headers are sent only to the site being crawled (the start
+  URL's origin, or the listed URLs in List mode), never to external links,
+  other hosts or ports, or redirect targets outside it. MCP agents never
+  receive saved passwords, tokens or proxy credentials.
 - **Project files (`.seoproject`)** are SQLite databases containing
   crawled content, and are **not** encrypted by default. Two options
   exist for sensitive crawls:

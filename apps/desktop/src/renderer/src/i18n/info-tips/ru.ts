@@ -320,8 +320,8 @@ export const RU_INFO_TIPS: Record<string, string> = {
     'При сетевых ошибках и ответах 408/425/429/5xx повторять до N дополнительных раз, прежде чем сдаться. Каждый повтор засчитывается в бюджет времени ответа URL.',
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'Вкл. при аудите мобильного UX или для мобильных превью в стиле PageSpeed.',
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "Один заголовок на строку в формате 'Ключ: Значение'. Добавляется к каждому запросу — полезно для токенов аутентификации или подсказок маршрутизации. Значения пользователя перекрывают значения по умолчанию при совпадении ключей.",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "Один заголовок на строку в формате 'Ключ: Значение'. Отправляется только на обходимый сайт, как и HTTP-аутентификация, — никогда на внешние ссылки или другие хосты. Полезно для токенов аутентификации или подсказок маршрутизации. Значения пользователя перекрывают значения по умолчанию при совпадении ключей.",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     'Один URL sitemap на строку. Помимо перехода по ссылкам со стартового URL, краулер загружает эти sitemap и ставит каждую перечисленную страницу в очередь как дополнительное зерно — более быстрое/полное обнаружение и надёжный поиск сирот, даже если sitemap лежит по нестандартному пути. Оставьте пустым, чтобы отключить.',
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -351,8 +351,8 @@ export const RU_INFO_TIPS: Record<string, string> = {
     'После обхода повторно загружает выборку индексируемых страниц с противоположным user agent (мобильным, если обход был десктопным, и наоборот) и сравнивает title, H1, meta description, canonical, robots, число слов и ссылок. Различия попадают в проблему «Расхождение мобильной и десктопной версий» и одноимённый отчёт.',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     'Сколько страниц повторно загружает проверка паритета, сначала самые ссылаемые. 0 = все индексируемые HTML-страницы (удваивает трафик обхода для этого набора).',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "Проверять исходящие ссылки на другие хосты (только HEAD), чтобы представление «Битые ссылки» ловило мёртвые внешние. Screaming Frog: 'External Links' (Configuration → Spider → Crawl).",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "Также полностью загружать (GET) исходящие ссылки на другие хосты; их статус проверяется в любом случае, чтобы представление «Битые ссылки» ловило мёртвые внешние. HTTP-аутентификация и пользовательские заголовки никогда не отправляются на другие хосты. Screaming Frog: 'External Links' (Configuration → Spider → Crawl).",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     'Сырой заголовок ответа `Content-Security-Policy`. Пусто, если отсутствует.',
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -412,8 +412,8 @@ export const RU_INFO_TIPS: Record<string, string> = {
     'Spider для полных аудитов сайта; «Список» для повторной проверки известного набора страниц; «Sitemap» для аудита ровно того, что опубликовано в sitemap.xml.',
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     'Стандартный CSS-селектор — тот же синтаксис, что у `document.querySelectorAll`.',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    'Хранится в вашем локальном файле настроек открытым текстом. Относитесь к файлу соответственно.',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    'Шифруется с помощью связки ключей операционной системы, если она доступна, и не попадает в экспортированные настройки.',
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     '«Убрать», если сайт канонизирует /foo (без слэша); «Добавить» для сайтов, канонизирующих /foo/.',
   ['Sunset over the mountain ridge']: 'Закат над горным хребтом',

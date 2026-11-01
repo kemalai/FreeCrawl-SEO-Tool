@@ -1892,7 +1892,7 @@ function CrawlerPanel({ form, update }: PanelProps) {
           label={t('settingsPanels.crawler.crawlExternal', { defaultValue: 'Check External Links' })}
           checked={form.crawlExternal}
           onChange={(v) => update('crawlExternal', v)}
-          info="Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."
+          info="Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."
           example="On for outbound link audits; off for fast internal-only crawls."
         />
         <Bool
@@ -2604,7 +2604,7 @@ function RequestsPanel({ form, update }: PanelProps) {
         onChange={(v) => update('customHeadersText', v)}
         rows={6}
         placeholder={'Authorization: Bearer ...\nX-Custom: foo'}
-        info="One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."
+        info="One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."
         example={'Authorization: Bearer abc123xyz\nX-Forwarded-For: 1.2.3.4\nCookie: session=...'}
       />
     </>
@@ -3341,7 +3341,7 @@ function AuthPanel({ form, update }: PanelProps) {
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
-        {t('settingsPanels.auth.intro', { defaultValue: 'HTTP authentication applied on every request. Useful for staging environments behind Basic/Digest auth, or APIs that require a Bearer token. For sites behind an HTML login form, use Form Login below instead.' })}
+        {t('settingsPanels.auth.intro', { defaultValue: "HTTP authentication sent only to the site being crawled (the start URL's origin, or the listed URLs in List mode) — never to external links, CDNs or other hosts. Useful for staging environments behind Basic/Digest auth, or APIs that require a Bearer token. For sites behind an HTML login form, use Form Login below instead." })}
       </p>
 
       <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
@@ -3378,7 +3378,8 @@ function AuthPanel({ form, update }: PanelProps) {
               label={t('settingsPanels.auth.password', { defaultValue: 'Password' })}
               value={auth.password ?? ''}
               onChange={(v) => setAuth({ password: v })}
-              info="Stored in your local prefs file as plain text. Treat the file accordingly."
+              type="password"
+              info="Encrypted with your operating system's keychain when one is available, and left out of exported settings."
               example="hunter2"
             />
           </>
@@ -3389,6 +3390,7 @@ function AuthPanel({ form, update }: PanelProps) {
             label={t('settingsPanels.auth.token', { defaultValue: 'Token' })}
             value={auth.token ?? ''}
             onChange={(v) => setAuth({ token: v })}
+            type="password"
             info="Sent verbatim as `Bearer <token>`. Don't include the `Bearer ` prefix yourself."
             example="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
           />

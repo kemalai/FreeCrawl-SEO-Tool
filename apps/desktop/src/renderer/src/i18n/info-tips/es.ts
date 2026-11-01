@@ -321,8 +321,8 @@ export const ES_INFO_TIPS: Record<string, string> = {
     'Ante errores de red o respuestas 408/425/429/5xx, reintentar hasta N veces más antes de desistir. Cada reintento cuenta para el presupuesto de tiempo de respuesta de la URL.',
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'Activado al auditar la UX móvil o capturar vistas previas móviles estilo PageSpeed.',
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "Una cabecera por línea en formato 'Clave: Valor'. Se añade a cada petición — útil para tokens de autenticación o indicaciones de enrutado personalizadas. Los valores del usuario prevalecen sobre los predeterminados cuando las claves coinciden.",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "Una cabecera por línea en formato 'Clave: Valor'. Se envía solo al sitio que se rastrea, igual que la autenticación HTTP — nunca a enlaces externos ni a otros hosts. Útil para tokens de autenticación o indicaciones de enrutado personalizadas. Los valores del usuario prevalecen sobre los predeterminados cuando las claves coinciden.",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     'Una URL de sitemap por línea. Además de seguir los enlaces desde la URL inicial, el rastreador obtiene estos sitemaps y encola cada página que listan como semilla extra — descubrimiento más rápido/completo y detección fiable de páginas huérfanas incluso cuando el sitemap está en una ruta no estándar. Déjalo vacío para desactivar.',
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -352,8 +352,8 @@ export const ES_INFO_TIPS: Record<string, string> = {
     'Tras el rastreo, vuelve a descargar una muestra de páginas indexables con el user agent opuesto (móvil si el rastreo fue de escritorio, y viceversa) y compara título, H1, meta descripción, canonical, robots, número de palabras y de enlaces. Las diferencias alimentan el problema \'Discrepancia móvil / escritorio\' y el informe homónimo.',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     'Cuántas páginas vuelve a descargar la sonda de paridad móvil, primero las más enlazadas. 0 = todas las páginas HTML indexables (duplica el tráfico del rastreo para ese conjunto).',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "Sondear los enlaces salientes a otros hosts (solo HEAD) para que la vista Enlaces rotos detecte externos muertos. Screaming Frog: 'External Links' (Configuration → Spider → Crawl).",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "Además, descargar por completo (GET) los enlaces salientes a otros hosts; su estado se comprueba en cualquier caso, para que la vista Enlaces rotos detecte externos muertos. La autenticación HTTP y las cabeceras personalizadas nunca se envían a otros hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl).",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     'Cabecera de respuesta `Content-Security-Policy` sin procesar. Vacía cuando falta.',
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -413,8 +413,8 @@ export const ES_INFO_TIPS: Record<string, string> = {
     'Spider para auditorías completas del sitio; Lista para volver a comprobar un conjunto conocido de páginas; Sitemap para auditar exactamente lo publicado en sitemap.xml.',
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     'Selector CSS estándar — misma sintaxis que `document.querySelectorAll`.',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    'Se guarda en tu archivo de preferencias local como texto sin cifrar. Trata el archivo en consecuencia.',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    'Se cifra con el llavero de tu sistema operativo cuando hay uno disponible y se omite en la configuración exportada.',
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     'Quitar si tu sitio canonicaliza /foo (sin barra); Añadir para sitios que canonicalizan /foo/.',
   ['Sunset over the mountain ridge']: 'Atardecer sobre la cresta de la montaña',

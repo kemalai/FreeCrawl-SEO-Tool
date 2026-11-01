@@ -307,6 +307,10 @@ export function TopBar() {
             onFocus={() => {
               if (recentUrls.length > 0) setRecentOpen(true);
             }}
+            // Closed on blur rather than by a full-window backdrop: the list
+            // opens on mere focus, and a backdrop swallowed the next click —
+            // typing a URL and pressing Start only closed the list.
+            onBlur={() => setRecentOpen(false)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !running) void start();
               if (e.key === 'Escape') setRecentOpen(false);
@@ -316,10 +320,6 @@ export function TopBar() {
           />
           {recentOpen && recentUrls.length > 0 && (
             <>
-              <div
-                className="fixed inset-0 z-10"
-                onClick={() => setRecentOpen(false)}
-              />
               <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded border border-surface-700 bg-surface-900 shadow-xl">
                 <div className="flex items-center gap-1.5 border-b border-surface-800 px-3 py-1.5 text-[10px] uppercase tracking-wider text-surface-500">
                   <History className="h-3 w-3" />

@@ -2443,6 +2443,29 @@ function redactConfigSecrets(config: Record<string, unknown>): Record<string, un
   >;
 }
 
+/** `config` with its secrets blanked, for replies to an MCP agent: an
+ *  agent's context goes to its model provider, so the user's passwords,
+ *  tokens and proxy credentials must never be in it. */
+function configForAgent(config: CrawlConfig): CrawlConfig {
+  return splitConfigSecrets(config).clean;
+}
+
+/** `next` with every secret it leaves blank taken from `current`. An agent
+ *  only ever sees blanked secrets (`configForAgent`), so a read-modify-write
+ *  of the config sends them back blank — that must keep the stored values,
+ *  not wipe them. */
+function keepStoredSecrets(next: CrawlConfig, current: CrawlConfig | null): CrawlConfig {
+  if (!current) return next;
+  const stored = splitConfigSecrets(current).secrets;
+  const given = splitConfigSecrets(next).secrets;
+  const keep: Record<string, string> = {};
+  for (const [field, value] of Object.entries(stored)) {
+    if (!given[field]) keep[field] = value;
+  }
+  if (Object.keys(keep).length === 0) return next;
+  return applyConfigSecrets(JSON.parse(JSON.stringify(next)) as CrawlConfig, keep);
+}
+
 /** Serialize a config for at-rest storage: secrets are pulled out and the
  *  whole secret bundle is encrypted into one field, the rest stays plain
  *  (and human-diffable). Returns the JSON string to persist. */
@@ -2630,8 +2653,13 @@ function restoreProjectConfig(db: ProjectDb): CrawlConfig | null {
  * keep opening — they simply become containers the next time they are
  * saved.
  */
-function openProjectAtPath(documentPath: string): Promise<void> {
+/**
+ * Open a project document in the current session. Resolves `false` when the
+ * user kept the open project instead (see {@link confirmReplaceUnsaved}).
+ */
+async function openProjectAtPath(documentPath: string): Promise<boolean> {
   const s = currentSession();
+  if (!(await confirmReplaceUnsaved(s))) return false;
   const open = s.openQueue.then(async () => {
     s.setOpenProgress({ phase: 'opening' });
     try {
@@ -2641,7 +2669,43 @@ function openProjectAtPath(documentPath: string): Promise<void> {
     }
   });
   s.openQueue = open.catch(() => undefined);
-  return open;
+  await open;
+  return true;
+}
+
+/**
+ * Before another project replaces the window's one, offer unsaved work the
+ * same Save / Don't Save / Cancel choice closing the window does. Opening a
+ * project used to swap the working copy out — and sweep it off disk — without
+ * asking, so an unsaved crawl vanished. Resolves `false` on Cancel or when
+ * the save fails or is cancelled. A headless (MCP agent) session has no
+ * window and no user to ask.
+ */
+async function confirmReplaceUnsaved(s: ProjectSession): Promise<boolean> {
+  if (s.kind === 'headless' || !s.dirty) return true;
+  const win = s.window ?? mainWindow;
+  if (!win || win.isDestroyed()) return true;
+  const res = await dialog.showMessageBox(win, {
+    type: 'warning',
+    title: L().dlgUnsavedTitle,
+    message: L().msgUnsavedChanges,
+    detail: L().detailUnsavedChanges,
+    buttons: [L().btnSaveChanges, L().btnDiscardChanges, L().btnCancel],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  });
+  if (res.response === 2) return false;
+  if (res.response === 1) return true;
+  const target = s.currentProjectPath;
+  if (!target) return (await runSaveProjectAs()) !== null;
+  try {
+    await saveProjectDocument(s, target);
+    return true;
+  } catch (err) {
+    dialog.showErrorBox(L().dlgSaveFailedTitle, (err as Error).message);
+    return false;
+  }
 }
 
 async function openProjectInSession(s: ProjectSession, documentPath: string): Promise<void> {
@@ -3133,12 +3197,27 @@ function getRecentProjects(): string[] {
     .slice(0, 10);
 }
 
+/**
+ * Identity of a recent-projects entry. `resolve` unifies separators and
+ * `..` segments — a path an MCP agent passes, or one typed by hand, can use
+ * `/` on Windows — so the same file no longer shows up twice. Windows
+ * compares paths case-insensitively; macOS and Linux keep the exact path,
+ * since either can sit on a case-sensitive volume.
+ */
+function recentProjectKey(filePath: string): string {
+  const full = resolvePath(filePath);
+  if (process.platform === 'win32') return full.toLowerCase();
+  if (process.platform === 'darwin') return full;
+  return full;
+}
+
 function pushRecentProject(filePath: string, isoNow?: string): void {
   const entries = getRecentProjectEntries();
-  const existing = entries.find((e) => e.path === filePath);
-  const rest = entries.filter((e) => e.path !== filePath);
+  const key = recentProjectKey(filePath);
+  const existing = entries.find((e) => recentProjectKey(e.path) === key);
+  const rest = entries.filter((e) => recentProjectKey(e.path) !== key);
   const merged: RecentProject = {
-    path: filePath,
+    path: resolvePath(filePath),
     archived: existing?.archived ?? false,
     tags: existing?.tags ?? [],
     lastOpened: isoNow ?? existing?.lastOpened,
@@ -7971,10 +8050,15 @@ function registerIpc(): void {
     const database = sess.getDb();
     database.setMeta('lastStartUrl', config.startUrl);
     // Persist the config so a crash-then-resume can rehydrate it
-    // without the user re-entering anything. Stored as JSON in
-    // `project_meta` since the table is keyed by string.
+    // without the user re-entering anything, and so the project reopens
+    // with these settings. Stored as JSON in `project_meta` since the
+    // table is keyed by string. A crawl of a different site wipes
+    // `project_meta` inside `start()`; `onProjectReset` below writes it
+    // back after that wipe.
+    let storedConfig: string | null = null;
     try {
-      database.setMeta('lastCrawlConfig', serializeConfigWithEncryptedSecrets(config));
+      storedConfig = serializeConfigWithEncryptedSecrets(config);
+      database.setMeta('lastCrawlConfig', storedConfig);
     } catch {
       /* never fatal */
     }
@@ -8245,6 +8329,14 @@ function registerIpc(): void {
       dbCall: (method, args) => dbCallViaPool(sess, method, args),
       renderUrl: renderHook,
       respiderSeeds: opts.respiderSeeds,
+      onProjectReset: () => {
+        if (storedConfig === null) return;
+        try {
+          database.setMeta('lastCrawlConfig', storedConfig);
+        } catch {
+          /* never fatal */
+        }
+      },
     });
     sess.activeCrawler = crawler;
     attachCrawlerListeners(crawler, sess);
@@ -8816,7 +8908,8 @@ function registerIpc(): void {
       // current saved `currentSession().lastCrawlConfig` if present, else the factory
       // default. Lets an agent see what's saved before calling
       // `start_crawl` without overrides.
-      return currentSession().lastCrawlConfig ?? { ...DEFAULT_CRAWL_CONFIG };
+      // Secrets are blanked — see `configForAgent`.
+      return configForAgent(currentSession().lastCrawlConfig ?? { ...DEFAULT_CRAWL_CONFIG });
     },
 
     'set-crawl-config': async (input) => {
@@ -8830,7 +8923,10 @@ function registerIpc(): void {
       if (!cfg || typeof cfg !== 'object') {
         throw new Error('CrawlConfig object required.');
       }
-      currentSession().lastCrawlConfig = { ...DEFAULT_CRAWL_CONFIG, ...cfg };
+      currentSession().lastCrawlConfig = keepStoredSecrets(
+        { ...DEFAULT_CRAWL_CONFIG, ...cfg },
+        currentSession().lastCrawlConfig,
+      );
       try {
         getDb().setMeta(
           'lastCrawlConfig',
@@ -8839,7 +8935,7 @@ function registerIpc(): void {
       } catch {
         /* non-fatal — config still set in memory */
       }
-      return { ok: true, config: currentSession().lastCrawlConfig };
+      return { ok: true, config: configForAgent(currentSession().lastCrawlConfig!) };
     },
 
     'url-rewrite-preview': async (input) => {
@@ -9559,7 +9655,11 @@ function registerIpc(): void {
       if (!i.destPath) throw new Error('destPath is required (output .seoproject path).');
       const { decryptFile } = await import('./project-encryption.js');
       await decryptFile(i.filePath, i.destPath, i.password);
-      await openProjectAtPath(i.destPath);
+      if (!(await openProjectAtPath(i.destPath))) {
+        throw new Error(
+          `Decrypted to ${i.destPath}, but the desktop user kept their unsaved project open.`,
+        );
+      }
       return { filePath: i.destPath };
     },
   };
@@ -9681,7 +9781,7 @@ function registerIpc(): void {
         target = res.filePaths[0]!;
       }
       try {
-        await openProjectAtPath(target);
+        if (!(await openProjectAtPath(target))) return null;
         return { filePath: target };
       } catch (err) {
         if (mainWindow) {
@@ -9861,7 +9961,7 @@ function registerIpc(): void {
       try {
         const { decryptFile } = await import('./project-encryption.js');
         await decryptFile(srcPath, dstPath, password);
-        await openProjectAtPath(dstPath);
+        if (!(await openProjectAtPath(dstPath))) return null;
         return { filePath: dstPath };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -11300,11 +11400,14 @@ void app.whenReady().then(async () => {
             const base: CrawlConfig =
               savedBase !== null ? savedBase : { ...DEFAULT_CRAWL_CONFIG };
             const overrides = input.configOverrides ?? {};
-            const resolved: CrawlConfig = {
-              ...base,
-              ...overrides,
-              startUrl: (input.startUrl ?? base.startUrl ?? '').trim(),
-            };
+            const resolved: CrawlConfig = keepStoredSecrets(
+              {
+                ...base,
+                ...overrides,
+                startUrl: (input.startUrl ?? base.startUrl ?? '').trim(),
+              },
+              base,
+            );
             if (!resolved.startUrl) {
               sessionRegistry.releaseCrawl(ctx.sessionId, gate.crawlId);
               return makeBridgeError(
@@ -11325,7 +11428,7 @@ void app.whenReady().then(async () => {
               ok: true,
               crawlId: gate.crawlId,
               sessionId: ctx.sessionId,
-              config: resolved,
+              config: configForAgent(resolved),
               queued: gate.queued,
               waitedMs: gate.waitedMs,
             } satisfies McpStartCrawlResult;

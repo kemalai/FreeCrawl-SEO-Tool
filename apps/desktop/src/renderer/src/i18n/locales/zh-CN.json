@@ -718,7 +718,7 @@
       "url": "Webhook URL"
     },
     "auth": {
-      "intro": "对每个请求应用的 HTTP 认证。适用于位于 Basic/Digest 认证之后的预发布环境，或需要 Bearer 令牌的 API。若站点使用 HTML 登录表单，请改用下方的表单登录。",
+      "intro": "仅发送到正在抓取的站点（起始 URL 的源，或列表模式中列出的 URL）的 HTTP 认证——绝不会发送到外部链接、CDN 或其他主机。适用于位于 Basic/Digest 认证之后的预发布环境，或需要 Bearer 令牌的 API。若站点使用 HTML 登录表单，请改用下方的表单登录。",
       "scheme": "认证方式",
       "schemeNone": "无",
       "schemeBasic": "Basic（用户名 + 密码）",

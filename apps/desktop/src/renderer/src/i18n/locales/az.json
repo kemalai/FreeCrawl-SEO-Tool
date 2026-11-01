@@ -740,7 +740,7 @@
       "url": "Vebhuk URL-i"
     },
     "auth": {
-      "intro": "Hər sorğuya tətbiq olunan HTTP autentifikasiyası. Basic/Digest arxasındaki sınaq mühitləri və ya Bearer token tələb edən API-lar üçün faydalıdır. HTML giriş forması arxasındaki saytlar üçün aşağıdaki forma girişindən istifadə edin.",
+      "intro": "Yalnız taranan sayta (başlanğıc URL-in mənşəyinə və ya Siyahı rejimində siyahıdakı URL-lərə) göndərilən HTTP autentifikasiyası — heç vaxt xarici keçidlərə, CDN-lərə və ya başqa hostlara. Basic/Digest arxasındaki sınaq mühitləri və ya Bearer token tələb edən API-lar üçün faydalıdır. HTML giriş forması arxasındaki saytlar üçün aşağıdaki forma girişindən istifadə edin.",
       "scheme": "Autentifikasiya sxemi",
       "schemeNone": "Yoxdur",
       "schemeBasic": "Basic (istifadəçi adı + parol)",

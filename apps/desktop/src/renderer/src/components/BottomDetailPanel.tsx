@@ -19,6 +19,7 @@ import type {
   UrlAnalyticsDetail,
   SpellingMatchesResult,
 } from '@freecrawl/shared-types';
+import { credentialGateForConfig, type CredentialGate } from '@freecrawl/shared-types';
 import { GridExportButton } from './GridExportButton.js';
 import { useAppStore } from '../store.js';
 import { diagnoseStatus, type StatusDiagnosis } from '../utils/statusDiagnosis.js';
@@ -1830,9 +1831,12 @@ function HttpHeadersView({
   // builder. This is reconstructed-not-stored because per-URL request
   // headers are deterministic from (config, URL) and storing them
   // would multiply the row size by ~5x for zero diagnostic gain.
+  // Same credential boundary the crawler applies; built once per config
+  // because a List-mode config can carry a long URL list.
+  const credentialGate = useMemo(() => credentialGateForConfig(config), [config]);
   const requestHeaders = useMemo(
-    () => buildPreviewRequestHeaders(config, row.url),
-    [config, row.url],
+    () => buildPreviewRequestHeaders(config, row.url, credentialGate),
+    [config, row.url, credentialGate],
   );
   // Decode the status code (esp. Cloudflare 52x / 530, 4xx bot blocks,
   // 5xx-under-load) into a plain-English explanation enriched with
@@ -1996,13 +2000,16 @@ function StatusDiagnosisBanner({ diag }: { diag: StatusDiagnosis }) {
  *
  * Per-host UA matching mirrors `Crawler.resolveUserAgent`. Auth /
  * custom headers / accept-language come straight from the active
- * config. This is reconstructed at render time, so if the user
+ * config; auth and custom headers appear only for URLs inside the
+ * credential boundary (`credentialGateForConfig`), as on the wire.
+ * This is reconstructed at render time, so if the user
  * changed the config since the crawl ran the values reflect the
  * NEW config — that's noted to the user via the panel header banner.
  */
 function buildPreviewRequestHeaders(
   config: CrawlConfig,
   url: string,
+  credentialGate: CredentialGate,
 ): { name: string; value: string }[] {
   const userAgent = resolvePreviewUserAgent(config, url);
   const map = new Map<string, string>();
@@ -2013,6 +2020,7 @@ function buildPreviewRequestHeaders(
     'accept',
     'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
   );
+  if (!credentialGate(url)) return [...map.entries()].map(([name, value]) => ({ name, value }));
   if (config.auth.type === 'basic' && config.auth.username) {
     // btoa is browser-safe; the crawler uses Buffer.from(...).toString('base64')
     // which produces the same encoding.

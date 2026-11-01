@@ -1,6 +1,9 @@
-import { fetch as undiciFetch } from 'undici';
 import type { CrawlConfig, MobileParityDiff, MobileParityField } from '@freecrawl/shared-types';
-import { defaultRequestHeaders } from './http-client.js';
+import {
+  fetchFollowingRedirects,
+  scopedRequestHeaders,
+  type ScopedCredentials,
+} from './http-client.js';
 import type { ParsedPage } from './html-parser.js';
 
 /**
@@ -23,22 +26,16 @@ export interface ParityFetchResult {
 export async function fetchForParity(
   url: string,
   userAgent: string,
-  config: Pick<CrawlConfig, 'acceptLanguage' | 'customHeaders' | 'auth'>,
+  config: Pick<CrawlConfig, 'acceptLanguage'> & ScopedCredentials,
   timeoutMs = FETCH_TIMEOUT_MS,
 ): Promise<ParityFetchResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const headers = defaultRequestHeaders(
-      userAgent,
-      config.acceptLanguage,
-      config.customHeaders,
-      config.auth,
-    );
-    const res = await undiciFetch(url, {
-      method: 'GET',
-      headers,
-      redirect: 'follow',
+    // The alternate UA can be redirected off-site (m.example.com, an app
+    // store); credentials follow only where the crawl's gate allows.
+    const res = await fetchFollowingRedirects(url, {
+      headersFor: (u) => scopedRequestHeaders(u, userAgent, config.acceptLanguage, config),
       signal: controller.signal,
     });
     const type = res.headers.get('content-type') ?? '';

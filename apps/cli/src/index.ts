@@ -73,7 +73,8 @@ Options:
                         a WordPress blog can go from ~2k to ~40k image requests with this on)
   --adaptive-speed    Back off automatically on HTTP 429/503 and Retry-After, then recover
                         (off by default; the fixed --rps / --concurrency hold otherwise)
-  --header <K: V>     Extra request header; repeatable (e.g. --header "Authorization: Bearer X")
+  --header <K: V>     Extra request header for the crawled site only (never sent to external
+                        hosts); repeatable (e.g. --header "Authorization: Bearer X")
   --include <regex>   Only crawl URLs matching this regex; repeatable
   --exclude <regex>   Skip URLs matching this regex; repeatable
   --list <file>       List-mode crawl: fetch every URL in <file> (one per line), no link follow

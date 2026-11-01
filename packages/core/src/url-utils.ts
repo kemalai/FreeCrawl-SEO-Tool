@@ -1,3 +1,5 @@
+import { registrableDomain } from '@freecrawl/shared-types';
+
 export interface UrlRegexRewrite {
   pattern: string;
   replacement: string;
@@ -231,66 +233,9 @@ export function normalizeUrl(
   }
 }
 
-/**
- * Two-label public suffixes where the registrable domain is the last THREE
- * labels (e.g. `example.co.uk`, `site.com.tr`) rather than the last two.
- * A curated subset of the Mozilla Public Suffix List covering the common
- * ccTLD second levels — the full PSL is megabytes and unnecessary for scope
- * matching. Without this, `foo.com.tr` and `bar.com.tr` collapse to the same
- * registrable domain (`com.tr`), so `all-subdomains` scope escapes onto every
- * unrelated site on the ccTLD.
- */
-const MULTI_LEVEL_SUFFIXES: ReadonlySet<string> = new Set([
-  // United Kingdom
-  'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk', 'net.uk', 'sch.uk', 'ac.uk', 'gov.uk', 'nhs.uk',
-  // Turkey
-  'com.tr', 'net.tr', 'org.tr', 'gov.tr', 'edu.tr', 'k12.tr', 'av.tr', 'bel.tr', 'biz.tr', 'gen.tr',
-  'info.tr', 'name.tr', 'web.tr', 'tv.tr',
-  // Australia / New Zealand
-  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'asn.au', 'id.au',
-  'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz', 'school.nz',
-  // Japan / Korea / China / Hong Kong
-  'co.jp', 'or.jp', 'ne.jp', 'ac.jp', 'go.jp', 'gr.jp',
-  'co.kr', 'or.kr', 'ne.kr', 're.kr', 'go.kr', 'ac.kr',
-  'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
-  'com.hk', 'org.hk', 'net.hk', 'gov.hk', 'edu.hk',
-  // Brazil / Mexico / Argentina / Colombia
-  'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br',
-  'com.mx', 'net.mx', 'org.mx', 'gob.mx', 'edu.mx',
-  'com.ar', 'net.ar', 'org.ar', 'gob.ar', 'edu.ar',
-  'com.co', 'net.co', 'org.co', 'gov.co', 'edu.co',
-  // India / Singapore / Malaysia / Thailand / Vietnam / Indonesia / Philippines
-  'co.in', 'net.in', 'org.in', 'gen.in', 'firm.in', 'ind.in', 'ac.in', 'edu.in', 'gov.in', 'res.in',
-  'com.sg', 'net.sg', 'org.sg', 'gov.sg', 'edu.sg',
-  'com.my', 'net.my', 'org.my', 'gov.my', 'edu.my',
-  'co.th', 'in.th', 'ac.th', 'go.th', 'or.th',
-  'com.vn', 'net.vn', 'org.vn', 'gov.vn', 'edu.vn',
-  'co.id', 'or.id', 'go.id', 'ac.id', 'web.id',
-  'com.ph', 'net.ph', 'org.ph', 'gov.ph', 'edu.ph',
-  // South Africa / Israel / Russia / Ukraine / Spain / Poland
-  'co.za', 'org.za', 'net.za', 'gov.za', 'ac.za',
-  'co.il', 'org.il', 'net.il', 'gov.il', 'ac.il',
-  'com.ru', 'net.ru', 'org.ru',
-  'com.ua', 'net.ua', 'org.ua',
-  'com.es', 'org.es', 'gob.es', 'edu.es', 'nom.es',
-  'com.pl', 'net.pl', 'org.pl', 'gov.pl', 'edu.pl',
-]);
-
-/**
- * Registrable ("root") domain of a hostname, honouring the multi-level
- * public-suffix table above. `www.example.com` → `example.com`;
- * `shop.example.co.uk` → `example.co.uk`.
- */
-export function registrableDomain(hostname: string): string {
-  const host = hostname.toLowerCase().replace(/\.$/, '');
-  const labels = host.split('.');
-  if (labels.length <= 2) return host;
-  const lastTwo = labels.slice(-2).join('.');
-  if (MULTI_LEVEL_SUFFIXES.has(lastTwo) && labels.length >= 3) {
-    return labels.slice(-3).join('.');
-  }
-  return lastTwo;
-}
+// `registrableDomain` lives in shared-types so the renderer can apply the
+// same credential boundary (`createCredentialGate`) as the crawler.
+export { registrableDomain };
 
 export function isSameHost(
   urlA: string,

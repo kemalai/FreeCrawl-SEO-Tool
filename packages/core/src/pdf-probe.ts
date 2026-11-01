@@ -1,5 +1,8 @@
-import { fetch as undiciFetch } from 'undici';
-import { defaultRequestHeaders } from './http-client.js';
+import {
+  fetchFollowingRedirects,
+  scopedRequestHeaders,
+  type ScopedCredentials,
+} from './http-client.js';
 import type { CrawlConfig } from '@freecrawl/shared-types';
 
 /**
@@ -55,25 +58,22 @@ const EMPTY: PdfMetadata = {
 
 export async function probePdfMetadata(
   url: string,
-  config: Pick<CrawlConfig, 'userAgent' | 'acceptLanguage' | 'customHeaders' | 'auth'>,
+  config: Pick<CrawlConfig, 'userAgent' | 'acceptLanguage'> & ScopedCredentials,
 ): Promise<PdfProbeResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
-    const headers = defaultRequestHeaders(
-      config.userAgent,
-      config.acceptLanguage,
-      config.customHeaders,
-      config.auth,
-    );
-    headers['range'] = `bytes=0-${MAX_BYTES - 1}`;
-    headers['accept-encoding'] = 'identity';
-    headers['accept'] = 'application/pdf,*/*;q=0.8';
-
-    const res = await undiciFetch(url, {
-      method: 'GET',
-      headers,
-      redirect: 'follow',
+    // An internal PDF URL can still redirect to a document host elsewhere;
+    // each hop gets the crawl's credentials only if the gate allows it.
+    const headersFor = (u: string): Record<string, string> => {
+      const headers = scopedRequestHeaders(u, config.userAgent, config.acceptLanguage, config);
+      headers['range'] = `bytes=0-${MAX_BYTES - 1}`;
+      headers['accept-encoding'] = 'identity';
+      headers['accept'] = 'application/pdf,*/*;q=0.8';
+      return headers;
+    };
+    const res = await fetchFollowingRedirects(url, {
+      headersFor,
       signal: controller.signal,
     });
     // 200 (Range ignored) and 206 (Partial Content) are both fine.

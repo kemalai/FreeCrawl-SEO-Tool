@@ -762,7 +762,7 @@
       "url": "URL del webhook"
     },
     "auth": {
-      "intro": "Autenticazione HTTP applicata a ogni richiesta. Utile per ambienti di staging protetti da autenticazione Basic/Digest, o per API che richiedono un token Bearer. Per siti protetti da un modulo di login HTML, usa invece il login tramite modulo qui sotto.",
+      "intro": "Autenticazione HTTP inviata solo al sito scansionato (l'origine dell'URL iniziale, o gli URL elencati in modalità Elenco) — mai a link esterni, CDN o altri host. Utile per ambienti di staging protetti da autenticazione Basic/Digest, o per API che richiedono un token Bearer. Per siti protetti da un modulo di login HTML, usa invece il login tramite modulo qui sotto.",
       "scheme": "Schema di autenticazione",
       "schemeNone": "Nessuno",
       "schemeBasic": "Basic (utente + password)",

@@ -314,8 +314,8 @@ export const KO_INFO_TIPS: Record<string, string> = {
     '네트워크 오류 및 408/425/429/5xx 응답 시 포기하기 전에 최대 N번 더 재시도합니다. 각 재시도는 URL의 응답 시간 예산에 포함됩니다.',
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     '모바일 UX를 감사하거나 PageSpeed 스타일 모바일 미리보기를 캡처할 때 켬.',
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "'Key: Value' 형식으로 한 줄에 헤더 하나. 모든 요청에 추가됩니다 — 인증 토큰이나 사용자 지정 라우팅 힌트에 유용합니다. 키가 겹치면 사용자 값이 기본값을 덮어씁니다.",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "'Key: Value' 형식으로 한 줄에 헤더 하나. HTTP 인증과 마찬가지로 크롤링 중인 사이트에만 전송되며, 외부 링크나 다른 호스트로는 절대 전송되지 않습니다. 인증 토큰이나 사용자 지정 라우팅 힌트에 유용합니다. 키가 겹치면 사용자 값이 기본값을 덮어씁니다.",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     '한 줄에 사이트맵 URL 하나. 시작 URL에서 링크를 따라가는 것에 더해 크롤러가 이 사이트맵들을 가져와 나열된 모든 페이지를 추가 시드로 큐에 넣습니다 — 더 빠르고 완전한 발견, 그리고 사이트맵이 비표준 경로에 있어도 신뢰할 수 있는 고아 페이지 감지. 비활성화하려면 비워 두세요.',
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -345,8 +345,8 @@ export const KO_INFO_TIPS: Record<string, string> = {
     '크롤 후 색인 가능한 페이지 샘플을 반대 사용자 에이전트(데스크톱 크롤이면 모바일, 그 반대도 마찬가지)로 다시 가져와 제목, H1, 메타 설명, 캐노니컬, robots, 단어 수, 링크 수를 비교합니다. 차이는 \'모바일 / 데스크톱 불일치\' 이슈와 같은 이름의 보고서에 반영됩니다.',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     '모바일 패리티 프로브가 다시 가져오는 페이지 수이며 인링크가 많은 순입니다. 0 = 모든 색인 가능 HTML 페이지(해당 집합의 크롤 트래픽이 두 배가 됨).',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "다른 호스트로 나가는 링크를 검사(HEAD만)하여 깨진 링크 보기가 죽은 외부 링크를 잡아냅니다. Screaming Frog: 'External Links'(Configuration → Spider → Crawl).",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "다른 호스트로 나가는 링크도 전체(GET)로 가져옵니다. 상태는 어느 경우든 검사되므로 깨진 링크 보기가 죽은 외부 링크를 잡아냅니다. HTTP 인증과 사용자 지정 헤더는 다른 호스트로 절대 전송되지 않습니다. Screaming Frog: 'External Links'(Configuration → Spider → Crawl).",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     '원시 `Content-Security-Policy` 응답 헤더. 없으면 비어 있습니다.',
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -404,8 +404,8 @@ export const KO_INFO_TIPS: Record<string, string> = {
     '전체 사이트 감사에는 Spider, 알려진 페이지 집합을 재확인하려면 목록, sitemap.xml에 게시된 내용을 정확히 감사하려면 사이트맵.',
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     '표준 CSS 선택자 — `document.querySelectorAll`과 같은 문법.',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    '로컬 환경설정 파일에 일반 텍스트로 저장됩니다. 파일을 그에 맞게 다루세요.',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    '사용 가능한 경우 운영 체제의 키체인으로 암호화되며, 내보낸 설정에는 포함되지 않습니다.',
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     '사이트가 /foo(슬래시 없음)로 표준화하면 제거, /foo/로 표준화하면 추가.',
   ['Sunset over the mountain ridge']: '산등성이 위의 일몰',

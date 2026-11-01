@@ -15,6 +15,11 @@ export interface FieldInfo {
  * an optional concrete example. `pointer-events-none` lets the mouse
  * pass through, so hovering the icon doesn't block clicks on the
  * column-header sort/resize controls underneath.
+ *
+ * The popover is `hidden` (display: none) until hover/focus, not merely
+ * `invisible`: an invisible absolute box still counts toward its scroll
+ * container's overflow, so every [i] near the right edge of a Settings
+ * panel gave that panel a permanent horizontal scrollbar.
  */
 export function InfoTip({ info, example }: FieldInfo) {
   const { t, i18n } = useTranslation();
@@ -33,7 +38,7 @@ export function InfoTip({ info, example }: FieldInfo) {
         tabIndex={0}
         aria-label={localizedInfo ?? t('infoTip.moreInfo', { defaultValue: 'More info' })}
       />
-      <span className="pointer-events-none invisible absolute left-4 top-0 z-50 w-64 rounded border border-surface-700 bg-surface-900 p-2 text-[10px] leading-relaxed text-surface-200 opacity-0 shadow-xl transition-opacity duration-150 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+      <span className="pointer-events-none absolute left-4 top-0 z-50 hidden w-64 rounded border border-surface-700 bg-surface-900 p-2 text-[10px] leading-relaxed text-surface-200 shadow-xl group-hover:block group-focus-within:block">
         {localizedInfo && <span className="block">{localizedInfo}</span>}
         {localizedExample && (
           <>

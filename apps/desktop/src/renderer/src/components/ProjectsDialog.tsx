@@ -34,6 +34,17 @@ export function ProjectsDialog({
     if (open) void reload();
   }, [open, reload]);
 
+  // Escape closes the dialog like the other modals — except while a tag
+  // edit is open, where Escape cancels just that edit.
+  useEffect(() => {
+    if (!open || editingTags !== null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, editingTags, onClose]);
+
   const allTags = useMemo(() => {
     const s = new Set<string>();
     for (const r of recents) for (const tag of r.tags ?? []) s.add(tag);

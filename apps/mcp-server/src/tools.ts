@@ -1693,7 +1693,7 @@ export function buildTools(): Tool[] {
     {
       requiresDb: false,
       name: 'get_crawl_config',
-      description: 'Read the most recently-used CrawlConfig — the same config `start_crawl` falls back to when called without overrides. Reflects whatever the user (or the previous MCP `set_crawl_config` call) configured in Settings.',
+      description: 'Read the most recently-used CrawlConfig — the same config `start_crawl` falls back to when called without overrides. Reflects whatever the user (or the previous MCP `set_crawl_config` call) configured in Settings. Secrets (HTTP auth password / token, form-login password, proxy URL) are returned blank.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () =>
         bridgeRequest<unknown>('POST', '/v1/action/get-crawl-config', {}),
@@ -1703,7 +1703,7 @@ export function buildTools(): Tool[] {
       requiresDb: false,
       name: 'set_crawl_config',
       description:
-        'Persist a full CrawlConfig as the saved default — next `start_crawl` without overrides will use these settings. The input is the entire CrawlConfig object (every field the Settings dialog exposes). Pass `get_crawl_config` first to read the current shape, then send the modified copy back. Validation happens at crawl launch time — out-of-range values may be silently clamped or fail at start.',
+        'Persist a full CrawlConfig as the saved default — next `start_crawl` without overrides will use these settings. The input is the entire CrawlConfig object (every field the Settings dialog exposes). Pass `get_crawl_config` first to read the current shape, then send the modified copy back; secret fields left blank keep their stored values. Validation happens at crawl launch time — out-of-range values may be silently clamped or fail at start.',
       inputSchema: {
         type: 'object',
         description: 'Full CrawlConfig object. Pass the result of `get_crawl_config` with your modifications layered on.',

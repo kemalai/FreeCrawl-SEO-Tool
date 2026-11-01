@@ -318,8 +318,8 @@ export const AZ_INFO_TIPS: Record<string, string> = {
     'Şəbəkə xətalarında və 408/425/429/5xx cavablarında imtina etməzdən əvvəl N dəfə də təkrar cəhd et. Hər təkrar cəhd URL-in cavab vaxtı büdcəsinə sayılır.',
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'Mobil UX auditi edərkən və ya PageSpeed tərzində mobil önizləmələr çəkərkən aktiv.',
-  ["One header per line in 'Key: Value' format. Added to every request — useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
-    "'Açar: Dəyər' formatında hər sətirdə bir başlıq. Hər sorğuya əlavə olunur — autentifikasiya tokenləri və ya fərdi yönləndirmə göstərişləri üçün faydalıdır. Açarlar toqquşduqda istifadəçi dəyərləri standartları əvəz edir.",
+  ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
+    "'Açar: Dəyər' formatında hər sətirdə bir başlıq. HTTP autentifikasiyası kimi yalnız taranan sayta göndərilir — heç vaxt xarici keçidlərə və ya başqa hostlara. Autentifikasiya tokenləri və ya fərdi yönləndirmə göstərişləri üçün faydalıdır. Açarlar toqquşduqda istifadəçi dəyərləri standartları əvəz edir.",
   ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
     'Hər sətirdə bir sitemap URL-i. Başlanğıc URL-dən keçidləri izləməklə yanaşı, tarayıcı bu sitemap-ləri yükləyir və siyahıdakı hər səhifəni əlavə toxum kimi növbəyə qoyur — daha sürətli/tam kəşf və sitemap qeyri-standart yolda olsa belə etibarlı yetim aşkarlanması. Söndürmək üçün boş buraxın.',
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
@@ -349,8 +349,8 @@ export const AZ_INFO_TIPS: Record<string, string> = {
     'Taramadan sonra indekslənə bilən səhifələrin nümunəsini əks istifadəçi agenti ilə (tarama masaüstü idisə mobil, əksinə isə masaüstü) yenidən yükləyir və başlıq, H1, meta təsvir, canonical, robots, söz sayı və keçid sayını müqayisə edir. Fərqlər \'Mobil / masaüstü uyğunsuzluğu\' probleminə və eyni adlı hesabata daxil olur.',
   ['How many pages the mobile-parity probe re-fetches, most-linked first. 0 = every indexable HTML page (doubles the crawl\'s traffic for that set).']:
     'Mobil paritet yoxlamasının yenidən yüklədiyi səhifə sayı, ən çox keçid alanlar əvvəl. 0 = bütün indekslənə bilən HTML səhifələr (həmin dəst üçün tarama trafikini ikiqat artırır).',
-  ["Probe outbound links to other hosts (HEAD only) so the Broken Links view catches dead externals. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
-    "Başqa hostlara çıxış keçidlərini yoxla (yalnız HEAD) ki, Qırıq keçidlər görünüşü ölü xariciləri tutsun. Screaming Frog: 'External Links' (Configuration → Spider → Crawl).",
+  ["Also fetch outbound links to other hosts in full (GET); their status is checked either way, so the Broken Links view catches dead externals. HTTP authentication and custom headers are never sent to other hosts. Screaming Frog: 'External Links' (Configuration → Spider → Crawl)."]:
+    "Başqa hostlara çıxan keçidləri həm də tam (GET) yüklə; onların statusu hər halda yoxlanılır ki, Qırıq keçidlər görünüşü ölü xariciləri tutsun. HTTP autentifikasiyası və fərdi başlıqlar heç vaxt başqa hostlara göndərilmir. Screaming Frog: 'External Links' (Configuration → Spider → Crawl).",
   ['Raw `Content-Security-Policy` response header. Empty when missing.']:
     'Xam `Content-Security-Policy` cavab başlığı. Yoxdursa boşdur.',
   ['Raw `content` attribute of `<meta http-equiv="refresh">`, e.g. "5; url=/foo".']:
@@ -410,8 +410,8 @@ export const AZ_INFO_TIPS: Record<string, string> = {
     'Tam sayt auditləri üçün Spider; məlum səhifə dəstini yenidən yoxlamaq üçün Siyahı; sitemap.xml-də dərc olunanları dəqiq audit etmək üçün Sitemap.',
   ['Standard CSS selector — same syntax as `document.querySelectorAll`.']:
     'Standart CSS seçicisi — `document.querySelectorAll` ilə eyni sintaksis.',
-  ['Stored in your local prefs file as plain text. Treat the file accordingly.']:
-    'Yerli tərcihlər faylınızda açıq mətn kimi saxlanılır. Fayla buna uyğun yanaşın.',
+  ["Encrypted with your operating system's keychain when one is available, and left out of exported settings."]:
+    'Saxlanılarkən, mövcuddursa, əməliyyat sisteminizin açar zənciri ilə şifrələnir və ixrac edilən ayarlara daxil edilmir.',
   ['Strip if your site canonicalises /foo (no slash); Add for sites that canonicalise /foo/.']:
     'Saytınız /foo (slaşsız) kanonikləşdirirsə Sil; /foo/ kanonikləşdirən saytlar üçün Əlavə et.',
   ['Sunset over the mountain ridge']: 'Dağ silsiləsi üzərində gün batımı',
