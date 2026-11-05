@@ -139,6 +139,10 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
           click: () => send('export-bulk'),
         },
         {
+          label: L.exportMarkdown,
+          click: () => send('export-markdown'),
+        },
+        {
           label: L.exportSheets,
           click: () => send('export-sheets'),
         },
@@ -150,6 +154,10 @@ export function buildAppMenu(handlers: AppMenuHandlers): Menu {
         {
           label: L.compareWith,
           click: () => send('compare-with-project'),
+        },
+        {
+          label: L.compareWithPrevious,
+          click: () => send('compare-with-previous'),
         },
         {
           label: L.scheduledCrawl,

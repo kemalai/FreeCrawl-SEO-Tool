@@ -317,14 +317,14 @@ export const IT_INFO_TIPS: Record<string, string> = {
     'Attivato se il tuo CMS serve la stessa pagina con maiuscole miste (/Foo e /foo).',
   ['On if your site canonicalises to non-www but emits www links somewhere.']:
     'Attivato se il tuo sito canonicalizza senza www ma emette link con www da qualche parte.',
-  ["On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."]:
-    "Su errori di rete e risposte 408/425/429/5xx, ritenta fino a N volte in più prima di rinunciare. Ogni tentativo conta nel budget di tempo di risposta dell'URL.",
+  ["On 408/425/429/5xx responses, retry up to N more times before giving up. Requests that get no response at all use Connection Failure Retries below. Each retry counts toward the URL's response time budget."]:
+    "Sulle risposte 408/425/429/5xx, riprova fino a N volte prima di arrendersi. Le richieste senza alcuna risposta usano Tentativi su errore di connessione, qui sotto. Ogni tentativo conta nel budget del tempo di risposta dell'URL.",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'Attivato quando verifichi la UX mobile o catturi anteprime mobile in stile PageSpeed.',
   ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
     "Un header per riga nel formato 'Chiave: Valore'. Inviato solo al sito scansionato, come l'autenticazione HTTP — mai ai link esterni o ad altri host. Utile per token di autenticazione o suggerimenti di routing personalizzati. I valori dell'utente sovrascrivono i predefiniti quando le chiavi coincidono.",
-  ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
-    "Un URL di sitemap per riga. Oltre a seguire i link dall'URL iniziale, il crawler recupera queste sitemap e accoda ogni pagina elencata come seme aggiuntivo — scoperta più rapida/completa e rilevamento affidabile delle pagine orfane anche quando la sitemap si trova in un percorso non standard. Lascia vuoto per disabilitare.",
+  ["One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "Un URL di sitemap per riga. Oltre a seguire i link dall'URL iniziale, il crawler recupera queste sitemap e accoda ogni pagina elencata come seme aggiuntivo — scoperta più rapida/completa e rilevamento affidabile delle pagine orfane anche quando la sitemap si trova in un percorso non standard. Lascia vuoto per disabilitare. I percorsi relativi come /sitemap.xml vengono risolti rispetto all'URL iniziale.",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
     'Un URL per riga. Ognuno viene recuperato esattamente una volta; i link in uscita NON vengono seguiti. I commenti che iniziano con # vengono ignorati.',
   ['OS scheduler hint applied at crawl start. Lowering priority lets the rest of the machine stay responsive during heavy crawls. May require elevated privileges on some platforms.']:
@@ -605,10 +605,10 @@ export const IT_INFO_TIPS: Record<string, string> = {
     'La versione mobile con URL separato (m-dot): <link rel="alternate" media="only screen and (max-width: …)">. Nullo sui siti responsive, cioè la maggior parte — un valore qui senza canonical reciproco di ritorno è la classica configurazione m-dot rotta.',
   ['Crawl on only when the site really does serve a separate mobile host.']:
     'Scansiona attivato solo quando il sito serve davvero un host mobile separato.',
-  ['Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", and href="#" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter.']:
-    'Link che un motore di ricerca non può seguire: <a> senza href ma con onclick, href="javascript:…" e segnaposto href="#" collegati a un handler. Solo Memorizza — un link non scansionabile per definizione non viene mai recuperato. Alimenta il filtro problema Navigazione solo JS.',
-  ['On — it is a count, so it costs nothing.']:
-    'Attivato — è un conteggio, quindi non costa nulla.',
+  ["Links a search engine cannot follow: <a> with no href but an onclick, href=\"javascript:…\", href=\"#\" placeholders wired to a handler, an href on a non-link element such as <span> or <div>, and non-link elements whose onclick navigates. Store-only — an uncrawlable link is by definition never fetched. Each one appears under Outlinks as Uncrawlable; the internal ones drive the JS-Only Navigation issue filter."]:
+    "Link che un motore di ricerca non può seguire: <a> senza href ma con onclick, href=\"javascript:…\", segnaposto href=\"#\" collegati a un handler, un href su un elemento che non è un link, come <span> o <div>, ed elementi non link il cui onclick naviga. Solo Memorizza — un link non scansionabile per definizione non viene mai recuperato. Ognuno compare in Link in uscita come Non scansionabile; quelli interni alimentano il filtro problema Navigazione solo in JS.",
+  ["On — recording them costs almost nothing."]:
+    "Attivato — registrarli non costa quasi nulla.",
   ['With a Subfolder-scoped crawl, links pointing outside the start folder are fetched once so their status code is known, then stopped — they are checked, not crawled through. Off leaves them undiscovered entirely.']:
     'Con una scansione di ambito Sottocartella, i link che puntano fuori dalla cartella iniziale vengono recuperati una volta per conoscerne il codice di stato, poi fermati — vengono controllati, non scansionati in profondità. Disattivato li lascia del tutto non scoperti.',
   ['On — knowing a link out of /blog/ is a 404 costs one request.']:
@@ -647,8 +647,8 @@ export const IT_INFO_TIPS: Record<string, string> = {
   ['Reads Sitemap: directives from /robots.txt plus the conventional /sitemap.xml fallbacks at crawl start. Cheap I/O, and it powers every sitemap issue filter.']:
     "Legge le direttive Sitemap: da /robots.txt più i fallback convenzionali /sitemap.xml all'avvio della scansione. I/O economico, e alimenta ogni filtro problema della sitemap.",
   ['On (default).']: 'Attivato (predefinito).',
-  ['Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions.']:
-    'URL di sitemap espliciti, uno per riga. Le loro voci vengono sempre sia registrate sia accodate come semi di scansione — usalo quando la sitemap si trova da qualche parte che robots.txt non menziona mai.',
+  ["Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "URL di sitemap espliciti, uno per riga. Le loro voci vengono sempre sia registrate sia accodate come semi di scansione — usalo quando la sitemap si trova da qualche parte che robots.txt non menziona mai. I percorsi relativi come /sitemap.xml vengono risolti rispetto all'URL iniziale.",
   ['Treat the concurrency and RPS above as a ceiling and let the target server set the real pace. On a 429/503 (or a Retry-After header) the crawler pauses for the penalty window and steps the rate + concurrency down; after a sustained run of clean responses it grows them back toward the ceiling. Off = hold the configured rate no matter how the server responds.']:
     'Tratta la concorrenza e gli RPS sopra come un tetto e lascia che il server di destinazione detti il ritmo reale. Su un 429/503 (o un header Retry-After) il crawler si ferma per la finestra di penalità e riduce frequenza + concorrenza; dopo una serie sostenuta di risposte pulite le riporta verso il tetto. Disattivato = mantieni la frequenza configurata comunque risponda il server.',
   ['Turn on for sites behind Cloudflare / a WAF that returns 429s; leave off for your own infrastructure where the fixed rate is safe.']:
@@ -683,4 +683,50 @@ export const IT_INFO_TIPS: Record<string, string> = {
     "Massima similarità testuale stimata con un'altra pagina del gruppo di quasi-duplicati di questo URL, misurata sul testo principale. Vuota per le pagine che non sono quasi-duplicati.",
   ["90 = recommended (Screaming Frog's default); 80 catches looser rewrites; 0 turns this pass off."]:
     "90 = consigliato (predefinito di Screaming Frog); 80 individua riscritture più libere; 0 disattiva questo passaggio.",
+  ["The page's `og:title` — the headline Facebook, LinkedIn and other OpenGraph readers show on a share card. One of the four required OpenGraph properties."]:
+    "L'`og:title` della pagina: il titolo che Facebook, LinkedIn e gli altri lettori OpenGraph mostrano nella scheda di condivisione. Una delle quattro proprietà OpenGraph obbligatorie.",
+  ["The `og:description` text shown under the title on a share card."]:
+    "Il testo di `og:description` mostrato sotto il titolo nella scheda di condivisione.",
+  ["The `og:image` URL as written in the page. The share card uses this picture; it should be absolute and return 200. One of the four required OpenGraph properties."]:
+    "L'URL di `og:image` così come scritto nella pagina. La scheda di condivisione usa questa immagine; deve essere assoluto e restituire 200. Una delle quattro proprietà OpenGraph obbligatorie.",
+  ["Pixel width of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Larghezza in pixel dell'og:image, letta dalla sonda delle immagini social. 0 = impossibile leggere l'immagine; vuoto = non sondata.",
+  ["Pixel height of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Altezza in pixel dell'og:image, letta dalla sonda delle immagini social. 0 = impossibile leggere l'immagine; vuoto = non sondata.",
+  ["The `og:type` of the page, such as website or article. One of the four required OpenGraph properties."]:
+    "L'`og:type` della pagina, ad esempio website o article. Una delle quattro proprietà OpenGraph obbligatorie.",
+  ["The `og:url` — the address share counts and the card link are attached to. One of the four required OpenGraph properties."]:
+    "L'`og:url`: l'indirizzo a cui sono associati i conteggi delle condivisioni e il link della scheda. Una delle quattro proprietà OpenGraph obbligatorie.",
+  ["The `og:site_name` that some platforms show above the share card title."]:
+    "L'`og:site_name` che alcune piattaforme mostrano sopra il titolo della scheda di condivisione.",
+  ["The `og:locale` — the language and territory of the markup."]:
+    "L'`og:locale`: la lingua e il territorio del markup.",
+  ["The X (Twitter) card type. Without it X shows no card, even when other `twitter:` tags are present."]:
+    "Il tipo di scheda di X (Twitter). Senza di esso X non mostra alcuna scheda, anche se sono presenti altri tag `twitter:`.",
+  ["The X card title. X falls back to og:title when it is missing."]:
+    "Il titolo della scheda X. Se manca, X usa og:title.",
+  ["The X card description. X falls back to og:description when it is missing."]:
+    "La descrizione della scheda X. Se manca, X usa og:description.",
+  ["The X card image URL. X falls back to og:image when it is missing."]:
+    "L'URL dell'immagine della scheda X. Se manca, X usa og:image.",
+  ["Pixel width of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Larghezza in pixel della twitter:image, letta dalla sonda delle immagini social. 0 = impossibile leggere l'immagine; vuoto = non sondata.",
+  ["Pixel height of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Altezza in pixel della twitter:image, letta dalla sonda delle immagini social. 0 = impossibile leggere l'immagine; vuoto = non sondata.",
+  ["When a request gets no response at all — a timeout, a reset or a refused connection — retry it up to N more times before recording it as failed. Kept apart from the HTTP retries above, so a flaky network and a struggling server can be tuned separately."]:
+    "Quando una richiesta non riceve alcuna risposta (timeout, connessione reimpostata o rifiutata), la riprova fino a N volte prima di registrarla come fallita. È separato dai tentativi HTTP qui sopra, così una rete instabile e un server in difficoltà si regolano a parte.",
+  ["2 default; 0 to record connection failures immediately; 4 on an unstable connection."]:
+    "2 predefinito; 0 per registrare subito gli errori di connessione; 4 su una connessione instabile.",
+  ["When a site that was answering stops responding — 10 requests in a row get no answer even after their connection retries — the crawl pauses instead of marking the rest of the queue as failed. Fix the problem or wait for the server to come back, then press Resume to continue where it stopped."]:
+    "Quando un sito che rispondeva smette di farlo (10 richieste di fila senza risposta anche dopo i tentativi di connessione), la scansione va in pausa invece di segnare come fallito il resto della coda. Risolvi il problema o attendi che il server torni, poi premi Riprendi per continuare da dove si è fermata.",
+  ["On by default. Turn it off when any result is better than a paused run, for example a crawl nobody is watching."]:
+    "Attivo per impostazione predefinita. Disattivalo quando qualsiasi risultato è meglio di una scansione in pausa, ad esempio una che nessuno sta seguendo.",
+  ["Links that sit in these parts of a page are recorded (they still count as inlinks and show in the link reports) but the crawler does not follow them. Useful for mega-menus and footers that link to thousands of pages. A page that is also linked from the body is still crawled."]:
+    "I link che si trovano in queste parti della pagina vengono registrati (contano ancora come link in entrata e compaiono nei report dei link), ma il crawler non li segue. Utile per mega-menu e piè di pagina che puntano a migliaia di pagine. Una pagina linkata anche dal corpo viene comunque scansionata.",
+  ["Footer + Sidebar on a shop whose footer lists every category"]:
+    "Piè di pagina + Barra laterale su un negozio il cui piè di pagina elenca tutte le categorie",
+  ["Links inside any element matching one of these CSS selectors are recorded but not followed — the way to keep faceted filters or a mega-menu from flooding the crawl without excluding the pages themselves. An invalid selector is ignored."]:
+    "I link all'interno di qualsiasi elemento che corrisponde a uno di questi selettori CSS vengono registrati ma non seguiti: il modo per evitare che filtri a faccette o un mega-menu inondino la scansione senza escludere le pagine stesse. Un selettore non valido viene ignorato.",
+  ["The name every export's save dialog suggests. Tokens are filled in when you export: {report} = what is exported, {date} / {time} / {datetime} = now, {domain} = the crawled site, {project} = the project name. Characters that are not allowed in file names are replaced with a dash."]:
+    "Il nome proposto dalla finestra di salvataggio di ogni esportazione. I token vengono compilati all'esportazione: {report} = ciò che si esporta, {date} / {time} / {datetime} = adesso, {domain} = il sito scansionato, {project} = il nome del progetto. I caratteri non ammessi nei nomi file vengono sostituiti da un trattino.",
 };

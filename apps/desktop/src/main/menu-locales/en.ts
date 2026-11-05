@@ -309,4 +309,9 @@ export const MENU_EN: MenuLabels = {
   // ── Google OAuth refresh failure ──
   oauthRefreshExpired:
     'Google rejected the saved sign-in ({reason}). This usually means your Google Cloud OAuth app is in "Testing" status, where Google expires the connection every 7 days. Fix it once: Google Cloud Console → OAuth consent screen → "Publish app" (no verification review needed), then Disconnect and Connect this integration again.',
+  exportMarkdown: "Export All Page Markdown…",
+  dlgExportMarkdownTitle: "Choose a folder for the Markdown files",
+  dlgExportMarkdownDoneTitle: "Markdown export complete",
+  msgExportMarkdownWritten: "Markdown files written: {files}. The folder also contains index.csv mapping each URL to its file.",
+  compareWithPrevious: "Compare With Previous Crawl…",
 };

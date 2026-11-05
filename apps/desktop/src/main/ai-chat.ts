@@ -30,6 +30,8 @@ import {
   type AnthropicBlock,
 } from './ai-chat-format.js';
 import { apiFetch } from './api-fetch.js';
+import { recordAiUsage } from './ai-settings.js';
+import { providerTimeoutMs } from './ai-providers.js';
 
 const REQUEST_TIMEOUT_MS = 180_000;
 const MAX_TOKENS = 4096;
@@ -64,14 +66,21 @@ export async function runChatTurn(
   tools: ChatTool[],
   signal: AbortSignal,
 ): Promise<ChatTurnResult> {
+  let out: ChatTurnResult;
   switch (provider) {
     case 'openai':
-      return runOpenAiChat(model, system, messages, tools, signal);
+      out = await runOpenAiChat(model, system, messages, tools, signal);
+      break;
     case 'anthropic':
-      return runAnthropicChat(model, system, messages, tools, signal);
+      out = await runAnthropicChat(model, system, messages, tools, signal);
+      break;
     case 'ollama':
-      return runOllamaChat(model, system, messages, tools, signal);
+      out = await runOllamaChat(model, system, messages, tools, signal);
+      break;
   }
+  // Counted toward the provider's token totals (Settings → Integrations).
+  recordAiUsage(provider, out.tokensIn, out.tokensOut);
+  return out;
 }
 
 // ── OpenAI ───────────────────────────────────────────────────────────
@@ -231,7 +240,12 @@ async function runOllamaChat(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: mergeSignals(signal),
+      // Local models on modest hardware can need longer than the cloud
+      // ceiling — the Ollama timeout setting wins when it is set.
+      signal: AbortSignal.any([
+        signal,
+        AbortSignal.timeout(providerTimeoutMs('ollama', REQUEST_TIMEOUT_MS)),
+      ]),
     });
   } catch (err) {
     throw new ChatError(

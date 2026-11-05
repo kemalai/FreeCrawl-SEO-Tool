@@ -93,49 +93,124 @@ export async function readBodyCapped(
   return { text: new TextDecoder('utf-8').decode(merged), truncated };
 }
 
+export interface LoadRobotsOptions {
+  /** Per-attempt budget for the request and the body read. Default 10 s. */
+  timeoutMs?: number;
+  /** Tries on a network error, timeout, 429 or 5xx. Default 2. */
+  attempts?: number;
+  /** Pause between tries. Default 1 s. */
+  retryDelayMs?: number;
+  /** Abandons the fetch and any retry (crawl stopped): allow-all, no notice. */
+  signal?: AbortSignal;
+}
+
+/** One robots.txt fetch: a checker, or why there is none. */
+type RobotsAttempt =
+  | { kind: 'checker'; checker: RobotsChecker }
+  /** 4xx — RFC 9309 "unavailable": no rules, allow everything. */
+  | { kind: 'absent' }
+  /** 5xx / 429 / network error / timeout — worth another try. */
+  | { kind: 'failed'; reason: string; status: number | null };
+
 export async function loadRobots(
   origin: string,
   userAgent: string,
-  /** Optional notice sink. Called when robots.txt returns a server error
-   *  (5xx): RFC 9309 says a crawler SHOULD then treat the whole site as
-   *  disallowed, but we keep crawling (allow-all) so a transient 503 — very
-   *  common behind Cloudflare — doesn't silently nuke the entire crawl. The
-   *  caller surfaces this so the choice is visible rather than hidden. */
+  /** Optional notice sink. Called when robots.txt could not be read — a
+   *  server error (5xx), a 429, a timeout or a network error that outlived
+   *  every retry. RFC 9309 says a crawler SHOULD treat an unreachable
+   *  robots.txt as "disallow all", but we keep crawling (allow-all) so a
+   *  transient 503 — very common behind Cloudflare — doesn't nuke the
+   *  entire crawl. The caller surfaces the notice so the choice is visible:
+   *  crawling disallowed URLs without a word is the bug this replaces. */
   onNotice?: (message: string) => void,
+  opts: LoadRobotsOptions = {},
 ): Promise<RobotsChecker> {
   // The header goes on the wire; only the token goes to the matcher.
   const uaToken = robotsUserAgentToken(userAgent);
   const robotsUrl = new URL('/robots.txt', origin).toString();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-  try {
-    const res = await undiciFetch(robotsUrl, {
-      method: 'GET',
-      headers: { 'user-agent': userAgent },
-      signal: controller.signal,
-    });
-    if (res.ok) {
-      const { text: body, truncated } = await readBodyCapped(res.body);
-      if (truncated && onNotice) {
-        onNotice(
-          `robots.txt for ${origin} is larger than ${Math.round(MAX_ROBOTS_BYTES / 1024)} KB; only the first ${Math.round(MAX_ROBOTS_BYTES / 1024)} KB were parsed (RFC 9309 §2.5).`,
-        );
+  const timeoutMs = opts.timeoutMs ?? 10_000;
+  const attempts = Math.max(1, opts.attempts ?? 2);
+  const retryDelayMs = opts.retryDelayMs ?? 1000;
+  const { signal } = opts;
+
+  const attempt = async (): Promise<RobotsAttempt> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = (): void => controller.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const res = await undiciFetch(robotsUrl, {
+        method: 'GET',
+        headers: { 'user-agent': userAgent },
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        const { text: body, truncated } = await readBodyCapped(res.body);
+        if (truncated && onNotice) {
+          onNotice(
+            `robots.txt for ${origin} is larger than ${Math.round(MAX_ROBOTS_BYTES / 1024)} KB; only the first ${Math.round(MAX_ROBOTS_BYTES / 1024)} KB were parsed (RFC 9309 §2.5).`,
+          );
+        }
+        const parser = robotsParser(robotsUrl, body);
+        return {
+          kind: 'checker',
+          checker: {
+            isAllowed: (url: string) => parser.isAllowed(url, uaToken) ?? true,
+            getCrawlDelay: () => parser.getCrawlDelay(uaToken),
+          },
+        };
       }
-      const parser = robotsParser(robotsUrl, body);
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* already closed */
+      }
+      // 429 is a 4xx by number but "slow down" by meaning — Google treats
+      // it like a 5xx, and a rate-limited robots.txt is not a missing one.
+      if (res.status >= 500 || res.status === 429) {
+        return { kind: 'failed', reason: `HTTP ${res.status}`, status: res.status };
+      }
+      return { kind: 'absent' };
+    } catch (err) {
       return {
-        isAllowed: (url: string) => parser.isAllowed(url, uaToken) ?? true,
-        getCrawlDelay: () => parser.getCrawlDelay(uaToken),
+        kind: 'failed',
+        reason: controller.signal.aborted
+          ? `timed out after ${Math.round(timeoutMs / 1000)} s`
+          : formatFetchError(err),
+        status: null,
       };
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', onAbort);
     }
-    if (res.status >= 500 && onNotice) {
-      onNotice(
-        `robots.txt for ${origin} returned HTTP ${res.status}. Per RFC 9309 a 5xx should be treated as "disallow all", but FreeCrawl continues crawling to avoid a transient server error blocking the whole run — verify the site is reachable if results look off.`,
-      );
+  };
+
+  let last: RobotsAttempt = { kind: 'absent' };
+  for (let i = 0; i < attempts && !signal?.aborted; i++) {
+    if (i > 0) {
+      await new Promise<void>((r) => {
+        const t = setTimeout(done, retryDelayMs);
+        function done(): void {
+          clearTimeout(t);
+          signal?.removeEventListener('abort', done);
+          r();
+        }
+        signal?.addEventListener('abort', done, { once: true });
+      });
+      if (signal?.aborted) break;
     }
-  } catch {
-    // ignore — default allow
-  } finally {
-    clearTimeout(timeout);
+    last = await attempt();
+    if (last.kind !== 'failed') break;
+  }
+  if (last.kind === 'checker') return last.checker;
+  if (signal?.aborted) return NOOP;
+  if (last.kind === 'failed' && onNotice) {
+    const tries = attempts > 1 ? ` (${attempts} attempts)` : '';
+    onNotice(
+      last.status !== null
+        ? `robots.txt for ${origin} returned ${last.reason}${tries}. Per RFC 9309 a server error should be treated as "disallow all", but FreeCrawl continues crawling to avoid a transient server error blocking the whole run — URLs it disallows may be crawled; verify the site is reachable if results look off.`
+        : `robots.txt for ${origin} could not be fetched${tries}: ${last.reason}. FreeCrawl continues as if the site had no robots.txt, so URLs it disallows may be crawled.`,
+    );
   }
   return NOOP;
 }

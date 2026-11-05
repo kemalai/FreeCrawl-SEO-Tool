@@ -311,4 +311,9 @@ export const MENU_ES: MenuLabels = {
   // ── Google OAuth refresh failure ──
   oauthRefreshExpired:
     'Google rechazó el inicio de sesión guardado ({reason}). Normalmente significa que tu app OAuth de Google Cloud está en estado "Testing", donde Google caduca la conexión cada 7 días. Arréglalo una vez: Google Cloud Console → OAuth consent screen → "Publish app" (sin revisión de verificación) y luego Desconecta y Conecta esta integración de nuevo.',
+  exportMarkdown: "Exportar todas las páginas en Markdown…",
+  dlgExportMarkdownTitle: "Elige una carpeta para los archivos Markdown",
+  dlgExportMarkdownDoneTitle: "Exportación a Markdown completada",
+  msgExportMarkdownWritten: "Archivos Markdown escritos: {files}. La carpeta incluye index.csv, que relaciona cada URL con su archivo.",
+  compareWithPrevious: "Comparar con el rastreo anterior…",
 };

@@ -10,7 +10,10 @@
     "checkOff": "Off",
     "cookiesOffHint": "Cookie checks are off because the crawl's cookie policy is \"Reject all\". Choose \"Accept all\" or \"Block third-party\" under Settings → Cookies to analyse Set-Cookie headers.",
     "notComputed": "Not computed",
-    "notComputedHint": "Inlinks have not been computed yet, so orphan pages cannot be counted. They are computed at the end of a crawl that has \"Recompute inlinks\" on."
+    "notComputedHint": "Inlinks have not been computed yet, so orphan pages cannot be counted. They are computed at the end of a crawl that has \"Recompute inlinks\" on.",
+    "searchPlaceholder": "Search checks…",
+    "searchClear": "Clear search",
+    "searchNoResults": "No matching checks."
   },
   "integrations": {
     "intro": "Connect external services with your own credentials. API keys and secrets are encrypted at rest using your operating system's secure storage and never leave this machine.",
@@ -187,7 +190,11 @@
     "capacityTitle": "Estimated additional URLs that fit in remaining system memory at the current per-URL cost. Calc: systemFree / perUrlCost. Treat as an upper bound — sustained throughput is usually CPU-bound first.",
     "lagResponsiveTitle": "Main thread is responsive — input feels instant",
     "lagContendedTitle": "Main thread is contended — light click stutter",
-    "lagBusyTitle": "Main thread is busy — IPC backed up; most likely sidebar SQL or table chunk fetch competing with the crawler"
+    "lagBusyTitle": "Main thread is busy — IPC backed up; most likely sidebar SQL or table chunk fetch competing with the crawler",
+    "throttled": "Throttled",
+    "throttledTitle": "Adaptive speed slowed the crawl because the site answered 429 / 503. It speeds up again once responses are clean.",
+    "pausedHostDown": "Paused — site stopped responding",
+    "pausedHostDownTitle": "The site stopped answering, so the crawl paused itself instead of failing the rest of the queue. Check the site, then press Resume."
   },
   "menu": {
     "file": "File",
@@ -631,7 +638,9 @@
       "worstCaseDelay": "Worst-case delay per failed URL ≈ initialDelay × (2 ^ attempts − 1) = {{value}}",
       "tip1": "For a quick first sweep on a healthy site try the <bold>Fast</bold> preset (Settings → Presets) — concurrency 40, RPS 40, no retries.",
       "tip2": "For unreliable origins or slow APIs try <bold>Thorough</bold> — concurrency 10, 3 retries, 30 s timeout.",
-      "tip3": "Concurrency × HTTP keep-alive = the steady-state connection count. Most servers comfortably handle 20–40; corporate proxies / WAFs often cap at 8–10."
+      "tip3": "Concurrency × HTTP keep-alive = the steady-state connection count. Most servers comfortably handle 20–40; corporate proxies / WAFs often cap at 8–10.",
+      "pauseOnHostUnresponsive": "Pause crawl if a host stops responding",
+      "connectionFailureRetries": "Connection Failure Retries (no response: timeout / reset / refused)"
     },
     "requests": {
       "intro": "HTTP headers sent with every request.",
@@ -644,7 +653,13 @@
     "filters": {
       "intro": "URL allowlist/blocklist. Patterns are JavaScript regex tested against the full URL.",
       "includePatterns": "Include Patterns (regex, one per line — empty = all allowed)",
-      "excludePatterns": "Exclude Patterns (regex, one per line)"
+      "excludePatterns": "Exclude Patterns (regex, one per line)",
+      "linkPositionsHeading": "Don't follow links in",
+      "linkPositionNavigation": "Navigation (<nav>)",
+      "linkPositionHeader": "Header (<header>)",
+      "linkPositionFooter": "Footer (<footer>)",
+      "linkPositionSidebar": "Sidebar (<aside>)",
+      "excludeLinkSelectors": "Don't follow links inside these elements (CSS selectors, one per line)"
     },
     "customSearch": {
       "intro1": "Flag pages whose body contains any of these terms. Two modes per line:",
@@ -736,8 +751,17 @@
     "webhook": {
       "intro1": "Webhook fired once when each crawl finishes. Single",
       "intro2": "with a JSON summary (start URL, duration, total URLs, status mix, every non-zero issue count). Empty disables.",
-      "outro": "Compatible with Slack incoming webhooks (the JSON shape is rich enough for Slack to render plain text), Zapier \"Catch Hook\" triggers, Discord webhooks, and custom HTTP endpoints.",
-      "url": "Webhook URL"
+      "url": "Webhook URL",
+      "format": "Message format",
+      "formatAuto": "Auto (detect from the URL)",
+      "formatJson": "JSON (Zapier, Make, n8n, own endpoint)",
+      "outroFormats": "Slack, Discord and Microsoft Teams get a readable message: status mix, top issues and, for scheduled crawls with Auto Compare, the changes since the previous crawl. Auto recognises Slack incoming webhooks, Discord webhooks and Teams connector URLs; for a Teams Workflows URL pick Microsoft Teams. Anything else receives the JSON summary.",
+      "secretNote": "A webhook URL works like a password — anyone who has it can post to your channel. FreeCrawl stores it encrypted and leaves it out of exported settings.",
+      "test": "Send test message",
+      "testing": "Sending…",
+      "testOk": "Delivered as {{format}} (HTTP {{status}}).",
+      "testInvalid": "Enter an http(s) URL first.",
+      "testFailed": "Not delivered ({{status}}): {{detail}}"
     },
     "auth": {
       "intro": "HTTP authentication sent only to the site being crawled (the start URL's origin, or the listed URLs in List mode) — never to external links, CDNs or other hosts. Useful for staging environments behind Basic/Digest auth, or APIs that require a Bearer token. For sites behind an HTML login form, use Form Login below instead.",
@@ -837,7 +861,14 @@
       "disableAll": "Disable all",
       "summary": "Enabled: {{on}} / {{total}}",
       "groupSummary": "{{on}} / {{total}} on",
-      "noMatch": "No check matches your filter."
+      "noMatch": "No check matches your filter.",
+      "severityIntro": "Change a check's severity to move it between the Critical / Warning / Info rollups, the report order and the sidebar marker — for example when a check matters more or less on this site.",
+      "severityCritical": "Critical",
+      "severityWarning": "Warning",
+      "severityInfo": "Info",
+      "severityLabel": "Severity",
+      "severityChanged": "Changed from {{tier}}",
+      "resetSeverities": "Reset severities"
     },
     "advanced": {
       "intro": "Lower-level caps and link-follow toggles. Defaults are tuned for typical SEO audits — only touch these if you know why.",
@@ -953,7 +984,15 @@
     "urlHeader": "URL",
     "beforeHeader": "Before",
     "afterHeader": "After",
-    "noDiffs": "No diffs in this category."
+    "noDiffs": "No diffs in this category.",
+    "previousTitle": "Changes Since the Previous Crawl",
+    "previousCrawl": "Previous crawl ({{date}})",
+    "thisCrawl": "This crawl",
+    "noPrevious": "No previous crawl to compare with yet. Turn on \"Auto compare with the previous crawl\" in Scheduled Crawl, or crawl from the CLI with --auto-compare.",
+    "issuesChanged": "Issues Changed",
+    "issueHeader": "Issue",
+    "changeHeader": "Change",
+    "noIssueChanges": "No issue counts changed."
   },
   "scheduled": {
     "title": "Scheduled Crawl",
@@ -995,7 +1034,16 @@
     "browse": "Browse…",
     "outputDirHint": "Pick a folder — each run writes into a timestamped sub-folder there.",
     "sheets": "Also push All URLs to a new Google Sheets spreadsheet",
-    "webhook": "Notify the project webhook with the file list (Settings → Webhook)"
+    "webhook": "Notify the project webhook with the file list (Settings → Webhook)",
+    "runNow": "Run Now",
+    "runNowTitle": "Start this scheduled crawl now. The regular schedule is not changed.",
+    "runNowSaveFirst": "Save your changes first.",
+    "runNowBusy": "A crawl is already running — wait for it to finish or stop it first.",
+    "runNowNoConfig": "Run a crawl manually once first — the schedule reuses its settings.",
+    "runNowNoProject": "Open or save a project first.",
+    "runNowNoSchedule": "Save the schedule first.",
+    "autoCompare": "Auto compare with the previous crawl",
+    "autoCompareHint": "Keeps the previous crawl when this one starts. Changes go to the export folder (crawl-changes.csv), the webhook and File → Compare With Previous Crawl."
   },
   "serp": {
     "noTitle": "(no title)",
@@ -1414,7 +1462,9 @@
     "loadingSource": "Loading source…",
     "noBody": "No HTML body stored for this URL.",
     "noBodyHint1": "View Source is only captured for HTML pages crawled with the",
-    "noBodyHint2": "setting enabled."
+    "noBodyHint2": "setting enabled.",
+    "markdownLoading": "Converting to Markdown…",
+    "markdownFailed": "This page could not be converted to Markdown."
   },
   "viewRendered": {
     "noBody": "No rendered DOM stored for this URL.",
@@ -1524,7 +1574,9 @@
     "imagesUnit": "images",
     "loaded": "{{n}} loaded",
     "row": "Row",
-    "noImages": "No images"
+    "noImages": "No images",
+    "missingTitleOnly": "Missing Title only",
+    "emptyMissingTitle": "No images without a title attribute."
   },
   "serpTab": {
     "title": "SERP Preview",
@@ -1952,7 +2004,10 @@
     "summary": "{{shown}} pages · {{tested}} with response · {{errors}} errors · {{selected}} selected",
     "running": "Running: {{url}}",
     "emptyNoData": "No internal HTML pages crawled yet — run a crawl, then select pages and Run.",
-    "emptyNoMatch": "No pages match the current filter."
+    "emptyNoMatch": "No pages match the current filter.",
+    "modelDefault": "Model (default: {{model}})",
+    "modelMissing": "\"{{model}}\" is not in the current model list of {{provider}}.",
+    "pickModel": "Pick a live model…"
   },
   "seoTab": {
     "title": "SEO Authority",
@@ -2118,7 +2173,10 @@
       "note": "Active crawl data lives in the app's user-data directory until you Save As — the path above only controls where Save As starts. Changing this won't move any existing project files.",
       "autoSaveTitle": "Batch Save",
       "autoSaveLabel": "Auto-save project every N crawled URLs — 0 = off",
-      "autoSaveHint": "While a crawl runs, the open .seoproject file is rewritten each time this many more URLs have been crawled, so a crash or power loss costs at most one batch. Only applies once the project has been saved to a file; minimum {{min}}. Each save is a full snapshot, so keep it in the thousands on large sites."
+      "autoSaveHint": "While a crawl runs, the open .seoproject file is rewritten each time this many more URLs have been crawled, so a crash or power loss costs at most one batch. Only applies once the project has been saved to a file; minimum {{min}}. Each save is a full snapshot, so keep it in the thousands on large sites.",
+      "fileNamesTitle": "Export File Names",
+      "fileNamesReset": "Reset",
+      "fileNamesPreview": "Example:"
     },
     "agents": {
       "title": "Agent Sessions (MCP)",
@@ -2390,5 +2448,41 @@
     "setupResidential": "For residential proxies, create a list in the dashboard first (country, rotation) and use the connection details it shows.",
     "setupJsRender": "With JavaScript rendering on, use the HTTP form: the browser cannot use a SOCKS5 proxy that needs a password.",
     "hide": "Hide"
+  },
+  "rateLimitNotice": {
+    "title": "The site is limiting the crawl",
+    "body_one": "The server answered {{count}} request with 429 (Too Many Requests) or 503 (Service Unavailable). Adaptive speed is off, so the crawl keeps its fixed pace and more pages may fail.",
+    "body_other": "The server answered {{count}} requests with 429 (Too Many Requests) or 503 (Service Unavailable). Adaptive speed is off, so the crawl keeps its fixed pace and more pages may fail.",
+    "benefit": "If you turn on Adaptive speed, the crawl speed adjusts automatically: it slows down while the server pushes back and speeds up again once responses are clean. Saving it applies to this crawl too.",
+    "where": "Where to turn it on",
+    "path": "Settings → Speed → Adaptive speed",
+    "dontShow": "Don't show this again",
+    "notNow": "Not now",
+    "openSettings": "Open Speed settings"
+  },
+  "aiSettings": {
+    "title": "Model & Prompt",
+    "defaultModel": "Default model",
+    "checkModels": "Check models",
+    "checking": "Checking…",
+    "checkNeedsCredentials": "Save the credentials above first.",
+    "listFailed": "Could not load the model list: {{detail}}",
+    "modelOk": "{{model}} is available.",
+    "modelMissing": "{{model}} is not in the current model list of {{provider}}.",
+    "pickModel": "Pick a live model…",
+    "defaultModelHint": "Used when the AI tab or the Assistant leaves the model blank. Leave empty for the built-in default ({{model}}).",
+    "systemPrompt": "System prompt",
+    "systemPromptPlaceholder": "You are a technical SEO specialist. Answer in short, plain sentences.",
+    "systemPromptHint": "Sent with every AI tab prompt to this provider: role, tone, language, constraints. The Assistant keeps its own instructions.",
+    "timeout": "Request timeout (seconds)",
+    "timeoutHint": "How long to wait for the local model to answer (10–3600). Large models on modest hardware need more. Empty = 120 for the AI tab, 180 for the Assistant.",
+    "usageTitle": "Token usage",
+    "usageRequests": "Requests: {{value}}",
+    "usageTokensIn": "Input tokens: {{value}}",
+    "usageTokensOut": "Output tokens: {{value}}",
+    "usageSince": "Since {{date}}",
+    "usageReset": "Reset",
+    "usageNone": "No requests recorded yet.",
+    "usageHint": "Counted on this computer from the token figures each response reports (AI tab and Assistant). Your provider’s bill is the authority."
   }
 }

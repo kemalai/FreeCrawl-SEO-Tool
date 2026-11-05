@@ -309,4 +309,9 @@ export const MENU_TR: MenuLabels = {
   // ── Google OAuth refresh failure ──
   oauthRefreshExpired:
     'Google kayıtlı oturumu reddetti ({reason}). Bu genellikle Google Cloud OAuth uygulamanızın "Testing" durumunda olduğunu gösterir; Google bu durumda bağlantıyı her 7 günde bir düşürür. Bir kez düzeltin: Google Cloud Console → OAuth consent screen → "Publish app" (verification incelemesi gerekmez), sonra bu entegrasyonu Bağlantıyı Kes ve tekrar Bağla.',
+  exportMarkdown: "Tüm Sayfaları Markdown Olarak Dışa Aktar…",
+  dlgExportMarkdownTitle: "Markdown dosyaları için bir klasör seçin",
+  dlgExportMarkdownDoneTitle: "Markdown dışa aktarma tamamlandı",
+  msgExportMarkdownWritten: "Yazılan Markdown dosyası: {files}. Klasördeki index.csv her URL'i dosyasıyla eşler.",
+  compareWithPrevious: "Önceki Taramayla Karşılaştır…",
 };

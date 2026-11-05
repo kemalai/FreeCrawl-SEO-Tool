@@ -10,7 +10,10 @@
     "checkOff": "已关闭",
     "cookiesOffHint": "由于抓取的 Cookie 策略为“全部拒绝”，Cookie 检查已关闭。请在 设置 → Cookie 中选择“全部接受”或“拦截第三方”以分析 Set-Cookie 标头。",
     "notComputed": "未计算",
-    "notComputedHint": "尚未计算入链，因此无法统计孤立页面。入链会在开启“重新计算入链”的抓取结束时计算。"
+    "notComputedHint": "尚未计算入链，因此无法统计孤立页面。入链会在开启“重新计算入链”的抓取结束时计算。",
+    "searchPlaceholder": "搜索检查项…",
+    "searchClear": "清除搜索",
+    "searchNoResults": "没有匹配的检查项。"
   },
   "integrations": {
     "intro": "使用你自己的凭据连接外部服务。API 密钥和机密会通过操作系统的安全存储在本地加密保存，绝不会离开这台机器。",
@@ -185,7 +188,11 @@
     "capacityTitle": "按当前每个 URL 的成本估算，剩余系统内存还能容纳多少个 URL。计算方式：系统可用内存 / 每个 URL 成本。请视为上限——持续吞吐量通常先受 CPU 限制。",
     "lagResponsiveTitle": "主线程响应灵敏——操作感觉即时",
     "lagContendedTitle": "主线程存在争用——点击时略有卡顿",
-    "lagBusyTitle": "主线程繁忙——IPC 已积压；最可能是侧边栏的 SQL 或表格分块加载在与抓取器争抢资源"
+    "lagBusyTitle": "主线程繁忙——IPC 已积压；最可能是侧边栏的 SQL 或表格分块加载在与抓取器争抢资源",
+    "throttled": "已限速",
+    "throttledTitle": "由于网站返回 429 / 503，自适应速度降低了抓取速度。响应恢复正常后会再次提速。",
+    "pausedHostDown": "已暂停——网站停止响应",
+    "pausedHostDownTitle": "网站停止响应，因此抓取自行暂停，而不是把队列中剩余的 URL 记为失败。请检查网站，然后点击“继续”。"
   },
   "menu": {
     "file": "文件",
@@ -611,7 +618,9 @@
       "worstCaseDelay": "单个失败 URL 的最坏延迟 ≈ 初始延迟 × (2 ^ 重试次数 − 1) = {{value}}",
       "tip1": "要对健康站点做一次快速首轮扫描，可试试 <bold>快速</bold> 预设（设置 → 预设）——并发 40、RPS 40、不重试。",
       "tip2": "对于不稳定的源站或缓慢的 API，可试试 <bold>彻底</bold> ——并发 10、重试 3 次、超时 30 秒。",
-      "tip3": "并发数 × HTTP keep-alive = 稳定状态下的连接数。大多数服务器可以从容承受 20–40；企业代理和 WAF 通常限制在 8–10。"
+      "tip3": "并发数 × HTTP keep-alive = 稳定状态下的连接数。大多数服务器可以从容承受 20–40；企业代理和 WAF 通常限制在 8–10。",
+      "pauseOnHostUnresponsive": "主机停止响应时暂停抓取",
+      "connectionFailureRetries": "连接失败重试次数（无响应：超时 / 重置 / 拒绝）"
     },
     "requests": {
       "intro": "随每个请求发送的 HTTP 请求头。",
@@ -624,7 +633,13 @@
     "filters": {
       "intro": "URL 白名单/黑名单。模式为 JavaScript 正则表达式，针对完整 URL 进行匹配。",
       "includePatterns": "包含模式（正则，每行一个——留空 = 全部允许）",
-      "excludePatterns": "排除模式（正则，每行一个）"
+      "excludePatterns": "排除模式（正则，每行一个）",
+      "linkPositionsHeading": "不跟踪以下区域中的链接",
+      "linkPositionNavigation": "导航（<nav>）",
+      "linkPositionHeader": "页眉（<header>）",
+      "linkPositionFooter": "页脚（<footer>）",
+      "linkPositionSidebar": "侧边栏（<aside>）",
+      "excludeLinkSelectors": "不跟踪这些元素内的链接（CSS 选择器，每行一个）"
     },
     "customSearch": {
       "intro1": "标记正文中包含以下任一词语的页面。每行有两种写法：",
@@ -714,8 +729,17 @@
     "webhook": {
       "intro1": "每次抓取结束时触发一次的 Webhook。单个",
       "intro2": "请求，携带 JSON 摘要（起始 URL、耗时、URL 总数、状态分布、所有非零的问题计数）。留空则关闭。",
-      "outro": "兼容 Slack 的传入 Webhook（JSON 结构足够丰富，Slack 能以纯文本呈现）、Zapier 的“Catch Hook”触发器、Discord Webhook 以及自建的 HTTP 端点。",
-      "url": "Webhook URL"
+      "url": "Webhook URL",
+      "format": "消息格式",
+      "formatAuto": "自动（根据 URL 识别）",
+      "formatJson": "JSON（Zapier、Make、n8n、自建端点）",
+      "outroFormats": "Slack、Discord 和 Microsoft Teams 会收到易读的消息：状态码分布、主要问题，以及开启 Auto Compare 的定时抓取自上次抓取以来的变化。“自动”可识别 Slack 传入 Webhook、Discord Webhook 和 Teams 连接器 URL；Teams Workflows URL 请选择 Microsoft Teams。其他地址收到 JSON 摘要。",
+      "secretNote": "Webhook URL 相当于密码——任何拿到它的人都能向你的频道发消息。FreeCrawl 会加密保存它，且不会写入导出的设置。",
+      "test": "发送测试消息",
+      "testing": "正在发送…",
+      "testOk": "已按 {{format}} 格式送达（HTTP {{status}}）。",
+      "testInvalid": "请先输入 http(s) URL。",
+      "testFailed": "未送达（{{status}}）：{{detail}}"
     },
     "auth": {
       "intro": "仅发送到正在抓取的站点（起始 URL 的源，或列表模式中列出的 URL）的 HTTP 认证——绝不会发送到外部链接、CDN 或其他主机。适用于位于 Basic/Digest 认证之后的预发布环境，或需要 Bearer 令牌的 API。若站点使用 HTML 登录表单，请改用下方的表单登录。",
@@ -815,7 +839,14 @@
       "disableAll": "全部关闭",
       "summary": "已开启：{{on}} / {{total}}",
       "groupSummary": "{{on}} / {{total}} 开启",
-      "noMatch": "没有与筛选匹配的检查。"
+      "noMatch": "没有与筛选匹配的检查。",
+      "severityIntro": "更改检查的严重程度，可将其移到“严重 / 警告 / 信息”分组、报告排序和侧边栏标记中的另一档——例如某项检查在此网站上更重要或不那么重要时。",
+      "severityCritical": "严重",
+      "severityWarning": "警告",
+      "severityInfo": "信息",
+      "severityLabel": "严重程度",
+      "severityChanged": "默认：{{tier}}",
+      "resetSeverities": "重置严重程度"
     },
     "advanced": {
       "intro": "较底层的上限和链接跟随开关。默认值针对常规 SEO 审计做了调校——只有清楚原因时才去改动。",
@@ -931,7 +962,15 @@
     "urlHeader": "URL",
     "beforeHeader": "之前",
     "afterHeader": "之后",
-    "noDiffs": "此类别下没有差异。"
+    "noDiffs": "此类别下没有差异。",
+    "previousTitle": "自上次抓取以来的变化",
+    "previousCrawl": "上一次抓取（{{date}}）",
+    "thisCrawl": "本次抓取",
+    "noPrevious": "还没有可比较的上一次抓取。请在“定时抓取”中开启“自动与上一次抓取比较”，或在 CLI 中使用 --auto-compare 抓取。",
+    "issuesChanged": "有变化的问题",
+    "issueHeader": "问题",
+    "changeHeader": "变化",
+    "noIssueChanges": "问题数量没有变化。"
   },
   "scheduled": {
     "title": "定时抓取",
@@ -973,7 +1012,16 @@
     "browse": "浏览…",
     "outputDirHint": "选择一个文件夹——每次运行都会写入其中带时间戳的子文件夹。",
     "sheets": "同时将所有 URL 推送到新的 Google 表格",
-    "webhook": "用文件列表通知项目 Webhook（设置 → Webhook）"
+    "webhook": "用文件列表通知项目 Webhook（设置 → Webhook）",
+    "runNow": "立即运行",
+    "runNowTitle": "立即启动此定时抓取。常规计划不会改变。",
+    "runNowSaveFirst": "请先保存更改。",
+    "runNowBusy": "已有抓取正在运行——请等待其完成或先将其停止。",
+    "runNowNoConfig": "请先手动运行一次抓取——该计划会沿用其设置。",
+    "runNowNoProject": "请先打开或保存一个项目。",
+    "runNowNoSchedule": "请先保存计划。",
+    "autoCompare": "自动与上一次抓取比较",
+    "autoCompareHint": "本次抓取开始时保留上一次抓取。变化会写入导出文件夹（crawl-changes.csv）、Webhook，并可在“文件 → 与上一次抓取比较”中查看。"
   },
   "serp": {
     "noTitle": "（无标题）",
@@ -1388,7 +1436,9 @@
     "loadingSource": "正在加载源码…",
     "noBody": "未为此 URL 保存 HTML 内容。",
     "noBodyHint1": "“查看源码”仅对开启了以下设置时抓取的 HTML 页面保存：",
-    "noBodyHint2": "。"
+    "noBodyHint2": "。",
+    "markdownLoading": "正在转换为 Markdown…",
+    "markdownFailed": "无法将此页面转换为 Markdown。"
   },
   "viewRendered": {
     "noBody": "未为此 URL 保存渲染后的 DOM。",
@@ -1498,7 +1548,9 @@
     "imagesUnit": "张图片",
     "loaded": "已加载 {{n}} 张",
     "row": "行",
-    "noImages": "没有图片"
+    "noImages": "没有图片",
+    "missingTitleOnly": "仅缺少 title",
+    "emptyMissingTitle": "没有缺少 title 属性的图片。"
   },
   "serpTab": {
     "title": "SERP 预览",
@@ -1919,7 +1971,10 @@
     "summary": "{{shown}} 个页面 · 有回复 {{tested}} 个 · 错误 {{errors}} 个 · 已选 {{selected}} 个",
     "running": "正在运行：{{url}}",
     "emptyNoData": "尚未抓取任何内部 HTML 页面——先运行一次抓取，然后选择页面并点击“运行”。",
-    "emptyNoMatch": "没有页面符合当前筛选条件。"
+    "emptyNoMatch": "没有页面符合当前筛选条件。",
+    "modelDefault": "模型（默认：{{model}}）",
+    "modelMissing": "“{{model}}”不在 {{provider}} 当前的模型列表中。",
+    "pickModel": "选择一个当前可用的模型…"
   },
   "seoTab": {
     "title": "SEO 权重",
@@ -2081,7 +2136,10 @@
       "note": "在“另存为”之前，当前抓取数据位于应用的用户数据目录中——上面的路径只决定“另存为”从哪里开始。修改它不会移动任何已有的项目文件。",
       "autoSaveTitle": "批量保存",
       "autoSaveLabel": "每抓取 N 个 URL 自动保存项目 — 0 = 关闭",
-      "autoSaveHint": "抓取进行时，每多抓取这么多 URL 就重写一次打开的 .seoproject 文件，崩溃或断电最多损失一个批次。仅在项目已保存为文件后生效；最小 {{min}}。每次保存都是完整快照，大型站点请设为数千。"
+      "autoSaveHint": "抓取进行时，每多抓取这么多 URL 就重写一次打开的 .seoproject 文件，崩溃或断电最多损失一个批次。仅在项目已保存为文件后生效；最小 {{min}}。每次保存都是完整快照，大型站点请设为数千。",
+      "fileNamesTitle": "导出文件名",
+      "fileNamesReset": "重置",
+      "fileNamesPreview": "示例："
     },
     "agents": {
       "title": "代理会话（MCP）",
@@ -2345,5 +2403,40 @@
     "setupResidential": "住宅代理需要先在控制台中创建一个列表（国家、轮换），再使用列表显示的连接信息。",
     "setupJsRender": "开启 JavaScript 渲染时请使用 HTTP 格式：浏览器无法使用需要密码的 SOCKS5 代理。",
     "hide": "隐藏"
+  },
+  "rateLimitNotice": {
+    "title": "网站正在限制抓取",
+    "body_other": "服务器对 {{count}} 个请求返回了 429（Too Many Requests）或 503（Service Unavailable）。自适应速度已关闭，因此抓取保持固定节奏，可能有更多页面失败。",
+    "benefit": "开启自适应速度后，抓取速度会自动调整：服务器施加限制时放慢，响应恢复正常后再次提速。保存后也会应用到本次抓取。",
+    "where": "在哪里开启",
+    "path": "设置 → 速度 → 自适应速度",
+    "dontShow": "不再显示",
+    "notNow": "暂不",
+    "openSettings": "打开速度设置"
+  },
+  "aiSettings": {
+    "title": "模型与提示词",
+    "defaultModel": "默认模型",
+    "checkModels": "检查模型",
+    "checking": "正在检查…",
+    "checkNeedsCredentials": "请先保存上方的凭据。",
+    "listFailed": "无法加载模型列表：{{detail}}",
+    "modelOk": "{{model}} 可用。",
+    "modelMissing": "{{model}} 不在 {{provider}} 当前的模型列表中。",
+    "pickModel": "选择一个当前可用的模型…",
+    "defaultModelHint": "当 AI 标签页或助手未填写模型时使用。留空则使用内置默认模型（{{model}}）。",
+    "systemPrompt": "系统提示词",
+    "systemPromptPlaceholder": "你是一名技术 SEO 专家。用简短、平实的句子回答。",
+    "systemPromptHint": "随每条发送给该服务商的 AI 标签页提示词一起发送：角色、语气、语言、约束。助手保留自己的指令。",
+    "timeout": "请求超时（秒）",
+    "timeoutHint": "等待本地模型回答的时长（10–3600）。在普通硬件上运行的大模型需要更久。留空 = AI 标签页 120，助手 180。",
+    "usageTitle": "Token 用量",
+    "usageRequests": "请求数：{{value}}",
+    "usageTokensIn": "输入 Token：{{value}}",
+    "usageTokensOut": "输出 Token：{{value}}",
+    "usageSince": "自 {{date}} 起",
+    "usageReset": "重置",
+    "usageNone": "尚无请求记录。",
+    "usageHint": "根据每次响应报告的 Token 数在本机统计（AI 标签页和助手）。以服务商的账单为准。"
   }
 }

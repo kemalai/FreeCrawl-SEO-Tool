@@ -316,4 +316,9 @@ export const MENU_AZ: MenuLabels = {
   // ── Google OAuth refresh failure ──
   oauthRefreshExpired:
     'Google yadda saxlanılan girişi rədd etdi ({reason}). Bu adətən Google Cloud OAuth tətbiqinizin "Testing" statusunda olduğunu bildirir; bu halda Google bağlantını hər 7 gündə bir bitirir. Bir dəfə düzəldin: Google Cloud Console → OAuth consent screen → "Publish app" (təsdiq yoxlaması tələb olunmur), sonra bu inteqrasiyanı ayırıb yenidən qoşun.',
+  exportMarkdown: "Bütün səhifələri Markdown kimi ixrac et…",
+  dlgExportMarkdownTitle: "Markdown faylları üçün qovluq seçin",
+  dlgExportMarkdownDoneTitle: "Markdown ixracı tamamlandı",
+  msgExportMarkdownWritten: "Yazılan Markdown faylı: {files}. Qovluqda hər URL-i faylına uyğunlaşdıran index.csv də var.",
+  compareWithPrevious: "Əvvəlki taramayla müqayisə et…",
 };

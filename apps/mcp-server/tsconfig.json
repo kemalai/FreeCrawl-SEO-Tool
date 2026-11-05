@@ -9,6 +9,7 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../../packages/shared-types" },
-    { "path": "../../packages/db" }
+    { "path": "../../packages/db" },
+    { "path": "../../packages/core" }
   ]
 }

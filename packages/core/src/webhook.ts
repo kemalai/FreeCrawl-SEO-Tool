@@ -9,7 +9,13 @@
  * teardown. Webhook delivery is best-effort by definition.
  */
 import { fetch } from 'undici';
-import type { CrawlSummary, OverviewCounts } from '@freecrawl/shared-types';
+import type { CrawlSummary, OverviewCounts, WebhookFormat } from '@freecrawl/shared-types';
+import {
+  renderWebhookBody,
+  resolveWebhookFormat,
+  type ResolvedWebhookFormat,
+  type WebhookNotice,
+} from './webhook-format.js';
 
 export interface WebhookPayload {
   /** ISO 8601 timestamp the crawl finished at. */
@@ -46,6 +52,24 @@ export async function postWebhookJson(
   timeoutMs = 10_000,
 ): Promise<WebhookResult> {
   return postCrawlCompleteWebhook(url, payload as unknown as WebhookPayload, timeoutMs);
+}
+
+/**
+ * POST a crawl notification in the body `format` asks for: the raw JSON
+ * document for generic endpoints, a rendered `notice` for Slack / Discord
+ * / Teams (`auto` decides from the URL). Same never-throws contract.
+ */
+export async function postWebhookMessage(
+  url: string,
+  format: WebhookFormat | undefined,
+  json: Record<string, unknown>,
+  notice: WebhookNotice,
+  timeoutMs = 10_000,
+): Promise<WebhookResult & { format: ResolvedWebhookFormat }> {
+  const resolved = resolveWebhookFormat(url, format);
+  const body = resolved === 'json' ? json : renderWebhookBody(resolved, notice);
+  const res = await postWebhookJson(url, body, timeoutMs);
+  return { ...res, format: resolved };
 }
 
 export async function postCrawlCompleteWebhook(

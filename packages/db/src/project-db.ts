@@ -46,6 +46,8 @@ import type {
   SeoResult,
   SeoRow,
   GscInspectionResult,
+  UncrawlableLink,
+  UncrawlableLinkKind,
   UrlAnalyticsDetail,
   UrlCategory,
   UrlDetail,
@@ -70,8 +72,16 @@ import type {
 import {
   GENERIC_ANCHOR_TEXTS,
   ISSUE_COUNT_KEY,
+  ISSUE_GROUPS,
+  issueCount,
+  type CompareCategory,
+  type CompareDiffRow,
+  type IssueCountDelta,
+  type PreviousCrawlComparison,
   issueCategoriesBySeverity,
   normalizeDisabledIssues,
+  normalizeSeverityOverrides,
+  type IssueSeverityOverrides,
   isValidHreflangCode,
   MINHASH_SLOTS,
   MINHASH_BANDS,
@@ -83,6 +93,7 @@ import { runMigrations, type MigrationProgress } from './migrations.js';
 
 /** `meta` key holding the JSON list of silenced issue categories. */
 export const DISABLED_ISSUES_META_KEY = 'disabledIssues';
+export const SEVERITY_OVERRIDES_META_KEY = 'issueSeverityOverrides';
 /** `meta` key mirroring `CrawlConfig.dedupePreNormalize` ('1' / '0'). */
 export const DEDUPE_PRE_NORMALIZE_META_KEY = 'dedupePreNormalize';
 /** JSON `Soft404ProbeResult` of the last crawl's missing-page probe; '' when clean. */
@@ -95,10 +106,13 @@ export const INLINKS_COMPUTED_META_KEY = 'inlinksComputed';
  * definition); sitemap-seeded and list-mode pages are exactly the ones
  * this check exists for. Until inlinks were computed every page has
  * `inlinks = 0`, so the check flags nothing rather than every page.
+ * Both start-URL keys are exempt: `lastStartUrl` is what the user typed
+ * (desktop only), `startUrl` the address it resolved to (every crawler,
+ * CLI included) — `http://site` typed, `https://site/` crawled.
  */
 const ORPHAN_PAGE_SQL = `is_external = 0 AND content_kind = 'html'
   AND status_code >= 200 AND status_code < 300 AND inlinks = 0
-  AND url != COALESCE((SELECT value FROM project_meta WHERE key = 'lastStartUrl'), '')
+  AND url NOT IN (SELECT value FROM project_meta WHERE key IN ('lastStartUrl', 'startUrl'))
   AND EXISTS (SELECT 1 FROM project_meta WHERE key = '${INLINKS_COMPUTED_META_KEY}')`;
 const EMPTY_DISABLED: ReadonlySet<UrlCategory> = new Set();
 
@@ -272,6 +286,8 @@ interface UrlRowDb {
   mixed_content_passive: number;
   hreflang_invalid_count: number;
   hreflang_self_ref_missing: number;
+  hreflang_self_only?: number;
+  hreflang_lang_mismatch?: number;
   hreflang_reciprocity_missing: number;
   hreflang_target_issues: number;
   hreflang_unlinked: number;
@@ -302,6 +318,7 @@ interface UrlRowDb {
   title_count: number;
   images_empty_alt: number;
   empty_anchor_count: number;
+  empty_href_count?: number;
   apple_touch_icon: string | null;
   manifest_url: string | null;
   feed_url: string | null;
@@ -547,6 +564,7 @@ export interface UpsertUrlInput {
   titleCount?: number;
   imagesEmptyAlt?: number;
   emptyAnchorCount?: number;
+  emptyHrefCount?: number;
   /** Per-page link-level counters over every `<a>` (not just the deduped
    *  link records): anchors > 100 chars, generic anchors, and
    *  `target=_blank` without noopener / noreferrer. */
@@ -692,7 +710,7 @@ const UPSERT_URL_SQL = `
     meta_refresh, meta_refresh_url, js_redirect_url, charset,
     extraction_results,
     simhash, content_hash,
-    title_count, images_empty_alt, empty_anchor_count,
+    title_count, images_empty_alt, empty_anchor_count, empty_href_count,
     anchor_too_long_count, generic_anchor_count, target_blank_no_noopener_count,
     apple_touch_icon, manifest_url, feed_url,
     microdata_count, rdfa_count, insecure_form_action_count, missing_sri_count,
@@ -737,7 +755,7 @@ const UPSERT_URL_SQL = `
     :meta_refresh, :meta_refresh_url, :js_redirect_url, :charset,
     :extraction_results,
     :simhash, :content_hash,
-    :title_count, :images_empty_alt, :empty_anchor_count,
+    :title_count, :images_empty_alt, :empty_anchor_count, :empty_href_count,
     :anchor_too_long_count, :generic_anchor_count, :target_blank_no_noopener_count,
     :apple_touch_icon, :manifest_url, :feed_url,
     :microdata_count, :rdfa_count, :insecure_form_action_count, :missing_sri_count,
@@ -845,6 +863,7 @@ const UPSERT_URL_SQL = `
     title_count = excluded.title_count,
     images_empty_alt = excluded.images_empty_alt,
     empty_anchor_count = excluded.empty_anchor_count,
+    empty_href_count = excluded.empty_href_count,
     anchor_too_long_count = excluded.anchor_too_long_count,
     generic_anchor_count = excluded.generic_anchor_count,
     target_blank_no_noopener_count = excluded.target_blank_no_noopener_count,
@@ -1206,19 +1225,24 @@ const INDEXABLE_HTML_SCOPE =
  * a Turkish, German or Japanese site the "URL Uppercase" issue fired on
  * essentially every page while none of them contain an uppercase letter.
  *
- * SQLite has no percent-decode and GLOB has no lookbehind, so this splits
- * the two cases:
- *   - no `%` in the URL → the original check is exactly right;
- *   - otherwise → only G-Z, letters that can never be a hex digit.
- *
- * That removes the false positives completely. The residual is a false
- * NEGATIVE for a URL whose only uppercase letters are A-F *and* which also
- * contains an escape (`/ABC/%C3%BC`), which is rare and far less harmful
- * than flagging every localized URL on the site. Fixing that last case
- * exactly needs a column computed at write time.
+ * SQLite has no percent-decode and GLOB has no lookbehind, so GLOB settles
+ * what it can and hands the rest to `fc_url_has_upper` (registered on every
+ * ProjectDb connection):
+ *   - no `%` in the URL → `[A-Z]` anywhere is exactly right;
+ *   - a G-Z letter can never be a hex digit → uppercase for sure;
+ *   - only A-F letters next to escapes (`/Kategori-ABC/%C3%BC`, a mixed-case
+ *     Turkish slug) → the function strips the escapes and looks again.
+ * Earlier versions stopped at G-Z and missed that last case.
  */
-const URL_HAS_UPPERCASE =
-  "(CASE WHEN url GLOB '*[%]*' THEN url GLOB '*[G-Z]*' ELSE url GLOB '*[A-Z]*' END)";
+const URL_HAS_UPPERCASE = `(CASE WHEN url GLOB '*[%]*'
+  THEN url GLOB '*[G-Z]*' OR (url GLOB '*[A-F]*' AND fc_url_has_upper(url))
+  ELSE url GLOB '*[A-Z]*' END)`;
+
+/** SQL `fc_url_has_upper(url)`: an uppercase ASCII letter outside every `%XX` escape. */
+function urlHasUppercaseOutsideEscapes(url: unknown): number {
+  if (typeof url !== 'string') return 0;
+  return /[A-Z]/.test(url.replace(/%[0-9A-Fa-f]{2}/g, '')) ? 1 : 0;
+}
 
 // "URL contains a non-ASCII character." `normalizeUrl` percent-encodes the
 // path and punycodes the host, so the stored `url` is always pure ASCII —
@@ -1264,6 +1288,20 @@ export interface LinkExportRow {
   link_position: string | null;
   link_path: string | null;
   link_origin: string | null;
+}
+
+/** One `uncrawlable_links` row joined to its page, for the bulk export. */
+export interface UncrawlableLinkExportRow {
+  from_url: string;
+  to_url: string | null;
+  to_status: number | null;
+  code: string;
+  kind: string;
+  element: string;
+  anchor: string | null;
+  link_position: string | null;
+  link_path: string | null;
+  is_internal: number;
 }
 
 export type ProbeWrite =
@@ -1341,6 +1379,13 @@ export class ProjectDb {
       ? new DatabaseSync(filePath, { readOnly: true })
       : new DatabaseSync(filePath);
     this.bodies = new BodyCodec(this.db);
+    // Per connection, so the reader and writer workers' own ProjectDb
+    // instances can run every category SQL too (see URL_HAS_UPPERCASE).
+    this.db.function(
+      'fc_url_has_upper',
+      { deterministic: true },
+      urlHasUppercaseOutsideEscapes,
+    );
     if (!readOnly) {
       this.db.exec('PRAGMA journal_mode = WAL');
       this.db.exec('PRAGMA synchronous = NORMAL');
@@ -1439,10 +1484,10 @@ export class ProjectDb {
     // `runInTransaction`, the pragma below silently does nothing and Clear
     // quietly returns to its 17 s behaviour — still correct, just slow
     // again, which is exactly the kind of regression that is expensive to
-    // rediscover. Dropping FK enforcement stays safe only because all four
-    // tables carrying a foreign key (links, headers, image_usages,
-    // url_sources) are deleted explicitly below, so nothing relies on
-    // ON DELETE CASCADE to be reached.
+    // rediscover. Dropping FK enforcement stays safe only because every
+    // table carrying a foreign key (links, uncrawlable_links, headers,
+    // image_usages, url_sources) is deleted explicitly below, so nothing
+    // relies on ON DELETE CASCADE to be reached.
     //
     // `host_certs` is included so a Clear after a TLS-probe pass
     // doesn't leave stale certificate rows that the next crawl
@@ -1457,6 +1502,7 @@ export class ProjectDb {
          DELETE FROM resource_usages;
          DELETE FROM resources;
          DELETE FROM links;
+         DELETE FROM uncrawlable_links;
          DELETE FROM headers;
          DELETE FROM url_sources;
          DELETE FROM sitemap_urls;
@@ -1524,9 +1570,9 @@ export class ProjectDb {
     //
     // Safe under the same invariant as reset(): every table carrying a
     // foreign key to a deleted row is emptied of those rows in the *same*
-    // transaction before the parent is deleted — links / headers /
-    // url_sources / image_usages are cleared for the target url_ids below
-    // (the only four tables with an FK to `urls`), and orphan `images` are
+    // transaction before the parent is deleted — links / uncrawlable_links /
+    // headers / url_sources / image_usages are cleared for the target
+    // url_ids below (the only tables with an FK to `urls`), and orphan `images` are
     // removed with a `NOT IN image_usages` guard (the only FK to `images`).
     // Nothing relies on ON DELETE CASCADE being reached, so dropping the
     // check cannot leave a dangling child. The url-keyed audit tables have
@@ -1577,6 +1623,9 @@ export class ProjectDb {
             .prepare(`DELETE FROM links WHERE from_url_id IN (${placeholders})`)
             .run(...slice);
           linksDeleted += Number(linkRes.changes);
+          this.db
+            .prepare(`DELETE FROM uncrawlable_links WHERE from_url_id IN (${placeholders})`)
+            .run(...slice);
           this.db
             .prepare(`DELETE FROM headers WHERE url_id IN (${placeholders})`)
             .run(...slice);
@@ -1840,9 +1889,30 @@ export class ProjectDb {
   applyCrawlConfigFlags(config: {
     disabledIssues?: readonly string[];
     dedupePreNormalize?: boolean;
+    issueSeverityOverrides?: Partial<Record<string, string>>;
   }): void {
     this.setDisabledIssues(config.disabledIssues ?? []);
     this.setDedupePreNormalize(config.dedupePreNormalize ?? true);
+    this.setIssueSeverityOverrides(config.issueSeverityOverrides ?? {});
+  }
+
+  /** Per-project issue severity changes, mirrored into `meta` like the
+   *  disabled list so reports, exports and the CLI apply them too. */
+  setIssueSeverityOverrides(raw: unknown): void {
+    const normalized = normalizeSeverityOverrides(raw);
+    const next = Object.keys(normalized).length === 0 ? '' : JSON.stringify(normalized);
+    if ((this.getMeta(SEVERITY_OVERRIDES_META_KEY) ?? '') === next) return;
+    this.setMeta(SEVERITY_OVERRIDES_META_KEY, next);
+  }
+
+  getIssueSeverityOverrides(): IssueSeverityOverrides {
+    const raw = this.getMeta(SEVERITY_OVERRIDES_META_KEY);
+    if (!raw) return {};
+    try {
+      return normalizeSeverityOverrides(JSON.parse(raw));
+    } catch {
+      return {};
+    }
   }
 
   /** The silenced issue categories, as a set. Empty when none. */
@@ -1922,6 +1992,10 @@ export class ProjectDb {
      * Inlinks tab can list the pages that embed it.
      */
     resources?: DiscoveredResource[];
+    /** The page's uncrawlable links (Spider → Crawl → Store → Uncrawlable). */
+    uncrawlableLinks?: UncrawlableLink[];
+    /** Same contract as `storeLinks`, for `uncrawlable_links`. */
+    storeUncrawlableLinks?: boolean;
     fromDepth: number;
   }): { urlId: number } {
     return this.runInTransaction(() => {
@@ -1960,6 +2034,12 @@ export class ProjectDb {
           if (payload.resources) {
             this.db.prepare('DELETE FROM resource_usages WHERE from_url_id = ?').run(urlId);
             if (payload.resources.length > 0) this.insertResources(urlId, payload.resources);
+          }
+        }
+        if (payload.storeUncrawlableLinks ?? true) {
+          this.db.prepare('DELETE FROM uncrawlable_links WHERE from_url_id = ?').run(urlId);
+          if (payload.uncrawlableLinks && payload.uncrawlableLinks.length > 0) {
+            this.insertUncrawlableLinks(urlId, payload.uncrawlableLinks);
           }
         }
         if (payload.storeImages ?? true) {
@@ -2135,6 +2215,210 @@ export class ProjectDb {
     }
   }
 
+  /**
+   * Auto Compare Crawls: copy the crawl that is about to be replaced into
+   * `previous_crawl_*` so the next crawl can be compared with it — the
+   * internal HTML pages the compare view diffs, plus the issue counters.
+   * An empty project leaves no snapshot behind: there is nothing to
+   * compare with. Returns the number of pages kept.
+   */
+  snapshotForCompare(): number {
+    const issues = this.getOverviewCounts().issues;
+    return this.runInTransaction(() => {
+      this.db.exec('DELETE FROM previous_crawl_urls; DELETE FROM previous_crawl_info;');
+      const kept = Number(
+        this.db
+          .prepare(
+            `INSERT INTO previous_crawl_urls
+               (url, status_code, title, meta_description, h1, canonical, indexability, response_time_ms)
+             SELECT url, status_code, title, meta_description, h1, canonical, indexability, response_time_ms
+               FROM urls
+              WHERE is_external = 0 AND content_kind = 'html'`,
+          )
+          .run().changes,
+      );
+      if (kept > 0) {
+        this.db
+          .prepare(
+            `INSERT INTO previous_crawl_info (id, taken_at, start_url, issue_counts)
+             VALUES (1, ?, ?, ?)`,
+          )
+          .run(
+            new Date().toISOString(),
+            this.getMeta('lastStartUrl') ?? this.getMeta('startUrl') ?? null,
+            JSON.stringify(issues),
+          );
+      }
+      return kept;
+    });
+  }
+
+  /**
+   * What changed between the previous crawl's snapshot and the project as
+   * it stands now — the same categories and rules as `compareCrawls`
+   * (core), worked out in SQL against one database instead of two maps in
+   * memory, plus the issue checks whose page count moved. Null when no
+   * snapshot exists. Read-only, so the desktop runs it on a reader worker.
+   */
+  compareWithPreviousCrawl(
+    perCategoryLimit = 5000,
+    responseTimeThresholdMs = 500,
+  ): PreviousCrawlComparison | null {
+    const info = this.db
+      .prepare('SELECT taken_at, start_url, issue_counts FROM previous_crawl_info WHERE id = 1')
+      .get() as { taken_at: string; start_url: string | null; issue_counts: string } | undefined;
+    if (!info) return null;
+    const limit = Math.max(0, Math.floor(perCategoryLimit));
+    const counts: Record<CompareCategory, number> = {
+      added: 0,
+      removed: 0,
+      status: 0,
+      title: 0,
+      meta: 0,
+      h1: 0,
+      canonical: 0,
+      indexability: 0,
+      response_time: 0,
+    };
+    const sampleCounts: Record<CompareCategory, number> = { ...counts };
+    const samples: CompareDiffRow[] = [];
+    const push = (row: CompareDiffRow): void => {
+      counts[row.category]++;
+      if (sampleCounts[row.category] < limit) {
+        samples.push(row);
+        sampleCounts[row.category]++;
+      }
+    };
+    const status = (v: number | null): string | null => (v === null ? null : String(v));
+    const CURRENT = `is_external = 0 AND content_kind = 'html'`;
+
+    const totalCurrent = (
+      this.db.prepare(`SELECT COUNT(*) AS c FROM urls WHERE ${CURRENT}`).get() as { c: number }
+    ).c;
+    const totalPrevious = (
+      this.db.prepare('SELECT COUNT(*) AS c FROM previous_crawl_urls').get() as { c: number }
+    ).c;
+
+    // Added: on the site now, not in the previous crawl.
+    const added = this.db
+      .prepare(
+        `SELECT u.url, u.status_code FROM urls u
+          WHERE u.is_external = 0 AND u.content_kind = 'html'
+            AND NOT EXISTS (SELECT 1 FROM previous_crawl_urls p WHERE p.url = u.url)
+          ORDER BY u.id`,
+      )
+      .iterate() as Iterable<{ url: string; status_code: number | null }>;
+    for (const r of added) push({ url: r.url, category: 'added', before: null, after: status(r.status_code) });
+
+    // Removed: in the previous crawl, gone (or no longer internal HTML) now.
+    const removed = this.db
+      .prepare(
+        `SELECT p.url, p.status_code FROM previous_crawl_urls p
+          WHERE NOT EXISTS (
+            SELECT 1 FROM urls u WHERE u.url = p.url AND u.is_external = 0 AND u.content_kind = 'html'
+          )
+          ORDER BY p.url`,
+      )
+      .iterate() as Iterable<{ url: string; status_code: number | null }>;
+    for (const r of removed) push({ url: r.url, category: 'removed', before: status(r.status_code), after: null });
+
+    // Field-level changes on pages present in both.
+    const both = this.db
+      .prepare(
+        `SELECT p.url,
+                p.status_code AS a_status, u.status_code AS b_status,
+                p.title AS a_title, u.title AS b_title,
+                p.meta_description AS a_meta, u.meta_description AS b_meta,
+                p.h1 AS a_h1, u.h1 AS b_h1,
+                p.canonical AS a_canonical, u.canonical AS b_canonical,
+                p.indexability AS a_index, u.indexability AS b_index,
+                p.response_time_ms AS a_rt, u.response_time_ms AS b_rt
+           FROM previous_crawl_urls p
+           JOIN urls u ON u.url = p.url
+          WHERE u.is_external = 0 AND u.content_kind = 'html'
+          ORDER BY u.id`,
+      )
+      .iterate() as Iterable<{
+      url: string;
+      a_status: number | null;
+      b_status: number | null;
+      a_title: string | null;
+      b_title: string | null;
+      a_meta: string | null;
+      b_meta: string | null;
+      a_h1: string | null;
+      b_h1: string | null;
+      a_canonical: string | null;
+      b_canonical: string | null;
+      a_index: string | null;
+      b_index: string | null;
+      a_rt: number | null;
+      b_rt: number | null;
+    }>;
+    for (const r of both) {
+      if (r.a_status !== r.b_status) {
+        push({ url: r.url, category: 'status', before: status(r.a_status), after: status(r.b_status) });
+      }
+      if ((r.a_title ?? '') !== (r.b_title ?? '')) {
+        push({ url: r.url, category: 'title', before: r.a_title, after: r.b_title });
+      }
+      if ((r.a_meta ?? '') !== (r.b_meta ?? '')) {
+        push({ url: r.url, category: 'meta', before: r.a_meta, after: r.b_meta });
+      }
+      if ((r.a_h1 ?? '') !== (r.b_h1 ?? '')) {
+        push({ url: r.url, category: 'h1', before: r.a_h1, after: r.b_h1 });
+      }
+      if ((r.a_canonical ?? '') !== (r.b_canonical ?? '')) {
+        push({ url: r.url, category: 'canonical', before: r.a_canonical, after: r.b_canonical });
+      }
+      if (r.a_index !== r.b_index) {
+        push({ url: r.url, category: 'indexability', before: r.a_index, after: r.b_index });
+      }
+      if (Math.abs((r.a_rt ?? 0) - (r.b_rt ?? 0)) >= responseTimeThresholdMs) {
+        push({
+          url: r.url,
+          category: 'response_time',
+          before: r.a_rt !== null ? `${r.a_rt} ms` : null,
+          after: r.b_rt !== null ? `${r.b_rt} ms` : null,
+        });
+      }
+    }
+
+    // Issue-level view: checks whose page count moved. A counter the
+    // snapshot predates (a check added since) has no "before" and is skipped.
+    let previousIssues: OverviewCounts['issues'] | null = null;
+    try {
+      previousIssues = JSON.parse(info.issue_counts) as OverviewCounts['issues'];
+    } catch {
+      previousIssues = null;
+    }
+    const issues: IssueCountDelta[] = [];
+    if (previousIssues) {
+      const currentIssues = this.getOverviewCounts().issues;
+      const disabled = this.getDisabledIssues();
+      for (const group of ISSUE_GROUPS) {
+        for (const def of group.items) {
+          if (disabled.has(def.category)) continue;
+          const before = issueCount(previousIssues, def) ?? null;
+          const after = issueCount(currentIssues, def) ?? null;
+          if (before === null || after === null || before === after) continue;
+          issues.push({ category: def.category, group: group.label, label: def.label, before, after });
+        }
+      }
+      issues.sort((a, b) => Math.abs(b.after - b.before) - Math.abs(a.after - a.before));
+    }
+
+    return {
+      previousTakenAt: info.taken_at,
+      previousStartUrl: info.start_url,
+      totalPrevious,
+      totalCurrent,
+      counts,
+      samples,
+      issues,
+    };
+  }
+
   /** How many URLs the last refresh crawl found different. Drives the
    *  "N changed" summary the status bar shows after a re-spider. */
   countChangedUrls(): number {
@@ -2273,6 +2557,12 @@ export class ProjectDb {
       statusCode: number | null;
       statusText?: string | null;
       contentType?: string | null;
+      /**
+       * Overrides the kind read from `contentType` — set when the answer is
+       * an error page or a redirect for a URL with an asset extension, so a
+       * 404 `.png` serving an HTML error page stays an image.
+       */
+      contentKind?: ContentKind | null;
       contentLength?: number | null;
       responseTimeMs?: number | null;
       redirectTarget?: string | null;
@@ -2291,7 +2581,7 @@ export class ProjectDb {
     // without this an external HTML page never leaves the 'other' bucket,
     // so the `external:html` filter stays empty. COALESCE keeps the prior
     // value when the probe returned no usable Content-Type.
-    const contentKind = contentKindFromType(patch.contentType);
+    const contentKind = patch.contentKind ?? contentKindFromType(patch.contentType);
     // Derive indexability from the probed status. External stubs are inserted
     // with a placeholder 'indexable'; without recomputing here, a link that
     // 404s, is bot-blocked, or never responded would stay reported as
@@ -2384,6 +2674,9 @@ export class ProjectDb {
          WHERE l.is_internal = 1
            AND l.type = 'hyperlink'
            AND l.to_url NOT IN (SELECT url FROM urls)
+           -- Links in an excluded position / selector are recorded, not
+           -- followed; a target linked from elsewhere still qualifies.
+           AND l.follow_excluded = 0
            ${followFilter}
          GROUP BY l.to_url`,
       )
@@ -2507,6 +2800,7 @@ export class ProjectDb {
       title_count: input.titleCount ?? 0,
       images_empty_alt: input.imagesEmptyAlt ?? 0,
       empty_anchor_count: input.emptyAnchorCount ?? 0,
+      empty_href_count: input.emptyHrefCount ?? 0,
       anchor_too_long_count: input.anchorTooLongCount ?? 0,
       generic_anchor_count: input.genericAnchorCount ?? 0,
       target_blank_no_noopener_count: input.targetBlankNoNoopenerCount ?? 0,
@@ -2595,7 +2889,7 @@ export class ProjectDb {
       for (let i = 0; i < links.length; i += CHUNK) {
         const slice = links.slice(i, i + CHUNK);
         const placeholders = slice
-          .map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
           .join(',');
         const args: (string | number | null)[] = [];
         for (const link of slice) {
@@ -2613,13 +2907,15 @@ export class ProjectDb {
             link.linkPosition,
             link.linkOrigin,
             link.toUrl === pageUrl ? 1 : 0,
+            link.followExcluded ? 1 : 0,
           );
         }
         this.db
           .prepare(
             `INSERT INTO links (
                from_url_id, to_url, anchor, rel, is_internal,
-               type, alt_text, target, path_type, link_path, link_position, link_origin, is_self
+               type, alt_text, target, path_type, link_path, link_position, link_origin, is_self,
+               follow_excluded
              ) VALUES ${placeholders}`,
           )
           .run(...args);
@@ -2627,7 +2923,10 @@ export class ProjectDb {
 
       // External stubs: also batched into multi-row inserts. ON CONFLICT
       // keeps already-known external URLs untouched.
-      const externals = links.filter((l) => !l.isInternal);
+      // A link the user excluded from following (link position / selector)
+      // is kept as a link row only — no stub that would read as an
+      // unchecked external URL.
+      const externals = links.filter((l) => !l.isInternal && !l.followExcluded);
       if (externals.length > 0) {
         const externalDepth = fromDepth + 1;
         for (let i = 0; i < externals.length; i += CHUNK) {
@@ -4075,7 +4374,9 @@ export class ProjectDb {
              hreflang_self_ref_missing = 0,
              hreflang_reciprocity_missing = 0,
              hreflang_target_issues = 0,
-             hreflang_unlinked = 0
+             hreflang_unlinked = 0,
+             hreflang_self_only = 0,
+             hreflang_lang_mismatch = 0
        WHERE is_external = 0 AND content_kind = 'html'`,
     );
 
@@ -4084,10 +4385,11 @@ export class ProjectDb {
       url: string;
       hreflangs: string | null;
       hreflang_count: number;
+      lang: string | null;
     }
     const rows = this.db
       .prepare(
-        `SELECT id, url, hreflangs, hreflang_count FROM urls
+        `SELECT id, url, hreflangs, hreflang_count, lang FROM urls
           WHERE is_external = 0 AND content_kind = 'html'
             AND hreflang_count > 0 AND hreflangs IS NOT NULL`,
       )
@@ -4182,7 +4484,9 @@ export class ProjectDb {
          hreflang_self_ref_missing = ?,
          hreflang_reciprocity_missing = ?,
          hreflang_target_issues = ?,
-         hreflang_unlinked = ?
+         hreflang_unlinked = ?,
+         hreflang_self_only = ?,
+         hreflang_lang_mismatch = ?
        WHERE id = ?`,
     );
 
@@ -4241,6 +4545,10 @@ export class ProjectDb {
           reciprocityMissing,
           targetIssues,
           unlinked,
+          // Self Reference Only: annotations exist, but every one of them
+          // points back at this page — the "cluster" has no alternates.
+          entries.length > 0 && entries.every((e) => e.href === r.url) ? 1 : 0,
+          hreflangLangMismatch(entries, r.url, r.lang) ? 1 : 0,
           r.id,
         );
       }
@@ -4626,10 +4934,12 @@ export class ProjectDb {
        RETURNING id`,
     );
     const upsertUsage = this.db.prepare(
-      `INSERT INTO image_usages (from_url_id, image_id, alt, is_variant, lazy)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO image_usages (from_url_id, image_id, alt, is_variant, lazy, has_title)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(from_url_id, image_id) DO UPDATE SET
          alt = excluded.alt,
+         -- NULL = not an <img> slot of its own (variant / share card).
+         has_title = COALESCE(excluded.has_title, image_usages.has_title),
          is_variant = MIN(image_usages.is_variant, excluded.is_variant),
          -- An eager use wins; COALESCE so a NULL (share card) never masks it.
          lazy = MIN(COALESCE(image_usages.lazy, excluded.lazy), COALESCE(excluded.lazy, image_usages.lazy))`,
@@ -4653,6 +4963,7 @@ export class ProjectDb {
           img.alt,
           variant,
           img.lazy === undefined ? null : img.lazy ? 1 : 0,
+          img.hasTitle === undefined ? null : img.hasTitle ? 1 : 0,
         );
       }
       if (ownsTx) this.db.exec('COMMIT');
@@ -4690,6 +5001,53 @@ export class ProjectDb {
       seen.add(r.url);
       const row = upsertResource.get(r.url, r.kind) as { id: number };
       insertUsage.run(fromUrlId, row.id);
+    }
+  }
+
+  /** Record a page's uncrawlable links. Runs inside the caller's
+   *  `writeFetchedUrl` transaction; the parser already deduped and capped them. */
+  insertUncrawlableLinks(fromUrlId: number, links: UncrawlableLink[]): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO uncrawlable_links
+         (from_url_id, to_url, code, kind, element, anchor, link_path, link_position, is_internal)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const l of links) {
+      stmt.run(
+        fromUrlId,
+        l.toUrl,
+        l.code,
+        l.kind,
+        l.element,
+        l.anchor,
+        l.linkPath,
+        l.linkPosition,
+        l.isInternal ? 1 : 0,
+      );
+    }
+  }
+
+  /** Every recorded uncrawlable link with its page, for the bulk export.
+   *  Keyset-paged like `iterateLinks`. */
+  *iterateUncrawlableLinks(): IterableIterator<UncrawlableLinkExportRow> {
+    const stmt = this.db.prepare(
+      `SELECT u.id, f.url AS from_url, u.to_url, t.status_code AS to_status, u.code,
+              u.kind, u.element, u.anchor, u.link_position, u.link_path, u.is_internal
+         FROM uncrawlable_links u
+         JOIN urls f ON f.id = u.from_url_id
+         LEFT JOIN urls t ON t.url = u.to_url
+        WHERE u.id > ?
+        ORDER BY u.id ASC LIMIT 2000`,
+    );
+    let lastId = 0;
+    for (;;) {
+      const rows = stmt.all(lastId) as unknown as (UncrawlableLinkExportRow & { id: number })[];
+      if (rows.length === 0) return;
+      for (const r of rows) {
+        lastId = r.id;
+        yield r;
+      }
+      if (rows.length < 2000) return;
     }
   }
 
@@ -6362,6 +6720,7 @@ export class ProjectDb {
     search?: string;
     missingAltOnly?: boolean;
     emptyAltOnly?: boolean;
+    missingTitleOnly?: boolean;
     duplicateAltOnly?: boolean;
     internalOnly?: boolean;
     minByteSize?: number;
@@ -6384,6 +6743,7 @@ export class ProjectDb {
       if (params.internalOnly) where.push('i.is_internal = 1');
       if (params.missingAltOnly) where.push('iu.alt IS NULL AND iu.is_variant = 0');
       if (params.emptyAltOnly) where.push("iu.alt = '' AND iu.is_variant = 0");
+      if (params.missingTitleOnly) where.push('iu.has_title = 0 AND iu.is_variant = 0');
       if (params.duplicateAltOnly) where.push(USAGE_DUPLICATE_ALT_PREDICATE);
       if (params.search) {
         where.push('(i.src LIKE ? OR iu.alt LIKE ?)');
@@ -6449,6 +6809,8 @@ export class ProjectDb {
     if (params.internalOnly) where.push('i.is_internal = 1');
     if (params.missingAltOnly) where.push('i.alt IS NULL');
     if (params.emptyAltOnly) where.push("i.alt = ''");
+    // Legacy projects without usage rows never recorded titles.
+    if (params.missingTitleOnly) where.push('0');
     if (params.duplicateAltOnly) where.push(DUPLICATE_ALT_PREDICATE);
     if (params.search) {
       where.push('(i.src LIKE ? OR i.alt LIKE ?)');
@@ -6506,6 +6868,7 @@ export class ProjectDb {
       search: params.search,
       filter: params.filter,
       disabledIssues: this.getDisabledIssues(),
+      severityOverrides: this.getIssueSeverityOverrides(),
     });
     const sortCol = validSortColumn(params.sortBy, this.urlSortColumns());
     const sortDir = params.sortDir === 'desc' ? 'DESC' : 'ASC';
@@ -6724,7 +7087,7 @@ export class ProjectDb {
     // the row set the same query by construction.
     const disabledIssues = this.getDisabledIssues();
     const countCategory = (cat: UrlCategory): number => {
-      const clause = categoryWhereClause(cat, disabledIssues);
+      const clause = categoryWhereClause(cat, disabledIssues, this.getIssueSeverityOverrides());
       return countWhere(clause ?? '1 = 1');
     };
 
@@ -7106,6 +7469,8 @@ export class ProjectDb {
       hreflangSelfRefMissing: countWhere(
         `${html} AND hreflang_count > 0 AND hreflang_self_ref_missing = 1`,
       ),
+      hreflangSelfOnly: countWhere(`${html} AND hreflang_self_only = 1`),
+      hreflangLangMismatch: countWhere(`${html} AND hreflang_lang_mismatch = 1`),
       hreflangReciprocityMissing: countWhere(
         `${html} AND hreflang_reciprocity_missing > 0`,
       ),
@@ -7147,6 +7512,12 @@ export class ProjectDb {
            ELSE (SELECT COUNT(*) FROM images WHERE alt = '') END) AS c`,
       ),
       linkEmptyAnchor: countWhere(`${html} AND empty_anchor_count > 0`),
+      linkEmptyHref: countWhere(`${html} AND empty_href_count > 0`),
+      // Per usage, like Missing Alt. `has_title` is NULL on rows written
+      // before it was recorded, so an old crawl counts 0, not everything.
+      imageMissingTitle: this.scalarCount(
+        'SELECT COUNT(*) AS c FROM image_usages WHERE has_title = 0 AND is_variant = 0',
+      ),
       appleTouchIconMissing: countWhere(
         `${html} AND status_code >= 200 AND status_code < 300
          AND (apple_touch_icon IS NULL OR apple_touch_icon = '')`,
@@ -7408,6 +7779,11 @@ export class ProjectDb {
       renderBlockingCritical: countWhere(`${html} AND render_blocking_count > 20`),
       ogImageTooLarge: issueCount('issues:og-image-too-large'),
       twitterImageTooLarge: issueCount('issues:twitter-image-too-large'),
+      ogImageNot200: issueCount('issues:og-image-not-200'),
+      twitterImageNot200: issueCount('issues:twitter-image-not-200'),
+      // Counted through the same predicate the sidebar click applies.
+      ogIncomplete: countWhere(categoryWhereClause('issues:og-incomplete') ?? '1 = 0'),
+      twitterIncomplete: countWhere(categoryWhereClause('issues:twitter-incomplete') ?? '1 = 0'),
       ogImageWrongAspect: countWhere(
         `${html} AND og_image IS NOT NULL AND og_image != ''
          AND og_image_width > 0 AND og_image_height > 0
@@ -7685,11 +8061,17 @@ export class ProjectDb {
   }
 
   getOutlinks(urlId: number, limit: number): { rows: OutlinkRow[]; total: number } {
-    const total = (
+    const linkTotal = (
       this.db
         .prepare('SELECT COUNT(*) AS c FROM links WHERE from_url_id = ?')
         .get(urlId) as { c: number }
     ).c;
+    const uncrawlableTotal = (
+      this.db
+        .prepare('SELECT COUNT(*) AS c FROM uncrawlable_links WHERE from_url_id = ?')
+        .get(urlId) as { c: number }
+    ).c;
+    const total = linkTotal + uncrawlableTotal;
     const rows = this.db
       .prepare(
         `SELECT
@@ -7724,26 +8106,80 @@ export class ProjectDb {
       link_origin: string | null;
       is_internal: number;
     }[];
-    return {
-      total,
-      rows: rows.map((r) => ({
-        toUrl: r.to_url,
-        toStatusCode: r.to_status_code,
-        toSize: r.to_size,
-        toFinalUrl: r.to_final_url,
-        toFinalStatusCode: r.to_final_status_code,
-        type: (r.type as OutlinkRow['type']) ?? 'hyperlink',
-        anchor: r.anchor,
-        altText: r.alt_text,
-        rel: r.rel,
-        target: r.target,
-        pathType: (r.path_type as OutlinkRow['pathType']) ?? null,
-        linkPath: r.link_path,
-        linkPosition: (r.link_position as OutlinkRow['linkPosition']) ?? null,
-        linkOrigin: (r.link_origin as OutlinkRow['linkOrigin']) ?? 'html',
-        isInternal: r.is_internal === 1,
-      })),
-    };
+    const out: OutlinkRow[] = rows.map((r) => ({
+      toUrl: r.to_url,
+      toStatusCode: r.to_status_code,
+      toSize: r.to_size,
+      toFinalUrl: r.to_final_url,
+      toFinalStatusCode: r.to_final_status_code,
+      type: (r.type as OutlinkRow['type']) ?? 'hyperlink',
+      anchor: r.anchor,
+      altText: r.alt_text,
+      rel: r.rel,
+      target: r.target,
+      pathType: (r.path_type as OutlinkRow['pathType']) ?? null,
+      linkPath: r.link_path,
+      linkPosition: (r.link_position as OutlinkRow['linkPosition']) ?? null,
+      linkOrigin: (r.link_origin as OutlinkRow['linkOrigin']) ?? 'html',
+      isInternal: r.is_internal === 1,
+      crawlability: 'crawlable',
+    }));
+    // Uncrawlable links follow the regular ones, inside the same limit.
+    // `toUrl` falls back to the code when no address could be read, so the
+    // row still says what the link is.
+    const room = limit - out.length;
+    if (uncrawlableTotal > 0 && room > 0) {
+      const extra = this.db
+        .prepare(
+          `SELECT u.to_url, u.code, u.kind, u.anchor, u.link_path, u.link_position,
+                  u.is_internal,
+                  t.status_code AS to_status_code,
+                  t.content_length AS to_size,
+                  t.redirect_final_url AS to_final_url,
+                  ft.status_code AS to_final_status_code
+             FROM uncrawlable_links u
+             LEFT JOIN urls t ON t.url = u.to_url
+             LEFT JOIN urls ft ON ft.url = t.redirect_final_url
+            WHERE u.from_url_id = ?
+            ORDER BY u.id
+            LIMIT ?`,
+        )
+        .all(urlId, room) as unknown as {
+        to_url: string | null;
+        code: string;
+        kind: string;
+        anchor: string | null;
+        link_path: string | null;
+        link_position: string | null;
+        is_internal: number;
+        to_status_code: number | null;
+        to_size: number | null;
+        to_final_url: string | null;
+        to_final_status_code: number | null;
+      }[];
+      for (const r of extra) {
+        out.push({
+          toUrl: r.to_url ?? r.code,
+          toStatusCode: r.to_status_code,
+          toSize: r.to_size,
+          toFinalUrl: r.to_final_url,
+          toFinalStatusCode: r.to_final_status_code,
+          type: 'hyperlink',
+          anchor: r.anchor,
+          altText: null,
+          rel: null,
+          target: null,
+          pathType: null,
+          linkPath: r.link_path,
+          linkPosition: (r.link_position as OutlinkRow['linkPosition']) ?? null,
+          linkOrigin: 'html',
+          isInternal: r.is_internal === 1,
+          crawlability: 'uncrawlable',
+          uncrawlableKind: r.kind as UncrawlableLinkKind,
+        });
+      }
+    }
+    return { total, rows: out };
   }
 
   getUrlDetail(id: number, linkLimit = 500): UrlDetail | null {
@@ -7860,6 +8296,117 @@ export class ProjectDb {
    * was stored — typically because the page is non-HTML, the crawl
    * predates this feature, or storeBodySnapshots was disabled in config.
    */
+  /**
+   * The numbers `diagnoseCrawl` reads: status mix, failures, blocks,
+   * thin / JS-only pages, traps, depth. One aggregate pass over `urls`
+   * plus two small lookups — cheap enough for an agent to call often.
+   */
+  crawlHealthStats(startUrl?: string | null): {
+    internalUrls: number;
+    answered: number;
+    htmlOk: number;
+    status429: number;
+    status503: number;
+    status5xx: number;
+    status403: number;
+    noResponse: number;
+    timeouts: number;
+    botBlocked: number;
+    robotsBlocked: number;
+    thinHtml: number;
+    jsOnlyNav: number;
+    traps: number;
+    withQuery: number;
+    maxDepthReached: number;
+    atMaxDepth: number;
+    start: { status: number | null; redirectTarget: string | null } | null;
+    topErrors: { text: string; count: number }[];
+  } {
+    const r = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) AS internal_urls,
+           SUM(status_code IS NOT NULL) AS answered,
+           SUM(content_kind = 'html' AND status_code BETWEEN 200 AND 299) AS html_ok,
+           SUM(status_code = 429) AS s429,
+           SUM(status_code = 503) AS s503,
+           SUM(status_code >= 500 AND status_code != 503) AS s5xx,
+           SUM(status_code = 403) AS s403,
+           SUM(indexability = 'non-indexable:no-response') AS no_response,
+           SUM(indexability = 'non-indexable:no-response'
+               AND (LOWER(status_text) LIKE '%timeout%' OR LOWER(status_text) LIKE '%timed out%')) AS timeouts,
+           SUM(indexability = 'unknown:bot-blocked') AS bot_blocked,
+           SUM(indexability = 'non-indexable:robots-blocked') AS robots_blocked,
+           SUM(content_kind = 'html' AND status_code BETWEEN 200 AND 299
+               AND word_count IS NOT NULL AND word_count < 50) AS thin_html,
+           SUM(content_kind = 'html' AND js_only_links_count > 0) AS js_only_nav,
+           SUM(url_trap IS NOT NULL AND url_trap != '') AS traps,
+           SUM(INSTR(url, '?') > 0) AS with_query,
+           MAX(depth) AS max_depth
+         FROM urls WHERE is_external = 0`,
+      )
+      .get() as Record<string, number | null>;
+    const n = (k: string): number => Number(r[k] ?? 0);
+    const maxDepth = n('max_depth');
+    const atMaxDepth = (
+      this.db
+        .prepare('SELECT COUNT(*) AS c FROM urls WHERE is_external = 0 AND depth = ?')
+        .get(maxDepth) as { c: number }
+    ).c;
+    const topErrors = (
+      this.db
+        .prepare(
+          `SELECT status_text AS text, COUNT(*) AS count FROM urls
+            WHERE is_external = 0 AND indexability = 'non-indexable:no-response'
+              AND status_text IS NOT NULL AND status_text != ''
+            GROUP BY status_text ORDER BY count DESC LIMIT 5`,
+        )
+        .all() as { text: string; count: number }[]
+    ).map((e) => ({ text: e.text.slice(0, 160), count: e.count }));
+    let start: { status: number | null; redirectTarget: string | null } | null = null;
+    if (startUrl) {
+      const row = this.db
+        .prepare('SELECT status_code, redirect_target FROM urls WHERE url = ?')
+        .get(startUrl) as { status_code: number | null; redirect_target: string | null } | undefined;
+      if (row) start = { status: row.status_code, redirectTarget: row.redirect_target };
+    }
+    return {
+      internalUrls: n('internal_urls'),
+      answered: n('answered'),
+      htmlOk: n('html_ok'),
+      status429: n('s429'),
+      status503: n('s503'),
+      status5xx: n('s5xx'),
+      status403: n('s403'),
+      noResponse: n('no_response'),
+      timeouts: n('timeouts'),
+      botBlocked: n('bot_blocked'),
+      robotsBlocked: n('robots_blocked'),
+      thinHtml: n('thin_html'),
+      jsOnlyNav: n('js_only_nav'),
+      traps: n('traps'),
+      withQuery: n('with_query'),
+      maxDepthReached: maxDepth,
+      atMaxDepth,
+      start,
+      topErrors,
+    };
+  }
+
+  /** Internal HTML pages that have a stored body (raw or rendered), for
+   *  the "All Page Markdown" export. Ids and URLs only — bodies are read
+   *  one at a time. */
+  listPagesWithSource(): { id: number; url: string; title: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT u.id, u.url, u.title FROM urls u
+           JOIN url_sources s ON s.url_id = u.id
+          WHERE u.is_external = 0 AND u.content_kind = 'html'
+          ORDER BY u.id`,
+      )
+      .all() as unknown as { id: number; url: string; title: string | null }[];
+  }
+
   getUrlSource(
     urlId: number,
   ): {
@@ -8135,6 +8682,7 @@ export class ProjectDb {
   *iterateImages(options: {
     missingAltOnly?: boolean;
     emptyAltOnly?: boolean;
+    missingTitleOnly?: boolean;
     duplicateAltOnly?: boolean;
     search?: string;
     minByteSize?: number;
@@ -8148,6 +8696,7 @@ export class ProjectDb {
     if (this.hasImageUsages()) {
       if (options.missingAltOnly) where.push('iu.alt IS NULL AND iu.is_variant = 0');
       if (options.emptyAltOnly) where.push("iu.alt = '' AND iu.is_variant = 0");
+      if (options.missingTitleOnly) where.push('iu.has_title = 0 AND iu.is_variant = 0');
       if (options.duplicateAltOnly) where.push(USAGE_DUPLICATE_ALT_PREDICATE);
       if (options.search) {
         where.push('(i.src LIKE ? OR iu.alt LIKE ?)');
@@ -8197,6 +8746,7 @@ export class ProjectDb {
     where.push('i.occurrences > 0');
     if (options.missingAltOnly) where.push('i.alt IS NULL');
     if (options.emptyAltOnly) where.push("i.alt = ''");
+    if (options.missingTitleOnly) where.push('0');
     if (options.duplicateAltOnly) where.push(DUPLICATE_ALT_PREDICATE);
     if (options.search) {
       where.push('(i.src LIKE ? OR i.alt LIKE ?)');
@@ -8318,7 +8868,11 @@ export class ProjectDb {
     // inside Electron's 4 GB heap-cap budget. 2000-row batches keep
     // peak memory flat regardless of table size while adding only
     // ~500 statement executions per million rows.
-    const where = categoryWhereClause(category, this.getDisabledIssues());
+    const where = categoryWhereClause(
+      category,
+      this.getDisabledIssues(),
+      this.getIssueSeverityOverrides(),
+    );
     const BATCH = 2000;
     const sql = where
       ? `SELECT * FROM urls WHERE (${where}) AND id > ? ORDER BY id LIMIT ?`
@@ -8352,6 +8906,7 @@ export class ProjectDb {
     const { whereSql, args: baseArgs } = buildUrlsWhere({
       ...params,
       disabledIssues: this.getDisabledIssues(),
+      severityOverrides: this.getIssueSeverityOverrides(),
     });
     const BATCH = 2000;
     const sql = whereSql
@@ -9258,10 +9813,11 @@ export class ProjectDb {
     limit: number,
   ): Record<string, IssueUrlSample[]> {
     const disabled = this.getDisabledIssues();
+    const overrides = this.getIssueSeverityOverrides();
     const cap = Math.max(1, Math.min(1_000, Math.floor(limit) || 1));
     const out: Record<string, IssueUrlSample[]> = {};
     for (const category of categories) {
-      const where = categoryWhereClause(category, disabled);
+      const where = categoryWhereClause(category, disabled, overrides);
       if (!where) continue;
       out[category] = (
         this.db
@@ -10523,6 +11079,8 @@ export class ProjectDb {
     hreflangSelfRefMissing: r.hreflang_self_ref_missing === 1,
     hreflangReciprocityMissing: r.hreflang_reciprocity_missing,
     hreflangUnlinked: r.hreflang_unlinked ?? 0,
+    hreflangSelfOnly: (r.hreflang_self_only ?? 0) === 1,
+    hreflangLangMismatch: (r.hreflang_lang_mismatch ?? 0) === 1,
     mobileParity: r.mobile_parity ?? null,
     mobileParityDiff: r.mobile_parity_diff ?? 0,
     mobileOverflowPx: (r.mobile_usable ?? -1) >= 0 ? (r.mobile_overflow_px ?? 0) : null,
@@ -10550,6 +11108,7 @@ export class ProjectDb {
     titleCount: r.title_count ?? 0,
     imagesEmptyAlt: r.images_empty_alt ?? 0,
     emptyAnchorCount: r.empty_anchor_count ?? 0,
+    emptyHrefCount: r.empty_href_count ?? 0,
     appleTouchIcon: r.apple_touch_icon ?? null,
     manifestUrl: r.manifest_url ?? null,
     feedUrl: r.feed_url ?? null,
@@ -10782,7 +11341,7 @@ const ISSUE_WRITE_BATCH = 2_000;
  * pass (`issueMaterialisationStale`) instead of showing 0 for those
  * checks until the next crawl.
  */
-export const ISSUE_MATERIALISATION_VERSION = '4';
+export const ISSUE_MATERIALISATION_VERSION = '5';
 const ISSUE_VERSION_META_KEY = 'urlsIssuesVersion';
 
 /**
@@ -11009,6 +11568,28 @@ export const EXPENSIVE_ISSUE_DEFINITIONS: ReadonlyArray<readonly [string, string
        OR twitter_image IN (SELECT src FROM images WHERE byte_size > 5242880)
      )`,
   ],
+  // Share images that answered 3xx-unfollowed / 4xx / 5xx to the image
+  // probe — the card renders without a picture. Status 0 (no answer, or a
+  // private address the probe would not request) is left out: it is not
+  // known to be broken.
+  [
+    'issues:og-image-not-200',
+    `is_external = 0 AND content_kind = 'html'
+     AND og_image IS NOT NULL AND og_image != ''
+     AND (
+       og_image_src IN (SELECT src FROM images WHERE probe_status >= 300)
+       OR og_image IN (SELECT src FROM images WHERE probe_status >= 300)
+     )`,
+  ],
+  [
+    'issues:twitter-image-not-200',
+    `is_external = 0 AND content_kind = 'html'
+     AND twitter_image IS NOT NULL AND twitter_image != ''
+     AND (
+       twitter_image_src IN (SELECT src FROM images WHERE probe_status >= 300)
+       OR twitter_image IN (SELECT src FROM images WHERE probe_status >= 300)
+     )`,
+  ],
   [
     'issues:canonical-chain-multi-hop',
     `is_external = 0 AND content_kind = 'html'
@@ -11031,6 +11612,8 @@ function buildUrlsWhere(params: {
   search?: string;
   /** Silenced checks — their categories match no rows. */
   disabledIssues?: ReadonlySet<string>;
+  /** Per-project severity changes, for the severity rollups. */
+  severityOverrides?: IssueSeverityOverrides;
   filter?: AdvancedFilter;
 }): { whereSql: string; args: (string | number)[] } {
   const where: string[] = [];
@@ -11038,7 +11621,7 @@ function buildUrlsWhere(params: {
 
   const cat = params.category ?? 'all';
   if (cat !== 'all') {
-    const clause = categoryWhereClause(cat, params.disabledIssues);
+    const clause = categoryWhereClause(cat, params.disabledIssues, params.severityOverrides);
     if (clause) where.push(clause);
   }
 
@@ -11170,6 +11753,8 @@ export function categoryWhereClause(
   cat: UrlCategory,
   /** Silenced issue checks (Settings → Issues): their filter matches nothing. */
   disabledIssues?: ReadonlySet<string>,
+  /** Per-project severity changes (Settings → Issues) for the rollups. */
+  severityOverrides?: IssueSeverityOverrides,
 ): string | null {
   if (disabledIssues?.has(cat)) return '1 = 0';
   switch (cat) {
@@ -11207,16 +11792,14 @@ export function categoryWhereClause(
       // be perfectly fine.
       return "indexability = 'unknown:bot-blocked'";
     case 'status:no-response':
-      // Robots-blocked URLs are recorded with a NULL status because the
-      // crawler deliberately never requested them — they are not pages
-      // that failed to answer. Counting them here made "No Response"
-      // read as N failures on a crawl whose failure count was zero, and
-      // double-counted them against the sibling Blocked by Robots row.
-      // Bot-blocked URLs did answer — just not with the page. Skipped
-      // external links (private addresses) were never requested at all.
-      return `status_code IS NULL
-              AND indexability NOT IN (
-                'non-indexable:robots-blocked', 'unknown:bot-blocked', 'unknown:skipped')`;
+      // A request that got no answer — timeout, refused connection, DNS.
+      // Both writers of such a row (a failed page fetch, a failed external
+      // probe) mark it `non-indexable:no-response`. Keying on a NULL status
+      // instead swept in every row that was never requested: robots-blocked
+      // URLs, skipped private addresses, and external link stubs nobody
+      // probed — in List mode, where outlinks are recorded but not checked,
+      // a healthy 5-URL list read as 70 % No Response.
+      return "indexability = 'non-indexable:no-response'";
     case 'status:2xx':
       return 'status_code >= 200 AND status_code < 300';
     case 'status:3xx':
@@ -11500,6 +12083,32 @@ export function categoryWhereClause(
               AND (og_title IS NULL OR og_title = '')
               AND (og_description IS NULL OR og_description = '')
               AND (og_image IS NULL OR og_image = '')`;
+    case 'issues:og-incomplete':
+      // Some OpenGraph markup, but not the four properties the protocol
+      // requires (title, type, image, url) — platforms fall back to
+      // scraping, or show a bare link.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (COALESCE(og_title, '') != '' OR COALESCE(og_description, '') != ''
+                   OR COALESCE(og_image, '') != '' OR COALESCE(og_type, '') != ''
+                   OR COALESCE(og_url, '') != '')
+              AND (COALESCE(og_title, '') = '' OR COALESCE(og_type, '') = ''
+                   OR COALESCE(og_image, '') = '' OR COALESCE(og_url, '') = '')`;
+    case 'issues:twitter-incomplete':
+      // An X card that cannot render. X falls back to og:title / og:image,
+      // so only the true gaps count: twitter:* tags with no twitter:card,
+      // a card with no title anywhere, or a large-image card with no image.
+      return `is_external = 0 AND content_kind = 'html'
+              AND status_code >= 200 AND status_code < 300
+              AND (
+                (COALESCE(twitter_card, '') = ''
+                  AND (COALESCE(twitter_title, '') != '' OR COALESCE(twitter_description, '') != ''
+                       OR COALESCE(twitter_image, '') != ''))
+                OR (COALESCE(twitter_card, '') != ''
+                  AND COALESCE(twitter_title, '') = '' AND COALESCE(og_title, '') = '')
+                OR (LOWER(COALESCE(twitter_card, '')) = 'summary_large_image'
+                  AND COALESCE(twitter_image, '') = '' AND COALESCE(og_image, '') = '')
+              )`;
     case 'issues:twitter-missing':
       // Twitter card is “missing” if there’s no twitter:card tag AND no
       // twitter:image — the minimum pair needed for a valid preview.
@@ -11792,6 +12401,21 @@ export function categoryWhereClause(
       // alt="" specifically. Decorative images use this intentionally, but
       // many sites apply it to content images by mistake.
       return "is_external = 0 AND content_kind = 'html' AND images_empty_alt > 0";
+    case 'issues:link-empty-href':
+      // `<a href="">` — a link to nowhere (resolves to the page itself).
+      return "is_external = 0 AND content_kind = 'html' AND empty_href_count > 0";
+    case 'issues:image-missing-title':
+      // Pages using at least one `<img>` without a title attribute (the
+      // Images tab lists the individual uses).
+      return `is_external = 0 AND content_kind = 'html'
+              AND id IN (SELECT from_url_id FROM image_usages
+                          WHERE has_title = 0 AND is_variant = 0)`;
+    case 'issues:hreflang-self-only':
+      // Every hreflang annotation on the page is the page itself.
+      return "is_external = 0 AND content_kind = 'html' AND hreflang_self_only = 1";
+    case 'issues:hreflang-lang-mismatch':
+      // Self-referencing hreflang language ≠ html[lang].
+      return "is_external = 0 AND content_kind = 'html' AND hreflang_lang_mismatch = 1";
     case 'issues:link-empty-anchor':
       // Internal links whose anchor has no usable text or alt — Lighthouse
       // a11y "links must have discernible names".
@@ -11889,7 +12513,7 @@ export function categoryWhereClause(
           : cat === 'issues:severity-warning'
             ? 'warning'
             : 'info';
-      const clauses = issueCategoriesBySeverity(tier)
+      const clauses = issueCategoriesBySeverity(tier, severityOverrides)
         .filter((c) => !disabledIssues?.has(c))
         .map((c) => categoryWhereClause(c, disabledIssues))
         .filter((c): c is string => c !== null)
@@ -12204,6 +12828,8 @@ export function categoryWhereClause(
     case 'issues:image-too-large':
     case 'issues:og-image-too-large':
     case 'issues:twitter-image-too-large':
+    case 'issues:og-image-not-200':
+    case 'issues:twitter-image-not-200':
       // These three are materialised into `urls_issues` by the issue
       // recompute (EXPENSIVE_ISSUE_DEFINITIONS, every 30 s mid-crawl and
       // once more post-crawl), and the sidebar count already reads that
@@ -12434,6 +13060,10 @@ export function categoryWhereClause(
       // `hreflang_count` column gives an at-a-glance density.
       return `is_external = 0 AND content_kind = 'html'
               AND hreflang_count > 0`;
+    case 'tab:social':
+      // Social tab — every internal HTML page, so pages with no OpenGraph /
+      // X card markup are listed too (that absence is the finding).
+      return "is_external = 0 AND content_kind = 'html'";
     case 'tab:amp':
       // V1 Faz 3 — AMP tab. Pages that declare an `<link rel="amphtml">`
       // pointing to an AMP version. The Detail panel's "AMP HTML" field
@@ -12633,4 +13263,39 @@ function computeQueryParamCount(rawUrl: string): number {
   } catch {
     return 0;
   }
+}
+
+/**
+ * The page's self-referencing hreflang (the entry whose `href` is the page
+ * itself, `x-default` aside) names a different language than `html[lang]`
+ * — one of the two declarations is wrong. Languages are compared on their
+ * primary subtag (`en` vs `en-GB` agree); a region only counts when both
+ * sides declare one (`en-GB` vs `en-US` disagree). No self entry, or no
+ * `html[lang]`, means there is nothing to compare. A page listed under two
+ * self entries passes when either one agrees.
+ */
+export function hreflangLangMismatch(
+  entries: ReadonlyArray<{ lang: string; href: string }>,
+  pageUrl: string,
+  htmlLang: string | null,
+): boolean {
+  const html = parseLangTag(htmlLang ?? '');
+  if (!html) return false;
+  const selfLangs = entries
+    .filter((e) => e.href === pageUrl && e.lang.toLowerCase() !== 'x-default')
+    .map((e) => parseLangTag(e.lang))
+    .filter((t): t is { lang: string; region: string | null } => t !== null);
+  if (selfLangs.length === 0) return false;
+  return !selfLangs.some(
+    (t) =>
+      t.lang === html.lang && (t.region === null || html.region === null || t.region === html.region),
+  );
+}
+
+function parseLangTag(raw: string): { lang: string; region: string | null } | null {
+  const parts = raw.trim().toLowerCase().replace(/_/g, '-').split('-').filter(Boolean);
+  const lang = parts[0];
+  if (!lang || !/^[a-z]{2,3}$/.test(lang)) return null;
+  const region = parts.slice(1).find((p) => /^[a-z]{2}$|^\d{3}$/.test(p)) ?? null;
+  return { lang, region };
 }

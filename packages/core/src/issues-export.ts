@@ -65,7 +65,10 @@ export async function exportIssues(
   outputPath: string,
   options: IssuesExportOptions,
 ): Promise<IssuesExportResult> {
-  const issues = summarizeIssues(options.counts ?? db.getOverviewCounts());
+  const issues = summarizeIssues(
+    options.counts ?? db.getOverviewCounts(),
+    db.getIssueSeverityOverrides(),
+  );
 
   if (options.format === 'csv') {
     const source = (function* (): Generator<Record<string, unknown>> {

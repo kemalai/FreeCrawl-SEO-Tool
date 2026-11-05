@@ -819,4 +819,22 @@ export const AZ_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': 'Məhsul kataloqu auditi: JSON-LD-dən qiymət, valyuta, stok, reytinq, SKU və brendi çıxarır, "stokda yoxdur" mətnini işarələyir və filtrlərin taramanı şişirtməməsi üçün sorğu sətri fasetlərini ötürür.',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': 'Nəşriyyat auditi: hreflang və xəbər sitemap-lərini izləyir, müəllif və dərc / yenilənmə tarixlərini çıxarır və hreflang qarşılıqlılığını yoxlayır — təzəlik və dil hədəfləməsinin sıralamanı müəyyən etdiyi saytlar üçün.',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': 'Hər səhifəni Chromium-da render edir və səhifədaxili WCAG auditini (kontrast, fokus çərçivəsi, toxunma hədəfləri, şrift ölçüsü) və mobil istifadəyararlılıq yoxlamalarını işə salır. Qəsdən yavaşdır — aşağı paralellik.',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "title atributu yoxdur",
+  "Self Reference Only": "Yalnız özünə istinad",
+  "Mismatch With HTML lang": "HTML lang ilə uyğun deyil",
+  "Empty href": "Boş href",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph natamamdır",
+  "Twitter Card Incomplete": "Twitter Card natamamdır",
+  "OG Image Not 200": "OG şəkli 200 deyil",
+  "Twitter Image Not 200": "Twitter şəkli 200 deyil",
+  "og:image Width": "og:image eni",
+  "og:image Height": "og:image hündürlüyü",
+  "twitter:image Width": "twitter:image eni",
+  "twitter:image Height": "twitter:image hündürlüyü",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "Keçidin taranma imkanı",
+  "Crawlable": "Taranıla bilən",
+  "Uncrawlable": "Taranıla bilməyən",
 };

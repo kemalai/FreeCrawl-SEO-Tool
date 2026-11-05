@@ -308,4 +308,9 @@ export const MENU_KO: MenuLabels = {
   // ── Google OAuth refresh failure ──
   oauthRefreshExpired:
     'Google이 저장된 로그인을 거부했습니다({reason}). 보통 Google Cloud OAuth 앱이 "Testing" 상태라는 뜻이며, 이 상태에서는 Google이 7일마다 연결을 만료시킵니다. 한 번만 고치세요: Google Cloud Console → OAuth consent screen → "Publish app"(검증 심사 불필요), 그다음 이 통합을 연결 해제 후 다시 연결하세요.',
+  exportMarkdown: "모든 페이지를 Markdown으로 내보내기…",
+  dlgExportMarkdownTitle: "Markdown 파일을 저장할 폴더 선택",
+  dlgExportMarkdownDoneTitle: "Markdown 내보내기 완료",
+  msgExportMarkdownWritten: "작성된 Markdown 파일: {files}. 폴더에는 각 URL과 파일을 연결한 index.csv도 있습니다.",
+  compareWithPrevious: "이전 크롤과 비교…",
 };

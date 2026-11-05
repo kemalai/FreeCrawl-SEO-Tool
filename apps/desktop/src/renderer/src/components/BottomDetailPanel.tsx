@@ -11,6 +11,7 @@ import type {
   LinkPathType,
   LinkPosition,
   LinkType,
+  OutlinkRow,
   UrlCertInfoResult,
   UrlClusterMember,
   UrlDetail,
@@ -305,28 +306,32 @@ export function BottomDetailPanel() {
     for (const d of details) {
       for (const l of d.outlinks) {
         rows.push(
-          buildLinkRow({
-            fromUrl: d.row.url,
-            toUrl: l.toUrl,
-            toStatusCode: l.toStatusCode,
-            toSize: l.toSize,
-            toFinalUrl: l.toFinalUrl,
-            toFinalStatusCode: l.toFinalStatusCode,
-            type: l.type,
-            anchor: l.anchor,
-            altText: l.altText,
-            rel: l.rel,
-            target: l.target,
-            pathType: l.pathType,
-            linkPath: l.linkPath,
-            linkPosition: l.linkPosition,
-            linkOrigin: l.linkOrigin,
-          }),
+          buildOutlinkRow(
+            {
+              fromUrl: d.row.url,
+              toUrl: l.toUrl,
+              toStatusCode: l.toStatusCode,
+              toSize: l.toSize,
+              toFinalUrl: l.toFinalUrl,
+              toFinalStatusCode: l.toFinalStatusCode,
+              type: l.type,
+              anchor: l.anchor,
+              altText: l.altText,
+              rel: l.rel,
+              target: l.target,
+              pathType: l.pathType,
+              linkPath: l.linkPath,
+              linkPosition: l.linkPosition,
+              linkOrigin: l.linkOrigin,
+            },
+            l.crawlability,
+            i18n.language,
+          ),
         );
       }
     }
     return rows;
-  }, [details]);
+  }, [details, i18n.language]);
 
   const aggregatedInlinksTotal = useMemo(
     () => details.reduce((n, d) => n + d.inlinksTotal, 0),
@@ -501,7 +506,7 @@ export function BottomDetailPanel() {
                 selectedUrlId={detail?.row.id ?? null}
                 total={aggregatedOutlinksTotal}
                 shown={aggregatedOutlinks.length}
-                columns={LINK_COLUMNS}
+                columns={OUTLINK_COLUMNS}
                 rows={aggregatedOutlinks}
               />
             )
@@ -513,25 +518,29 @@ export function BottomDetailPanel() {
                 selectedUrlId={detail.row.id}
                 total={detail.outlinksTotal}
                 shown={detail.outlinks.length}
-                columns={LINK_COLUMNS}
+                columns={OUTLINK_COLUMNS}
                 rows={detail.outlinks.map((l) =>
-                  buildLinkRow({
-                    fromUrl: detail.row.url,
-                    toUrl: l.toUrl,
-                    toStatusCode: l.toStatusCode,
-                    toSize: l.toSize,
-                    toFinalUrl: l.toFinalUrl,
-                    toFinalStatusCode: l.toFinalStatusCode,
-                    type: l.type,
-                    anchor: l.anchor,
-                    altText: l.altText,
-                    rel: l.rel,
-                    target: l.target,
-                    pathType: l.pathType,
-                    linkPath: l.linkPath,
-                    linkPosition: l.linkPosition,
-                    linkOrigin: l.linkOrigin,
-                  }),
+                  buildOutlinkRow(
+                    {
+                      fromUrl: detail.row.url,
+                      toUrl: l.toUrl,
+                      toStatusCode: l.toStatusCode,
+                      toSize: l.toSize,
+                      toFinalUrl: l.toFinalUrl,
+                      toFinalStatusCode: l.toFinalStatusCode,
+                      type: l.type,
+                      anchor: l.anchor,
+                      altText: l.altText,
+                      rel: l.rel,
+                      target: l.target,
+                      pathType: l.pathType,
+                      linkPath: l.linkPath,
+                      linkPosition: l.linkPosition,
+                      linkOrigin: l.linkOrigin,
+                    },
+                    l.crawlability,
+                    i18n.language,
+                  ),
                 )}
               />
             )
@@ -1351,6 +1360,31 @@ function ViewSourceView({
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [wrap, setWrap] = useState(false);
+  // HTML or the page converted to Markdown. The conversion runs in the
+  // main process (parser worker) and is fetched only when asked for.
+  const [format, setFormat] = useState<'html' | 'markdown'>('html');
+  const [markdown, setMarkdown] = useState<{ key: string; text: string | null } | null>(null);
+  const [mdLoading, setMdLoading] = useState(false);
+  const mdKey = `${urlId}|${kind}`;
+  useEffect(() => {
+    if (format !== 'markdown' || urlId === null || markdown?.key === mdKey) return;
+    let cancelled = false;
+    setMdLoading(true);
+    void window.freecrawl
+      .urlMarkdownGet({ id: urlId, rendered: kind === 'rendered' })
+      .then((r) => {
+        if (!cancelled) setMarkdown({ key: mdKey, text: r.markdown });
+      })
+      .catch(() => {
+        if (!cancelled) setMarkdown({ key: mdKey, text: null });
+      })
+      .finally(() => {
+        if (!cancelled) setMdLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [format, urlId, kind, mdKey, markdown?.key]);
   // Active match index (0-based). When the user presses Enter (next) or
   // Shift+Enter (prev) we cycle through matches and the active one is
   // scrolled into view + highlighted in a stronger colour.
@@ -1384,7 +1418,13 @@ function ViewSourceView({
     setActiveMatch(0);
   }, [search, urlId]);
 
-  const activeBody = kind === 'rendered' ? src?.renderedBody ?? null : src?.body ?? null;
+  const htmlBody = kind === 'rendered' ? src?.renderedBody ?? null : src?.body ?? null;
+  const showMarkdown = format === 'markdown' && htmlBody !== null;
+  const activeBody = showMarkdown
+    ? markdown?.key === mdKey
+      ? markdown.text
+      : null
+    : htmlBody;
   // Memoize the full-body scans so they only re-run when the body, query, or
   // active-match index actually change — NOT on every keystroke or parent
   // re-render. On a multi-MB snapshot, an unmemoized countMatches +
@@ -1403,6 +1443,37 @@ function ViewSourceView({
 
   if (loading && !src) {
     return <div className="p-4 text-[11px] text-surface-500">{t('viewSource.loadingSource', { defaultValue: 'Loading source…' })}</div>;
+  }
+  const formatToggle = (
+    <div className="flex overflow-hidden rounded border border-surface-700 text-[10px]">
+      {(['html', 'markdown'] as const).map((f) => (
+        <button
+          key={f}
+          type="button"
+          onClick={() => setFormat(f)}
+          className={clsx(
+            'px-2 py-0.5',
+            format === f ? 'bg-surface-700 text-surface-50' : 'text-surface-400 hover:bg-surface-800',
+          )}
+        >
+          {f === 'html' ? 'HTML' : 'Markdown'}
+        </button>
+      ))}
+    </div>
+  );
+  if (showMarkdown && activeBody === null) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex items-center gap-2 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px]">
+          {formatToggle}
+        </div>
+        <div className="p-4 text-[11px] text-surface-500">
+          {mdLoading
+            ? t('viewSource.markdownLoading', { defaultValue: 'Converting to Markdown…' })
+            : t('viewSource.markdownFailed', { defaultValue: 'This page could not be converted to Markdown.' })}
+        </div>
+      </div>
+    );
   }
   if (!src || activeBody === null) {
     if (kind === 'rendered') {
@@ -1449,14 +1520,17 @@ function ViewSourceView({
   }
 
   function download() {
-    const blob = new Blob([body], { type: 'text/html;charset=utf-8' });
+    const ext = showMarkdown ? 'md' : 'html';
+    const blob = new Blob([body], {
+      type: showMarkdown ? 'text/markdown;charset=utf-8' : 'text/html;charset=utf-8',
+    });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    let filename = 'page.html';
+    let filename = `page.${ext}`;
     try {
       const u = new URL(pageUrl);
       const seg = u.pathname.replace(/\/+$/, '').split('/').pop() || u.hostname;
-      filename = `${(seg || 'page').replace(/[^a-z0-9._-]/gi, '_')}.html`;
+      filename = `${(seg || 'page').replace(/[^a-z0-9._-]/gi, '_')}.${ext}`;
     } catch {
       /* ignore */
     }
@@ -1468,8 +1542,9 @@ function ViewSourceView({
   return (
     <div className="flex h-full flex-col">
       <div className="flex flex-wrap items-center gap-2 border-b border-surface-800 bg-surface-900 px-3 py-1.5 text-[11px]">
+        {formatToggle}
         <span className="text-surface-500">
-          {(activeLength / 1024).toFixed(1)} KB
+          {((showMarkdown ? body.length : activeLength) / 1024).toFixed(1)} KB
           {src.truncated && kind === 'raw' && (
             <span className="ml-1 rounded bg-amber-900/40 px-1.5 py-0.5 text-[9px] uppercase text-amber-300">
               truncated
@@ -2478,6 +2553,30 @@ const LINK_COLUMNS: LinksColumn[] = [
   { id: 'size', header: 'Size', width: 90 },
   { id: 'transferred', header: 'Transferred', width: 100 },
 ];
+
+/** Outlinks add Screaming Frog's "Link Crawlability" column after Link
+ *  Origin: an uncrawlable link (`<span href>`, `javascript:` …) is listed
+ *  with the page's other links but marked as one a search engine can't follow. */
+const CRAWLABILITY_COL = LINK_COLUMNS.findIndex((c) => c.id === 'link-origin') + 1;
+const OUTLINK_COLUMNS: LinksColumn[] = [
+  ...LINK_COLUMNS.slice(0, CRAWLABILITY_COL),
+  { id: 'link-crawlability', header: 'Link Crawlability', width: 120 },
+  ...LINK_COLUMNS.slice(CRAWLABILITY_COL),
+];
+
+function buildOutlinkRow(
+  r: LinkFactsRow,
+  crawlability: OutlinkRow['crawlability'],
+  lang: string,
+): string[] {
+  const cells = buildLinkRow(r);
+  cells.splice(
+    CRAWLABILITY_COL,
+    0,
+    translateLabel(crawlability === 'uncrawlable' ? 'Uncrawlable' : 'Crawlable', lang),
+  );
+  return cells;
+}
 
 interface LinkFactsRow {
   fromUrl: string;

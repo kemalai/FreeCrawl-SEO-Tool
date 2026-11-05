@@ -15,7 +15,7 @@
  * over the running one.
  */
 
-import type { CrawlConfig, CrawlProgress } from './crawl.js';
+import type { CrawlConfig, CrawlMode, CrawlProgress } from './crawl.js';
 
 /** Bump when the wire shape changes in a way old clients must notice. */
 export const BRIDGE_PROTOCOL_VERSION = 2 as const;
@@ -69,6 +69,14 @@ export type OnBusy = 'reject' | 'queue' | 'takeover';
  */
 export interface McpStartCrawlInput {
   startUrl?: string;
+  /**
+   * Crawl mode. Omitted: `list` when `urlList` is given, otherwise the
+   * saved mode — except that a `startUrl` never runs in list mode (a list
+   * crawl has no start URL), so it falls back to `spider` there.
+   */
+  mode?: CrawlMode;
+  /** List-mode URLs (one per entry). Replaces the saved list when given. */
+  urlList?: string[];
   /**
    * Optional path to a `.seoproject` this crawl should target. On the
    * primary (desktop-window) session it is validated against the open

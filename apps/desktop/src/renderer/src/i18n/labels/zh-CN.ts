@@ -806,4 +806,22 @@ export const ZH_CN_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': '商品目录审计：从 JSON-LD 提取价格、货币、库存、评分、SKU 和品牌，标记“缺货”文案，并跳过查询字符串分面，避免筛选器让抓取量爆炸。',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': '发布者审计：跟踪 hreflang 和新闻站点地图，提取作者及发布 / 修改日期，并检查 hreflang 互链——适用于时效性和语言定向决定排名的站点。',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': '在 Chromium 中渲染每个页面并运行页内 WCAG 审计（对比度、焦点轮廓、点击目标、字号）以及移动可用性检查。有意放慢——低并发。',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "缺少 title 属性",
+  "Self Reference Only": "仅自引用",
+  "Mismatch With HTML lang": "与 HTML lang 不一致",
+  "Empty href": "href 为空",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph 不完整",
+  "Twitter Card Incomplete": "Twitter Card 不完整",
+  "OG Image Not 200": "OG 图片非 200",
+  "Twitter Image Not 200": "Twitter 图片非 200",
+  "og:image Width": "og:image 宽度",
+  "og:image Height": "og:image 高度",
+  "twitter:image Width": "twitter:image 宽度",
+  "twitter:image Height": "twitter:image 高度",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "链接可抓取性",
+  "Crawlable": "可抓取",
+  "Uncrawlable": "不可抓取",
 };

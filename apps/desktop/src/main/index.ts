@@ -46,6 +46,7 @@ import { totalmem, freemem, cpus, release } from 'node:os';
 import appIcon from './assets/window-icon.png?asset';
 import {
   DEFAULT_CRAWL_CONFIG,
+  applyExportFilenamePattern,
   IPC,
   type MenuEvent,
   type AssistantApprovalInput,
@@ -58,6 +59,7 @@ import {
   type McpToolsListResult,
   type ConfirmClearResult,
   type CrawlConfig,
+  type CrawlMode,
   type CrawlProgress,
   type CrawlSummary,
   type ExportCsvInput,
@@ -127,6 +129,7 @@ import {
   type SettingsImportResult,
   type ScheduleEntry,
   type ScheduleSpec,
+  type ScheduleRunNowResult,
   type PagesPerDirectoryInput,
   type ImagesQueryInput,
   type ImagesQueryResult,
@@ -203,6 +206,14 @@ import {
   type AiRunResult,
   type AiQueryInput,
   type AiQueryResult,
+  type AiModelsResult,
+  type AiProvider,
+  type AiSettingsState,
+  aiModelOffered,
+  type PreviousCrawlComparison,
+  WEBHOOK_FORMATS,
+  type WebhookFormat,
+  type WebhookTestResult,
   type SeoRunInput,
   type SeoRunResult,
   type SeoQueryInput,
@@ -298,7 +309,10 @@ import {
   type HtmlReportData,
   exportIssues,
   runSeoAuditExport,
-  postWebhookJson,
+  postWebhookMessage,
+  resolveWebhookFormat,
+  buildScheduledCrawlNotice,
+  redactUrlSecrets,
   ensureHeapHeadroom,
   compareCrawls,
   testUrlAgainstRobots,
@@ -311,10 +325,12 @@ import {
   compileUrlRegexRewrites,
   previewExtractionRules,
   runBulkExport,
+  writeCrawlChangesCsvs,
   analyzeLogFile,
   buildLogExportXlsx,
   buildLogExportCsv,
   extractProseText,
+  htmlToMarkdown,
   type LogAnalysisResult,
   type LogExportTables,
 } from '@freecrawl/core';
@@ -373,7 +389,21 @@ import {
   MetricaError,
 } from './metrica.js';
 import { runAiBatch, type AiBatchItem } from './ai-batch.js';
-import { resolveModel, defaultConcurrency } from './ai-providers.js';
+import {
+  resolveModel,
+  defaultConcurrency,
+  listProviderModels,
+  DEFAULT_MODELS as AI_DEFAULT_MODELS,
+} from './ai-providers.js';
+import {
+  AI_PROVIDERS,
+  aiUsage,
+  allAiProviderSettings,
+  configureAiPrefsStore,
+  flushAiUsage,
+  resetAiUsage,
+  setAiProviderSettings,
+} from './ai-settings.js';
 import { runSeoBatch } from './seo-batch.js';
 import * as mcpClient from './mcp-client.js';
 import {
@@ -412,6 +442,7 @@ import {
 } from './agent-session-registry.js';
 import {
   claimIfDue,
+  claimNow,
   getSchedule,
   recordFireResult,
   setSchedule,
@@ -1541,7 +1572,24 @@ function schedulePrefsWrite(): void {
   }, 250);
 }
 
+// AI provider settings + token totals live in the prefs cache; the module
+// gets a lazy get/set pair so it never imports this file.
+configureAiPrefsStore({
+  get: (key) => {
+    loadPrefs();
+    return prefsCache[key];
+  },
+  set: (key, value) => {
+    loadPrefs();
+    prefsCache[key] = value;
+    schedulePrefsWrite();
+  },
+});
+
 function flushPrefs(): void {
+  // Token totals are counted in memory on a debounce — fold them into the
+  // cache before the final write.
+  if (prefsLoaded) flushAiUsage();
   if (prefsWriteTimer) {
     clearTimeout(prefsWriteTimer);
     prefsWriteTimer = null;
@@ -1653,7 +1701,52 @@ function schedulerTickForSession(s: ProjectSession): void {
     `Scheduled crawl firing: ${cfg.startUrl} (cadence=${entry.spec.cadence})`,
   );
   s.crawlerStartedByScheduler = true;
-  void crawlController.launchCrawl(cfg);
+  void launchScheduledCrawl(s, cfg);
+}
+
+/**
+ * Keep the crawl a scheduled run is about to replace, for Auto Compare.
+ * Runs on the writer worker: it copies every internal HTML row, which on a
+ * large project is far too much work for the main thread.
+ */
+async function snapshotForCompareViaPool(s: ProjectSession): Promise<number> {
+  if (!s.writerPool.isReady()) return s.getDb().snapshotForCompare();
+  try {
+    return await s.writerPool.call<number>('snapshotForCompare', []);
+  } catch (err) {
+    if (!(err instanceof WriterUnavailableError)) throw err;
+    return s.getDb().snapshotForCompare();
+  }
+}
+
+/** Changes since the previous crawl's snapshot, on a reader worker. */
+async function compareWithPreviousViaPool(s: ProjectSession): Promise<PreviousCrawlComparison | null> {
+  if (!s.readerPool.isReady()) return s.getDb().compareWithPreviousCrawl();
+  return s.readerPool.call<PreviousCrawlComparison | null>('compareWithPreviousCrawl', []);
+}
+
+/**
+ * Start a scheduled crawl (timed fire or Run Now). With Auto Compare on,
+ * the crawl it is about to replace is snapshotted first, so the finished
+ * crawl can be compared with it. A failed snapshot never blocks the crawl.
+ */
+async function launchScheduledCrawl(s: ProjectSession, cfg: CrawlConfig): Promise<void> {
+  if (!crawlController) return;
+  if (getSchedule(schedulerStore, s.currentProjectPath)?.spec.autoCompare) {
+    try {
+      const kept = await snapshotForCompareViaPool(s);
+      logger.log('info', 'scheduler', `Auto Compare: kept ${kept} page(s) of the previous crawl`, undefined, s.logTag);
+    } catch (err) {
+      logger.log(
+        'warn',
+        'scheduler',
+        `Auto Compare snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+        undefined,
+        s.logTag,
+      );
+    }
+  }
+  await crawlController.launchCrawl(cfg);
 }
 
 function startScheduler(): void {
@@ -2405,6 +2498,13 @@ function splitConfigSecrets(config: CrawlConfig): {
     secrets['proxyUrl'] = clean.proxyUrl;
     clean.proxyUrl = '';
   }
+  // A Slack / Discord / Teams webhook URL is bearer-equivalent: anyone
+  // holding it can post into the channel. Same treatment as a password —
+  // encrypted at rest, blanked in the settings export and for MCP agents.
+  if (clean.webhookUrl) {
+    secrets['webhookUrl'] = clean.webhookUrl;
+    clean.webhookUrl = '';
+  }
   return { clean, secrets };
 }
 
@@ -2428,6 +2528,9 @@ function applyConfigSecrets(
   if (secrets['proxyUrl'] !== undefined) {
     config.proxyUrl = secrets['proxyUrl'];
   }
+  if (secrets['webhookUrl'] !== undefined) {
+    config.webhookUrl = secrets['webhookUrl'];
+  }
   return config;
 }
 
@@ -2441,6 +2544,31 @@ function redactConfigSecrets(config: Record<string, unknown>): Record<string, un
     string,
     unknown
   >;
+}
+
+/** An MCP agent's list-mode URLs, cleaned the way the desktop's list
+ *  editor cleans pasted text: trimmed, blank and `#` comment lines dropped,
+ *  only http(s) URLs kept, duplicates collapsed (first one wins). */
+function cleanBridgeUrlList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const value = item.trim();
+    if (!value || value.startsWith('#')) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      continue;
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
 }
 
 /** `config` with its secrets blanked, for replies to an MCP agent: an
@@ -2985,6 +3113,89 @@ async function saveProjectDocument(
  * chosen project name, then to a generic label when nothing has been
  * crawled yet.
  */
+/** A stored page as Markdown — on a parser worker when the pool is up,
+ *  inline otherwise (tests, pool start-up). */
+async function pageMarkdown(html: string, url: string): Promise<string> {
+  const selector = currentSession().lastCrawlConfig?.contentAreaSelector;
+  if (parserPool.isReady()) {
+    try {
+      return await parserPool.markdown(html, url, selector);
+    } catch {
+      // Worker timeout / crash — fall through to the inline conversion.
+    }
+  }
+  return htmlToMarkdown(html, url, { contentAreaSelector: selector });
+}
+
+/**
+ * Write one `.md` per stored HTML page (rendered DOM preferred, else the
+ * raw body) plus `index.csv` (url, title, file). File names are a short
+ * slug of the path plus a hash of the URL — unique, and well inside the
+ * Windows path limit whatever the URL length.
+ */
+async function exportAllPageMarkdown(
+  db: ProjectDb,
+  outputDir: string,
+): Promise<{ files: number; skipped: number }> {
+  const pagesDir = join(outputDir, 'pages');
+  await mkdir(pagesDir, { recursive: true });
+  const pages = db.listPagesWithSource();
+  const index: string[] = ['url,title,file'];
+  const csv = (v: string) => (/[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  let files = 0;
+  let skipped = 0;
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < pages.length) {
+      const page = pages[cursor++]!;
+      const src = db.getUrlSource(page.id);
+      const html = src?.renderedBody || src?.body || '';
+      if (!html) {
+        skipped++;
+        continue;
+      }
+      const md = await pageMarkdown(html, page.url);
+      let slug = 'page';
+      try {
+        const u = new URL(page.url);
+        slug = `${u.hostname}${u.pathname}`
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 60) || 'page';
+      } catch {
+        /* keep the fallback */
+      }
+      const hash = createHash('sha1').update(page.url).digest('hex').slice(0, 8);
+      const file = `${slug}-${hash}.md`;
+      await writeFile(join(pagesDir, file), md, 'utf8');
+      index.push([csv(page.url), csv(page.title ?? ''), csv(`pages/${file}`)].join(','));
+      files++;
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, () => worker()));
+  await writeFile(join(outputDir, 'index.csv'), '\ufeff' + index.join('\n') + '\n', 'utf8');
+  return { files, skipped };
+}
+
+/**
+ * Default file name for an export's save dialog, built from the user's
+ * pattern (Settings → Storage → Export file names; `{report}`, `{date}`,
+ * `{domain}`, …). The default pattern keeps the historical names.
+ */
+function exportFileName(report: string, ext: string, s: ProjectSession = currentSession()): string {
+  const raw = prefsCache['exportFilenamePattern'];
+  const pattern = typeof raw === 'string' ? raw : '';
+  let project = '';
+  try {
+    project = suggestedProjectName(s);
+  } catch {
+    project = '';
+  }
+  const url = s.lastCrawlConfig?.startUrl ?? '';
+  return `${applyExportFilenamePattern(pattern, { report, url, project })}.${ext}`;
+}
+
 function suggestedProjectName(s: ProjectSession): string {
   const sanitise = (raw: string): string =>
     Array.from(raw)
@@ -5164,7 +5375,7 @@ function registerIpc(): void {
         if (!parent) return { filePath: '', bytesWritten: 0 };
         const res = await dialog.showSaveDialog(parent, {
           title: L().dlgExportLogAnalysisTitle,
-          defaultPath: `log-analysis.${format}`,
+          defaultPath: exportFileName('log-analysis', format),
           filters: [
             format === 'csv'
               ? { name: 'CSV', extensions: ['csv'] }
@@ -5832,6 +6043,24 @@ function registerIpc(): void {
   });
   registerHandle(IPC.scheduleSet, (_e, spec: ScheduleSpec | null) => {
     return setSchedule(schedulerStore, currentSession().currentProjectPath, spec);
+  });
+  // "Run Now" — the scheduled crawl, fired by hand. Same config and
+  // after-crawl actions as a timed fire (crawlerStartedByScheduler), but the
+  // regular cadence is left alone.
+  registerHandle(IPC.scheduleRunNow, async (): Promise<ScheduleRunNowResult> => {
+    const s = currentSession();
+    const projectPath = s.currentProjectPath;
+    if (!projectPath) return { ok: false, reason: 'no-project' };
+    if (!getSchedule(schedulerStore, projectPath)) return { ok: false, reason: 'no-schedule' };
+    if (s.activeCrawler) return { ok: false, reason: 'busy' };
+    const cfg = s.lastCrawlConfig;
+    if (!cfg || !crawlController) return { ok: false, reason: 'no-config' };
+    const entry = claimNow(schedulerStore, projectPath);
+    if (!entry) return { ok: false, reason: 'no-schedule' };
+    logger.log('info', 'scheduler', `Scheduled crawl started by hand (Run Now): ${cfg.startUrl}`);
+    s.crawlerStartedByScheduler = true;
+    void launchScheduledCrawl(s, cfg);
+    return { ok: true, entry };
   });
 
   // V1 Faz 9 — directory picker for Settings → Storage. Returns the chosen
@@ -7297,6 +7526,37 @@ function registerIpc(): void {
     }
   });
 
+  // Settings → Integrations → AI provider → Model & Prompt.
+  const aiSettingsState = (): AiSettingsState => ({
+    settings: allAiProviderSettings(),
+    usage: aiUsage(),
+    defaultModels: { ...AI_DEFAULT_MODELS },
+  });
+  const isAiProvider = (v: unknown): v is AiProvider =>
+    typeof v === 'string' && (AI_PROVIDERS as readonly string[]).includes(v);
+  registerHandle(IPC.aiSettingsGet, (): AiSettingsState => aiSettingsState());
+  registerHandle(IPC.aiSettingsSet, (_e, provider: unknown, settings: unknown): AiSettingsState => {
+    if (isAiProvider(provider)) setAiProviderSettings(provider, settings);
+    return aiSettingsState();
+  });
+  registerHandle(IPC.aiUsageReset, (_e, provider: unknown): AiSettingsState => {
+    if (isAiProvider(provider)) resetAiUsage(provider);
+    return aiSettingsState();
+  });
+  registerHandle(
+    IPC.aiModels,
+    async (_e, provider: unknown, model: unknown): Promise<AiModelsResult> => {
+      if (!isAiProvider(provider)) return { ok: false, model: '', error: 'Unknown provider' };
+      const effective = resolveModel(provider, typeof model === 'string' ? model : undefined);
+      try {
+        const models = await listProviderModels(provider);
+        return { ok: true, model: effective, models, offered: aiModelOffered(provider, effective, models) };
+      } catch (err) {
+        return { ok: false, model: effective, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
   registerHandle(
     IPC.aiQuery,
     async (_e, input: AiQueryInput): Promise<AiQueryResult> => {
@@ -7776,8 +8036,14 @@ function registerIpc(): void {
       if (sess.crawlerStartedByScheduler) {
         sess.crawlerStartedByScheduler = false;
         recordFireResult(schedulerStore, sess.currentProjectPath, 'success');
-        const after = getSchedule(schedulerStore, sess.currentProjectPath)?.spec.afterCrawl;
-        if (after) void runScheduledAfterCrawl(sess, after);
+        const spec = getSchedule(schedulerStore, sess.currentProjectPath)?.spec;
+        if (spec?.afterCrawl || spec?.autoCompare) {
+          void runScheduledAfterCrawl(
+            sess,
+            spec.afterCrawl ?? { export: 'none', outputDir: '', sheets: false, webhook: false },
+            spec.autoCompare === true,
+          );
+        }
       }
       if (Notification.isSupported() && !sess.window?.isFocused()) {
         try {
@@ -7899,13 +8165,38 @@ function registerIpc(): void {
    * Best-effort — every step logs its own failure and never touches the
    * schedule's "last status", which reflects the crawl itself.
    */
-  async function runScheduledAfterCrawl(sess: ProjectSession, after: ScheduleAfterCrawl): Promise<void> {
+  async function runScheduledAfterCrawl(
+    sess: ProjectSession,
+    after: ScheduleAfterCrawl,
+    autoCompare = false,
+  ): Promise<void> {
     const db = sess.getDb();
     const startUrl = db.getMeta('lastStartUrl') ?? '';
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
     const project = basename(sess.currentProjectPath, '.seoproject') || 'crawl';
     const files: string[] = [];
     const errors: string[] = [];
+    // Auto Compare Crawls: what changed since the crawl this one replaced.
+    let comparison: PreviousCrawlComparison | null = null;
+    if (autoCompare) {
+      try {
+        comparison = await compareWithPreviousViaPool(sess);
+        if (comparison) {
+          const c = comparison.counts;
+          logger.log(
+            'info',
+            'main',
+            `Auto Compare: +${c.added} / -${c.removed} pages, ${comparison.issues.length} check(s) changed since ${comparison.previousTakenAt}`,
+            undefined,
+            sess.logTag,
+          );
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`compare: ${msg}`);
+        logger.log('warn', 'main', `Auto Compare failed: ${msg}`, undefined, sess.logTag);
+      }
+    }
     let exportDir: string | null = null;
     if (after.export !== 'none' && after.outputDir) {
       exportDir = join(after.outputDir, `${project}-${stamp}`);
@@ -7928,6 +8219,7 @@ function registerIpc(): void {
           await writePdfReport(db, target);
           files.push(target);
         }
+        if (comparison) files.push(...(await writeCrawlChangesCsvs(comparison, exportDir)));
         logger.log('info', 'main', `Scheduled export (${after.export}) wrote ${files.length} file(s) to ${exportDir}`, undefined, sess.logTag);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -7952,20 +8244,53 @@ function registerIpc(): void {
       if (!url) {
         logger.log('warn', 'main', 'Scheduled webhook skipped: no webhook URL in Settings → Webhook', undefined, sess.logTag);
       } else {
-        const r = await postWebhookJson(url, {
-          event: 'scheduled-export',
-          finishedAt: new Date().toISOString(),
-          startUrl,
-          project: sess.currentProjectPath,
-          export: after.export,
-          exportDir,
-          files,
-          sheetsUrl,
-          errors,
-          summary: db.getSummary(),
-          issues: db.getOverviewCounts().issues,
-        });
-        logger.log(r.ok ? 'info' : 'warn', 'main', `Scheduled webhook ${r.ok ? 'delivered' : 'failed'} (status ${r.status ?? 'n/a'}, ${r.durationMs} ms)${r.ok ? '' : `: ${r.detail}`}`, undefined, sess.logTag);
+        const summary = db.getSummary();
+        const issues = db.getOverviewCounts().issues;
+        // Raw document for Zapier / n8n / own endpoints; Slack, Discord
+        // and Teams get a readable message built from the same facts.
+        const r = await postWebhookMessage(
+          url,
+          sess.lastCrawlConfig?.webhookFormat,
+          {
+            event: 'scheduled-export',
+            finishedAt: new Date().toISOString(),
+            startUrl,
+            project: sess.currentProjectPath,
+            export: after.export,
+            exportDir,
+            files,
+            sheetsUrl,
+            errors,
+            summary,
+            issues,
+            // Issue-level "what changed"; the crawl-changes CSVs carry the
+            // page-level detail.
+            ...(comparison
+              ? {
+                  comparison: {
+                    previousCrawlAt: comparison.previousTakenAt,
+                    pagesBefore: comparison.totalPrevious,
+                    pagesNow: comparison.totalCurrent,
+                    changes: comparison.counts,
+                    issues: comparison.issues.slice(0, 100),
+                  },
+                }
+              : {}),
+          },
+          buildScheduledCrawlNotice({
+            project,
+            startUrl,
+            summary,
+            issues,
+            exportKind: after.export,
+            exportDir,
+            fileCount: files.length,
+            sheetsUrl,
+            errors,
+            comparison,
+          }),
+        );
+        logger.log(r.ok ? 'info' : 'warn', 'main', `Scheduled webhook (${r.format}) ${r.ok ? 'delivered' : 'failed'} (status ${r.status ?? 'n/a'}, ${r.durationMs} ms)${r.ok ? '' : `: ${r.detail}`}`, undefined, sess.logTag);
       }
     }
   }
@@ -8330,9 +8655,12 @@ function registerIpc(): void {
       renderUrl: renderHook,
       respiderSeeds: opts.respiderSeeds,
       onProjectReset: () => {
-        if (storedConfig === null) return;
+        // The reset wiped `project_meta`, including the start URL written
+        // above — without it the report, sitemap, MCP and Auto Compare
+        // describe a site with no address.
         try {
-          database.setMeta('lastCrawlConfig', storedConfig);
+          database.setMeta('lastStartUrl', config.startUrl);
+          if (storedConfig !== null) database.setMeta('lastCrawlConfig', storedConfig);
         } catch {
           /* never fatal */
         }
@@ -8608,6 +8936,10 @@ function registerIpc(): void {
     currentSession().activeCrawler?.resume();
   });
 
+  registerHandle(IPC.crawlSetAdaptiveSpeed, (_e, enabled: unknown) => {
+    currentSession().activeCrawler?.setAdaptiveSpeed(enabled === true);
+  });
+
   // Expose the same primitives to the MCP bridge so external agents
   // (Claude Code, etc.) can drive Start/Stop/Pause/Resume through the
   // exact same code path the renderer does.
@@ -8874,6 +9206,7 @@ function registerIpc(): void {
         filePath?: string;
         missingAltOnly?: boolean;
         emptyAltOnly?: boolean;
+        missingTitleOnly?: boolean;
         duplicateAltOnly?: boolean;
         search?: string;
         minByteSize?: number;
@@ -8882,6 +9215,7 @@ function registerIpc(): void {
       const { rowsWritten } = await exportImagesToCsv(getDb(), filePath, {
         missingAltOnly: i.missingAltOnly,
         emptyAltOnly: i.emptyAltOnly,
+        missingTitleOnly: i.missingTitleOnly,
         duplicateAltOnly: i.duplicateAltOnly,
         search: i.search,
         minByteSize: typeof i.minByteSize === 'number' ? i.minByteSize : undefined,
@@ -10027,6 +10361,7 @@ function registerIpc(): void {
           search: input.search,
           missingAltOnly: input.missingAltOnly,
           emptyAltOnly: input.emptyAltOnly,
+          missingTitleOnly: input.missingTitleOnly,
           duplicateAltOnly: input.duplicateAltOnly,
           internalOnly: input.internalOnly,
           minByteSize: input.minByteSize,
@@ -10168,7 +10503,7 @@ function registerIpc(): void {
             const w = win ?? mainWindow;
             if (!w) return;
             const res = await dialog.showSaveDialog(w, {
-              defaultPath: 'freecrawl-selected.csv',
+              defaultPath: exportFileName('selected', 'csv'),
               filters: [{ name: 'CSV', extensions: ['csv'] }],
             });
             if (res.canceled || !res.filePath) return;
@@ -10280,7 +10615,7 @@ function registerIpc(): void {
             const w = win ?? mainWindow;
             if (!w) return;
             const res = await dialog.showSaveDialog(w, {
-              defaultPath: 'freecrawl-selected.csv',
+              defaultPath: exportFileName('selected', 'csv'),
               filters: [{ name: 'CSV', extensions: ['csv'] }],
             });
             if (res.canceled || !res.filePath) return;
@@ -10405,7 +10740,7 @@ function registerIpc(): void {
       const isSelection = (input.selectedIds?.length ?? 0) > 0;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: isSelection ? 'freecrawl-selected.csv' : 'freecrawl-export.csv',
+          defaultPath: exportFileName(isSelection ? 'selected' : 'export', 'csv'),
           filters: [{ name: 'CSV', extensions: ['csv'] }],
         });
         if (res.canceled || !res.filePath) {
@@ -10428,7 +10763,7 @@ function registerIpc(): void {
       const isSelection = (input.selectedIds?.length ?? 0) > 0;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: isSelection ? 'freecrawl-selected.json' : 'freecrawl-export.json',
+          defaultPath: exportFileName(isSelection ? 'selected' : 'export', 'json'),
           filters: [{ name: 'JSON', extensions: ['json'] }],
         });
         if (res.canceled || !res.filePath) {
@@ -10452,7 +10787,7 @@ function registerIpc(): void {
       const isSelection = (input.selectedIds?.length ?? 0) > 0;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: isSelection ? 'freecrawl-selected.xml' : 'freecrawl-export.xml',
+          defaultPath: exportFileName(isSelection ? 'selected' : 'export', 'xml'),
           filters: [{ name: 'XML', extensions: ['xml'] }],
         });
         if (res.canceled || !res.filePath) {
@@ -10477,7 +10812,7 @@ function registerIpc(): void {
       let filePath = input.filePath;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: 'freecrawl-broken-links.csv',
+          defaultPath: exportFileName('broken-links', 'csv'),
           filters: [{ name: 'CSV', extensions: ['csv'] }],
         });
         if (res.canceled || !res.filePath) {
@@ -10502,7 +10837,7 @@ function registerIpc(): void {
       let filePath = input.filePath;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: 'freecrawl-images.csv',
+          defaultPath: exportFileName('images', 'csv'),
           filters: [{ name: 'CSV', extensions: ['csv'] }],
         });
         if (res.canceled || !res.filePath) {
@@ -10513,6 +10848,7 @@ function registerIpc(): void {
       const { rowsWritten } = await exportImagesToCsv(getDb(), filePath, {
         missingAltOnly: input.missingAltOnly,
         emptyAltOnly: input.emptyAltOnly,
+        missingTitleOnly: input.missingTitleOnly,
         duplicateAltOnly: input.duplicateAltOnly,
         search: input.search,
         minByteSize: input.minByteSize,
@@ -10537,7 +10873,7 @@ function registerIpc(): void {
       // format toggle in the panel UI.
       const res = await dialog.showSaveDialog(win, {
         title: L().dlgExportTableTitle,
-        defaultPath: join(baseDir, `${input.fileName}.xlsx`),
+        defaultPath: join(baseDir, exportFileName(input.fileName, 'xlsx')),
         filters: [
           { name: L().filterExcelWorkbook, extensions: ['xlsx'] },
           { name: 'CSV', extensions: ['csv'] },
@@ -10596,9 +10932,8 @@ function registerIpc(): void {
                 : format === 'json'
                   ? 'JSON'
                   : 'XML';
-          const baseName = isSelection ? 'freecrawl-selected' : 'freecrawl-export';
           const res = await dialog.showSaveDialog(mainWindow!, {
-            defaultPath: `${baseName}.${ext}`,
+            defaultPath: exportFileName(isSelection ? 'selected' : 'export', ext),
             filters: [{ name: filterName, extensions: [ext] }],
           });
           if (res.canceled || !res.filePath) {
@@ -10741,6 +11076,50 @@ function registerIpc(): void {
     }
   });
 
+  // View Source → Markdown. The conversion runs on a parser worker: a
+  // multi-MB page parsed on the main thread would stall every IPC.
+  registerHandle(
+    IPC.urlMarkdownGet,
+    async (_e, input: { id: number; rendered?: boolean }): Promise<{ markdown: string | null }> => {
+      const db = getDb();
+      const src = db.getUrlSource(input.id);
+      const html = input.rendered ? (src?.renderedBody ?? null) : (src?.body ?? null);
+      if (!html) return { markdown: null };
+      const url = db.getUrlById(input.id)?.url ?? '';
+      return { markdown: await pageMarkdown(html, url) };
+    },
+  );
+
+  // Bulk Export → All Page Markdown.
+  registerHandle(
+    IPC.exportMarkdown,
+    async (): Promise<{ outputDir: string; files: number; skipped: number } | null> => {
+      const win = dialogParent();
+      if (!win) return null;
+      const res = await dialog.showOpenDialog(win, {
+        title: L().dlgExportMarkdownTitle,
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (res.canceled || !res.filePaths[0]) return null;
+      const outputDir = join(res.filePaths[0], exportFileName('markdown', 'md').replace(/\.md$/, ''));
+      const result = await exportAllPageMarkdown(getDb(), outputDir);
+      void dialog
+        .showMessageBox(win, {
+          type: 'info',
+          title: L().dlgExportMarkdownDoneTitle,
+          message: L().msgExportMarkdownWritten.replace('{files}', String(result.files)),
+          detail: outputDir,
+          buttons: [L().btnOk, L().btnOpenFolder],
+          defaultId: 0,
+          noLink: true,
+        })
+        .then((r) => {
+          if (r.response === 1) void shell.openPath(outputDir);
+        });
+      return { outputDir, ...result };
+    },
+  );
+
   registerHandle(IPC.exportBulk, async (): Promise<BulkExportResult> => {
     if (!mainWindow) {
       return { outputDir: '', files: [], errors: [] };
@@ -10820,7 +11199,7 @@ function registerIpc(): void {
       let filePath = input.filePath;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: 'freecrawl-report.pdf',
+          defaultPath: exportFileName('report', 'pdf'),
           filters: [{ name: L().filterPdfReport, extensions: ['pdf'] }],
         });
         if (res.canceled || !res.filePath) return { filePath: '', bytesWritten: 0 };
@@ -10885,7 +11264,7 @@ function registerIpc(): void {
       let filePath = input.filePath;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: 'freecrawl-report.html',
+          defaultPath: exportFileName('report', 'html'),
           filters: [{ name: L().filterHtmlReport, extensions: ['html'] }],
         });
         if (res.canceled || !res.filePath) {
@@ -10921,7 +11300,7 @@ function registerIpc(): void {
       let filePath = input.filePath;
       if (!filePath) {
         const res = await dialog.showSaveDialog(mainWindow!, {
-          defaultPath: 'freecrawl-issues.xlsx',
+          defaultPath: exportFileName('issues', 'xlsx'),
           filters: [
             { name: L().filterExcelWorkbook, extensions: ['xlsx'] },
             { name: 'CSV (UTF-8)', extensions: ['csv'] },
@@ -11025,6 +11404,51 @@ function registerIpc(): void {
         truncated: result.truncated,
         sharded: result.sharded,
       };
+    },
+  );
+
+  // File → Compare With Previous Crawl: the snapshot a scheduled / CLI
+  // crawl with Auto Compare took before it replaced the previous crawl.
+  registerHandle(
+    IPC.compareWithPrevious,
+    (): Promise<PreviousCrawlComparison | null> => compareWithPreviousViaPool(currentSession()),
+  );
+
+  // Settings → Webhook → Send test: one message in the chosen format, so a
+  // Slack / Discord / Teams setup can be checked without running a crawl.
+  registerHandle(
+    IPC.webhookTest,
+    async (_e, url: unknown, format: unknown): Promise<WebhookTestResult> => {
+      const target = typeof url === 'string' ? url.trim() : '';
+      const chosen: WebhookFormat = (WEBHOOK_FORMATS as readonly string[]).includes(String(format))
+        ? (format as WebhookFormat)
+        : 'auto';
+      const resolved = resolveWebhookFormat(target, chosen);
+      if (!/^https?:\/\//i.test(target)) {
+        return { ok: false, status: null, detail: 'invalid-url', format: resolved };
+      }
+      const r = await postWebhookMessage(
+        target,
+        chosen,
+        { event: 'test', message: 'FreeCrawl SEO webhook test', sentAt: new Date().toISOString() },
+        {
+          title: 'FreeCrawl SEO: webhook test',
+          facts: [{ label: 'Format', value: resolved }],
+          sections: [
+            {
+              title: 'It works',
+              lines: ['Crawl-finished and scheduled-crawl notifications will arrive here.'],
+            },
+          ],
+          tone: 'good',
+        },
+      );
+      logger.log(
+        r.ok ? 'info' : 'warn',
+        'main',
+        `Webhook test (${r.format}) to ${redactUrlSecrets(target)}: ${r.ok ? 'delivered' : 'failed'} (status ${r.status ?? 'n/a'})`,
+      );
+      return { ok: r.ok, status: r.status, detail: r.detail.slice(0, 300), format: r.format };
     },
   );
 
@@ -11380,11 +11804,36 @@ void app.whenReady().then(async () => {
             );
           }
         }
+        // Resolve the crawl mode up front: list mode has no start URL, so
+        // both the lease label and the "is there anything to crawl" check
+        // depend on it.
+        const savedMode = sess.lastCrawlConfig?.mode ?? 'spider';
+        const requestedMode =
+          input.mode === 'spider' || input.mode === 'list' || input.mode === 'sitemap'
+            ? input.mode
+            : undefined;
+        const mode: CrawlMode =
+          requestedMode ??
+          (input.urlList !== undefined
+            ? 'list'
+            : input.startUrl !== undefined && savedMode === 'list'
+              ? 'spider'
+              : savedMode);
+        const listUrls =
+          mode === 'list'
+            ? cleanBridgeUrlList(input.urlList ?? sess.lastCrawlConfig?.urlList ?? [])
+            : [];
+        if (mode === 'list' && listUrls.length === 0) {
+          return makeBridgeError(
+            'bad-request',
+            'List mode needs at least one http(s) URL — pass `urlList`, or save a list in the desktop app first.',
+          );
+        }
         // Arbitrate the crawl slot before launching anything.
         const startUrlForLease = (
-          input.startUrl ??
-          sess.lastCrawlConfig?.startUrl ??
-          ''
+          mode === 'list'
+            ? (listUrls[0] ?? '')
+            : (input.startUrl ?? sess.lastCrawlConfig?.startUrl ?? '')
         ).trim();
         const gate = await sessionRegistry.acquireCrawl(ctx.sessionId, {
           clientId: ctx.clientId,
@@ -11404,11 +11853,13 @@ void app.whenReady().then(async () => {
               {
                 ...base,
                 ...overrides,
+                mode,
+                ...(mode === 'list' ? { urlList: listUrls } : {}),
                 startUrl: (input.startUrl ?? base.startUrl ?? '').trim(),
               },
               base,
             );
-            if (!resolved.startUrl) {
+            if (mode !== 'list' && !resolved.startUrl) {
               sessionRegistry.releaseCrawl(ctx.sessionId, gate.crawlId);
               return makeBridgeError(
                 'bad-request',

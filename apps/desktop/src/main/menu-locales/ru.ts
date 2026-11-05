@@ -311,4 +311,9 @@ export const MENU_RU: MenuLabels = {
   // ── Google OAuth refresh failure ──
   oauthRefreshExpired:
     'Google отклонил сохранённый вход ({reason}). Обычно это означает, что ваше OAuth-приложение в Google Cloud находится в статусе "Testing", при котором Google сбрасывает подключение каждые 7 дней. Исправьте один раз: Google Cloud Console → OAuth consent screen → "Publish app" (проверка не требуется), затем отключите и снова подключите эту интеграцию.',
+  exportMarkdown: "Экспорт всех страниц в Markdown…",
+  dlgExportMarkdownTitle: "Выберите папку для файлов Markdown",
+  dlgExportMarkdownDoneTitle: "Экспорт в Markdown завершён",
+  msgExportMarkdownWritten: "Записано файлов Markdown: {files}. В папке также есть index.csv, где каждому URL сопоставлен его файл.",
+  compareWithPrevious: "Сравнить с предыдущим обходом…",
 };

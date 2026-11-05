@@ -22,6 +22,7 @@ import { GUIDES_ZH_CN } from './zh-CN.js';
 import { GUIDES_KO } from './ko.js';
 import { GUIDES_HI } from './hi.js';
 import { GUIDES_AZ } from './az.js';
+import { GUIDES_NL } from './nl.js';
 
 export type { Guide, GuideStep, GuideTroubleshoot } from './types.js';
 
@@ -39,6 +40,7 @@ export const GUIDES: Record<UiLanguage, Record<string, Guide>> = {
   ko: GUIDES_KO,
   hi: GUIDES_HI,
   az: GUIDES_AZ,
+  nl: GUIDES_NL,
 };
 
 /** Guide set for a UI language tag; unknown tags fall back to English. */

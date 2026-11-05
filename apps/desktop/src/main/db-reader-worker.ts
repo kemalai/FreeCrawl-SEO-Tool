@@ -79,6 +79,7 @@ const ALLOWED_METHODS = new Set<string>([
   'queryAi',
   'querySeo',
   'getUrlAnalytics',
+  'compareWithPreviousCrawl',
   'getOverviewCounts',
   'getOverviewCountsAsync',
   'getSummary',

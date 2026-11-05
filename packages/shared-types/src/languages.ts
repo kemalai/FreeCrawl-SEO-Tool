@@ -44,6 +44,7 @@ export const UI_LANGUAGES = [
   'pt-BR',
   'ru',
   'es',
+  'nl',
 ] as const;
 
 export type UiLanguage = (typeof UI_LANGUAGES)[number];
@@ -70,6 +71,7 @@ export const UI_LANGUAGE_NAMES: Record<UiLanguage, { native: string; english: st
   'pt-BR': { native: 'Português (Brasil)', english: 'Portuguese (Brazil)' },
   ru: { native: 'Русский', english: 'Russian' },
   es: { native: 'Español', english: 'Spanish' },
+  nl: { native: 'Nederlands', english: 'Dutch' },
 };
 
 /**
@@ -82,6 +84,7 @@ export const UI_LANGUAGE_PICKER_ORDER: readonly UiLanguage[] = [
   'tr',
   'az',
   'zh-CN',
+  'nl',
   'fr',
   'hi',
   'it',
@@ -114,6 +117,7 @@ const PRIMARY_SUBTAG_TO_LOCALE: Record<string, UiLanguage> = {
   pt: 'pt-BR',
   ru: 'ru',
   es: 'es',
+  nl: 'nl',
 };
 
 /** Exact-tag lookup, lowercased, so `ZH-cn` and `zh-CN` both hit. */

@@ -10,7 +10,10 @@
     "checkOff": "Désactivé",
     "cookiesOffHint": "Les contrôles des cookies sont désactivés car la politique de cookies de l'exploration est « Tout refuser ». Choisissez « Tout accepter » ou « Bloquer les tiers » dans Paramètres → Cookies pour analyser les en-têtes Set-Cookie.",
     "notComputed": "Non calculé",
-    "notComputedHint": "Les liens entrants n'ont pas encore été calculés, les pages orphelines ne peuvent donc pas être comptées. Ils sont calculés à la fin d'une exploration avec « Recalculer les liens entrants » activé."
+    "notComputedHint": "Les liens entrants n'ont pas encore été calculés, les pages orphelines ne peuvent donc pas être comptées. Ils sont calculés à la fin d'une exploration avec « Recalculer les liens entrants » activé.",
+    "searchPlaceholder": "Rechercher des vérifications…",
+    "searchClear": "Effacer la recherche",
+    "searchNoResults": "Aucune vérification correspondante."
   },
   "integrations": {
     "intro": "Connectez des services externes avec vos propres identifiants. Les clés d'API et les secrets sont chiffrés au repos via le stockage sécurisé de votre système d'exploitation et ne quittent jamais cette machine.",
@@ -189,7 +192,11 @@
     "capacityTitle": "Estimation des URL supplémentaires qui tiennent dans la mémoire système restante au coût actuel par URL. Calcul : mémoireLibre / coûtParUrl. À prendre comme une borne supérieure : le débit soutenu est d'abord limité par le processeur.",
     "lagResponsiveTitle": "Le thread principal répond — la saisie paraît instantanée",
     "lagContendedTitle": "Le thread principal est en contention — léger accroc au clic",
-    "lagBusyTitle": "Le thread principal est occupé — l'IPC s'accumule ; le plus probable est que le SQL de la barre latérale ou le chargement des blocs du tableau entre en concurrence avec l'explorateur"
+    "lagBusyTitle": "Le thread principal est occupé — l'IPC s'accumule ; le plus probable est que le SQL de la barre latérale ou le chargement des blocs du tableau entre en concurrence avec l'explorateur",
+    "throttled": "Ralenti",
+    "throttledTitle": "La vitesse adaptative a ralenti l'exploration car le site a répondu 429 / 503. Elle accélère de nouveau dès que les réponses sont propres.",
+    "pausedHostDown": "En pause — le site ne répond plus",
+    "pausedHostDownTitle": "Le site a cessé de répondre : l'exploration s'est mise en pause au lieu de marquer le reste de la file comme échoué. Vérifiez le site, puis cliquez sur Reprendre."
   },
   "menu": {
     "file": "Fichier",
@@ -651,7 +658,9 @@
       "worstCaseDelay": "Délai dans le pire cas par URL en échec ≈ délaiInitial × (2 ^ tentatives − 1) = {{value}}",
       "tip1": "Pour un premier passage rapide sur un site en bonne santé, essayez le préréglage <bold>Rapide</bold> (Paramètres → Préréglages) — concurrence 40, RPS 40, aucune nouvelle tentative.",
       "tip2": "Pour des origines peu fiables ou des API lentes, essayez <bold>Approfondi</bold> — concurrence 10, 3 tentatives, délai de 30 s.",
-      "tip3": "Concurrence × keep-alive HTTP = nombre de connexions en régime stable. La plupart des serveurs gèrent 20–40 sans problème ; les proxys et WAF d'entreprise plafonnent souvent à 8–10."
+      "tip3": "Concurrence × keep-alive HTTP = nombre de connexions en régime stable. La plupart des serveurs gèrent 20–40 sans problème ; les proxys et WAF d'entreprise plafonnent souvent à 8–10.",
+      "pauseOnHostUnresponsive": "Mettre l'exploration en pause si un hôte ne répond plus",
+      "connectionFailureRetries": "Nouvelles tentatives sur échec de connexion (pas de réponse : délai / réinitialisation / refus)"
     },
     "requests": {
       "intro": "En-têtes HTTP envoyés avec chaque requête.",
@@ -664,7 +673,13 @@
     "filters": {
       "intro": "Liste blanche / liste noire d'URL. Les motifs sont des expressions régulières JavaScript testées sur l'URL complète.",
       "includePatterns": "Motifs d'inclusion (regex, un par ligne — vide = tout autorisé)",
-      "excludePatterns": "Motifs d'exclusion (regex, un par ligne)"
+      "excludePatterns": "Motifs d'exclusion (regex, un par ligne)",
+      "linkPositionsHeading": "Ne pas suivre les liens dans",
+      "linkPositionNavigation": "Navigation (<nav>)",
+      "linkPositionHeader": "En-tête (<header>)",
+      "linkPositionFooter": "Pied de page (<footer>)",
+      "linkPositionSidebar": "Barre latérale (<aside>)",
+      "excludeLinkSelectors": "Ne pas suivre les liens à l'intérieur de ces éléments (sélecteurs CSS, un par ligne)"
     },
     "customSearch": {
       "intro1": "Signale les pages dont le corps contient l'un de ces termes. Deux modes par ligne :",
@@ -758,8 +773,17 @@
     "webhook": {
       "intro1": "Webhook déclenché une fois à la fin de chaque exploration. Un seul",
       "intro2": "avec un résumé JSON (URL de départ, durée, total d'URL, répartition des statuts, tous les compteurs de problèmes non nuls). Vide le désactive.",
-      "outro": "Compatible avec les webhooks entrants Slack (la forme du JSON est suffisamment riche pour que Slack l'affiche en texte brut), les déclencheurs « Catch Hook » de Zapier, les webhooks Discord et vos propres points de terminaison HTTP.",
-      "url": "URL du webhook"
+      "url": "URL du webhook",
+      "format": "Format du message",
+      "formatAuto": "Automatique (détecté d’après l’URL)",
+      "formatJson": "JSON (Zapier, Make, n8n, votre propre endpoint)",
+      "outroFormats": "Slack, Discord et Microsoft Teams reçoivent un message lisible : répartition des codes d’état, principaux problèmes et, pour les explorations planifiées avec Auto Compare, les changements depuis l’exploration précédente. Automatique reconnaît les webhooks entrants Slack, les webhooks Discord et les URL de connecteurs Teams ; pour une URL Teams Workflows, choisissez Microsoft Teams. Toute autre adresse reçoit le résumé JSON.",
+      "secretNote": "Une URL de webhook fonctionne comme un mot de passe : quiconque la possède peut publier dans votre canal. FreeCrawl la stocke chiffrée et l’exclut des paramètres exportés.",
+      "test": "Envoyer un message de test",
+      "testing": "Envoi…",
+      "testOk": "Livré au format {{format}} (HTTP {{status}}).",
+      "testInvalid": "Saisissez d’abord une URL http(s).",
+      "testFailed": "Non livré ({{status}}) : {{detail}}"
     },
     "auth": {
       "intro": "Authentification HTTP envoyée uniquement au site exploré (l'origine de l'URL de départ, ou les URL listées en mode Liste) — jamais aux liens externes, aux CDN ni à d'autres hôtes. Utile pour les environnements de préproduction derrière une authentification Basic/Digest, ou les API qui exigent un jeton Bearer. Pour les sites derrière un formulaire de connexion HTML, utilisez plutôt la connexion par formulaire ci-dessous.",
@@ -859,7 +883,14 @@
       "disableAll": "Tout désactiver",
       "summary": "Activés : {{on}} / {{total}}",
       "groupSummary": "{{on}} / {{total}} activés",
-      "noMatch": "Aucun contrôle ne correspond à votre filtre."
+      "noMatch": "Aucun contrôle ne correspond à votre filtre.",
+      "severityIntro": "Modifiez la gravité d'une vérification pour la déplacer entre les regroupements Critique / Avertissement / Info, l'ordre du rapport et le repère de la barre latérale — par exemple quand une vérification compte plus ou moins sur ce site.",
+      "severityCritical": "Critique",
+      "severityWarning": "Avertissement",
+      "severityInfo": "Info",
+      "severityLabel": "Gravité",
+      "severityChanged": "Par défaut : {{tier}}",
+      "resetSeverities": "Réinitialiser les gravités"
     },
     "advanced": {
       "intro": "Plafonds de bas niveau et interrupteurs de suivi des liens. Les valeurs par défaut sont réglées pour des audits SEO courants — n'y touchez que si vous savez pourquoi.",
@@ -975,7 +1006,15 @@
     "urlHeader": "URL",
     "beforeHeader": "Avant",
     "afterHeader": "Après",
-    "noDiffs": "Aucune différence dans cette catégorie."
+    "noDiffs": "Aucune différence dans cette catégorie.",
+    "previousTitle": "Changements depuis l’exploration précédente",
+    "previousCrawl": "Exploration précédente ({{date}})",
+    "thisCrawl": "Cette exploration",
+    "noPrevious": "Pas encore d’exploration précédente à comparer. Activez « Comparer automatiquement avec l’exploration précédente » dans Exploration planifiée, ou explorez depuis la CLI avec --auto-compare.",
+    "issuesChanged": "Problèmes modifiés",
+    "issueHeader": "Problème",
+    "changeHeader": "Variation",
+    "noIssueChanges": "Aucun nombre de problèmes n’a changé."
   },
   "scheduled": {
     "title": "Exploration planifiée",
@@ -1017,7 +1056,16 @@
     "browse": "Parcourir…",
     "outputDirHint": "Choisissez un dossier : chaque exécution écrit dans un sous-dossier horodaté.",
     "sheets": "Envoyer aussi toutes les URL vers une nouvelle feuille Google Sheets",
-    "webhook": "Notifier le webhook du projet avec la liste des fichiers (Paramètres → Webhook)"
+    "webhook": "Notifier le webhook du projet avec la liste des fichiers (Paramètres → Webhook)",
+    "runNow": "Lancer maintenant",
+    "runNowTitle": "Lance maintenant cette exploration planifiée. La planification habituelle n'est pas modifiée.",
+    "runNowSaveFirst": "Enregistrez d'abord vos modifications.",
+    "runNowBusy": "Une exploration est déjà en cours — attendez qu'elle se termine ou arrêtez-la d'abord.",
+    "runNowNoConfig": "Lancez d'abord une exploration manuellement une fois — la planification réutilise ses paramètres.",
+    "runNowNoProject": "Ouvrez ou enregistrez d'abord un projet.",
+    "runNowNoSchedule": "Enregistrez d'abord la planification.",
+    "autoCompare": "Comparer automatiquement avec l’exploration précédente",
+    "autoCompareHint": "Conserve l’exploration précédente au démarrage de celle-ci. Les changements vont dans le dossier d’export (crawl-changes.csv), au webhook et dans Fichier → Comparer avec l’exploration précédente."
   },
   "serp": {
     "noTitle": "(aucun titre)",
@@ -1440,7 +1488,9 @@
     "loadingSource": "Chargement du code source…",
     "noBody": "Aucun corps HTML stocké pour cette URL.",
     "noBodyHint1": "Voir le code source n'est capturé que pour les pages HTML explorées avec le réglage",
-    "noBodyHint2": "activé."
+    "noBodyHint2": "activé.",
+    "markdownLoading": "Conversion en Markdown…",
+    "markdownFailed": "Cette page n'a pas pu être convertie en Markdown."
   },
   "viewRendered": {
     "noBody": "Aucun DOM rendu stocké pour cette URL.",
@@ -1550,7 +1600,9 @@
     "imagesUnit": "images",
     "loaded": "{{n}} chargées",
     "row": "Ligne",
-    "noImages": "Aucune image"
+    "noImages": "Aucune image",
+    "missingTitleOnly": "Sans title uniquement",
+    "emptyMissingTitle": "Aucune image sans attribut title."
   },
   "serpTab": {
     "title": "Prévisualisation SERP",
@@ -1985,7 +2037,10 @@
     "summary": "{{shown}} pages · {{tested}} avec réponse · {{errors}} erreurs · {{selected}} sélectionnées",
     "running": "Exécution : {{url}}",
     "emptyNoData": "Aucune page HTML interne explorée pour l'instant — lancez une exploration, puis sélectionnez des pages et cliquez sur Lancer.",
-    "emptyNoMatch": "Aucune page ne correspond au filtre actuel."
+    "emptyNoMatch": "Aucune page ne correspond au filtre actuel.",
+    "modelDefault": "Modèle (par défaut : {{model}})",
+    "modelMissing": "« {{model}} » ne figure pas dans la liste actuelle des modèles de {{provider}}.",
+    "pickModel": "Choisir un modèle disponible…"
   },
   "seoTab": {
     "title": "Autorité SEO",
@@ -2155,7 +2210,10 @@
       "note": "Les données de l'exploration active vivent dans le répertoire de données utilisateur de l'application jusqu'à Enregistrer sous — le chemin ci-dessus ne contrôle que le point de départ d'Enregistrer sous. Le modifier ne déplace aucun fichier de projet existant.",
       "autoSaveTitle": "Sauvegarde par lots",
       "autoSaveLabel": "Enregistrer le projet toutes les N URL explorées — 0 = désactivé",
-      "autoSaveHint": "Pendant l'exploration, le fichier .seoproject ouvert est réécrit chaque fois que ce nombre d'URL supplémentaires a été exploré : un plantage ou une coupure ne coûte qu'un lot au plus. Ne s'applique qu'une fois le projet enregistré dans un fichier ; minimum {{min}}. Chaque enregistrement est un instantané complet : sur les gros sites, restez dans les milliers."
+      "autoSaveHint": "Pendant l'exploration, le fichier .seoproject ouvert est réécrit chaque fois que ce nombre d'URL supplémentaires a été exploré : un plantage ou une coupure ne coûte qu'un lot au plus. Ne s'applique qu'une fois le projet enregistré dans un fichier ; minimum {{min}}. Chaque enregistrement est un instantané complet : sur les gros sites, restez dans les milliers.",
+      "fileNamesTitle": "Noms des fichiers d'export",
+      "fileNamesReset": "Réinitialiser",
+      "fileNamesPreview": "Exemple :"
     },
     "agents": {
       "title": "Sessions d'agent (MCP)",
@@ -2435,5 +2493,42 @@
     "setupResidential": "Pour les proxies résidentiels, créez d'abord une liste dans le tableau de bord (pays, rotation) et utilisez les informations de connexion qu'elle affiche.",
     "setupJsRender": "Avec le rendu JavaScript activé, utilisez la forme HTTP : le navigateur ne peut pas utiliser un proxy SOCKS5 qui demande un mot de passe.",
     "hide": "Masquer"
+  },
+  "rateLimitNotice": {
+    "title": "Le site limite l'exploration",
+    "body_one": "Le serveur a répondu à {{count}} requête par 429 (Too Many Requests) ou 503 (Service Unavailable). La vitesse adaptative est désactivée : l'exploration garde son rythme fixe et d'autres pages risquent d'échouer.",
+    "body_many": "Le serveur a répondu à {{count}} de requêtes par 429 (Too Many Requests) ou 503 (Service Unavailable). La vitesse adaptative est désactivée : l'exploration garde son rythme fixe et d'autres pages risquent d'échouer.",
+    "body_other": "Le serveur a répondu à {{count}} requêtes par 429 (Too Many Requests) ou 503 (Service Unavailable). La vitesse adaptative est désactivée : l'exploration garde son rythme fixe et d'autres pages risquent d'échouer.",
+    "benefit": "Si vous activez la vitesse adaptative, la vitesse d'exploration s'ajuste automatiquement : elle ralentit tant que le serveur freine et accélère de nouveau dès que les réponses sont propres. L'enregistrer s'applique aussi à cette exploration.",
+    "where": "Où l'activer",
+    "path": "Paramètres → Vitesse → Vitesse adaptative",
+    "dontShow": "Ne plus afficher",
+    "notNow": "Plus tard",
+    "openSettings": "Ouvrir les paramètres de vitesse"
+  },
+  "aiSettings": {
+    "title": "Modèle et prompt",
+    "defaultModel": "Modèle par défaut",
+    "checkModels": "Vérifier les modèles",
+    "checking": "Vérification…",
+    "checkNeedsCredentials": "Enregistrez d’abord les identifiants ci-dessus.",
+    "listFailed": "Impossible de charger la liste des modèles : {{detail}}",
+    "modelOk": "{{model}} est disponible.",
+    "modelMissing": "{{model}} ne figure pas dans la liste actuelle des modèles de {{provider}}.",
+    "pickModel": "Choisir un modèle disponible…",
+    "defaultModelHint": "Utilisé quand l’onglet IA ou l’Assistant laisse le modèle vide. Laissez vide pour le modèle par défaut intégré ({{model}}).",
+    "systemPrompt": "Prompt système",
+    "systemPromptPlaceholder": "Tu es un spécialiste du SEO technique. Réponds par des phrases courtes et simples.",
+    "systemPromptHint": "Envoyé avec chaque prompt de l’onglet IA à ce fournisseur : rôle, ton, langue, contraintes. L’Assistant garde ses propres instructions.",
+    "timeout": "Délai d’attente de la requête (secondes)",
+    "timeoutHint": "Combien de temps attendre la réponse du modèle local (10–3600). Les gros modèles sur du matériel modeste ont besoin de plus. Vide = 120 pour l’onglet IA, 180 pour l’Assistant.",
+    "usageTitle": "Consommation de tokens",
+    "usageRequests": "Requêtes : {{value}}",
+    "usageTokensIn": "Tokens d’entrée : {{value}}",
+    "usageTokensOut": "Tokens de sortie : {{value}}",
+    "usageSince": "Depuis le {{date}}",
+    "usageReset": "Réinitialiser",
+    "usageNone": "Aucune requête enregistrée pour l’instant.",
+    "usageHint": "Compté sur cet ordinateur à partir des chiffres de tokens que chaque réponse indique (onglet IA et Assistant). La facture de votre fournisseur fait foi."
   }
 }

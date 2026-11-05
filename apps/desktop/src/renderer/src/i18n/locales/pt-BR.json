@@ -10,7 +10,10 @@
     "checkOff": "Desativado",
     "cookiesOffHint": "As verificações de cookies estão desativadas porque a política de cookies do rastreamento é \"Rejeitar tudo\". Escolha \"Aceitar tudo\" ou \"Bloquear terceiros\" em Configurações → Cookies para analisar os cabeçalhos Set-Cookie.",
     "notComputed": "Não calculado",
-    "notComputedHint": "Os links de entrada ainda não foram calculados, então as páginas órfãs não podem ser contadas. Eles são calculados no fim de um rastreamento com \"Recalcular links de entrada\" ativado."
+    "notComputedHint": "Os links de entrada ainda não foram calculados, então as páginas órfãs não podem ser contadas. Eles são calculados no fim de um rastreamento com \"Recalcular links de entrada\" ativado.",
+    "searchPlaceholder": "Pesquisar verificações…",
+    "searchClear": "Limpar pesquisa",
+    "searchNoResults": "Nenhuma verificação corresponde."
   },
   "integrations": {
     "intro": "Conecte serviços externos com suas próprias credenciais. As chaves de API e os segredos são criptografados em repouso pelo armazenamento seguro do seu sistema operacional e nunca saem desta máquina.",
@@ -189,7 +192,11 @@
     "capacityTitle": "Estimativa de quantas URLs adicionais caberiam na memória restante do sistema no custo atual por URL. Cálculo: memóriaLivre / custoPorUrl. Trate como um limite superior — a vazão sustentada normalmente é limitada pela CPU primeiro.",
     "lagResponsiveTitle": "A thread principal está responsiva — a interação parece instantânea",
     "lagContendedTitle": "A thread principal está em contenção — leve engasgo ao clicar",
-    "lagBusyTitle": "A thread principal está ocupada — o IPC acumulou; o mais provável é que o SQL da barra lateral ou o carregamento de blocos da tabela esteja competindo com o rastreador"
+    "lagBusyTitle": "A thread principal está ocupada — o IPC acumulou; o mais provável é que o SQL da barra lateral ou o carregamento de blocos da tabela esteja competindo com o rastreador",
+    "throttled": "Desacelerado",
+    "throttledTitle": "A velocidade adaptativa desacelerou o rastreamento porque o site respondeu 429 / 503. Ela acelera de novo quando as respostas ficam limpas.",
+    "pausedHostDown": "Pausado — o site parou de responder",
+    "pausedHostDownTitle": "O site parou de responder, então o rastreamento se pausou em vez de marcar o resto da fila como falha. Verifique o site e clique em Retomar."
   },
   "menu": {
     "file": "Arquivo",
@@ -651,7 +658,9 @@
       "worstCaseDelay": "Atraso no pior caso por URL com falha ≈ atrasoInicial × (2 ^ tentativas − 1) = {{value}}",
       "tip1": "Para uma primeira varredura rápida em um site saudável, experimente o preset <bold>Rápido</bold> (Configurações → Presets) — concorrência 40, RPS 40, sem novas tentativas.",
       "tip2": "Para origens instáveis ou APIs lentas, experimente <bold>Minucioso</bold> — concorrência 10, 3 tentativas, tempo limite de 30 s.",
-      "tip3": "Concorrência × keep-alive do HTTP = número de conexões em regime estável. A maioria dos servidores lida bem com 20–40; proxies e WAFs corporativos costumam limitar em 8–10."
+      "tip3": "Concorrência × keep-alive do HTTP = número de conexões em regime estável. A maioria dos servidores lida bem com 20–40; proxies e WAFs corporativos costumam limitar em 8–10.",
+      "pauseOnHostUnresponsive": "Pausar o rastreamento se um host parar de responder",
+      "connectionFailureRetries": "Novas tentativas por falha de conexão (sem resposta: tempo esgotado / redefinição / recusa)"
     },
     "requests": {
       "intro": "Cabeçalhos HTTP enviados em cada requisição.",
@@ -664,7 +673,13 @@
     "filters": {
       "intro": "Lista de permissão/bloqueio de URLs. Os padrões são expressões regulares JavaScript testadas contra a URL completa.",
       "includePatterns": "Padrões de inclusão (regex, um por linha — vazio = tudo permitido)",
-      "excludePatterns": "Padrões de exclusão (regex, um por linha)"
+      "excludePatterns": "Padrões de exclusão (regex, um por linha)",
+      "linkPositionsHeading": "Não seguir links em",
+      "linkPositionNavigation": "Navegação (<nav>)",
+      "linkPositionHeader": "Cabeçalho (<header>)",
+      "linkPositionFooter": "Rodapé (<footer>)",
+      "linkPositionSidebar": "Barra lateral (<aside>)",
+      "excludeLinkSelectors": "Não seguir links dentro destes elementos (seletores CSS, um por linha)"
     },
     "customSearch": {
       "intro1": "Sinaliza páginas cujo corpo contém qualquer um destes termos. Dois modos por linha:",
@@ -758,8 +773,17 @@
     "webhook": {
       "intro1": "Webhook disparado uma vez ao fim de cada rastreamento. Um único",
       "intro2": "com um resumo JSON (URL inicial, duração, total de URLs, distribuição de status, todas as contagens de problemas diferentes de zero). Vazio desativa.",
-      "outro": "Compatível com webhooks de entrada do Slack (o formato do JSON é rico o bastante para o Slack renderizar como texto simples), gatilhos \"Catch Hook\" do Zapier, webhooks do Discord e endpoints HTTP próprios.",
-      "url": "URL do webhook"
+      "url": "URL do webhook",
+      "format": "Formato da mensagem",
+      "formatAuto": "Automático (detectar pela URL)",
+      "formatJson": "JSON (Zapier, Make, n8n, endpoint próprio)",
+      "outroFormats": "Slack, Discord e Microsoft Teams recebem uma mensagem legível: distribuição dos códigos de status, principais problemas e, em rastreamentos agendados com Auto Compare, as mudanças desde o rastreamento anterior. Automático reconhece webhooks de entrada do Slack, webhooks do Discord e URLs de conectores do Teams; para uma URL do Teams Workflows escolha Microsoft Teams. Qualquer outro endereço recebe o resumo JSON.",
+      "secretNote": "Uma URL de webhook funciona como uma senha: qualquer pessoa com ela pode postar no seu canal. O FreeCrawl a guarda criptografada e a deixa fora das configurações exportadas.",
+      "test": "Enviar mensagem de teste",
+      "testing": "Enviando…",
+      "testOk": "Entregue como {{format}} (HTTP {{status}}).",
+      "testInvalid": "Informe primeiro uma URL http(s).",
+      "testFailed": "Não entregue ({{status}}): {{detail}}"
     },
     "auth": {
       "intro": "Autenticação HTTP enviada apenas ao site rastreado (a origem da URL inicial, ou as URLs listadas no modo Lista) — nunca a links externos, CDNs ou outros hosts. Útil para ambientes de homologação atrás de autenticação Basic/Digest, ou APIs que exigem um token Bearer. Para sites atrás de um formulário de login HTML, use o login por formulário abaixo.",
@@ -859,7 +883,14 @@
       "disableAll": "Desativar todas",
       "summary": "Ativadas: {{on}} / {{total}}",
       "groupSummary": "{{on}} / {{total}} ativas",
-      "noMatch": "Nenhuma verificação corresponde ao seu filtro."
+      "noMatch": "Nenhuma verificação corresponde ao seu filtro.",
+      "severityIntro": "Mude a gravidade de uma verificação para movê-la entre os grupos Crítico / Aviso / Info, a ordem do relatório e o marcador da barra lateral — por exemplo, quando uma verificação importa mais ou menos neste site.",
+      "severityCritical": "Crítico",
+      "severityWarning": "Aviso",
+      "severityInfo": "Info",
+      "severityLabel": "Gravidade",
+      "severityChanged": "Padrão: {{tier}}",
+      "resetSeverities": "Redefinir gravidades"
     },
     "advanced": {
       "intro": "Limites de baixo nível e chaves de seguimento de links. Os padrões são calibrados para auditorias SEO comuns — só mexa se souber por quê.",
@@ -975,7 +1006,15 @@
     "urlHeader": "URL",
     "beforeHeader": "Antes",
     "afterHeader": "Depois",
-    "noDiffs": "Sem diferenças nesta categoria."
+    "noDiffs": "Sem diferenças nesta categoria.",
+    "previousTitle": "Mudanças desde o rastreamento anterior",
+    "previousCrawl": "Rastreamento anterior ({{date}})",
+    "thisCrawl": "Este rastreamento",
+    "noPrevious": "Ainda não há rastreamento anterior para comparar. Ative \"Comparar automaticamente com o rastreamento anterior\" em Rastreamento agendado, ou rastreie pela CLI com --auto-compare.",
+    "issuesChanged": "Problemas alterados",
+    "issueHeader": "Problema",
+    "changeHeader": "Variação",
+    "noIssueChanges": "Nenhuma contagem de problemas mudou."
   },
   "scheduled": {
     "title": "Rastreamento agendado",
@@ -1017,7 +1056,16 @@
     "browse": "Procurar…",
     "outputDirHint": "Escolha uma pasta — cada execução grava em uma subpasta com data e hora.",
     "sheets": "Enviar também todas as URLs para uma nova planilha do Google Sheets",
-    "webhook": "Notificar o webhook do projeto com a lista de arquivos (Configurações → Webhook)"
+    "webhook": "Notificar o webhook do projeto com a lista de arquivos (Configurações → Webhook)",
+    "runNow": "Executar agora",
+    "runNowTitle": "Inicia agora este rastreamento agendado. O agendamento regular não muda.",
+    "runNowSaveFirst": "Salve suas alterações primeiro.",
+    "runNowBusy": "Já há um rastreamento em andamento — aguarde terminar ou pare-o primeiro.",
+    "runNowNoConfig": "Execute um rastreamento manualmente uma vez primeiro — o agendamento reutiliza as configurações dele.",
+    "runNowNoProject": "Abra ou salve um projeto primeiro.",
+    "runNowNoSchedule": "Salve o agendamento primeiro.",
+    "autoCompare": "Comparar automaticamente com o rastreamento anterior",
+    "autoCompareHint": "Guarda o rastreamento anterior quando este começa. As mudanças vão para a pasta de exportação (crawl-changes.csv), o webhook e Arquivo → Comparar com o rastreamento anterior."
   },
   "serp": {
     "noTitle": "(sem título)",
@@ -1440,7 +1488,9 @@
     "loadingSource": "Carregando o código-fonte…",
     "noBody": "Nenhum corpo HTML armazenado para esta URL.",
     "noBodyHint1": "Ver código-fonte só é capturado para páginas HTML rastreadas com a configuração",
-    "noBodyHint2": "ativada."
+    "noBodyHint2": "ativada.",
+    "markdownLoading": "Convertendo para Markdown…",
+    "markdownFailed": "Não foi possível converter esta página para Markdown."
   },
   "viewRendered": {
     "noBody": "Nenhum DOM renderizado armazenado para esta URL.",
@@ -1550,7 +1600,9 @@
     "imagesUnit": "imagens",
     "loaded": "{{n}} carregadas",
     "row": "Linha",
-    "noImages": "Sem imagens"
+    "noImages": "Sem imagens",
+    "missingTitleOnly": "Só sem title",
+    "emptyMissingTitle": "Nenhuma imagem sem atributo title."
   },
   "serpTab": {
     "title": "Pré-visualização de SERP",
@@ -1985,7 +2037,10 @@
     "summary": "{{shown}} páginas · {{tested}} com resposta · {{errors}} erros · {{selected}} selecionadas",
     "running": "Executando: {{url}}",
     "emptyNoData": "Nenhuma página HTML interna rastreada ainda — execute um rastreamento, depois selecione páginas e clique em Executar.",
-    "emptyNoMatch": "Nenhuma página corresponde ao filtro atual."
+    "emptyNoMatch": "Nenhuma página corresponde ao filtro atual.",
+    "modelDefault": "Modelo (padrão: {{model}})",
+    "modelMissing": "\"{{model}}\" não está na lista de modelos atual de {{provider}}.",
+    "pickModel": "Escolha um modelo disponível…"
   },
   "seoTab": {
     "title": "Autoridade SEO",
@@ -2155,7 +2210,10 @@
       "note": "Os dados do rastreamento ativo ficam no diretório de dados do usuário do aplicativo até você usar Salvar como — o caminho acima só controla onde o Salvar como começa. Mudá-lo não move nenhum arquivo de projeto existente.",
       "autoSaveTitle": "Salvamento em lote",
       "autoSaveLabel": "Salvar o projeto automaticamente a cada N URLs rastreadas — 0 = desligado",
-      "autoSaveHint": "Durante o rastreamento, o arquivo .seoproject aberto é reescrito sempre que essa quantidade de URLs a mais é rastreada, então uma falha ou queda de energia custa no máximo um lote. Só vale depois que o projeto foi salvo em arquivo; mínimo {{min}}. Cada salvamento é um snapshot completo — em sites grandes, mantenha na casa dos milhares."
+      "autoSaveHint": "Durante o rastreamento, o arquivo .seoproject aberto é reescrito sempre que essa quantidade de URLs a mais é rastreada, então uma falha ou queda de energia custa no máximo um lote. Só vale depois que o projeto foi salvo em arquivo; mínimo {{min}}. Cada salvamento é um snapshot completo — em sites grandes, mantenha na casa dos milhares.",
+      "fileNamesTitle": "Nomes dos arquivos de exportação",
+      "fileNamesReset": "Redefinir",
+      "fileNamesPreview": "Exemplo:"
     },
     "agents": {
       "title": "Sessões de agente (MCP)",
@@ -2435,5 +2493,42 @@
     "setupResidential": "Para proxies residenciais, crie primeiro uma lista no painel (país, rotação) e use os dados de conexão que ela mostra.",
     "setupJsRender": "Com a renderização de JavaScript ativada, use o formato HTTP: o navegador não consegue usar um proxy SOCKS5 que exige senha.",
     "hide": "Ocultar"
+  },
+  "rateLimitNotice": {
+    "title": "O site está limitando o rastreamento",
+    "body_one": "O servidor respondeu a {{count}} solicitação com 429 (Too Many Requests) ou 503 (Service Unavailable). A velocidade adaptativa está desativada, então o rastreamento mantém o ritmo fixo e mais páginas podem falhar.",
+    "body_many": "O servidor respondeu a {{count}} de solicitações com 429 (Too Many Requests) ou 503 (Service Unavailable). A velocidade adaptativa está desativada, então o rastreamento mantém o ritmo fixo e mais páginas podem falhar.",
+    "body_other": "O servidor respondeu a {{count}} solicitações com 429 (Too Many Requests) ou 503 (Service Unavailable). A velocidade adaptativa está desativada, então o rastreamento mantém o ritmo fixo e mais páginas podem falhar.",
+    "benefit": "Se você ativar a velocidade adaptativa, a velocidade do rastreamento se ajusta sozinha: desacelera enquanto o servidor impõe limites e acelera de novo quando as respostas ficam limpas. Salvar também aplica a este rastreamento.",
+    "where": "Onde ativar",
+    "path": "Configurações → Velocidade → Velocidade adaptativa",
+    "dontShow": "Não mostrar de novo",
+    "notNow": "Agora não",
+    "openSettings": "Abrir configurações de velocidade"
+  },
+  "aiSettings": {
+    "title": "Modelo e prompt",
+    "defaultModel": "Modelo padrão",
+    "checkModels": "Verificar modelos",
+    "checking": "Verificando…",
+    "checkNeedsCredentials": "Salve primeiro as credenciais acima.",
+    "listFailed": "Não foi possível carregar a lista de modelos: {{detail}}",
+    "modelOk": "{{model}} está disponível.",
+    "modelMissing": "{{model}} não está na lista de modelos atual de {{provider}}.",
+    "pickModel": "Escolha um modelo disponível…",
+    "defaultModelHint": "Usado quando a aba IA ou o Assistente deixa o modelo em branco. Deixe vazio para o padrão embutido ({{model}}).",
+    "systemPrompt": "Prompt de sistema",
+    "systemPromptPlaceholder": "Você é um especialista em SEO técnico. Responda com frases curtas e simples.",
+    "systemPromptHint": "Enviado com cada prompt da aba IA para este provedor: papel, tom, idioma, restrições. O Assistente mantém as próprias instruções.",
+    "timeout": "Tempo limite da requisição (segundos)",
+    "timeoutHint": "Quanto esperar pela resposta do modelo local (10–3600). Modelos grandes em hardware modesto precisam de mais. Vazio = 120 para a aba IA, 180 para o Assistente.",
+    "usageTitle": "Uso de tokens",
+    "usageRequests": "Requisições: {{value}}",
+    "usageTokensIn": "Tokens de entrada: {{value}}",
+    "usageTokensOut": "Tokens de saída: {{value}}",
+    "usageSince": "Desde {{date}}",
+    "usageReset": "Zerar",
+    "usageNone": "Nenhuma requisição registrada ainda.",
+    "usageHint": "Contado neste computador a partir dos números de tokens que cada resposta informa (aba IA e Assistente). A fatura do seu provedor é a referência."
   }
 }

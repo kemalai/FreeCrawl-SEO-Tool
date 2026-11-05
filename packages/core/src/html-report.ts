@@ -308,7 +308,7 @@ async function* htmlReportChunks(
   const maxUrlsPerIssue = options.maxUrlsPerIssue ?? DEFAULT_MAX_URLS_PER_ISSUE;
   const data = options.data ?? collectHtmlReportData(db, maxUrlsPerIssue);
   const { summary, counts } = data;
-  const issues = summarizeIssues(counts);
+  const issues = summarizeIssues(counts, db.getIssueSeverityOverrides());
   const generatedAt = options.generatedAt ?? new Date();
 
   function rowsTable(

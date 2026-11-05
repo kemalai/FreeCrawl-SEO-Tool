@@ -17,7 +17,11 @@ import type {
   CrawlUrlRow,
   UrlCategory,
 } from '@freecrawl/shared-types';
-import { exportLinksToCsv, exportUrlsToCsv } from './csv-export.js';
+import {
+  exportLinksToCsv,
+  exportUncrawlableLinksToCsv,
+  exportUrlsToCsv,
+} from './csv-export.js';
 
 export interface BulkExportTask {
   label: string;
@@ -197,6 +201,22 @@ export async function runBulkExport(
         category: scope === 'internal' ? 'internal:all' : 'external:all',
         rowsWritten,
       });
+    } catch (err) {
+      errors.push({ label, error: (err as Error).message });
+    }
+  }
+  // Screaming Frog's "Pages With Uncrawlable Internal Outlinks" export:
+  // one row per uncrawlable link, so the code to fix is in the file.
+  if (!disabled.has('issues:js-only-navigation')) {
+    const label = 'Links — Uncrawlable';
+    const filePath = join(outputDir, 'links-uncrawlable.csv');
+    try {
+      const { rowsWritten } = await exportUncrawlableLinksToCsv(db, filePath);
+      if (rowsWritten === 0) {
+        await unlink(filePath).catch(() => undefined);
+      } else {
+        files.push({ filePath, label, category: 'issues:js-only-navigation', rowsWritten });
+      }
     } catch (err) {
       errors.push({ label, error: (err as Error).message });
     }

@@ -814,4 +814,22 @@ export const RU_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': 'Аудит каталога: извлекает цену, валюту, наличие, рейтинг, SKU и бренд из JSON-LD, помечает текст «нет в наличии» и пропускает фасеты в строке запроса, чтобы фильтры не раздували обход.',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': 'Аудит издателя: следует hreflang и новостным sitemap, извлекает автора и даты публикации / изменения и проверяет взаимность hreflang — для сайтов, где свежесть и языковой таргетинг определяют ранжирование.',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': 'Рендерит каждую страницу в Chromium и запускает встроенный аудит WCAG (контраст, обводка фокуса, области нажатия, размер шрифта) плюс проверки мобильного удобства. Медленно намеренно — низкая параллельность.',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "Нет атрибута title",
+  "Self Reference Only": "Только ссылка на себя",
+  "Mismatch With HTML lang": "Не совпадает с lang в HTML",
+  "Empty href": "Пустой href",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph неполный",
+  "Twitter Card Incomplete": "Twitter Card неполная",
+  "OG Image Not 200": "Изображение OG не 200",
+  "Twitter Image Not 200": "Изображение Twitter не 200",
+  "og:image Width": "Ширина og:image",
+  "og:image Height": "Высота og:image",
+  "twitter:image Width": "Ширина twitter:image",
+  "twitter:image Height": "Высота twitter:image",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "Доступность ссылки для обхода",
+  "Crawlable": "Доступна для обхода",
+  "Uncrawlable": "Недоступна для обхода",
 };

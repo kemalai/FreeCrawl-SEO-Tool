@@ -8,7 +8,11 @@ import {
   ISSUE_GROUPS,
   UI_LANGUAGE_NAMES,
   UI_LANGUAGE_PICKER_ORDER,
+  ISSUE_SEVERITY,
   normalizeDisabledIssues,
+  normalizeSeverityOverrides,
+  type IssueSeverity,
+  type IssueSeverityOverrides,
   normalizeUiLanguage,
   type UiLanguage,
   type UiTheme,
@@ -67,21 +71,28 @@ import type {
   FormLoginStep,
   ReportBranding,
   HttpAuth,
+  WebhookFormat,
+  WebhookTestResult,
   IntegrationDef,
   IntegrationsState,
   SpellingLanguageOption,
+  LinkPosition,
 } from '@freecrawl/shared-types';
 import {
   DEFAULT_CRAWL_CONFIG,
   INTEGRATIONS,
   AUTO_SAVE_MIN_URLS,
   normalizeAutoSaveEveryUrls,
+  DEFAULT_EXPORT_FILENAME_PATTERN,
+  EXPORT_FILENAME_TOKENS,
+  applyExportFilenamePattern,
 } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 import { InfoTip, type FieldInfo } from './InfoTip.js';
 import { ExtractionPreviewDialog } from './ExtractionPreviewDialog.js';
 import { IntegrationSetupGuideModal } from './IntegrationSetupGuideModal.js';
 import { GscSettingsSection } from './GscSettingsSection.js';
+import { AiProviderSettingsSection } from './AiProviderSettingsSection.js';
 import { Ga4SettingsSection } from './Ga4SettingsSection.js';
 import { McpServersSection } from './McpServersSection.js';
 import { GoogleAccountsSection } from './GoogleAccountsSection.js';
@@ -112,6 +123,8 @@ interface FormState {
   requestTimeoutMs: string;
   crawlDelayMs: string;
   retryAttempts: string;
+  connectionFailureRetries: string;
+  pauseOnHostUnresponsive: boolean;
   retryInitialDelayMs: string;
   followRedirects: boolean;
   respectRobotsTxt: boolean;
@@ -158,6 +171,8 @@ interface FormState {
   // filters
   includePatternsText: string;
   excludePatternsText: string;
+  excludeLinkPositions: LinkPosition[];
+  excludeLinkSelectorsText: string;
   customSearchTermsText: string;
   // url rewrites
   stripWww: boolean;
@@ -185,6 +200,7 @@ interface FormState {
   customExtractionRules: CustomExtractionRule[];
   // webhook
   webhookUrl: string;
+  webhookFormat: WebhookFormat;
   // auth + network
   auth: HttpAuth;
   formLoginEnabled: boolean;
@@ -207,6 +223,7 @@ interface FormState {
   mobileParitySample: string;
   /** Silenced issue checks (Settings → Issues). */
   disabledIssues: UrlCategory[];
+  issueSeverityOverrides: IssueSeverityOverrides;
   // content (body snapshot)
   storeBodySnapshots: boolean;
   bodySnapshotMaxBytes: string;
@@ -565,6 +582,8 @@ function configToForm(c: CrawlConfig): FormState {
     requestTimeoutMs: String(c.requestTimeoutMs),
     crawlDelayMs: String(c.crawlDelayMs),
     retryAttempts: String(c.retryAttempts),
+    connectionFailureRetries: String(c.connectionFailureRetries ?? c.retryAttempts),
+    pauseOnHostUnresponsive: c.pauseOnHostUnresponsive ?? true,
     retryInitialDelayMs: String(c.retryInitialDelayMs),
     followRedirects: c.followRedirects,
     respectRobotsTxt: c.respectRobotsTxt,
@@ -610,6 +629,8 @@ function configToForm(c: CrawlConfig): FormState {
       .join('\n'),
     includePatternsText: (c.includePatterns ?? []).join('\n'),
     excludePatternsText: (c.excludePatterns ?? []).join('\n'),
+    excludeLinkPositions: [...(c.excludeLinkPositions ?? [])],
+    excludeLinkSelectorsText: (c.excludeLinkSelectors ?? []).join('\n'),
     customSearchTermsText: (c.customSearchTerms ?? []).join('\n'),
     stripWww: c.stripWww,
     forceHttps: c.forceHttps,
@@ -632,6 +653,7 @@ function configToForm(c: CrawlConfig): FormState {
     contentAreaSelector: c.contentAreaSelector ?? '',
     customExtractionRules: (c.customExtractionRules ?? []).map((r) => ({ ...r })),
     webhookUrl: c.webhookUrl ?? '',
+    webhookFormat: c.webhookFormat ?? 'auto',
     auth: { ...(c.auth ?? { type: 'none' }) },
     formLoginEnabled: c.formLogin?.enabled ?? false,
     formLoginMode: c.formLogin?.mode ?? 'http',
@@ -664,6 +686,7 @@ function configToForm(c: CrawlConfig): FormState {
     probeMobileParity: c.probeMobileParity ?? false,
     mobileParitySample: String(c.mobileParitySample ?? 200),
     disabledIssues: normalizeDisabledIssues(c.disabledIssues),
+    issueSeverityOverrides: normalizeSeverityOverrides(c.issueSeverityOverrides),
     storeBodySnapshots: c.storeBodySnapshots ?? true,
     bodySnapshotMaxBytes: String(c.bodySnapshotMaxBytes ?? 1_048_576),
     maxLinksPerPage: String(c.maxLinksPerPage ?? 100),
@@ -890,6 +913,11 @@ export function SettingsDialog({ open, onClose }: Props) {
       requestTimeoutMs: Math.max(1000, num(form.requestTimeoutMs, config.requestTimeoutMs)),
       crawlDelayMs: Math.max(0, num(form.crawlDelayMs, config.crawlDelayMs)),
       retryAttempts: Math.max(0, num(form.retryAttempts, config.retryAttempts)),
+      connectionFailureRetries: Math.max(
+        0,
+        num(form.connectionFailureRetries, config.connectionFailureRetries ?? config.retryAttempts),
+      ),
+      pauseOnHostUnresponsive: form.pauseOnHostUnresponsive,
       retryInitialDelayMs: Math.max(0, num(form.retryInitialDelayMs, config.retryInitialDelayMs)),
       followRedirects: form.followRedirects,
       respectRobotsTxt: form.respectRobotsTxt,
@@ -933,6 +961,8 @@ export function SettingsDialog({ open, onClose }: Props) {
       customHeaders: parseHeaders(form.customHeadersText),
       includePatterns: parseLines(form.includePatternsText),
       excludePatterns: parseLines(form.excludePatternsText),
+      excludeLinkPositions: form.excludeLinkPositions,
+      excludeLinkSelectors: parseLines(form.excludeLinkSelectorsText),
       customSearchTerms: parseLines(form.customSearchTermsText),
       stripWww: form.stripWww,
       forceHttps: form.forceHttps,
@@ -973,6 +1003,7 @@ export function SettingsDialog({ open, onClose }: Props) {
         .filter((r) => r.name.trim() && r.selector.trim())
         .slice(0, 10),
       webhookUrl: form.webhookUrl.trim(),
+      webhookFormat: form.webhookFormat,
       auth: form.auth,
       formLogin: {
         enabled: form.formLoginEnabled,
@@ -1013,6 +1044,7 @@ export function SettingsDialog({ open, onClose }: Props) {
       probeMobileParity: form.probeMobileParity,
       mobileParitySample: Math.max(0, num(form.mobileParitySample, config.mobileParitySample)),
       disabledIssues: form.disabledIssues,
+      issueSeverityOverrides: form.issueSeverityOverrides,
       storeBodySnapshots: form.storeBodySnapshots,
       bodySnapshotMaxBytes: Math.max(
         0,
@@ -1093,6 +1125,12 @@ export function SettingsDialog({ open, onClose }: Props) {
         maxCls: Math.max(0, Number.parseFloat(form.budgetMaxCls) || 0),
       },
     });
+    // Adaptive speed is the one setting worth applying to the crawl that is
+    // already running: it is usually switched on *because* that crawl keeps
+    // drawing 429s. Everything else takes effect on the next crawl.
+    if (form.adaptiveSpeed !== config.adaptiveSpeed && useAppStore.getState().progress?.running) {
+      void window.freecrawl.crawlSetAdaptiveSpeed(form.adaptiveSpeed);
+    }
     onClose();
   }
 
@@ -1478,6 +1516,7 @@ const PRESETS: PresetDef[] = [
       requestTimeoutMs: '10000',
       crawlDelayMs: '0',
       retryAttempts: '0',
+      connectionFailureRetries: '0',
       retryInitialDelayMs: '250',
       excludeExtensionsText: 'pdf,zip,mp4,mp3,webm,mov,avi,iso,exe,dmg',
       maxRedirects: '5',
@@ -1494,6 +1533,7 @@ const PRESETS: PresetDef[] = [
       requestTimeoutMs: '30000',
       crawlDelayMs: '0',
       retryAttempts: '3',
+      connectionFailureRetries: '3',
       retryInitialDelayMs: '750',
       maxRedirects: '15',
     },
@@ -1801,8 +1841,8 @@ function ModePanel({ form, update }: PanelProps) {
           value={form.seedSitemapText}
           onChange={(v) => update('seedSitemapText', v)}
           rows={4}
-          placeholder={'https://example.com/sitemap.xml'}
-          info="One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable."
+          placeholder={'https://example.com/sitemap.xml\n/news-sitemap.xml'}
+          info="One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable. Relative paths such as /sitemap.xml are resolved against the start URL."
           example={'https://example.com/sitemap_index.xml\nhttps://example.com/news-sitemap.xml'}
         />
       )}
@@ -2244,8 +2284,8 @@ function SpiderCrawlPanel({ form, update }: PanelProps) {
             />
             <CrawlRow
               label="Uncrawlable Links"
-              info={'Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", and href="#" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter.'}
-              example="On — it is a count, so it costs nothing."
+              info={'Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", href="#" placeholders wired to a handler, an href on a non-link element such as <span> or <div>, and non-link elements whose onclick navigates. Store-only — an uncrawlable link is by definition never fetched. Each one appears under Outlinks as Uncrawlable; the internal ones drive the JS-Only Navigation issue filter.'}
+              example="On — recording them costs almost nothing."
               crawl={null}
               store={{
                 checked: form.storeUncrawlableLinks,
@@ -2406,7 +2446,7 @@ function SpiderCrawlPanel({ form, update }: PanelProps) {
                 onChange={(v) => update('seedSitemapText', v)}
                 rows={6}
                 placeholder={'https://example.com/sitemap_index.xml\nhttps://example.com/news-sitemap.xml'}
-                info="Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions."
+                info="Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions. Relative paths such as /sitemap.xml are resolved against the start URL."
                 example="https://example.com/sitemap_index.xml"
               />
             </div>
@@ -2483,6 +2523,15 @@ function SpeedPanel({ form, update }: PanelProps) {
               'Only affects behaviour when the server pushes back — a healthy site is crawled at the full ceiling either way.',
           })}
         </p>
+        <Bool
+          label={t('settingsPanels.speed.pauseOnHostUnresponsive', {
+            defaultValue: 'Pause crawl if a host stops responding',
+          })}
+          checked={form.pauseOnHostUnresponsive}
+          onChange={(v) => update('pauseOnHostUnresponsive', v)}
+          info="When a site that was answering stops responding — 10 requests in a row get no answer even after their connection retries — the crawl pauses instead of marking the rest of the queue as failed. Fix the problem or wait for the server to come back, then press Resume to continue where it stopped."
+          example="On by default. Turn it off when any result is better than a paused run, for example a crawl nobody is watching."
+        />
       </div>
       <Num
         label={t('settingsPanels.speed.crawlDelayMs', { defaultValue: 'Per-Worker Delay (ms after each request)' })}
@@ -2499,8 +2548,17 @@ function SpeedPanel({ form, update }: PanelProps) {
         label={t('settingsPanels.speed.retryAttempts', { defaultValue: 'Retry Attempts (per URL on transient errors)' })}
         value={form.retryAttempts}
         onChange={(v) => update('retryAttempts', v)}
-        info="On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."
+        info="On 408/425/429/5xx responses, retry up to N more times before giving up. Requests that get no response at all use Connection Failure Retries below. Each retry counts toward the URL's response time budget."
         example="2 default; 0 to record errors immediately without retrying; 5 for unreliable upstreams."
+      />
+      <Num
+        label={t('settingsPanels.speed.connectionFailureRetries', {
+          defaultValue: 'Connection Failure Retries (no response: timeout / reset / refused)',
+        })}
+        value={form.connectionFailureRetries}
+        onChange={(v) => update('connectionFailureRetries', v)}
+        info="When a request gets no response at all — a timeout, a reset or a refused connection — retry it up to N more times before recording it as failed. Kept apart from the HTTP retries above, so a flaky network and a struggling server can be tuned separately."
+        example="2 default; 0 to record connection failures immediately; 4 on an unstable connection."
       />
       <Num
         label={t('settingsPanels.speed.retryInitialDelayMs', { defaultValue: 'Initial Retry Delay (ms — exponential backoff)' })}
@@ -2636,9 +2694,54 @@ function FiltersPanel({ form, update }: PanelProps) {
         info="JavaScript regex. Any match → URL is skipped, even if it would otherwise pass the include list. Common uses: skip admin areas, large file types, session-id query params."
         example={'/admin\n\\.pdf$\n\\?session='}
       />
+
+      <div className="mt-4 mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-surface-300">
+        {t('settingsPanels.filters.linkPositionsHeading', { defaultValue: "Don't follow links in" })}
+        <InfoTip
+          info="Links that sit in these parts of a page are recorded (they still count as inlinks and show in the link reports) but the crawler does not follow them. Useful for mega-menus and footers that link to thousands of pages. A page that is also linked from the body is still crawled."
+          example="Footer + Sidebar on a shop whose footer lists every category"
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+        {LINK_POSITION_OPTIONS.map((opt) => (
+          <label key={opt.value} className="flex items-center gap-2 text-[11px] text-surface-200">
+            <input
+              type="checkbox"
+              checked={form.excludeLinkPositions.includes(opt.value)}
+              onChange={(e) =>
+                update(
+                  'excludeLinkPositions',
+                  e.target.checked
+                    ? [...form.excludeLinkPositions, opt.value]
+                    : form.excludeLinkPositions.filter((p) => p !== opt.value),
+                )
+              }
+            />
+            {t(`settingsPanels.filters.${opt.key}`, { defaultValue: opt.en })}
+          </label>
+        ))}
+      </div>
+      <Area
+        label={t('settingsPanels.filters.excludeLinkSelectors', {
+          defaultValue: "Don't follow links inside these elements (CSS selectors, one per line)",
+        })}
+        value={form.excludeLinkSelectorsText}
+        onChange={(v) => update('excludeLinkSelectorsText', v)}
+        rows={3}
+        placeholder={'.facets\n#filters\nnav.mega-menu'}
+        info="Links inside any element matching one of these CSS selectors are recorded but not followed — the way to keep faceted filters or a mega-menu from flooding the crawl without excluding the pages themselves. An invalid selector is ignored."
+        example={'.facets\n#filters\nnav.mega-menu'}
+      />
     </>
   );
 }
+
+const LINK_POSITION_OPTIONS: { value: LinkPosition; key: string; en: string }[] = [
+  { value: 'navigation', key: 'linkPositionNavigation', en: 'Navigation (<nav>)' },
+  { value: 'header', key: 'linkPositionHeader', en: 'Header (<header>)' },
+  { value: 'footer', key: 'linkPositionFooter', en: 'Footer (<footer>)' },
+  { value: 'sidebar', key: 'linkPositionSidebar', en: 'Sidebar (<aside>)' },
+];
 
 function CustomSearchPanel({ form, update }: PanelProps) {
   const { t } = useTranslation();
@@ -3309,6 +3412,25 @@ function CustomExtractionPanel({ form, update }: PanelProps) {
 
 function WebhookPanel({ form, update }: PanelProps) {
   const { t } = useTranslation();
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<WebhookTestResult | null>(null);
+  const url = form.webhookUrl.trim();
+  const sendTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      setTestResult(await window.freecrawl.webhookTest(url, form.webhookFormat));
+    } catch (e) {
+      setTestResult({
+        ok: false,
+        status: null,
+        detail: e instanceof Error ? e.message : String(e),
+        format: 'json',
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
   return (
     <>
       <p className="mb-3 text-[11px] text-surface-400">
@@ -3321,13 +3443,76 @@ function WebhookPanel({ form, update }: PanelProps) {
         <Text
           label={t('settingsPanels.webhook.url', { defaultValue: 'Webhook URL' })}
           value={form.webhookUrl}
-          onChange={(v) => update('webhookUrl', v)}
+          onChange={(v) => {
+            update('webhookUrl', v);
+            setTestResult(null);
+          }}
           info="`POST <url>` is fired when the `done` event emits. 10 s timeout. Failures are logged as info events but never break the crawl."
           example="https://hooks.slack.com/services/T0/B0/abc, https://your-server.example/freecrawl-hook"
         />
+        <label className="mb-2 flex flex-col gap-1">
+          <span className="text-[11px] text-surface-300">
+            {t('settingsPanels.webhook.format', { defaultValue: 'Message format' })}
+          </span>
+          <select
+            className="rounded border border-surface-700 bg-surface-950 px-2 py-1 text-[12px] text-surface-100 focus:border-blue-500 focus:outline-none"
+            value={form.webhookFormat}
+            onChange={(e) => {
+              update('webhookFormat', e.target.value as WebhookFormat);
+              setTestResult(null);
+            }}
+          >
+            <option value="auto">{t('settingsPanels.webhook.formatAuto', { defaultValue: 'Auto (detect from the URL)' })}</option>
+            <option value="json">{t('settingsPanels.webhook.formatJson', { defaultValue: 'JSON (Zapier, Make, n8n, own endpoint)' })}</option>
+            <option value="slack">Slack</option>
+            <option value="discord">Discord</option>
+            <option value="teams">Microsoft Teams</option>
+          </select>
+        </label>
         <p className="mt-1 text-[10px] text-surface-500">
-          {t('settingsPanels.webhook.outro', { defaultValue: 'Compatible with Slack incoming webhooks (the JSON shape is rich enough for Slack to render plain text), Zapier "Catch Hook" triggers, Discord webhooks, and custom HTTP endpoints.' })}
+          {t('settingsPanels.webhook.outroFormats', {
+            defaultValue:
+              'Slack, Discord and Microsoft Teams get a readable message: status mix, top issues and, for scheduled crawls with Auto Compare, the changes since the previous crawl. Auto recognises Slack incoming webhooks, Discord webhooks and Teams connector URLs; for a Teams Workflows URL pick Microsoft Teams. Anything else receives the JSON summary.',
+          })}
         </p>
+        <p className="mt-1 text-[10px] text-surface-500">
+          {t('settingsPanels.webhook.secretNote', {
+            defaultValue:
+              'A webhook URL works like a password — anyone who has it can post to your channel. FreeCrawl stores it encrypted and leaves it out of exported settings.',
+          })}
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className="rounded border border-surface-700 bg-surface-800 px-2.5 py-1 text-[11px] text-surface-200 hover:bg-surface-700 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={() => void sendTest()}
+            disabled={testing || url === ''}
+          >
+            {testing
+              ? t('settingsPanels.webhook.testing', { defaultValue: 'Sending…' })
+              : t('settingsPanels.webhook.test', { defaultValue: 'Send test message' })}
+          </button>
+          {testResult && testResult.ok && (
+            <span className="text-[11px] text-emerald-300">
+              {t('settingsPanels.webhook.testOk', {
+                defaultValue: 'Delivered as {{format}} (HTTP {{status}}).',
+                format: testResult.format,
+                status: testResult.status ?? '',
+              })}
+            </span>
+          )}
+          {testResult && !testResult.ok && (
+            <span className="break-all text-[11px] text-rose-300">
+              {testResult.detail === 'invalid-url'
+                ? t('settingsPanels.webhook.testInvalid', { defaultValue: 'Enter an http(s) URL first.' })
+                : t('settingsPanels.webhook.testFailed', {
+                    defaultValue: 'Not delivered ({{status}}): {{detail}}',
+                    status: testResult.status ?? '—',
+                    detail: testResult.detail || '—',
+                  })}
+            </span>
+          )}
+        </div>
       </div>
     </>
   );
@@ -4087,6 +4272,15 @@ function IssuesPanel({ form, update }: PanelProps) {
     items: matches(g.label) ? g.items : g.items.filter((i) => matches(i.label)),
   })).filter((g) => g.items.length > 0);
   const enabledCount = ISSUE_CATEGORIES.length - disabled.size;
+  const overrides = form.issueSeverityOverrides;
+  const overrideCount = Object.keys(overrides).length;
+  const setSeverity = (category: UrlCategory, tier: IssueSeverity): void =>
+    update('issueSeverityOverrides', normalizeSeverityOverrides({ ...overrides, [category]: tier }));
+  const tierLabel: Record<IssueSeverity, string> = {
+    critical: t('settingsPanels.issues.severityCritical', { defaultValue: 'Critical' }),
+    warning: t('settingsPanels.issues.severityWarning', { defaultValue: 'Warning' }),
+    info: t('settingsPanels.issues.severityInfo', { defaultValue: 'Info' }),
+  };
   return (
     <>
       <p className="mb-2 text-[11px] text-surface-400">
@@ -4099,6 +4293,12 @@ function IssuesPanel({ form, update }: PanelProps) {
         {t('settingsPanels.issues.effect', {
           defaultValue:
             'A disabled check disappears from the sidebar, the overview counts, HTML/PDF reports, bulk export and the crawl-complete webhook. Nothing is deleted — turn it back on to see its results again.',
+        })}
+      </p>
+      <p className="mb-3 text-[11px] text-surface-500">
+        {t('settingsPanels.issues.severityIntro', {
+          defaultValue:
+            "Change a check's severity to move it between the Critical / Warning / Info rollups, the report order and the sidebar marker — for example when a check matters more or less on this site.",
         })}
       </p>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -4124,6 +4324,14 @@ function IssuesPanel({ form, update }: PanelProps) {
           className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {t('settingsPanels.issues.disableAll', { defaultValue: 'Disable all' })}
+        </button>
+        <button
+          type="button"
+          onClick={() => update('issueSeverityOverrides', {})}
+          disabled={overrideCount === 0}
+          className="rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-300 hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {t('settingsPanels.issues.resetSeverities', { defaultValue: 'Reset severities' })}
         </button>
         <span className="text-[11px] text-surface-500">
           {t('settingsPanels.issues.summary', {
@@ -4172,17 +4380,51 @@ function IssuesPanel({ form, update }: PanelProps) {
             <div className="grid grid-cols-1 gap-x-4 px-3 py-1.5 sm:grid-cols-2">
               {items.map((i) => {
                 const off = disabled.has(i.category);
+                const builtIn = ISSUE_SEVERITY[i.category] ?? 'info';
+                const tier = overrides[i.category] ?? builtIn;
+                const changed = tier !== builtIn;
                 return (
-                  <label key={i.key} className="flex items-center gap-2 py-0.5 text-[11px]">
-                    <input
-                      type="checkbox"
-                      checked={!off}
-                      onChange={(e) => setOne(i.category, e.target.checked)}
-                    />
-                    <span className={clsx(off ? 'text-surface-500 line-through' : 'text-surface-300')}>
-                      {translateLabel(i.label, lang)}
-                    </span>
-                  </label>
+                  <div key={i.key} className="flex items-center gap-2 py-0.5 text-[11px]">
+                    <label className="flex min-w-0 flex-1 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={!off}
+                        onChange={(e) => setOne(i.category, e.target.checked)}
+                      />
+                      <span
+                        className={clsx(
+                          'truncate',
+                          off ? 'text-surface-500 line-through' : 'text-surface-300',
+                        )}
+                      >
+                        {translateLabel(i.label, lang)}
+                      </span>
+                    </label>
+                    <select
+                      value={tier}
+                      disabled={off}
+                      onChange={(e) => setSeverity(i.category, e.target.value as IssueSeverity)}
+                      aria-label={t('settingsPanels.issues.severityLabel', { defaultValue: 'Severity' })}
+                      title={
+                        changed
+                          ? t('settingsPanels.issues.severityChanged', {
+                              defaultValue: 'Changed from {{tier}}',
+                              tier: tierLabel[builtIn],
+                            })
+                          : t('settingsPanels.issues.severityLabel', { defaultValue: 'Severity' })
+                      }
+                      className={clsx(
+                        'shrink-0 rounded border bg-surface-950 px-1 py-0.5 text-[10px] focus:border-blue-500 focus:outline-none disabled:opacity-40',
+                        changed ? 'border-blue-500/70 text-blue-200' : 'border-surface-700 text-surface-300',
+                      )}
+                    >
+                      {(['critical', 'warning', 'info'] as const).map((tierKey) => (
+                        <option key={tierKey} value={tierKey}>
+                          {tierLabel[tierKey]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 );
               })}
             </div>
@@ -5126,6 +5368,13 @@ function IntegrationPage({ id }: { id: string }) {
           so their account dropdowns pick up a new or removed link. */}
       {def.id === 'gsc' && <GscSettingsSection key={accountsVersion} />}
       {def.id === 'ga4' && <Ga4SettingsSection key={accountsVersion} />}
+      {(def.id === 'openai' || def.id === 'anthropic' || def.id === 'ollama') && (
+        <AiProviderSettingsSection
+          provider={def.id}
+          providerName={def.name}
+          configured={state?.[def.id]?.configured ?? false}
+        />
+      )}
     </>
   );
 }
@@ -5656,6 +5905,28 @@ function StoragePanel() {
   const [autoSave, setAutoSaveState] = useState<string>(() =>
     String(normalizeAutoSaveEveryUrls(window.freecrawl.prefsGet('autoSaveEveryUrls'))),
   );
+  const startUrl = useAppStore((s) => s.config.startUrl);
+  const [namePattern, setNamePatternState] = useState<string>(() => {
+    const raw = window.freecrawl.prefsGet('exportFilenamePattern');
+    return typeof raw === 'string' && raw.trim() ? raw : DEFAULT_EXPORT_FILENAME_PATTERN;
+  });
+
+  // The default pattern is not stored, so a later change of the default
+  // reaches everyone who never customised it.
+  function setNamePattern(v: string) {
+    setNamePatternState(v);
+    const trimmed = v.trim();
+    if (trimmed && trimmed !== DEFAULT_EXPORT_FILENAME_PATTERN) {
+      window.freecrawl.prefsSet('exportFilenamePattern', trimmed);
+    } else {
+      window.freecrawl.prefsDelete('exportFilenamePattern');
+    }
+  }
+
+  const namePreview = `${applyExportFilenamePattern(namePattern, {
+    report: 'internal',
+    url: startUrl || 'https://www.example.com/',
+  })}.csv`;
 
   // Persist as typed: a valid interval is stored, anything else (0, blank,
   // below the floor) clears the pref so the default "off" applies.
@@ -5818,6 +6089,48 @@ function StoragePanel() {
               'While a crawl runs, the open .seoproject file is rewritten each time this many more URLs have been crawled, so a crash or power loss costs at most one batch. Only applies once the project has been saved to a file; minimum {{min}}. Each save is a full snapshot, so keep it in the thousands on large sites.',
             min: AUTO_SAVE_MIN_URLS,
           })}
+        </p>
+      </div>
+
+      <div className="mb-4 rounded border border-surface-800 bg-surface-950/40 p-3">
+        <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-surface-400">
+          {t('settings.storage.fileNamesTitle', { defaultValue: 'Export File Names' })}
+          <InfoTip
+            info="The name every export's save dialog suggests. Tokens are filled in when you export: {report} = what is exported, {date} / {time} / {datetime} = now, {domain} = the crawled site, {project} = the project name. Characters that are not allowed in file names are replaced with a dash."
+            example="{domain}_{date}_{report}"
+          />
+        </div>
+        <input
+          type="text"
+          value={namePattern}
+          onChange={(e) => setNamePattern(e.target.value)}
+          spellCheck={false}
+          aria-label={t('settings.storage.fileNamesTitle', { defaultValue: 'Export File Names' })}
+          className="w-full rounded border border-surface-700 bg-surface-950 px-2 py-1 font-mono text-[11px] text-surface-100 focus:border-blue-500 focus:outline-none"
+        />
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {EXPORT_FILENAME_TOKENS.map((token) => (
+            <button
+              key={token}
+              type="button"
+              onClick={() => setNamePattern(`${namePattern}${token}`)}
+              className="rounded border border-surface-700 px-1.5 py-0.5 font-mono text-[10px] text-surface-300 hover:bg-surface-800"
+            >
+              {token}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setNamePattern(DEFAULT_EXPORT_FILENAME_PATTERN)}
+            disabled={namePattern.trim() === DEFAULT_EXPORT_FILENAME_PATTERN}
+            className="ml-auto rounded border border-surface-700 px-2 py-0.5 text-[10px] text-surface-400 hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {t('settings.storage.fileNamesReset', { defaultValue: 'Reset' })}
+          </button>
+        </div>
+        <p className="mt-1.5 text-[11px] text-surface-500">
+          {t('settings.storage.fileNamesPreview', { defaultValue: 'Example:' })}{' '}
+          <span className="font-mono text-surface-200">{namePreview}</span>
         </p>
       </div>
 

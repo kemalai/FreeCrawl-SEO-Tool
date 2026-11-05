@@ -1,5 +1,5 @@
 import { parentPort } from 'node:worker_threads';
-import { parseHtml, extractProseText } from '@freecrawl/core';
+import { parseHtml, extractProseText, htmlToMarkdown } from '@freecrawl/core';
 
 /**
  * HTML-parser worker thread.
@@ -29,8 +29,9 @@ interface ParseRequest {
   html: string;
   pageUrl: string;
   opts: Parameters<typeof parseHtml>[2];
-  /** `prose` — return the main-content text instead of the full parse. */
-  mode?: 'parse' | 'prose';
+  /** `prose` — return the main-content text instead of the full parse;
+   *  `markdown` — the page converted to Markdown (View Source, bulk export). */
+  mode?: 'parse' | 'prose' | 'markdown';
 }
 
 parentPort.on('message', (msg: ParseRequest) => {
@@ -39,7 +40,11 @@ parentPort.on('message', (msg: ParseRequest) => {
     const result =
       msg.mode === 'prose'
         ? extractProseText(msg.html, msg.opts?.contentAreaSelector)
-        : parseHtml(msg.html, msg.pageUrl, msg.opts);
+        : msg.mode === 'markdown'
+          ? htmlToMarkdown(msg.html, msg.pageUrl, {
+              contentAreaSelector: msg.opts?.contentAreaSelector,
+            })
+          : parseHtml(msg.html, msg.pageUrl, msg.opts);
     parentPort!.postMessage({ requestId: msg.requestId, ok: true, result });
   } catch (err) {
     parentPort!.postMessage({

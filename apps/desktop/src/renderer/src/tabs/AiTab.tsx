@@ -10,6 +10,7 @@ import type {
   AiRow,
   IntegrationsState,
 } from '@freecrawl/shared-types';
+import { aiModelOffered } from '@freecrawl/shared-types';
 import { useAppStore } from '../store.js';
 
 const TOOLBAR_HEIGHT = 36;
@@ -104,6 +105,31 @@ export function AiTab() {
   useEffect(() => {
     void window.freecrawl.integrationsGetAll().then(setIntegrations);
   }, [provider]);
+
+  // Live model list of the selected provider (SF 24 "Live Model
+  // Validation"): fills the model suggestions and lets the tab warn before
+  // a batch is sent to a model the provider no longer offers. A failed
+  // lookup (offline, no key yet) simply means no check — never a block.
+  const [liveModels, setLiveModels] = useState<{ provider: AiProvider; models: string[]; model: string } | null>(null);
+  const providerReady = integrations?.[provider]?.configured ?? false;
+  useEffect(() => {
+    if (!providerReady) {
+      setLiveModels(null);
+      return;
+    }
+    let cancelled = false;
+    void window.freecrawl.aiModels(provider).then((r) => {
+      if (cancelled) return;
+      setLiveModels(r.ok ? { provider, models: r.models, model: r.model } : null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, providerReady]);
+  const modelList = liveModels?.provider === provider ? liveModels : null;
+  const effectiveModel = model.trim() || modelList?.model || '';
+  const modelMissing =
+    !!modelList && !!effectiveModel && !aiModelOffered(provider, effectiveModel, modelList.models);
 
   useEffect(() => {
     const off = window.freecrawl.onAiProgress((p) => {
@@ -261,10 +287,22 @@ export function AiTab() {
           type="text"
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          placeholder={t('aiTab.modelPlaceholder', { defaultValue: 'Model (optional)' })}
+          placeholder={
+            modelList?.model
+              ? t('aiTab.modelDefault', { defaultValue: 'Model (default: {{model}})', model: modelList.model })
+              : t('aiTab.modelPlaceholder', { defaultValue: 'Model (optional)' })
+          }
+          list={modelList ? `ai-tab-models-${provider}` : undefined}
           disabled={running}
-          className="h-6 w-36 rounded border border-surface-700 bg-surface-950 px-2 text-[11px] text-surface-100 placeholder-surface-500 focus:border-blue-500 focus:outline-none"
+          className="h-6 w-44 rounded border border-surface-700 bg-surface-950 px-2 text-[11px] text-surface-100 placeholder-surface-500 focus:border-blue-500 focus:outline-none"
         />
+        {modelList && (
+          <datalist id={`ai-tab-models-${provider}`}>
+            {modelList.models.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+        )}
         <button
           type="button"
           onClick={selectUntested}
@@ -325,6 +363,33 @@ export function AiTab() {
               '{{provider}} is not configured — set its credentials in Settings → Integrations to run prompts.',
             provider: PROVIDER_LABEL[provider],
           })}
+        </div>
+      )}
+      {providerConfigured && modelMissing && modelList && (
+        <div className="flex items-center gap-2 border-b border-amber-700/40 bg-amber-900/20 px-3 py-1 text-[10px] text-amber-200">
+          <AlertTriangle size={11} />
+          <span>
+            {t('aiTab.modelMissing', {
+              defaultValue: '"{{model}}" is not in the current model list of {{provider}}.',
+              model: effectiveModel,
+              provider: PROVIDER_LABEL[provider],
+            })}
+          </span>
+          <select
+            className="h-5 max-w-[240px] rounded border border-amber-700/60 bg-surface-950 px-1 text-[10px] text-surface-100 focus:outline-none"
+            value=""
+            onChange={(e) => {
+              if (e.target.value) setModel(e.target.value);
+            }}
+            disabled={running}
+          >
+            <option value="">{t('aiTab.pickModel', { defaultValue: 'Pick a live model…' })}</option>
+            {modelList.models.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
         </div>
       )}
 

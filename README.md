@@ -21,7 +21,7 @@
 
 <br />
 
-A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog-style UI, **200+ SEO issue checks**, an interface in **11 languages** with dark and light themes, and zero native dependencies.
+A high-performance website crawler built for serious SEO audits. Targets <kbd>1M+ URLs</kbd> on a single machine, with a dense Screaming Frog-style UI, **200+ SEO issue checks**, an interface in **12 languages** with dark and light themes, and zero native dependencies.
 
 </div>
 
@@ -52,17 +52,19 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 
 FreeCrawl crawls your website and checks it for SEO problems. It is a free desktop alternative to Screaming Frog that handles very large sites (**1M+ URLs on one machine**) and streams the results into a fast, dense table while the crawl is still running.
 
-It runs **200+ SEO checks across 33 tabs**: page titles, meta descriptions, headings, duplicate content, broken links, redirects, canonicals, hreflang, structured data, security headers, readability, mobile usability, soft 404s, and more. It can also render JavaScript pages with a real headless browser to capture the final DOM, screenshots, and Core Web Vitals. Any check you do not care about can be switched off per project.
+It runs **200+ SEO checks across 34 tabs**: page titles, meta descriptions, headings, duplicate content, broken links, redirects, canonicals, hreflang, structured data, security headers, readability, mobile usability, soft 404s, and more. It can also render JavaScript pages with a real headless browser to capture the final DOM, screenshots, and Core Web Vitals. Any check you do not care about can be switched off per project.
 
-Every link type (images, CSS, JavaScript, media, canonicals, pagination, hreflang, AMP, iframes) has its own **Crawl** and **Store** switch, so you decide exactly what gets fetched and what gets reported. Right-click any table selection to copy cells, rows, or columns straight to the clipboard.
+Every link type (images, CSS, JavaScript, media, canonicals, pagination, hreflang, AMP, iframes) has its own **Crawl** and **Store** switch, so you decide exactly what gets fetched and what gets reported. Links that only JavaScript can follow (`onclick` handlers, `javascript:` and `#` hrefs, `href` on non-link elements) are listed as **uncrawlable** instead of being missed silently, and links inside chosen page regions or CSS selectors can be recorded without being followed. Right-click any table selection to copy cells, rows, or columns straight to the clipboard. The Overview sidebar has a search box, and each check's severity can be changed per project.
 
 The crawler is built for real sites, not only clean ones. It recognises the block, challenge and rate-limit pages of more than 60 bot-protection, WAF and CDN vendors (Cloudflare, AWS WAF, Akamai, Imperva, DataDome, Sucuri, Wordfence and more) and marks those URLs as **blocked** instead of reporting hundreds of false broken links, re-checks external links with a GET and a browser User-Agent before calling them broken, probes the site for **soft-404** behaviour after every spider crawl, and can slow itself down on 429 / Retry-After responses with the opt-in **Adaptive speed** switch. `srcset` image variants are listed but not fetched unless you turn them on, the status bar shows every post-crawl phase (measuring images, running checks) as it happens, and stored page bodies are **zstd-compressed** with a per-project dictionary so large projects stay small on disk.
 
-Pull in real data from **Google Search Console, Analytics 4, PageSpeed Insights, Chrome UX Report, and Yandex Metrica**, check spelling and grammar with **LanguageTool** (with a **bundled offline dictionary** for languages LanguageTool has no rules for, such as Turkish), and run your own **AI prompts** on each page (OpenAI, Claude, or Ollama). Open several projects side by side, each in its own window running its own crawl, and manage them from a Projects dialog with search, tags, and starter templates.
+Pull in real data from **Google Search Console, Analytics 4, PageSpeed Insights, Chrome UX Report, and Yandex Metrica**, check spelling and grammar with **LanguageTool** (with a **bundled offline dictionary** for languages LanguageTool has no rules for, such as Turkish), and run your own **AI prompts** on each page (OpenAI, Claude, or Ollama), with your own model, system prompt and token usage per provider. Open several projects side by side, each in its own window running its own crawl, and manage them from a Projects dialog with search, tags, and starter templates.
 
-Export to **Excel, CSV, JSON, XML**, an HTML or brandable **PDF report**, sitemaps, a Screaming Frog-compatible **SEO Audit** folder, **Google Sheets**, or **BigQuery**. Save each project as **one compressed file** (or a **password-protected encrypted file**), and export any URL Details sub-table on its own. A built-in **MCP server** (100+ tools) lets AI agents like Claude drive crawls live and read every result. Every action a human can take in the desktop is callable from an agent, and **several agents can run in parallel**, each in its own isolated crawl session.
+**Scheduled crawls** run on their own or on demand with **Run Now**, export automatically, and can **compare every run with the previous one**: pages added or removed, changed status codes, titles, meta descriptions, H1s, canonicals and indexability, and the issue checks whose counts moved. When a crawl finishes, a summary goes to **Slack, Discord, Microsoft Teams** or any webhook URL.
 
-The interface speaks **11 languages** (English, Turkish, Spanish, French, Portuguese, Italian, Russian, Chinese, Korean, Hindi, Azerbaijani), follows your system language on first launch, and comes in **dark and light themes**. Everything runs **fully local**: no telemetry, no cloud, MIT-licensed.
+Export to **Excel, CSV, JSON, XML, Markdown**, an HTML or brandable **PDF report**, sitemaps, a Screaming Frog-compatible **SEO Audit** folder, **Google Sheets**, or **BigQuery**. Save each project as **one compressed file** (or a **password-protected encrypted file**), and export any URL Details sub-table on its own. A built-in **MCP server** (100+ tools) lets AI agents like Claude drive crawls live and read every result. Every action a human can take in the desktop is callable from an agent, and **several agents can run in parallel**, each in its own isolated crawl session.
+
+The interface speaks **12 languages** (English, Turkish, Spanish, French, Portuguese, Italian, Dutch, Russian, Chinese, Korean, Hindi, Azerbaijani), follows your system language on first launch, and comes in **dark and light themes**. Everything runs **fully local**: no telemetry, no cloud, MIT-licensed.
 
 <br />
 
@@ -121,7 +123,7 @@ The Playwright Chromium browser is bundled in every installer, so JavaScript ren
 | 📥 **Queue** | p-queue 8 |
 | 🤖 **robots** | robots-parser 3 |
 | 💾 **Storage** | `node:sqlite` + WAL, **zero native deps** |
-| 🌍 **i18n** | i18next, 11 UI languages |
+| 🌍 **i18n** | i18next, 12 UI languages |
 | 📦 **Distribution** | electron-builder 26 |
 
 <br />
@@ -225,6 +227,14 @@ node apps/cli/dist/index.js https://example.com --depth 2 --max 500 --out out.cs
 node apps/cli/dist/index.js --list urls.txt --out out.json     # list mode + JSON
 node apps/cli/dist/index.js https://example.com --adaptive-speed --image-variants   # back off on 429 / Retry-After, crawl srcset variants
 node apps/cli/dist/index.js compare before.seoproject after.seoproject              # diff two crawls
+node apps/cli/dist/index.js https://example.com --auto-compare --webhook https://hooks.slack.com/services/...   # report changes since the last run, post a summary
+
+# Control a running crawl from another terminal, then manage project files
+node apps/cli/dist/index.js pause --db crawl.seoproject
+node apps/cli/dist/index.js resume --db crawl.seoproject      # also continues a crawl that stopped, with its saved settings
+node apps/cli/dist/index.js stop --db crawl.seoproject        # results are kept
+node apps/cli/dist/index.js project list ./audits
+node apps/cli/dist/index.js project info crawl.seoproject
 
 # Yandex Metrica: pull per-page pageviews / visits / users into a project (YANDEX_METRICA_TOKEN in the env)
 node apps/cli/dist/index.js metrica-counters
@@ -272,20 +282,20 @@ FreeCrawl ships an **MCP (Model Context Protocol) server** that exposes the acti
 
 | Group | Tools |
 | :--- | :--- |
-| 📊 **Top-level data** | `get_summary`, `get_overview_counts`, `top_issues`, `query_urls`, `get_url_detail` |
+| 📊 **Top-level data** | `get_summary`, `get_overview_counts`, `top_issues`, `diagnose_crawl`, `query_urls`, `get_url_detail` |
 | 🔬 **Per-URL detail sub-tabs** | `get_url_source` (raw + rendered + screenshot paths), `get_url_inlinks`, `get_url_outlinks`, `get_url_images`, `get_url_headers`, `get_url_duplicates`, `get_url_analytics`, `get_url_cert` |
 | 🧩 **Integration rows** | `query_gsc`, `query_ga4`, `query_metrica`, `query_pagespeed`, `query_crux`, `query_spelling`, `get_url_spelling`, `query_ai`, `query_seo` |
 | 🔎 **Specialised queries** | `query_images`, `query_broken_links`, `list_duplicate_clusters` |
 | 📈 **Reports** | `report_status_code_histogram`, `report_indexability_distribution`, `report_content_kind_distribution`, `report_depth_histogram`, `report_response_time_histogram`, `report_inlinks_histogram`, `report_word_count_histogram`, `report_url_length_histogram`, `report_top_urls_by`, `report_top_anchor_texts`, `report_external_domain_health`, `report_image_weight_per_page`, `report_link_position_breakdown`, `report_pages_per_directory`, `report_word_count_per_directory`, `report_sitemap_orphans`, `report_orphan_cross_source`, `report_analytics_coverage`, `report_server_header_breakdown`, `report_query_string_variants`, `report_sitemap_priority_mismatch`, `report_top_words` |
 | 📤 **Exports & mutations** | `export_csv`, `export_json`, `export_xml`, `export_html_report`, `export_tabular`, `export_bulk`, `export_broken_links`, `export_images`, `sitemap_generate`, `sitemap_validate`, `robots_test`, `robots_validate`, `compare_load`, `crawl_add_url`, `respider_urls`, `remove_urls`, `data_delete_by_domain`, `graph_snapshot`, `get_crawl_path`, `url_rewrite_preview`, `extraction_preview` |
 | 🔐 **Project files** | `project_save_as`, `project_save_encrypted`, `project_open_encrypted` |
-| 🔌 **Integration fetch** | `google_auth_status`, `gsc_list_sites`, `gsc_fetch`, `ga4_list_properties`, `ga4_fetch`, `metrica_list_counters`, `metrica_fetch`, `pagespeed_run`, `crux_run`, `spelling_run`, `ai_run`, `seo_run`, `get_fetch_progress`, `cancel_fetch` |
+| 🔌 **Integration fetch** | `google_auth_status`, `google_account_set`, `gsc_list_sites`, `gsc_fetch`, `ga4_list_properties`, `ga4_fetch`, `metrica_list_counters`, `metrica_fetch`, `pagespeed_run`, `crux_run`, `spelling_run`, `ai_run`, `seo_run`, `get_fetch_progress`, `cancel_fetch` |
 | ⚙ **Config & schedule** | `get_crawl_config`, `set_crawl_config`, `schedule_get`, `schedule_set` |
 | 📁 **Project management** | `list_projects`, `set_project`, `current_project` |
 | 🕷 **Crawl control** (desktop must be open) | `start_crawl`, `stop_crawl`, `pause_crawl`, `resume_crawl`, `clear_crawl`, `get_crawl_progress`, `get_desktop_project` |
 | 🧑‍🤝‍🧑 **Agent sessions** (parallel agents) | `session_create`, `session_close`, `session_save`, `session_list`, `session_status` |
 
-`start_crawl` accepts a `startUrl` plus optional whitelisted overrides (scope, maxDepth, maxUrls, maxConcurrency, maxRps, crawlDelayMs, requestTimeoutMs, respectRobotsTxt, followRedirects, crawlExternal, userAgent, include/excludePatterns). Anything you don't override keeps the desktop user's saved value. Crawls launched via MCP go through the **same code path** as the UI's Start button, so progress shows up in the desktop app live as the agent drives it. Call `clear_crawl` first when you want a fresh BFS after a completed crawl with the same seed URL (otherwise the crawler treats the re-start as a resume and exits because every URL is already in the DB).
+`start_crawl` accepts a `startUrl` (or a `urlList` to fetch exactly those URLs in list mode) plus optional whitelisted overrides (scope, maxDepth, maxUrls, maxConcurrency, maxRps, crawlDelayMs, requestTimeoutMs, respectRobotsTxt, followRedirects, crawlExternal, userAgent, include/excludePatterns). Anything you don't override keeps the desktop user's saved value. Crawls launched via MCP go through the **same code path** as the UI's Start button, so progress shows up in the desktop app live as the agent drives it. Call `clear_crawl` first when you want a fresh BFS after a completed crawl with the same seed URL (otherwise the crawler treats the re-start as a resume and exits because every URL is already in the DB).
 
 **Several agents at once.** Multiple MCP clients can drive one running desktop app safely. Crawl control is a *lease*: `start_crawl` returns a `crawlId` you own, a second start against a busy session fails with `crawl-in-progress` (or, with `onBusy: "queue"`, waits its turn, or `"takeover"` to replace it), and `stop`/`pause`/`resume` refuse to touch a crawl owned by another client unless you pass `force: true`. `clear_crawl` won't wipe the desktop window's project when it has unsaved work. For full isolation, call **`session_create`** to get your own headless session inside the same app, with its own database, crawler and worker pool, so each agent crawls its own project without seeing the others; the MCP read tools automatically repoint to it. `session_create({ mode: "open", projectPath })` reopens a saved `.seoproject` to keep working on it (PageSpeed, spelling, exports, re-crawl), and `session_save` / `session_close({ save: true })` persist it, so the data no longer disappears when the session that produced it ends. Sessions are capped and idle ones are auto-closed (saving first if they have a document).
 
@@ -353,6 +363,7 @@ The server speaks newline-delimited JSON-RPC 2.0, so point any MCP-compatible cl
 > *"Show the 10 URLs with the longest response time in my last crawl."*
 > *"What are the top 5 issue categories with the most affected pages?"*
 > *"List every URL with a missing meta description."*
+> *"The crawl looks wrong. Diagnose it."* (`diagnose_crawl` spots rate limiting, bot protection, timeouts and robots.txt blocks)
 > *"Pause the running crawl, then resume it once I've checked the first 1000 URLs."*
 
 **Pointing at a non-default project:**
@@ -455,6 +466,7 @@ graph LR
   C --> D[desktop]
   C --> E[cli]
   B --> F[mcp-server]
+  C --> F
 ```
 
 <br />
@@ -464,7 +476,7 @@ graph LR
 ## 📈 Status
 
 > [!NOTE]
-> **v1.0.0, the full release.** All 33 analysis tabs, 181 issue checks (each one can be disabled per project), JavaScript rendering (screenshots, LCP candidate, mobile usability), multi-window projects, the link visualiser, every Google integration (Search Console / GA4 / PageSpeed / CrUX) plus Yandex Metrica, bot-protection and soft-404 detection, LanguageTool spelling, AI per-URL prompts, SEO Authority providers, Google Sheets + BigQuery export, HTML and PDF reports, the Screaming Frog-compatible SEO Audit export, scheduled crawls with automatic exports and webhooks, encrypted projects, the MCP server with live crawl control, the standalone Log File Analyzer, dark and light themes, and an interface in 11 languages all ship today.
+> **v1.0.0, the full release.** All 34 analysis tabs, 189 issue checks (each one can be disabled per project), JavaScript rendering (screenshots, LCP candidate, mobile usability), multi-window projects, the link visualiser, every Google integration (Search Console / GA4 / PageSpeed / CrUX) plus Yandex Metrica, bot-protection and soft-404 detection, LanguageTool spelling, AI per-URL prompts, SEO Authority providers, Google Sheets + BigQuery export, HTML and PDF reports, the Screaming Frog-compatible SEO Audit export, scheduled crawls with automatic exports, crawl-to-crawl comparison and Slack / Discord / Teams notifications, encrypted projects, the MCP server with live crawl control, the standalone Log File Analyzer, dark and light themes, and an interface in 12 languages all ship today.
 >
 > Cross-platform installers ship for Windows (setup + portable), macOS (Apple Silicon + Intel), and Linux (`.AppImage` / `.deb` / `.rpm`), with Playwright Chromium bundled so JS rendering works on first launch. The canvas-rendered URL table stays smooth on 25K+ row crawls, streams the first row in about 1 s, and long crawls are tuned for Apple Silicon (see [docs](docs/macos-apple-silicon-performance.md)).
 >

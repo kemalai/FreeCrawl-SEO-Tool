@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { X, Clock, AlertTriangle } from 'lucide-react';
+import { X, Clock, AlertTriangle, Play } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import type { ScheduleAfterCrawl, ScheduleEntry, ScheduleSpec } from '@freecrawl/shared-types';
@@ -24,6 +24,7 @@ interface FormState {
   afterOutputDir: string;
   afterSheets: boolean;
   afterWebhook: boolean;
+  autoCompare: boolean;
 }
 
 const DEFAULT_FORM: FormState = {
@@ -37,6 +38,7 @@ const DEFAULT_FORM: FormState = {
   afterOutputDir: '',
   afterSheets: false,
   afterWebhook: false,
+  autoCompare: false,
 };
 
 function entryToForm(entry: ScheduleEntry | null): FormState {
@@ -53,6 +55,7 @@ function entryToForm(entry: ScheduleEntry | null): FormState {
     afterOutputDir: spec.afterCrawl?.outputDir ?? '',
     afterSheets: spec.afterCrawl?.sheets ?? false,
     afterWebhook: spec.afterCrawl?.webhook ?? false,
+    autoCompare: spec.autoCompare ?? false,
   };
 }
 
@@ -82,6 +85,7 @@ function formToSpec(form: FormState): ScheduleSpec {
       webhook: form.afterWebhook,
     };
   }
+  if (form.autoCompare) out.autoCompare = true;
   return out;
 }
 
@@ -152,6 +156,36 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
       setEntry(result);
       setForm(entryToForm(result));
       setDirty(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runNow() {
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await window.freecrawl.scheduleRunNow();
+      if (result.ok) {
+        setEntry(result.entry);
+        onClose();
+        return;
+      }
+      setError(
+        result.reason === 'busy'
+          ? t('scheduled.runNowBusy', {
+              defaultValue: 'A crawl is already running — wait for it to finish or stop it first.',
+            })
+          : result.reason === 'no-config'
+            ? t('scheduled.runNowNoConfig', {
+                defaultValue: 'Run a crawl manually once first — the schedule reuses its settings.',
+              })
+            : result.reason === 'no-project'
+              ? t('scheduled.runNowNoProject', { defaultValue: 'Open or save a project first.' })
+              : t('scheduled.runNowNoSchedule', { defaultValue: 'Save the schedule first.' }),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -383,6 +417,23 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
               />
               {t('scheduled.webhook', { defaultValue: 'Notify the project webhook with the file list (Settings → Webhook)' })}
             </label>
+            <label className="mt-1 flex items-start gap-2 text-[11px] text-surface-200">
+              <input
+                type="checkbox"
+                checked={form.autoCompare}
+                onChange={(e) => update('autoCompare', e.target.checked)}
+                className="mt-0.5 h-3.5 w-3.5 accent-blue-500"
+              />
+              <span>
+                {t('scheduled.autoCompare', { defaultValue: 'Auto compare with the previous crawl' })}
+                <span className="block text-[10px] text-surface-500">
+                  {t('scheduled.autoCompareHint', {
+                    defaultValue:
+                      'Keeps the previous crawl when this one starts. Changes go to the export folder (crawl-changes.csv), the webhook and File → Compare With Previous Crawl.',
+                  })}
+                </span>
+              </span>
+            </label>
           </div>
 
           <div className="mt-3 rounded border border-surface-800 bg-surface-950/60 px-3 py-2">
@@ -427,6 +478,24 @@ export function ScheduledCrawlDialog({ open, onClose }: Props) {
               className="rounded border border-red-700/60 px-2.5 py-1 text-[11px] text-red-300 hover:bg-red-900/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {t('common.remove', { defaultValue: 'Remove' })}
+            </button>
+          )}
+          {entry && (
+            <button
+              type="button"
+              onClick={runNow}
+              disabled={saving || dirty}
+              title={
+                dirty
+                  ? t('scheduled.runNowSaveFirst', { defaultValue: 'Save your changes first.' })
+                  : t('scheduled.runNowTitle', {
+                      defaultValue: 'Start this scheduled crawl now. The regular schedule is not changed.',
+                    })
+              }
+              className="flex items-center gap-1 rounded border border-surface-700 px-2.5 py-1 text-[11px] text-surface-200 hover:bg-surface-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Play className="h-3 w-3" />
+              {t('scheduled.runNow', { defaultValue: 'Run Now' })}
             </button>
           )}
           <div className="ml-auto flex items-center gap-2">

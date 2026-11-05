@@ -45,6 +45,7 @@ export type TabKey =
   | 'pagination'
   | 'hreflang'
   | 'amp'
+  | 'social'
   | 'structured-data'
   | 'meta-refresh'
   | 'custom-extraction'
@@ -82,6 +83,7 @@ export const TAB_ORDER: { key: TabKey; label: string }[] = [
   { key: 'hreflang', label: 'Hreflang' },
   { key: 'amp', label: 'AMP' },
   { key: 'structured-data', label: 'Structured Data' },
+  { key: 'social', label: 'Social' },
   { key: 'meta-refresh', label: 'Meta Refresh' },
   { key: 'custom-extraction', label: 'Custom Extraction' },
   { key: 'custom-search', label: 'Custom Search' },
@@ -298,12 +300,29 @@ export const TAB_QUICK_FILTERS: Partial<Record<TabKey, TabQuickFilter[]>> = {
     { label: 'Canonical Conflict', category: 'issues:pagination-canonical-conflict' },
   ],
 
+  // ─── Social tab ─────────────────────────────────────────────────────────
+  social: [
+    { label: 'All', category: 'tab:social' },
+    { label: 'OpenGraph Tags Missing', category: 'issues:og-missing' },
+    { label: 'OpenGraph Incomplete', category: 'issues:og-incomplete' },
+    { label: 'OG Image Not 200', category: 'issues:og-image-not-200' },
+    { label: 'OG Image >5MB', category: 'issues:og-image-too-large' },
+    { label: 'OG Image Wrong Aspect Ratio', category: 'issues:og-image-wrong-aspect' },
+    { label: 'Twitter Card Missing', category: 'issues:twitter-missing' },
+    { label: 'Twitter Card Incomplete', category: 'issues:twitter-incomplete' },
+    { label: 'Twitter Image Not 200', category: 'issues:twitter-image-not-200' },
+    { label: 'Twitter Image >5MB', category: 'issues:twitter-image-too-large' },
+    { label: 'Twitter Image Wrong Aspect Ratio', category: 'issues:twitter-image-wrong-aspect' },
+  ],
+
   // ─── Hreflang tab ───────────────────────────────────────────────────────
   hreflang: [
     { label: 'All', category: 'tab:hreflang' },
     { label: 'X-Default Missing', category: 'issues:hreflang-x-default-missing' },
     { label: 'Invalid Code', category: 'issues:hreflang-invalid-code' },
     { label: 'Self-Ref Missing', category: 'issues:hreflang-self-ref-missing' },
+    { label: 'Self Reference Only', category: 'issues:hreflang-self-only' },
+    { label: 'Mismatch With HTML lang', category: 'issues:hreflang-lang-mismatch' },
     { label: 'Reciprocity Missing', category: 'issues:hreflang-reciprocity-missing' },
     { label: 'Target Issues', category: 'issues:hreflang-target-issues' },
     { label: 'Inconsistent Lang', category: 'issues:hreflang-inconsistent-lang' },
@@ -340,6 +359,7 @@ export const TAB_QUICK_FILTERS: Partial<Record<TabKey, TabQuickFilter[]>> = {
     { label: 'Broken Internal', category: 'issues:broken-links-internal' },
     { label: 'Broken External', category: 'issues:broken-links-external' },
     { label: 'Empty Anchor Text', category: 'issues:link-empty-anchor' },
+    { label: 'Empty href', category: 'issues:link-empty-href' },
     { label: 'Anchor Text Too Long (>100)', category: 'issues:anchor-text-too-long' },
     { label: 'Generic Anchor Text', category: 'issues:anchor-text-generic' },
     { label: 'Target=_blank No Noopener', category: 'issues:target-blank-no-noopener' },
@@ -826,6 +846,7 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
   if (cat === 'tab:pagination') return 'pagination';
   if (cat === 'tab:hreflang') return 'hreflang';
   if (cat === 'tab:amp') return 'amp';
+  if (cat === 'tab:social') return 'social';
   if (cat === 'tab:structured-data') return 'structured-data';
   if (cat === 'tab:meta-refresh') return 'meta-refresh';
   if (cat === 'tab:custom-extraction') return 'custom-extraction';
@@ -841,6 +862,7 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
   if (
     cat === 'issues:image-missing-alt' ||
     cat === 'issues:image-empty-alt' ||
+    cat === 'issues:image-missing-title' ||
     cat === 'issues:image-duplicate-alt'
   ) {
     return 'images';
@@ -866,6 +888,7 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
     return 'meta-description';
   }
   if (cat === 'issues:amp-validation-errors') return 'amp';
+  if (cat.startsWith('issues:og-') || cat.startsWith('issues:twitter-')) return 'social';
   if (cat.startsWith('issues:h1-')) return 'h1';
   if (cat === 'issues:heading-skipped-level') return 'h2';
   if (cat.startsWith('issues:canonical-')) return 'canonicals';
@@ -958,7 +981,8 @@ function tabForCategory(cat: UrlCategory): TabKey | null {
     // drill-down showed unrelated broken links instead of the pages the
     // count referred to. The Links tab filters the URL table by category,
     // which uses the correct `issues:link-empty-anchor` predicate.
-    cat === 'issues:link-empty-anchor'
+    cat === 'issues:link-empty-anchor' ||
+    cat === 'issues:link-empty-href'
   ) {
     return 'links';
   }
@@ -989,6 +1013,8 @@ function categoryForTab(tab: TabKey): UrlCategory {
       return 'tab:hreflang';
     case 'amp':
       return 'tab:amp';
+    case 'social':
+      return 'tab:social';
     case 'structured-data':
       return 'tab:structured-data';
     case 'meta-refresh':

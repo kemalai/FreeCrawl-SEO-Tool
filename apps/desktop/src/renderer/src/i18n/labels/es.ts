@@ -819,4 +819,22 @@ export const ES_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': 'Auditoría de catálogo: extrae precio, moneda, stock, valoración, SKU y marca del JSON-LD, marca el texto "agotado" y omite las facetas de query string para que los filtros no disparen el rastreo.',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': 'Auditoría editorial: sigue hreflang y sitemaps de noticias, extrae autor y fechas de publicación / modificación y comprueba la reciprocidad hreflang — para sitios donde la frescura y la segmentación por idioma determinan el ranking.',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': 'Renderiza cada página en Chromium y ejecuta la auditoría WCAG en página (contraste, contorno de foco, objetivos táctiles, tamaño de fuente) más las comprobaciones de usabilidad móvil. Lento a propósito — baja concurrencia.',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "Falta el atributo title",
+  "Self Reference Only": "Solo autorreferencia",
+  "Mismatch With HTML lang": "No coincide con el lang del HTML",
+  "Empty href": "href vacío",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph incompleto",
+  "Twitter Card Incomplete": "Twitter Card incompleta",
+  "OG Image Not 200": "Imagen OG no devuelve 200",
+  "Twitter Image Not 200": "Imagen de Twitter no devuelve 200",
+  "og:image Width": "Ancho de og:image",
+  "og:image Height": "Alto de og:image",
+  "twitter:image Width": "Ancho de twitter:image",
+  "twitter:image Height": "Alto de twitter:image",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "Rastreabilidad del enlace",
+  "Crawlable": "Rastreable",
+  "Uncrawlable": "No rastreable",
 };

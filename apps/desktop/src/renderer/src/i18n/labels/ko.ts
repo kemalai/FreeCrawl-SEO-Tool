@@ -807,4 +807,22 @@ export const KO_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': '상품 카탈로그 감사: JSON-LD에서 가격, 통화, 재고, 평점, SKU, 브랜드를 추출하고 "품절" 문구를 표시하며, 필터가 크롤을 폭증시키지 않도록 쿼리 스트링 패싯을 건너뜁니다.',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': '퍼블리셔 감사: hreflang과 뉴스 사이트맵을 따라가고 작성자와 게시 / 수정 날짜를 추출하며 hreflang 상호 참조를 확인합니다 — 최신성과 언어 타기팅이 순위를 좌우하는 사이트용.',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': '모든 페이지를 Chromium에서 렌더링하고 페이지 내 WCAG 감사(대비, 포커스 외곽선, 탭 대상, 글꼴 크기)와 모바일 사용성 검사를 실행합니다. 의도적으로 느림 — 낮은 동시성.',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "title 속성 없음",
+  "Self Reference Only": "자기 참조만 있음",
+  "Mismatch With HTML lang": "HTML lang과 불일치",
+  "Empty href": "빈 href",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph 불완전",
+  "Twitter Card Incomplete": "Twitter Card 불완전",
+  "OG Image Not 200": "OG 이미지가 200 아님",
+  "Twitter Image Not 200": "Twitter 이미지가 200 아님",
+  "og:image Width": "og:image 너비",
+  "og:image Height": "og:image 높이",
+  "twitter:image Width": "twitter:image 너비",
+  "twitter:image Height": "twitter:image 높이",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "링크 크롤링 가능 여부",
+  "Crawlable": "크롤링 가능",
+  "Uncrawlable": "크롤링 불가",
 };

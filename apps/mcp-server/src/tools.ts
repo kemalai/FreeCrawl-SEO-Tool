@@ -7,8 +7,11 @@
  */
 
 import type { ProjectDb } from '@freecrawl/db';
+import { diagnoseCrawl, htmlToMarkdown } from '@freecrawl/core';
 import type {
   AiProvider,
+  CrawlConfig,
+  CrawlProgress,
   SeoProvider,
   UrlCategory,
 } from '@freecrawl/shared-types';
@@ -297,13 +300,23 @@ export function buildTools(): Tool[] {
       requiresDb: false,
       name: 'start_crawl',
       description:
-        'Start a crawl in the running FreeCrawl desktop app. The desktop app must be open — this drives the SAME crawler the UI uses, so progress shows up in the app as it runs. `startUrl` is required unless the user has already run a crawl in this session (the last-used start URL is reused). Other config overrides are optional and layered on top of the desktop\'s saved settings. Returns a `crawlId` you own — `stop_crawl`/`pause_crawl` refuse to touch a crawl owned by a different client unless forced. If a crawl is ALREADY running, this fails with `crawl-in-progress` by default; set `onBusy` to "queue" to wait your turn or "takeover" to replace it. NOTE: when the previous crawl with the same start URL already completed, the crawler treats a re-start as a resume and exits immediately; call `clear_crawl` first to force a fresh BFS from the seed.',
+        'Start a crawl in the running FreeCrawl desktop app. The desktop app must be open — this drives the SAME crawler the UI uses, so progress shows up in the app as it runs. Three modes: spider (default — follow links from `startUrl`), list (`mode: "list"` + `urlList` — fetch exactly those URLs once, no link following; `startUrl` is not needed) and sitemap (`startUrl` is a sitemap URL whose entries are crawled). Passing `urlList` alone implies list mode. In spider/sitemap mode `startUrl` is required unless the user has already run a crawl in this session (the last-used start URL is reused). Other config overrides are optional and layered on top of the desktop\'s saved settings. Returns a `crawlId` you own — `stop_crawl`/`pause_crawl` refuse to touch a crawl owned by a different client unless forced. If a crawl is ALREADY running, this fails with `crawl-in-progress` by default; set `onBusy` to "queue" to wait your turn or "takeover" to replace it. NOTE: when the previous crawl with the same start URL already completed, the crawler treats a re-start as a resume and exits immediately; call `clear_crawl` first to force a fresh BFS from the seed.',
       inputSchema: {
         type: 'object',
         properties: {
           startUrl: {
             type: 'string',
-            description: 'Seed URL to crawl. Required unless the desktop already has a saved last-used crawl config.',
+            description: 'Seed URL to crawl (spider mode) or the sitemap URL (sitemap mode). Required in those modes unless the desktop already has a saved last-used crawl config. Ignored in list mode.',
+          },
+          mode: {
+            type: 'string',
+            enum: ['spider', 'list', 'sitemap'],
+            description: 'Crawl mode. Omitted: "list" when `urlList` is given; otherwise the saved mode, except that a `startUrl` never runs in list mode.',
+          },
+          urlList: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'List-mode URLs, one per entry (absolute http/https). Blank entries and lines starting with # are ignored; duplicates are collapsed. Replaces the saved list. `maxUrls` still caps how many are fetched.',
           },
           projectPath: {
             type: 'string',
@@ -346,6 +359,13 @@ export function buildTools(): Tool[] {
       },
       handler: async (args) => {
         const startUrl = typeof args.startUrl === 'string' ? args.startUrl : undefined;
+        const mode =
+          args.mode === 'spider' || args.mode === 'list' || args.mode === 'sitemap'
+            ? args.mode
+            : undefined;
+        const urlList = Array.isArray(args.urlList)
+          ? args.urlList.filter((u): u is string => typeof u === 'string')
+          : undefined;
         const projectPath =
           typeof args.projectPath === 'string' ? args.projectPath : undefined;
         const onBusy =
@@ -360,6 +380,8 @@ export function buildTools(): Tool[] {
             : undefined;
         return bridgeRequest('POST', '/v1/crawl/start', {
           startUrl,
+          mode,
+          urlList,
           projectPath,
           onBusy,
           queueTimeoutMs,
@@ -461,6 +483,31 @@ export function buildTools(): Tool[] {
     },
 
     {
+      name: 'diagnose_crawl',
+      description:
+        'Debug a crawl: checks the project for rate limiting (429/503), a host that stopped responding, bot protection, 403 walls, timeouts and connection failures, server errors, the URL / depth limits being hit, a JavaScript-rendered site crawled without rendering, robots.txt blocks, crawl traps and query-string explosions. Each finding has `evidence`, a plain-language `suggestion`, and — when the fix is a setting — `configChanges` you can merge onto `get_crawl_config` and send with `set_crawl_config` (Adaptive speed can also be switched for the running crawl from the desktop). Uses the live crawl progress and config when the desktop app is running; works on the project data alone otherwise.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: async (_args, db) => {
+        let progress: CrawlProgress | null = null;
+        let config: CrawlConfig | null = null;
+        let desktop = true;
+        try {
+          const r = await bridgeRequest<{ progress: CrawlProgress | null }>('GET', '/v1/crawl/progress');
+          progress = r.progress ?? null;
+          config = await bridgeRequest<CrawlConfig>('POST', '/v1/action/get-crawl-config', {});
+        } catch {
+          desktop = false;
+        }
+        const stats = db.crawlHealthStats(config?.startUrl ?? null);
+        return {
+          ...diagnoseCrawl({ stats, progress, config }),
+          usedLiveCrawlState: desktop,
+          stats,
+        };
+      },
+    },
+
+    {
       name: 'top_issues',
       description:
         'Ranked list of non-empty issue categories from get_overview_counts, sorted by count descending. Quick way to ask "what are the biggest problems with this crawl?".',
@@ -512,6 +559,12 @@ export function buildTools(): Tool[] {
         properties: {
           id: { type: 'integer', description: 'URL id from query_urls (preferred).' },
           url: { type: 'string', description: 'Exact URL string.' },
+          format: {
+            type: 'string',
+            enum: ['html', 'markdown'],
+            description:
+              '"html" (default) returns the stored bodies as-is. "markdown" returns `markdown` instead: the page\'s main content converted to Markdown (rendered DOM when stored, else the raw body), links and images made absolute — far fewer tokens than the HTML.',
+          },
         },
       },
       handler: (args, db) => {
@@ -519,6 +572,15 @@ export function buildTools(): Tool[] {
         const source = db.getUrlSource(id);
         if (!source) {
           throw new Error(`No stored body for URL id ${id} — body capture may be disabled or this URL was not HTML.`);
+        }
+        if (args.format === 'markdown') {
+          const html = source.renderedBody || source.body;
+          const url = db.getUrlById(id)?.url ?? '';
+          return {
+            url,
+            fromRenderedDom: Boolean(source.renderedBody),
+            markdown: htmlToMarkdown(html, url),
+          };
         }
         return source;
       },

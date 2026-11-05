@@ -812,4 +812,22 @@ export const HI_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': 'उत्पाद कैटलॉग ऑडिट: JSON-LD से कीमत, मुद्रा, स्टॉक, रेटिंग, SKU और ब्रांड निकालता है, "स्टॉक में नहीं" टेक्स्ट को चिह्नित करता है, और क्वेरी स्ट्रिंग फ़ेसेट छोड़ देता है ताकि फ़िल्टर क्रॉल को न बढ़ाएँ।',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': 'प्रकाशक ऑडिट: hreflang और न्यूज़ साइटमैप का अनुसरण करता है, लेखक और प्रकाशन / संशोधन तिथियाँ निकालता है, और hreflang पारस्परिकता जाँचता है — ऐसी साइटों के लिए जहाँ ताज़गी और भाषा लक्ष्यीकरण रैंकिंग तय करते हैं।',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': 'हर पेज को Chromium में रेंडर करता है और इन-पेज WCAG ऑडिट (कंट्रास्ट, फ़ोकस आउटलाइन, टैप टारगेट, फ़ॉन्ट आकार) तथा मोबाइल उपयोगिता जाँचें चलाता है। जानबूझकर धीमा — कम समवर्तीता।',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "title एट्रिब्यूट नहीं",
+  "Self Reference Only": "केवल स्वयं का संदर्भ",
+  "Mismatch With HTML lang": "HTML lang से मेल नहीं",
+  "Empty href": "खाली href",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph अधूरा",
+  "Twitter Card Incomplete": "Twitter Card अधूरा",
+  "OG Image Not 200": "OG छवि 200 नहीं",
+  "Twitter Image Not 200": "Twitter छवि 200 नहीं",
+  "og:image Width": "og:image चौड़ाई",
+  "og:image Height": "og:image ऊँचाई",
+  "twitter:image Width": "twitter:image चौड़ाई",
+  "twitter:image Height": "twitter:image ऊँचाई",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "लिंक क्रॉल योग्यता",
+  "Crawlable": "क्रॉल योग्य",
+  "Uncrawlable": "क्रॉल योग्य नहीं",
 };

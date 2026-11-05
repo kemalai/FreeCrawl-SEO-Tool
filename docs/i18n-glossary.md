@@ -1,6 +1,6 @@
 # FreeCrawl SEO — UI Translation Glossary
 
-The interface ships in 11 languages. At roughly 2,400 strings per locale, the
+The interface ships in 12 languages. At roughly 2,400 strings per locale, the
 biggest quality risk is not mistranslation but **inconsistency** — "crawl"
 rendered three different ways inside one language makes the product read as
 machine-translated. This file is the reference every locale is written
@@ -90,6 +90,31 @@ noun and the second the verb.
 | bot | bot | bot | bot | bot | бот | bot | bot | 机器人 | 봇 | बॉट |
 | threat / suspicious request | solicitud sospechosa | solicitação suspeita | requête suspecte | richiesta sospetta | подозрительный запрос | şüpheli istek | şübhəli sorğu | 可疑请求 | 의심스러운 요청 | संदिग्ध अनुरोध |
 
+### Dutch (nl)
+
+Added after the table above was laid out, so its column lives here.
+
+| English | nl |
+|---|---|
+| crawl (noun / verb) | crawl / crawlen |
+| crawler | crawler |
+| link · inlinks · outlinks | link · inkomende links · uitgaande links |
+| indexability · indexable | indexeerbaarheid · indexeerbaar |
+| orphan (page) | weespagina |
+| redirect · redirect chain | doorverwijzing · doorverwijzingsketen |
+| response code · status | responscode · status |
+| depth · word count | diepte · aantal woorden |
+| duplicate · near-duplicate | duplicaat · bijna-duplicaat |
+| render / rendering | renderen / rendering |
+| issue · warning · error · finding | probleem · waarschuwing · fout · bevinding |
+| export (verb) | exporteren |
+| overview · summary | overzicht · samenvatting |
+| throttle / rate limit · queue | snelheidslimiet · wachtrij |
+| project · settings · report | project · instellingen · rapport |
+| column · row · tab | kolom · rij · tabblad |
+| extraction rule | extractieregel |
+| suspicious request | verdacht verzoek |
+
 ---
 
 ## 3. Style rules per locale
@@ -115,6 +140,10 @@ noun and the second the verb.
 - **ko** — use `-기` verbal nouns for buttons (`내보내기`, `저장하기` → prefer
   the shorter `저장`). Formal `-습니다` register in prose. One plural
   category only (`_other`).
+- **nl** — informal *je* throughout (never *u*), infinitive button labels
+  (`Exporteren`, `Opslaan`). Compounds are one word; hyphenate after an
+  acronym or English part (`URL-lijst`, `HTML-pagina`). Two plural
+  categories (`_one` / `_other`).
 - **hi** — Devanagari. Keep widely-used English loanwords in Latin script when
   that is what practitioners actually write (`URL`, `SEO`, `क्रॉल`). Two
   plural categories (`_one` / `_other`).
@@ -129,7 +158,7 @@ rather than from memory — several of these are counter-intuitive:
 
 | Locale | Categories | Notes |
 |---|---|---|
-| en, tr, az | `_one`, `_other` | 0 → `other` |
+| en, tr, az, nl | `_one`, `_other` | 0 → `other` |
 | hi | `_one`, `_other` | **0 → `one`** ("0 पृष्ठ", singular) |
 | es, it | `_one`, `_many`, `_other` | 0 → `other`; `_many` fires at 10⁶ |
 | fr, pt-BR | `_one`, `_many`, `_other` | **0 → `one`**; `_many` at 10⁶ |

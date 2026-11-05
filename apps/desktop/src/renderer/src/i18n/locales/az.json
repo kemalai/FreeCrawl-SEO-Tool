@@ -10,7 +10,10 @@
     "checkOff": "Bağlı",
     "cookiesOffHint": "Taramanın kuki siyasəti \"Hamısını rədd et\" olduğu üçün kuki yoxlamaları bağlıdır. Set-Cookie başlıqlarını təhlil etmək üçün Parametrlər → Kukilər bölməsində \"Hamısını qəbul et\" və ya \"Üçüncü tərəfləri blokla\" seçin.",
     "notComputed": "Hesablanmayıb",
-    "notComputedHint": "Daxil olan keçidlər hələ hesablanmadığı üçün yetim səhifələri saymaq mümkün deyil. Onlar \"Daxil olan keçidləri yenidən hesabla\" aktiv olan taramanın sonunda hesablanır."
+    "notComputedHint": "Daxil olan keçidlər hələ hesablanmadığı üçün yetim səhifələri saymaq mümkün deyil. Onlar \"Daxil olan keçidləri yenidən hesabla\" aktiv olan taramanın sonunda hesablanır.",
+    "searchPlaceholder": "Yoxlamalarda axtar…",
+    "searchClear": "Axtarışı təmizlə",
+    "searchNoResults": "Uyğun yoxlama yoxdur."
   },
   "integrations": {
     "intro": "Xarici xidmətləri öz giriş məlumatlarınızla qoşun. API açarları və sirlər əməliyyat sisteminizin təhlükəsiz anbarı ilə şifrələnərək saxlanılır və heç vaxt bu maşından kənara çıxmır.",
@@ -187,7 +190,11 @@
     "capacityTitle": "Hazırkı URL xərci ilə qalan sistem yaddaşına daha nə qədər URL sığacağının təxmini. Hesablama: boş yaddaş / URL xərci. Bunu yuxarı hədd kimi qəbul edin — davamlı ötürücülük adətən əvvəlcə prosessorla məhdudlaşır.",
     "lagResponsiveTitle": "Əsas sap cavabdehdir — giriş dərhal hiss olunur",
     "lagContendedTitle": "Əsas sapda çəkişmə var — klikləyəndə yüngül ləngimə",
-    "lagBusyTitle": "Əsas sap məşğuldur — IPC yığılıb; ən ehtimallı səbəb yan panelin SQL-i və ya cədvəl hissələrinin yüklənməsinin tarayıcı ilə rəqabət aparmasıdır"
+    "lagBusyTitle": "Əsas sap məşğuldur — IPC yığılıb; ən ehtimallı səbəb yan panelin SQL-i və ya cədvəl hissələrinin yüklənməsinin tarayıcı ilə rəqabət aparmasıdır",
+    "throttled": "Yavaşladılıb",
+    "throttledTitle": "Sayt 429 / 503 qaytardığı üçün uyğunlaşan sürət taramanı yavaşlatdı. Cavablar düzələndə yenidən sürətlənir.",
+    "pausedHostDown": "Fasilə — sayt cavab vermir",
+    "pausedHostDownTitle": "Sayt cavab verməyi dayandırdı, ona görə tarama növbənin qalanını uğursuz saymaq əvəzinə özü fasilə verdi. Saytı yoxlayın, sonra Davam et düyməsini basın."
   },
   "menu": {
     "file": "Fayl",
@@ -631,7 +638,9 @@
       "worstCaseDelay": "Alınmayan URL üçün ən pis gecikmə ≈ ilkGecikmə × (2 ^ cəhd − 1) = {{value}}",
       "tip1": "Sağlam saytda sürətli ilk keçid üçün <bold>Sürətli</bold> hazır seçimini sınayın (Parametrlər → Hazır seçimlər) — paralellik 40, RPS 40, yenidən cəhd yoxdur.",
       "tip2": "Etibarsız mənbələr və ya yavaş API-lar üçün <bold>Ətraflı</bold> seçimini sınayın — paralellik 10, 3 cəhd, 30 san gözləmə.",
-      "tip3": "Paralellik × HTTP keep-alive = sabit vəziyyətdəki bağlantı sayı. Serverlərin çoxu 20–40-ı rahat daşıyır; korporativ proksi və WAF-lar adətən 8–10-da məhdudlaşdırır."
+      "tip3": "Paralellik × HTTP keep-alive = sabit vəziyyətdəki bağlantı sayı. Serverlərin çoxu 20–40-ı rahat daşıyır; korporativ proksi və WAF-lar adətən 8–10-da məhdudlaşdırır.",
+      "pauseOnHostUnresponsive": "Host cavab verməyi dayandırsa taramanı fasilə ver",
+      "connectionFailureRetries": "Bağlantı xətası təkrar cəhdləri (cavab yoxdur: vaxt aşımı / sıfırlama / rədd)"
     },
     "requests": {
       "intro": "Hər sorğu ilə göndərilən HTTP başlıqları.",
@@ -644,7 +653,13 @@
     "filters": {
       "intro": "URL-lərin icazə/qadağa siyahısı. Şablonlar tam URL üzərində yoxlanan JavaScript reqular ifadələridir.",
       "includePatterns": "Daxil etmə şablonları (regex, hər sətirdə bir — boş = hamısına icazə)",
-      "excludePatterns": "Kənarlaşdırma şablonları (regex, hər sətirdə bir)"
+      "excludePatterns": "Kənarlaşdırma şablonları (regex, hər sətirdə bir)",
+      "linkPositionsHeading": "Bu hissələrdəki keçidləri izləmə",
+      "linkPositionNavigation": "Naviqasiya (<nav>)",
+      "linkPositionHeader": "Yuxarı hissə (<header>)",
+      "linkPositionFooter": "Alt hissə (<footer>)",
+      "linkPositionSidebar": "Yan panel (<aside>)",
+      "excludeLinkSelectors": "Bu elementlərin içindəki keçidləri izləmə (CSS seçiciləri, hər sətirdə bir)"
     },
     "customSearch": {
       "intro1": "Məzmununda bu ifadələrdən hər hansı biri olan səhifələri işarələ. Hər sətir üçün iki üsul:",
@@ -736,8 +751,17 @@
     "webhook": {
       "intro1": "Hər tarama bitdikdə bir dəfə işə düşən vebhuk. Tək bir",
       "intro2": "sorğusu JSON xülasəsi ilə (başlanğıc URL, müddət, ümumi URL sayı, status paylanması, sıfırdan fərqli bütün problem sayları). Boş buraxmaq onu söndürür.",
-      "outro": "Slack-in daxil olan vebhukları (JSON quruluşu Slack-in onu sadə mətn kimi göstərməsi üçün kifayət qədər zəngindir), Zapier-in «Catch Hook» tətikləri, Discord vebhukları və öz HTTP nöqtələriniz ilə uyğundur.",
-      "url": "Vebhuk URL-i"
+      "url": "Vebhuk URL-i",
+      "format": "Mesaj formatı",
+      "formatAuto": "Avtomatik (URL-dən təyin et)",
+      "formatJson": "JSON (Zapier, Make, n8n, öz endpoint-iniz)",
+      "outroFormats": "Slack, Discord və Microsoft Teams oxunaqlı mesaj alır: status kodlarının bölgüsü, əsas problemlər və Auto Compare açıq planlaşdırılmış taramalarda əvvəlki taramadan bəri dəyişikliklər. Avtomatik seçim Slack daxil olan webhook-larını, Discord webhook-larını və Teams konnektor URL-lərini tanıyır; Teams Workflows URL-i üçün Microsoft Teams seçin. Digər ünvanlar JSON xülasəsini alır.",
+      "secretNote": "Webhook URL-i parol kimidir — ona sahib olan hər kəs kanalınıza yaza bilər. FreeCrawl onu şifrəli saxlayır və ixrac olunan ayarlara daxil etmir.",
+      "test": "Test mesajı göndər",
+      "testing": "Göndərilir…",
+      "testOk": "{{format}} kimi çatdırıldı (HTTP {{status}}).",
+      "testInvalid": "Əvvəlcə http(s) URL-i daxil edin.",
+      "testFailed": "Çatdırılmadı ({{status}}): {{detail}}"
     },
     "auth": {
       "intro": "Yalnız taranan sayta (başlanğıc URL-in mənşəyinə və ya Siyahı rejimində siyahıdakı URL-lərə) göndərilən HTTP autentifikasiyası — heç vaxt xarici keçidlərə, CDN-lərə və ya başqa hostlara. Basic/Digest arxasındaki sınaq mühitləri və ya Bearer token tələb edən API-lar üçün faydalıdır. HTML giriş forması arxasındaki saytlar üçün aşağıdaki forma girişindən istifadə edin.",
@@ -837,7 +861,14 @@
       "disableAll": "Hamısını söndür",
       "summary": "Yanılı: {{on}} / {{total}}",
       "groupSummary": "{{on}} / {{total}} yanılı",
-      "noMatch": "Filtrinizə uyğun yoxlama yoxdur."
+      "noMatch": "Filtrinizə uyğun yoxlama yoxdur.",
+      "severityIntro": "Yoxlamanın ciddiyyət dərəcəsini dəyişərək onu Kritik / Xəbərdarlıq / Məlumat qrupları, hesabat sırası və yan panel işarəsi arasında köçürün — məsələn, yoxlama bu saytda daha çox və ya daha az önəmlidirsə.",
+      "severityCritical": "Kritik",
+      "severityWarning": "Xəbərdarlıq",
+      "severityInfo": "Məlumat",
+      "severityLabel": "Ciddiyyət",
+      "severityChanged": "Standart: {{tier}}",
+      "resetSeverities": "Ciddiyyəti sıfırla"
     },
     "advanced": {
       "intro": "Aşağı səviyyəli hədlər və keçid izləmə açarları. Susmaya görə dəyərlər adi SEO auditləri üçün tənzimlənib — səbəbini bildiyiniz halda dəyişin.",
@@ -953,7 +984,15 @@
     "urlHeader": "URL",
     "beforeHeader": "Əvvəl",
     "afterHeader": "Sonra",
-    "noDiffs": "Bu kateqoriyada fərq yoxdur."
+    "noDiffs": "Bu kateqoriyada fərq yoxdur.",
+    "previousTitle": "Əvvəlki taramadan bəri dəyişikliklər",
+    "previousCrawl": "Əvvəlki tarama ({{date}})",
+    "thisCrawl": "Bu tarama",
+    "noPrevious": "Hələ müqayisə üçün əvvəlki tarama yoxdur. Planlaşdırılmış taramada \"Əvvəlki taramayla avtomatik müqayisə et\" seçimini aktivləşdirin və ya CLI-dən --auto-compare ilə tarayın.",
+    "issuesChanged": "Dəyişən problemlər",
+    "issueHeader": "Problem",
+    "changeHeader": "Dəyişiklik",
+    "noIssueChanges": "Heç bir problem sayı dəyişmədi."
   },
   "scheduled": {
     "title": "Cədvəlli tarama",
@@ -995,7 +1034,16 @@
     "browse": "Bax…",
     "outputDirHint": "Qovluq seçin — hər icra orada vaxt möhürlü alt qovluğa yazır.",
     "sheets": "Bütün URL-ləri yeni Google Sheets cədvəlinə də göndər",
-    "webhook": "Layihə webhook-una fayl siyahısını bildir (Ayarlar → Webhook)"
+    "webhook": "Layihə webhook-una fayl siyahısını bildir (Ayarlar → Webhook)",
+    "runNow": "İndi işə sal",
+    "runNowTitle": "Bu cədvəlli taramanı indi başladır. Müntəzəm cədvəl dəyişmir.",
+    "runNowSaveFirst": "Əvvəlcə dəyişiklikləri saxlayın.",
+    "runNowBusy": "Artıq bir tarama işləyir — bitməsini gözləyin və ya əvvəlcə dayandırın.",
+    "runNowNoConfig": "Əvvəlcə bir taramanı bir dəfə əl ilə işə salın — cədvəl onun parametrlərindən istifadə edir.",
+    "runNowNoProject": "Əvvəlcə layihə açın və ya saxlayın.",
+    "runNowNoSchedule": "Əvvəlcə cədvəli saxlayın.",
+    "autoCompare": "Əvvəlki taramayla avtomatik müqayisə et",
+    "autoCompareHint": "Bu tarama başlayanda əvvəlki taramanı saxlayır. Dəyişikliklər ixrac qovluğuna (crawl-changes.csv), webhook-a və Fayl → Əvvəlki taramayla müqayisə et bölməsinə gedir."
   },
   "serp": {
     "noTitle": "(başlıq yoxdur)",
@@ -1414,7 +1462,9 @@
     "loadingSource": "Mənbə yüklənir…",
     "noBody": "Bu URL üçün saxlanılmış HTML məzmunu yoxdur.",
     "noBodyHint1": "Mənbəyə bax yalnız bu parametr yandırılmış halda taranan HTML səhifələri üçün saxlanılır:",
-    "noBodyHint2": "."
+    "noBodyHint2": ".",
+    "markdownLoading": "Markdown-a çevrilir…",
+    "markdownFailed": "Bu səhifəni Markdown-a çevirmək mümkün olmadı."
   },
   "viewRendered": {
     "noBody": "Bu URL üçün saxlanılmış render edilmiş DOM yoxdur.",
@@ -1524,7 +1574,9 @@
     "imagesUnit": "şəkil",
     "loaded": "{{n}} yükləndi",
     "row": "Sətir",
-    "noImages": "Şəkil yoxdur"
+    "noImages": "Şəkil yoxdur",
+    "missingTitleOnly": "Yalnız title-ı olmayanlar",
+    "emptyMissingTitle": "title atributu olmayan şəkil yoxdur."
   },
   "serpTab": {
     "title": "SERP öncədən baxışı",
@@ -1952,7 +2004,10 @@
     "summary": "{{shown}} səhifə · {{tested}}-də cavab var · {{errors}} xəta · {{selected}} seçilib",
     "running": "İşləyir: {{url}}",
     "emptyNoData": "Hələ heç bir daxili HTML səhifəsi taranmayıb — əvvəlcə bir tarama işə salın, sonra səhifələri seçib İşə sal düyməsini basın.",
-    "emptyNoMatch": "Hazırkı süzgəcə uyğun səhifə yoxdur."
+    "emptyNoMatch": "Hazırkı süzgəcə uyğun səhifə yoxdur.",
+    "modelDefault": "Model (susmaya görə: {{model}})",
+    "modelMissing": "\"{{model}}\" {{provider}} təchizatçısının cari model siyahısında yoxdur.",
+    "pickModel": "Aktual model seçin…"
   },
   "seoTab": {
     "title": "SEO nüfuzu",
@@ -2118,7 +2173,10 @@
       "note": "Aktiv taramanın məlumatı Fərqli saxla edilənə qədər tətbiqin istifadəçi məlumat qovluğunda qalır — yuxarıdaki yol yalnız Fərqli saxla-nın haradan başlayacağını təyin edir. Onu dəyişmək mövcud layihə fayllarını yerindən tərpətmir.",
       "autoSaveTitle": "Toplu yadda saxlama",
       "autoSaveLabel": "Layihəni hər N taranan URL-də avtomatik yadda saxla — 0 = söndürülüb",
-      "autoSaveHint": "Tarama gedərkən açıq .seoproject faylı bu qədər əlavə URL tarandıqca yenidən yazılır; çökmə və ya elektrik kəsilməsi ən çox bir partiyaya başa gəlir. Yalnız layihə fayla yadda saxlanıldıqdan sonra tətbiq olunur; minimum {{min}}. Hər yadda saxlama tam snapshot-dır, böyük saytlarda dəyəri minlərlə saxlayın."
+      "autoSaveHint": "Tarama gedərkən açıq .seoproject faylı bu qədər əlavə URL tarandıqca yenidən yazılır; çökmə və ya elektrik kəsilməsi ən çox bir partiyaya başa gəlir. Yalnız layihə fayla yadda saxlanıldıqdan sonra tətbiq olunur; minimum {{min}}. Hər yadda saxlama tam snapshot-dır, böyük saytlarda dəyəri minlərlə saxlayın.",
+      "fileNamesTitle": "İxrac fayl adları",
+      "fileNamesReset": "Sıfırla",
+      "fileNamesPreview": "Nümunə:"
     },
     "agents": {
       "title": "Agent sessiyaları (MCP)",
@@ -2390,5 +2448,41 @@
     "setupResidential": "Rezident proksilər üçün əvvəlcə paneldə siyahı yaradın (ölkə, rotasiya) və onun göstərdiyi qoşulma məlumatlarından istifadə edin.",
     "setupJsRender": "JavaScript renderi açıq olanda HTTP formasından istifadə edin: brauzer şifrə tələb edən SOCKS5 proksidən istifadə edə bilmir.",
     "hide": "Gizlət"
+  },
+  "rateLimitNotice": {
+    "title": "Sayt taramanı məhdudlaşdırır",
+    "body_one": "Server {{count}} sorğuya 429 (Too Many Requests) və ya 503 (Service Unavailable) ilə cavab verdi. Uyğunlaşan sürət sönülüdür, ona görə tarama sabit tempini saxlayır və daha çox səhifə uğursuz ola bilər.",
+    "body_other": "Server {{count}} sorğuya 429 (Too Many Requests) və ya 503 (Service Unavailable) ilə cavab verdi. Uyğunlaşan sürət sönülüdür, ona görə tarama sabit tempini saxlayır və daha çox səhifə uğursuz ola bilər.",
+    "benefit": "Uyğunlaşan sürəti açsanız, tarama sürəti avtomatik tənzimlənir: server məhdudlaşdırdıqca yavaşlayır, cavablar düzələndə yenidən sürətlənir. Saxladıqda bu taramaya da tətbiq olunur.",
+    "where": "Harada açılır",
+    "path": "Parametrlər → Sürət → Uyğunlaşan sürət",
+    "dontShow": "Bunu bir daha göstərmə",
+    "notNow": "İndi yox",
+    "openSettings": "Sürət parametrlərini aç"
+  },
+  "aiSettings": {
+    "title": "Model və prompt",
+    "defaultModel": "Susmaya görə model",
+    "checkModels": "Modelləri yoxla",
+    "checking": "Yoxlanılır…",
+    "checkNeedsCredentials": "Əvvəlcə yuxarıdakı giriş məlumatlarını saxlayın.",
+    "listFailed": "Model siyahısı yüklənmədi: {{detail}}",
+    "modelOk": "{{model}} əlçatandır.",
+    "modelMissing": "{{model}} {{provider}} təchizatçısının cari model siyahısında yoxdur.",
+    "pickModel": "Aktual model seçin…",
+    "defaultModelHint": "Süni intellekt bölməsi və ya Köməkçi modeli boş buraxdıqda istifadə olunur. Daxili susmaya görə model ({{model}}) üçün boş buraxın.",
+    "systemPrompt": "Sistem promptu",
+    "systemPromptPlaceholder": "Sən texniki SEO mütəxəssisisən. Qısa və sadə cümlələrlə cavab ver.",
+    "systemPromptHint": "Bu təchizatçıya göndərilən hər Süni intellekt bölməsi promptu ilə birlikdə göndərilir: rol, ton, dil, məhdudiyyətlər. Köməkçi öz təlimatlarını saxlayır.",
+    "timeout": "Sorğunun vaxt limiti (saniyə)",
+    "timeoutHint": "Yerli modelin cavabını nə qədər gözləmək lazımdır (10–3600). Sadə avadanlıqda böyük modellərə daha çox vaxt lazımdır. Boş = Süni intellekt bölməsi üçün 120, Köməkçi üçün 180.",
+    "usageTitle": "Token istifadəsi",
+    "usageRequests": "Sorğular: {{value}}",
+    "usageTokensIn": "Giriş tokenləri: {{value}}",
+    "usageTokensOut": "Çıxış tokenləri: {{value}}",
+    "usageSince": "{{date}} tarixindən",
+    "usageReset": "Sıfırla",
+    "usageNone": "Hələ qeydə alınmış sorğu yoxdur.",
+    "usageHint": "Hər cavabın bildirdiyi token sayından bu kompüterdə hesablanır (Süni intellekt bölməsi və Köməkçi). Dəqiq rəqəm təchizatçınızın hesabıdır."
   }
 }

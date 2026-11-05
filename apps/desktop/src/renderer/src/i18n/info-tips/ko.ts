@@ -310,14 +310,14 @@ export const KO_INFO_TIPS: Record<string, string> = {
     'CMS가 같은 페이지를 대소문자가 섞인 형태(/Foo와 /foo)로 제공하면 켬.',
   ['On if your site canonicalises to non-www but emits www links somewhere.']:
     '사이트가 www 없는 형태로 표준화하지만 어딘가에서 www 링크를 내보내면 켬.',
-  ["On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."]:
-    '네트워크 오류 및 408/425/429/5xx 응답 시 포기하기 전에 최대 N번 더 재시도합니다. 각 재시도는 URL의 응답 시간 예산에 포함됩니다.',
+  ["On 408/425/429/5xx responses, retry up to N more times before giving up. Requests that get no response at all use Connection Failure Retries below. Each retry counts toward the URL's response time budget."]:
+    "408/425/429/5xx 응답이면 포기하기 전에 최대 N번 더 재시도합니다. 응답이 전혀 없는 요청은 아래의 연결 실패 재시도를 사용합니다. 각 재시도는 URL의 응답 시간 예산에 포함됩니다.",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     '모바일 UX를 감사하거나 PageSpeed 스타일 모바일 미리보기를 캡처할 때 켬.',
   ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
     "'Key: Value' 형식으로 한 줄에 헤더 하나. HTTP 인증과 마찬가지로 크롤링 중인 사이트에만 전송되며, 외부 링크나 다른 호스트로는 절대 전송되지 않습니다. 인증 토큰이나 사용자 지정 라우팅 힌트에 유용합니다. 키가 겹치면 사용자 값이 기본값을 덮어씁니다.",
-  ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
-    '한 줄에 사이트맵 URL 하나. 시작 URL에서 링크를 따라가는 것에 더해 크롤러가 이 사이트맵들을 가져와 나열된 모든 페이지를 추가 시드로 큐에 넣습니다 — 더 빠르고 완전한 발견, 그리고 사이트맵이 비표준 경로에 있어도 신뢰할 수 있는 고아 페이지 감지. 비활성화하려면 비워 두세요.',
+  ["One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "한 줄에 사이트맵 URL 하나. 시작 URL에서 링크를 따라가는 것에 더해 크롤러가 이 사이트맵들을 가져와 나열된 모든 페이지를 추가 시드로 큐에 넣습니다 — 더 빠르고 완전한 발견, 그리고 사이트맵이 비표준 경로에 있어도 신뢰할 수 있는 고아 페이지 감지. 비활성화하려면 비워 두세요. /sitemap.xml 같은 상대 경로는 시작 URL을 기준으로 해석됩니다.",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
     '한 줄에 URL 하나. 각각 정확히 한 번만 가져오며 아웃링크는 따라가지 않습니다. #으로 시작하는 주석은 무시됩니다.',
   ['OS scheduler hint applied at crawl start. Lowering priority lets the rest of the machine stay responsive during heavy crawls. May require elevated privileges on some platforms.']:
@@ -595,9 +595,9 @@ export const KO_INFO_TIPS: Record<string, string> = {
     '별도 URL(m-dot) 모바일 버전: <link rel="alternate" media="only screen and (max-width: …)">. 반응형 사이트(대부분)에서는 null입니다 — 여기 값이 있는데 되돌아오는 상호 canonical이 없으면 전형적인 깨진 m-dot 설정입니다.',
   ['Crawl on only when the site really does serve a separate mobile host.']:
     '사이트가 실제로 별도의 모바일 호스트를 제공할 때만 크롤링 켬.',
-  ['Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", and href="#" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter.']:
-    '검색 엔진이 따라갈 수 없는 링크: href 없이 onclick만 있는 <a>, href="javascript:…", 핸들러에 연결된 href="#" 자리표시자. 저장 전용 — 크롤링할 수 없는 링크는 정의상 절대 가져오지 않습니다. JS 전용 탐색 문제 필터에 데이터를 제공합니다.',
-  ['On — it is a count, so it costs nothing.']: '켬 — 카운트일 뿐이라 비용이 없습니다.',
+  ["Links a search engine cannot follow: <a> with no href but an onclick, href=\"javascript:…\", href=\"#\" placeholders wired to a handler, an href on a non-link element such as <span> or <div>, and non-link elements whose onclick navigates. Store-only — an uncrawlable link is by definition never fetched. Each one appears under Outlinks as Uncrawlable; the internal ones drive the JS-Only Navigation issue filter."]:
+    "검색 엔진이 따라갈 수 없는 링크: href 없이 onclick만 있는 <a>, href=\"javascript:…\", 핸들러에 연결된 href=\"#\" 자리표시자, <span>이나 <div>처럼 링크가 아닌 요소의 href, onclick으로 페이지를 이동시키는 링크가 아닌 요소. 저장 전용 — 크롤링할 수 없는 링크는 정의상 절대 가져오지 않습니다. 각 링크는 아웃바운드 링크에 크롤링 불가로 표시되며, 내부 링크는 JS만으로 된 내비게이션 문제 필터에 데이터를 제공합니다.",
+  ["On — recording them costs almost nothing."]: "켜기 — 기록하는 데 비용이 거의 들지 않습니다.",
   ['With a Subfolder-scoped crawl, links pointing outside the start folder are fetched once so their status code is known, then stopped — they are checked, not crawled through. Off leaves them undiscovered entirely.']:
     '하위 폴더 범위 크롤링에서 시작 폴더 밖을 가리키는 링크는 상태 코드를 알기 위해 한 번 가져온 뒤 멈춥니다 — 검사만 하고 크롤링하지 않습니다. 끄면 전혀 발견하지 않습니다.',
   ['On — knowing a link out of /blog/ is a 404 costs one request.']:
@@ -634,8 +634,8 @@ export const KO_INFO_TIPS: Record<string, string> = {
   ['Reads Sitemap: directives from /robots.txt plus the conventional /sitemap.xml fallbacks at crawl start. Cheap I/O, and it powers every sitemap issue filter.']:
     '크롤링 시작 시 /robots.txt의 Sitemap: 지시문과 관례적인 /sitemap.xml 대체 경로를 읽습니다. 저렴한 I/O이며 모든 사이트맵 문제 필터에 데이터를 제공합니다.',
   ['On (default).']: '켬(기본값).',
-  ['Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions.']:
-    '명시적 사이트맵 URL, 한 줄에 하나. 그 항목은 항상 기록되고 크롤링 시드로 큐에 들어갑니다 — robots.txt가 언급하지 않는 곳에 사이트맵이 있을 때 사용하세요.',
+  ["Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "명시적 사이트맵 URL, 한 줄에 하나. 그 항목은 항상 기록되고 크롤링 시드로 큐에 들어갑니다 — robots.txt가 언급하지 않는 곳에 사이트맵이 있을 때 사용하세요. /sitemap.xml 같은 상대 경로는 시작 URL을 기준으로 해석됩니다.",
   ['Treat the concurrency and RPS above as a ceiling and let the target server set the real pace. On a 429/503 (or a Retry-After header) the crawler pauses for the penalty window and steps the rate + concurrency down; after a sustained run of clean responses it grows them back toward the ceiling. Off = hold the configured rate no matter how the server responds.']:
     '위의 동시성과 RPS를 상한으로 취급하고 대상 서버가 실제 속도를 정하게 합니다. 429/503(또는 Retry-After 헤더)이 오면 크롤러는 페널티 기간 동안 일시 정지하고 속도 + 동시성을 낮추며, 깨끗한 응답이 지속되면 다시 상한을 향해 올립니다. 끔 = 서버가 어떻게 응답하든 설정된 속도를 유지합니다.',
   ['Turn on for sites behind Cloudflare / a WAF that returns 429s; leave off for your own infrastructure where the fixed rate is safe.']:
@@ -670,4 +670,50 @@ export const KO_INFO_TIPS: Record<string, string> = {
     "이 URL의 유사 중복 클러스터 안 다른 페이지와의 최고 추정 텍스트 유사도로, 본문 텍스트 기준입니다. 유사 중복이 아닌 페이지는 비어 있습니다.",
   ["90 = recommended (Screaming Frog's default); 80 catches looser rewrites; 0 turns this pass off."]:
     "90 = 권장(Screaming Frog 기본값), 80은 더 느슨한 재작성까지 잡음, 0은 이 단계를 끔.",
+  ["The page's `og:title` — the headline Facebook, LinkedIn and other OpenGraph readers show on a share card. One of the four required OpenGraph properties."]:
+    "페이지의 `og:title` — Facebook, LinkedIn 등 OpenGraph를 읽는 서비스가 공유 카드에 표시하는 제목입니다. 필수 OpenGraph 속성 네 가지 중 하나입니다.",
+  ["The `og:description` text shown under the title on a share card."]:
+    "공유 카드에서 제목 아래에 표시되는 `og:description` 텍스트입니다.",
+  ["The `og:image` URL as written in the page. The share card uses this picture; it should be absolute and return 200. One of the four required OpenGraph properties."]:
+    "페이지에 작성된 그대로의 `og:image` URL입니다. 공유 카드는 이 이미지를 사용하며, 절대 URL이어야 하고 200을 반환해야 합니다. 필수 OpenGraph 속성 네 가지 중 하나입니다.",
+  ["Pixel width of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "소셜 이미지 검사로 읽은 og:image의 픽셀 너비입니다. 0 = 이미지를 읽을 수 없음, 비어 있음 = 검사하지 않음.",
+  ["Pixel height of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "소셜 이미지 검사로 읽은 og:image의 픽셀 높이입니다. 0 = 이미지를 읽을 수 없음, 비어 있음 = 검사하지 않음.",
+  ["The `og:type` of the page, such as website or article. One of the four required OpenGraph properties."]:
+    "website, article 같은 페이지의 `og:type`입니다. 필수 OpenGraph 속성 네 가지 중 하나입니다.",
+  ["The `og:url` — the address share counts and the card link are attached to. One of the four required OpenGraph properties."]:
+    "`og:url` — 공유 횟수와 카드 링크가 연결되는 주소입니다. 필수 OpenGraph 속성 네 가지 중 하나입니다.",
+  ["The `og:site_name` that some platforms show above the share card title."]:
+    "일부 플랫폼이 공유 카드 제목 위에 표시하는 `og:site_name`입니다.",
+  ["The `og:locale` — the language and territory of the markup."]:
+    "`og:locale` — 마크업의 언어와 지역입니다.",
+  ["The X (Twitter) card type. Without it X shows no card, even when other `twitter:` tags are present."]:
+    "X(Twitter) 카드 유형입니다. 이것이 없으면 다른 `twitter:` 태그가 있어도 X는 카드를 표시하지 않습니다.",
+  ["The X card title. X falls back to og:title when it is missing."]:
+    "X 카드 제목입니다. 없으면 X는 og:title을 대신 사용합니다.",
+  ["The X card description. X falls back to og:description when it is missing."]:
+    "X 카드 설명입니다. 없으면 X는 og:description을 대신 사용합니다.",
+  ["The X card image URL. X falls back to og:image when it is missing."]:
+    "X 카드 이미지 URL입니다. 없으면 X는 og:image를 대신 사용합니다.",
+  ["Pixel width of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "소셜 이미지 검사로 읽은 twitter:image의 픽셀 너비입니다. 0 = 이미지를 읽을 수 없음, 비어 있음 = 검사하지 않음.",
+  ["Pixel height of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "소셜 이미지 검사로 읽은 twitter:image의 픽셀 높이입니다. 0 = 이미지를 읽을 수 없음, 비어 있음 = 검사하지 않음.",
+  ["When a request gets no response at all — a timeout, a reset or a refused connection — retry it up to N more times before recording it as failed. Kept apart from the HTTP retries above, so a flaky network and a struggling server can be tuned separately."]:
+    "요청에 응답이 전혀 없으면(시간 초과, 연결 재설정 또는 거부) 실패로 기록하기 전에 최대 N번 더 재시도합니다. 위의 HTTP 재시도와 분리되어 있어 불안정한 네트워크와 과부하 서버를 따로 조정할 수 있습니다.",
+  ["2 default; 0 to record connection failures immediately; 4 on an unstable connection."]:
+    "기본값 2, 연결 실패를 바로 기록하려면 0, 불안정한 연결에서는 4.",
+  ["When a site that was answering stops responding — 10 requests in a row get no answer even after their connection retries — the crawl pauses instead of marking the rest of the queue as failed. Fix the problem or wait for the server to come back, then press Resume to continue where it stopped."]:
+    "응답하던 사이트가 응답을 멈추면(연결 재시도 후에도 연속 10개 요청이 응답 없음) 대기열의 나머지를 실패로 표시하는 대신 크롤이 일시 중지됩니다. 문제를 해결하거나 서버가 돌아오기를 기다린 뒤 재개를 눌러 멈춘 곳부터 계속하세요.",
+  ["On by default. Turn it off when any result is better than a paused run, for example a crawl nobody is watching."]:
+    "기본적으로 켜져 있습니다. 일시 중지된 실행보다 어떤 결과든 나은 경우(예: 아무도 지켜보지 않는 크롤)에는 끄세요.",
+  ["Links that sit in these parts of a page are recorded (they still count as inlinks and show in the link reports) but the crawler does not follow them. Useful for mega-menus and footers that link to thousands of pages. A page that is also linked from the body is still crawled."]:
+    "페이지의 이 영역에 있는 링크는 기록되지만(여전히 인바운드 링크로 집계되고 링크 보고서에 표시됨) 크롤러가 따라가지 않습니다. 수천 개 페이지로 연결되는 메가 메뉴와 푸터에 유용합니다. 본문에서도 링크된 페이지는 계속 크롤링됩니다.",
+  ["Footer + Sidebar on a shop whose footer lists every category"]:
+    "푸터에 모든 카테고리가 나열된 쇼핑몰이라면 푸터 + 사이드바",
+  ["Links inside any element matching one of these CSS selectors are recorded but not followed — the way to keep faceted filters or a mega-menu from flooding the crawl without excluding the pages themselves. An invalid selector is ignored."]:
+    "이 CSS 선택자 중 하나와 일치하는 요소 안의 링크는 기록되지만 따라가지 않습니다. 페이지 자체를 제외하지 않고도 패싯 필터나 메가 메뉴가 크롤을 뒤덮지 않게 하는 방법입니다. 잘못된 선택자는 무시됩니다.",
+  ["The name every export's save dialog suggests. Tokens are filled in when you export: {report} = what is exported, {date} / {time} / {datetime} = now, {domain} = the crawled site, {project} = the project name. Characters that are not allowed in file names are replaced with a dash."]:
+    "각 내보내기의 저장 대화 상자가 제안하는 이름입니다. 내보낼 때 토큰이 채워집니다: {report} = 내보내는 항목, {date} / {time} / {datetime} = 현재 시각, {domain} = 크롤한 사이트, {project} = 프로젝트 이름. 파일 이름에 쓸 수 없는 문자는 하이픈으로 바뀝니다.",
 };

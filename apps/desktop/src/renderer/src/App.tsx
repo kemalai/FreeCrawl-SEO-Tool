@@ -12,6 +12,7 @@ import { ReportsDialog } from './components/ReportsDialog.js';
 import { SettingsDialog } from './components/SettingsDialog.js';
 import { CompareDialog } from './components/CompareDialog.js';
 import { ScheduledCrawlDialog } from './components/ScheduledCrawlDialog.js';
+import { RateLimitNotice } from './components/RateLimitNotice.js';
 import { ProjectsDialog } from './components/ProjectsDialog.js';
 import { PasswordPromptDialog } from './components/PasswordPromptDialog.js';
 import { ProjectOpenDialog } from './components/ProjectOpenDialog.js';
@@ -60,6 +61,7 @@ export function App() {
   const [exportAsOpen, setExportAsOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
+  const [compareMode, setCompareMode] = useState<'file' | 'previous'>('file');
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [dropFlash, setDropFlash] = useState<string | null>(null);
@@ -388,6 +390,9 @@ export function App() {
         case 'export-bulk':
           void window.freecrawl.exportBulk();
           break;
+        case 'export-markdown':
+          void window.freecrawl.exportMarkdown();
+          break;
         case 'export-sheets': {
           const cat = useAppStore.getState().activeCategory;
           void window.freecrawl
@@ -479,6 +484,11 @@ export function App() {
           void window.freecrawl.exportSeoAudit();
           break;
         case 'compare-with-project':
+          setCompareMode('file');
+          setCompareOpen(true);
+          break;
+        case 'compare-with-previous':
+          setCompareMode('previous');
           setCompareOpen(true);
           break;
         case 'manage-projects':
@@ -645,8 +655,9 @@ export function App() {
       />
       <ReportsDialog open={reportsOpen} onClose={() => setReportsOpen(false)} />
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <CompareDialog open={compareOpen} onClose={() => setCompareOpen(false)} />
+      <CompareDialog open={compareOpen} mode={compareMode} onClose={() => setCompareOpen(false)} />
       <ScheduledCrawlDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)} />
+      <RateLimitNotice />
       <ProjectsDialog
         open={projectsOpen}
         onClose={() => setProjectsOpen(false)}

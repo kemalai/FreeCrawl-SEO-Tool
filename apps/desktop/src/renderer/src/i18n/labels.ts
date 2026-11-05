@@ -31,6 +31,7 @@ import { KO_LABELS } from './labels/ko.js';
 import { PT_BR_LABELS } from './labels/pt-BR.js';
 import { RU_LABELS } from './labels/ru.js';
 import { ES_LABELS } from './labels/es.js';
+import { NL_LABELS } from './labels/nl.js';
 
 const LABELS: Partial<Record<UiLanguage, Record<string, string>>> = {
   tr: TR_LABELS,
@@ -43,6 +44,7 @@ const LABELS: Partial<Record<UiLanguage, Record<string, string>>> = {
   'pt-BR': PT_BR_LABELS,
   ru: RU_LABELS,
   es: ES_LABELS,
+  nl: NL_LABELS,
 };
 
 /**

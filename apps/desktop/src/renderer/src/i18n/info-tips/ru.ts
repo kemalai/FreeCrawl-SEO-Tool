@@ -316,14 +316,14 @@ export const RU_INFO_TIPS: Record<string, string> = {
     'Вкл., если ваша CMS отдаёт одну и ту же страницу в разном регистре (/Foo и /foo).',
   ['On if your site canonicalises to non-www but emits www links somewhere.']:
     'Вкл., если сайт канонизируется на версию без www, но где-то выдаёт ссылки с www.',
-  ["On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."]:
-    'При сетевых ошибках и ответах 408/425/429/5xx повторять до N дополнительных раз, прежде чем сдаться. Каждый повтор засчитывается в бюджет времени ответа URL.',
+  ["On 408/425/429/5xx responses, retry up to N more times before giving up. Requests that get no response at all use Connection Failure Retries below. Each retry counts toward the URL's response time budget."]:
+    "При ответах 408/425/429/5xx повторяет запрос до N раз, прежде чем сдаться. Запросы, на которые вообще нет ответа, используют настройку «Повторы при сбое соединения» ниже. Каждая попытка входит в бюджет времени ответа URL.",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'Вкл. при аудите мобильного UX или для мобильных превью в стиле PageSpeed.',
   ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
     "Один заголовок на строку в формате 'Ключ: Значение'. Отправляется только на обходимый сайт, как и HTTP-аутентификация, — никогда на внешние ссылки или другие хосты. Полезно для токенов аутентификации или подсказок маршрутизации. Значения пользователя перекрывают значения по умолчанию при совпадении ключей.",
-  ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
-    'Один URL sitemap на строку. Помимо перехода по ссылкам со стартового URL, краулер загружает эти sitemap и ставит каждую перечисленную страницу в очередь как дополнительное зерно — более быстрое/полное обнаружение и надёжный поиск сирот, даже если sitemap лежит по нестандартному пути. Оставьте пустым, чтобы отключить.',
+  ["One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "Один URL sitemap на строку. Помимо перехода по ссылкам со стартового URL, краулер загружает эти sitemap и ставит каждую перечисленную страницу в очередь как дополнительное зерно — более быстрое/полное обнаружение и надёжный поиск сирот, даже если sitemap лежит по нестандартному пути. Оставьте пустым, чтобы отключить. Относительные пути вроде /sitemap.xml разрешаются относительно начального URL.",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
     'Один URL на строку. Каждый загружается ровно один раз; по исходящим ссылкам переход НЕ выполняется. Комментарии, начинающиеся с #, игнорируются.',
   ['OS scheduler hint applied at crawl start. Lowering priority lets the rest of the machine stay responsive during heavy crawls. May require elevated privileges on some platforms.']:
@@ -604,9 +604,9 @@ export const RU_INFO_TIPS: Record<string, string> = {
     'Мобильная версия на отдельном URL (m-dot): <link rel="alternate" media="only screen and (max-width: …)">. Null на адаптивных сайтах, а таких большинство — значение здесь без ответного canonical назад — классическая сломанная m-dot-настройка.',
   ['Crawl on only when the site really does serve a separate mobile host.']:
     '«Сканировать» вкл. только когда сайт действительно отдаёт отдельный мобильный хост.',
-  ['Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", and href="#" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter.']:
-    'Ссылки, по которым поисковик не может перейти: <a> без href, но с onclick, href="javascript:…" и заглушки href="#" с обработчиком. Только «Сохранять» — несканируемая ссылка по определению никогда не загружается. Питает фильтр проблем «Навигация только через JS».',
-  ['On — it is a count, so it costs nothing.']: 'Вкл. — это счётчик, поэтому он ничего не стоит.',
+  ["Links a search engine cannot follow: <a> with no href but an onclick, href=\"javascript:…\", href=\"#\" placeholders wired to a handler, an href on a non-link element such as <span> or <div>, and non-link elements whose onclick navigates. Store-only — an uncrawlable link is by definition never fetched. Each one appears under Outlinks as Uncrawlable; the internal ones drive the JS-Only Navigation issue filter."]:
+    "Ссылки, по которым поисковик не может перейти: <a> без href, но с onclick, href=\"javascript:…\", заглушки href=\"#\" с обработчиком, href на элементе, который не является ссылкой, например <span> или <div>, и такие элементы, чей onclick выполняет переход. Только «Сохранять» — несканируемая ссылка по определению никогда не загружается. Каждая отображается в «Исходящие ссылки» как «Недоступна для обхода»; внутренние питают фильтр проблем «Навигация только через JS».",
+  ["On — recording them costs almost nothing."]: "Включено — запись почти ничего не стоит.",
   ['With a Subfolder-scoped crawl, links pointing outside the start folder are fetched once so their status code is known, then stopped — they are checked, not crawled through. Off leaves them undiscovered entirely.']:
     'При сканировании в области «Подпапка» ссылки, ведущие за пределы стартовой папки, загружаются один раз ради кода состояния и на этом останавливаются — они проверяются, а не сканируются насквозь. Выкл. оставляет их вовсе необнаруженными.',
   ['On — knowing a link out of /blog/ is a 404 costs one request.']:
@@ -645,8 +645,8 @@ export const RU_INFO_TIPS: Record<string, string> = {
   ['Reads Sitemap: directives from /robots.txt plus the conventional /sitemap.xml fallbacks at crawl start. Cheap I/O, and it powers every sitemap issue filter.']:
     'Читает директивы Sitemap: из /robots.txt плюс общепринятые запасные /sitemap.xml при старте сканирования. Дешёвый ввод-вывод, питает все фильтры проблем sitemap.',
   ['On (default).']: 'Вкл. (по умолчанию).',
-  ['Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions.']:
-    'Явные URL sitemap, по одному на строку. Их записи всегда и сохраняются, и ставятся в очередь как зёрна сканирования — используйте, когда sitemap лежит там, где robots.txt её никогда не упоминает.',
+  ["Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "Явные URL sitemap, по одному на строку. Их записи всегда и сохраняются, и ставятся в очередь как зёрна сканирования — используйте, когда sitemap лежит там, где robots.txt её никогда не упоминает. Относительные пути вроде /sitemap.xml разрешаются относительно начального URL.",
   ['Treat the concurrency and RPS above as a ceiling and let the target server set the real pace. On a 429/503 (or a Retry-After header) the crawler pauses for the penalty window and steps the rate + concurrency down; after a sustained run of clean responses it grows them back toward the ceiling. Off = hold the configured rate no matter how the server responds.']:
     'Считает параллельность и RPS выше потолком и позволяет целевому серверу задавать реальный темп. При 429/503 (или заголовке Retry-After) краулер выдерживает штрафное окно и понижает частоту + параллельность; после устойчивой серии чистых ответов возвращает их к потолку. Выкл. = держать настроенную частоту, как бы сервер ни отвечал.',
   ['Turn on for sites behind Cloudflare / a WAF that returns 429s; leave off for your own infrastructure where the fixed rate is safe.']:
@@ -681,4 +681,50 @@ export const RU_INFO_TIPS: Record<string, string> = {
     "Наибольшее расчётное сходство текста с другой страницей из группы почти дубликатов этого URL, по основному тексту. Пусто для страниц, не являющихся почти дубликатами.",
   ["90 = recommended (Screaming Frog's default); 80 catches looser rewrites; 0 turns this pass off."]:
     "90 = рекомендуется (по умолчанию в Screaming Frog); 80 находит более свободные переписывания; 0 отключает этот шаг.",
+  ["The page's `og:title` — the headline Facebook, LinkedIn and other OpenGraph readers show on a share card. One of the four required OpenGraph properties."]:
+    "`og:title` страницы — заголовок, который Facebook, LinkedIn и другие читатели OpenGraph показывают в карточке при публикации. Одно из четырёх обязательных свойств OpenGraph.",
+  ["The `og:description` text shown under the title on a share card."]:
+    "Текст `og:description`, который показывается под заголовком в карточке публикации.",
+  ["The `og:image` URL as written in the page. The share card uses this picture; it should be absolute and return 200. One of the four required OpenGraph properties."]:
+    "URL `og:image` в том виде, в каком он записан на странице. Карточка публикации использует это изображение; адрес должен быть абсолютным и отвечать 200. Одно из четырёх обязательных свойств OpenGraph.",
+  ["Pixel width of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Ширина og:image в пикселях по данным проверки изображений для соцсетей. 0 — изображение не удалось прочитать; пусто — не проверялось.",
+  ["Pixel height of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Высота og:image в пикселях по данным проверки изображений для соцсетей. 0 — изображение не удалось прочитать; пусто — не проверялось.",
+  ["The `og:type` of the page, such as website or article. One of the four required OpenGraph properties."]:
+    "`og:type` страницы, например website или article. Одно из четырёх обязательных свойств OpenGraph.",
+  ["The `og:url` — the address share counts and the card link are attached to. One of the four required OpenGraph properties."]:
+    "`og:url` — адрес, к которому привязаны счётчики публикаций и ссылка карточки. Одно из четырёх обязательных свойств OpenGraph.",
+  ["The `og:site_name` that some platforms show above the share card title."]:
+    "`og:site_name`, который некоторые платформы показывают над заголовком карточки.",
+  ["The `og:locale` — the language and territory of the markup."]:
+    "`og:locale` — язык и регион разметки.",
+  ["The X (Twitter) card type. Without it X shows no card, even when other `twitter:` tags are present."]:
+    "Тип карточки X (Twitter). Без него X не показывает карточку, даже если другие теги `twitter:` есть.",
+  ["The X card title. X falls back to og:title when it is missing."]:
+    "Заголовок карточки X. Если его нет, X берёт og:title.",
+  ["The X card description. X falls back to og:description when it is missing."]:
+    "Описание карточки X. Если его нет, X берёт og:description.",
+  ["The X card image URL. X falls back to og:image when it is missing."]:
+    "URL изображения карточки X. Если его нет, X берёт og:image.",
+  ["Pixel width of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Ширина twitter:image в пикселях по данным проверки изображений для соцсетей. 0 — изображение не удалось прочитать; пусто — не проверялось.",
+  ["Pixel height of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Высота twitter:image в пикселях по данным проверки изображений для соцсетей. 0 — изображение не удалось прочитать; пусто — не проверялось.",
+  ["When a request gets no response at all — a timeout, a reset or a refused connection — retry it up to N more times before recording it as failed. Kept apart from the HTTP retries above, so a flaky network and a struggling server can be tuned separately."]:
+    "Если на запрос нет никакого ответа — тайм-аут, сброс или отказ в соединении, — он повторяется до N раз, прежде чем будет записан как неудачный. Отделено от HTTP-повторов выше, чтобы нестабильную сеть и перегруженный сервер можно было настраивать по отдельности.",
+  ["2 default; 0 to record connection failures immediately; 4 on an unstable connection."]:
+    "По умолчанию 2; 0 — сразу записывать сбои соединения; 4 — при нестабильном соединении.",
+  ["When a site that was answering stops responding — 10 requests in a row get no answer even after their connection retries — the crawl pauses instead of marking the rest of the queue as failed. Fix the problem or wait for the server to come back, then press Resume to continue where it stopped."]:
+    "Если сайт, который отвечал, перестаёт отвечать — 10 запросов подряд остаются без ответа даже после повторов соединения, — обход приостанавливается, а не помечает остаток очереди как неудачный. Устраните проблему или дождитесь возвращения сервера, затем нажмите «Продолжить», чтобы продолжить с того же места.",
+  ["On by default. Turn it off when any result is better than a paused run, for example a crawl nobody is watching."]:
+    "Включено по умолчанию. Выключите, если любой результат лучше приостановленного обхода, — например, когда за обходом никто не следит.",
+  ["Links that sit in these parts of a page are recorded (they still count as inlinks and show in the link reports) but the crawler does not follow them. Useful for mega-menus and footers that link to thousands of pages. A page that is also linked from the body is still crawled."]:
+    "Ссылки в этих частях страницы записываются (они по-прежнему считаются входящими ссылками и видны в отчётах по ссылкам), но краулер по ним не переходит. Полезно для мегаменю и подвалов, ссылающихся на тысячи страниц. Страница, на которую есть ссылка и из основного текста, всё равно обходится.",
+  ["Footer + Sidebar on a shop whose footer lists every category"]:
+    "Подвал + Боковая панель для магазина, в подвале которого перечислены все категории",
+  ["Links inside any element matching one of these CSS selectors are recorded but not followed — the way to keep faceted filters or a mega-menu from flooding the crawl without excluding the pages themselves. An invalid selector is ignored."]:
+    "Ссылки внутри любого элемента, подходящего под один из этих CSS-селекторов, записываются, но по ним не переходят — так фасетные фильтры или мегаменю не захлёстывают обход, а сами страницы не исключаются. Недопустимый селектор игнорируется.",
+  ["The name every export's save dialog suggests. Tokens are filled in when you export: {report} = what is exported, {date} / {time} / {datetime} = now, {domain} = the crawled site, {project} = the project name. Characters that are not allowed in file names are replaced with a dash."]:
+    "Имя, которое предлагает окно сохранения каждого экспорта. Токены подставляются при экспорте: {report} — что экспортируется, {date} / {time} / {datetime} — текущий момент, {domain} — сканируемый сайт, {project} — имя проекта. Символы, недопустимые в именах файлов, заменяются дефисом.",
 };

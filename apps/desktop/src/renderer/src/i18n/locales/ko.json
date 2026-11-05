@@ -10,7 +10,10 @@
     "checkOff": "꺼짐",
     "cookiesOffHint": "크롤링의 쿠키 정책이 \"모두 거부\"이므로 쿠키 검사가 꺼져 있습니다. Set-Cookie 헤더를 분석하려면 설정 → 쿠키에서 \"모두 허용\" 또는 \"서드파티 차단\"을 선택하세요.",
     "notComputed": "계산 안 됨",
-    "notComputedHint": "인바운드 링크가 아직 계산되지 않아 고립 페이지를 셀 수 없습니다. \"인바운드 링크 다시 계산\"이 켜진 크롤이 끝날 때 계산됩니다."
+    "notComputedHint": "인바운드 링크가 아직 계산되지 않아 고립 페이지를 셀 수 없습니다. \"인바운드 링크 다시 계산\"이 켜진 크롤이 끝날 때 계산됩니다.",
+    "searchPlaceholder": "검사 항목 검색…",
+    "searchClear": "검색 지우기",
+    "searchNoResults": "일치하는 검사 항목이 없습니다."
   },
   "integrations": {
     "intro": "자신의 자격 증명으로 외부 서비스를 연결하십시오. API 키와 비밀 값은 운영체제의 보안 저장소를 통해 암호화되어 저장되며 이 컴퓨터를 벗어나지 않습니다.",
@@ -185,7 +188,11 @@
     "capacityTitle": "현재 URL당 비용을 기준으로, 남은 시스템 메모리에 들어갈 수 있는 추가 URL 수의 추정치입니다. 계산식: 여유 메모리 / URL당 비용. 상한선으로만 보십시오 — 지속 처리량은 보통 CPU에서 먼저 막힙니다.",
     "lagResponsiveTitle": "메인 스레드가 반응이 좋습니다 — 입력이 즉시 반영되는 느낌입니다",
     "lagContendedTitle": "메인 스레드에 경합이 있습니다 — 클릭할 때 약간 끊깁니다",
-    "lagBusyTitle": "메인 스레드가 바쁩니다 — IPC가 밀려 있습니다. 사이드바 SQL이나 테이블 청크 로딩이 크롤러와 경합 중일 가능성이 가장 큽니다"
+    "lagBusyTitle": "메인 스레드가 바쁩니다 — IPC가 밀려 있습니다. 사이드바 SQL이나 테이블 청크 로딩이 크롤러와 경합 중일 가능성이 가장 큽니다",
+    "throttled": "감속됨",
+    "throttledTitle": "사이트가 429 / 503으로 응답해 적응형 속도가 크롤을 늦췄습니다. 응답이 정상으로 돌아오면 다시 빨라집니다.",
+    "pausedHostDown": "일시 중지됨 — 사이트 응답 없음",
+    "pausedHostDownTitle": "사이트가 응답을 멈춰 대기열의 나머지를 실패로 표시하는 대신 크롤이 스스로 일시 중지되었습니다. 사이트를 확인한 뒤 재개를 누르세요."
   },
   "menu": {
     "file": "파일",
@@ -611,7 +618,9 @@
       "worstCaseDelay": "실패한 URL 하나의 최악 지연 ≈ 최초지연 × (2 ^ 재시도횟수 − 1) = {{value}}",
       "tip1": "정상적인 사이트를 빠르게 한 번 훑으려면 <bold>빠름</bold> 프리셋(설정 → 프리셋)을 사용해 보십시오 — 동시 실행 40, RPS 40, 재시도 없음.",
       "tip2": "불안정한 원본이나 느린 API에는 <bold>철저</bold>를 사용해 보십시오 — 동시 실행 10, 재시도 3회, 제한 시간 30초.",
-      "tip3": "동시 실행 수 × HTTP keep-alive = 정상 상태의 연결 수입니다. 대부분의 서버는 20–40을 무리 없이 감당하며, 기업용 프록시나 WAF는 흔히 8–10으로 제한합니다."
+      "tip3": "동시 실행 수 × HTTP keep-alive = 정상 상태의 연결 수입니다. 대부분의 서버는 20–40을 무리 없이 감당하며, 기업용 프록시나 WAF는 흔히 8–10으로 제한합니다.",
+      "pauseOnHostUnresponsive": "호스트가 응답하지 않으면 크롤 일시 중지",
+      "connectionFailureRetries": "연결 실패 재시도(응답 없음: 시간 초과 / 재설정 / 거부)"
     },
     "requests": {
       "intro": "모든 요청과 함께 보내는 HTTP 헤더입니다.",
@@ -624,7 +633,13 @@
     "filters": {
       "intro": "URL 허용/차단 목록입니다. 패턴은 전체 URL을 대상으로 검사하는 JavaScript 정규식입니다.",
       "includePatterns": "포함 패턴(정규식, 한 줄에 하나씩 — 비우면 전체 허용)",
-      "excludePatterns": "제외 패턴(정규식, 한 줄에 하나씩)"
+      "excludePatterns": "제외 패턴(정규식, 한 줄에 하나씩)",
+      "linkPositionsHeading": "다음 영역의 링크는 따라가지 않음",
+      "linkPositionNavigation": "내비게이션(<nav>)",
+      "linkPositionHeader": "헤더(<header>)",
+      "linkPositionFooter": "푸터(<footer>)",
+      "linkPositionSidebar": "사이드바(<aside>)",
+      "excludeLinkSelectors": "이 요소 안의 링크는 따라가지 않음(CSS 선택자, 한 줄에 하나)"
     },
     "customSearch": {
       "intro1": "본문에 다음 용어 중 하나라도 포함된 페이지를 표시합니다. 줄마다 두 가지 방식이 있습니다:",
@@ -714,8 +729,17 @@
     "webhook": {
       "intro1": "각 크롤이 끝날 때 한 번 호출되는 웹훅입니다. 단일",
       "intro2": "요청에 JSON 요약(시작 URL, 소요 시간, 총 URL 수, 상태 분포, 0이 아닌 모든 문제 개수)이 담깁니다. 비워 두면 사용하지 않습니다.",
-      "outro": "Slack 수신 웹훅(JSON 구조가 충분히 풍부해 Slack이 일반 텍스트로 표시합니다), Zapier의 \"Catch Hook\" 트리거, Discord 웹훅, 직접 만든 HTTP 엔드포인트와 호환됩니다.",
-      "url": "웹훅 URL"
+      "url": "웹훅 URL",
+      "format": "메시지 형식",
+      "formatAuto": "자동(URL로 감지)",
+      "formatJson": "JSON(Zapier, Make, n8n, 자체 엔드포인트)",
+      "outroFormats": "Slack, Discord, Microsoft Teams는 읽기 쉬운 메시지를 받습니다: 상태 코드 분포, 주요 문제, 그리고 Auto Compare가 켜진 예약 크롤의 경우 이전 크롤 이후 변경 사항. 자동은 Slack 수신 웹훅, Discord 웹훅, Teams 커넥터 URL을 인식합니다. Teams Workflows URL에는 Microsoft Teams를 선택하세요. 그 밖의 주소는 JSON 요약을 받습니다.",
+      "secretNote": "웹훅 URL은 비밀번호처럼 작동합니다. URL을 가진 사람은 누구나 채널에 게시할 수 있습니다. FreeCrawl은 이를 암호화해 저장하고 내보낸 설정에서 제외합니다.",
+      "test": "테스트 메시지 보내기",
+      "testing": "보내는 중…",
+      "testOk": "{{format}} 형식으로 전달됨(HTTP {{status}}).",
+      "testInvalid": "먼저 http(s) URL을 입력하세요.",
+      "testFailed": "전달되지 않음({{status}}): {{detail}}"
     },
     "auth": {
       "intro": "크롤링 중인 사이트(시작 URL의 출처, 또는 목록 모드에서 나열된 URL)에만 전송되는 HTTP 인증입니다. 외부 링크, CDN 또는 다른 호스트로는 절대 전송되지 않습니다. Basic/Digest 인증 뒤에 있는 스테이징 환경이나 Bearer 토큰이 필요한 API에 유용합니다. HTML 로그인 폼 뒤에 있는 사이트라면 아래의 폼 로그인을 대신 사용하십시오.",
@@ -815,7 +839,14 @@
       "disableAll": "모두 끄기",
       "summary": "켜짐: {{on}} / {{total}}",
       "groupSummary": "{{on}} / {{total}} 켜짐",
-      "noMatch": "필터와 일치하는 검사가 없습니다."
+      "noMatch": "필터와 일치하는 검사가 없습니다.",
+      "severityIntro": "검사의 심각도를 바꾸면 심각 / 경고 / 정보 그룹, 보고서 순서, 사이드바 표시 사이에서 옮길 수 있습니다. 예를 들어 이 사이트에서 어떤 검사가 더 중요하거나 덜 중요할 때 사용하세요.",
+      "severityCritical": "심각",
+      "severityWarning": "경고",
+      "severityInfo": "정보",
+      "severityLabel": "심각도",
+      "severityChanged": "기본값: {{tier}}",
+      "resetSeverities": "심각도 초기화"
     },
     "advanced": {
       "intro": "하위 수준 상한과 링크 따라가기 스위치입니다. 기본값은 일반적인 SEO 감사에 맞춰져 있으므로, 이유를 알 때만 손대십시오.",
@@ -931,7 +962,15 @@
     "urlHeader": "URL",
     "beforeHeader": "이전",
     "afterHeader": "이후",
-    "noDiffs": "이 범주에는 차이가 없습니다."
+    "noDiffs": "이 범주에는 차이가 없습니다.",
+    "previousTitle": "이전 크롤 이후 변경 사항",
+    "previousCrawl": "이전 크롤({{date}})",
+    "thisCrawl": "이번 크롤",
+    "noPrevious": "아직 비교할 이전 크롤이 없습니다. 예약 크롤에서 \"이전 크롤과 자동 비교\"를 켜거나 CLI에서 --auto-compare로 크롤하세요.",
+    "issuesChanged": "변경된 문제",
+    "issueHeader": "문제",
+    "changeHeader": "변화",
+    "noIssueChanges": "변경된 문제 수가 없습니다."
   },
   "scheduled": {
     "title": "예약 크롤",
@@ -973,7 +1012,16 @@
     "browse": "찾아보기…",
     "outputDirHint": "폴더를 선택하세요 — 실행할 때마다 타임스탬프가 붙은 하위 폴더에 저장됩니다.",
     "sheets": "모든 URL을 새 Google 스프레드시트에도 전송",
-    "webhook": "파일 목록으로 프로젝트 웹훅에 알림 (설정 → Webhook)"
+    "webhook": "파일 목록으로 프로젝트 웹훅에 알림 (설정 → Webhook)",
+    "runNow": "지금 실행",
+    "runNowTitle": "이 예약 크롤을 지금 시작합니다. 정기 일정은 바뀌지 않습니다.",
+    "runNowSaveFirst": "먼저 변경 사항을 저장하세요.",
+    "runNowBusy": "이미 크롤이 실행 중입니다. 끝날 때까지 기다리거나 먼저 중지하세요.",
+    "runNowNoConfig": "먼저 크롤을 한 번 수동으로 실행하세요. 예약은 그 설정을 다시 사용합니다.",
+    "runNowNoProject": "먼저 프로젝트를 열거나 저장하세요.",
+    "runNowNoSchedule": "먼저 일정을 저장하세요.",
+    "autoCompare": "이전 크롤과 자동 비교",
+    "autoCompareHint": "이번 크롤이 시작될 때 이전 크롤을 보관합니다. 변경 사항은 내보내기 폴더(crawl-changes.csv), 웹훅, 파일 → 이전 크롤과 비교에 표시됩니다."
   },
   "serp": {
     "noTitle": "(제목 없음)",
@@ -1388,7 +1436,9 @@
     "loadingSource": "소스를 불러오는 중…",
     "noBody": "이 URL에 저장된 HTML 본문이 없습니다.",
     "noBodyHint1": "소스 보기는 다음 설정을 켠 상태로 크롤한 HTML 페이지에 대해서만 기록됩니다:",
-    "noBodyHint2": "."
+    "noBodyHint2": ".",
+    "markdownLoading": "Markdown으로 변환하는 중…",
+    "markdownFailed": "이 페이지를 Markdown으로 변환할 수 없습니다."
   },
   "viewRendered": {
     "noBody": "이 URL에 저장된 렌더링 DOM이 없습니다.",
@@ -1498,7 +1548,9 @@
     "imagesUnit": "개 이미지",
     "loaded": "{{n}}개 불러옴",
     "row": "행",
-    "noImages": "이미지 없음"
+    "noImages": "이미지 없음",
+    "missingTitleOnly": "title 없는 것만",
+    "emptyMissingTitle": "title 속성이 없는 이미지가 없습니다."
   },
   "serpTab": {
     "title": "SERP 미리보기",
@@ -1919,7 +1971,10 @@
     "summary": "{{shown}}개 페이지 · 응답 있음 {{tested}}개 · 오류 {{errors}}개 · 선택 {{selected}}개",
     "running": "실행 중: {{url}}",
     "emptyNoData": "아직 크롤한 내부 HTML 페이지가 없습니다 — 먼저 크롤을 실행한 뒤 페이지를 선택하고 실행을 누르십시오.",
-    "emptyNoMatch": "현재 필터와 일치하는 페이지가 없습니다."
+    "emptyNoMatch": "현재 필터와 일치하는 페이지가 없습니다.",
+    "modelDefault": "모델(기본값: {{model}})",
+    "modelMissing": "\"{{model}}\"은(는) {{provider}}의 현재 모델 목록에 없습니다.",
+    "pickModel": "사용 가능한 모델 선택…"
   },
   "seoTab": {
     "title": "SEO 권위도",
@@ -2081,7 +2136,10 @@
       "note": "현재 크롤 데이터는 다른 이름으로 저장하기 전까지 앱의 사용자 데이터 디렉터리에 있습니다 — 위 경로는 다른 이름으로 저장이 어디서 시작할지만 정합니다. 이 값을 바꿔도 기존 프로젝트 파일은 옮겨지지 않습니다.",
       "autoSaveTitle": "일괄 저장",
       "autoSaveLabel": "크롤된 URL N개마다 프로젝트 자동 저장 — 0 = 끔",
-      "autoSaveHint": "크롤 중에 URL이 이만큼 더 크롤될 때마다 열려 있는 .seoproject 파일을 다시 씁니다. 충돌이나 정전 시 손실은 최대 한 배치입니다. 프로젝트를 파일로 저장한 뒤에만 적용되며 최소 {{min}}입니다. 매 저장은 전체 스냅샷이므로 대형 사이트에서는 수천 단위로 두세요."
+      "autoSaveHint": "크롤 중에 URL이 이만큼 더 크롤될 때마다 열려 있는 .seoproject 파일을 다시 씁니다. 충돌이나 정전 시 손실은 최대 한 배치입니다. 프로젝트를 파일로 저장한 뒤에만 적용되며 최소 {{min}}입니다. 매 저장은 전체 스냅샷이므로 대형 사이트에서는 수천 단위로 두세요.",
+      "fileNamesTitle": "내보내기 파일 이름",
+      "fileNamesReset": "초기화",
+      "fileNamesPreview": "예시:"
     },
     "agents": {
       "title": "에이전트 세션(MCP)",
@@ -2345,5 +2403,40 @@
     "setupResidential": "주거용 프록시는 먼저 대시보드에서 목록(국가, 로테이션)을 만들고 목록에 표시되는 연결 정보를 사용하세요.",
     "setupJsRender": "JavaScript 렌더링을 켠 경우 HTTP 형식을 사용하세요. 브라우저는 비밀번호가 필요한 SOCKS5 프록시를 사용할 수 없습니다.",
     "hide": "숨기기"
+  },
+  "rateLimitNotice": {
+    "title": "사이트가 크롤을 제한하고 있습니다",
+    "body_other": "서버가 요청 {{count}}개에 429(Too Many Requests) 또는 503(Service Unavailable)으로 응답했습니다. 적응형 속도가 꺼져 있어 크롤이 고정 속도를 유지하므로 더 많은 페이지가 실패할 수 있습니다.",
+    "benefit": "적응형 속도를 켜면 크롤 속도가 자동으로 조정됩니다. 서버가 제한하는 동안에는 느려지고 응답이 정상으로 돌아오면 다시 빨라집니다. 저장하면 이번 크롤에도 적용됩니다.",
+    "where": "켜는 위치",
+    "path": "설정 → 속도 → 적응형 속도",
+    "dontShow": "다시 표시하지 않음",
+    "notNow": "나중에",
+    "openSettings": "속도 설정 열기"
+  },
+  "aiSettings": {
+    "title": "모델 및 프롬프트",
+    "defaultModel": "기본 모델",
+    "checkModels": "모델 확인",
+    "checking": "확인 중…",
+    "checkNeedsCredentials": "먼저 위의 자격 증명을 저장하세요.",
+    "listFailed": "모델 목록을 불러올 수 없습니다: {{detail}}",
+    "modelOk": "{{model}}을(를) 사용할 수 있습니다.",
+    "modelMissing": "{{model}}은(는) {{provider}}의 현재 모델 목록에 없습니다.",
+    "pickModel": "사용 가능한 모델 선택…",
+    "defaultModelHint": "AI 탭이나 어시스턴트에서 모델을 비워 두면 사용됩니다. 기본 제공 모델({{model}})을 쓰려면 비워 두세요.",
+    "systemPrompt": "시스템 프롬프트",
+    "systemPromptPlaceholder": "당신은 기술 SEO 전문가입니다. 짧고 쉬운 문장으로 답하세요.",
+    "systemPromptHint": "이 제공업체로 보내는 모든 AI 탭 프롬프트와 함께 전송됩니다: 역할, 어조, 언어, 제약. 어시스턴트는 자체 지침을 유지합니다.",
+    "timeout": "요청 시간 제한(초)",
+    "timeoutHint": "로컬 모델의 응답을 기다리는 시간(10–3600). 평범한 하드웨어의 대형 모델은 더 오래 걸립니다. 비워 두면 AI 탭 120, 어시스턴트 180.",
+    "usageTitle": "토큰 사용량",
+    "usageRequests": "요청: {{value}}",
+    "usageTokensIn": "입력 토큰: {{value}}",
+    "usageTokensOut": "출력 토큰: {{value}}",
+    "usageSince": "{{date}}부터",
+    "usageReset": "초기화",
+    "usageNone": "아직 기록된 요청이 없습니다.",
+    "usageHint": "각 응답이 보고한 토큰 수를 바탕으로 이 컴퓨터에서 집계합니다(AI 탭과 어시스턴트). 정확한 금액은 제공업체 청구서를 따릅니다."
   }
 }

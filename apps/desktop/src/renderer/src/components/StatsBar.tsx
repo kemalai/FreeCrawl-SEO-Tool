@@ -169,6 +169,19 @@ export function StatsBar() {
       <Stat label={t('stats.pending')} value={progress?.pending ?? 0} />
       <Stat label={t('stats.failed')} value={progress?.failed ?? 0} />
       <Stat label={t('stats.urlPerSec')} value={progress?.urlsPerSecond?.toFixed(1) ?? '0.0'} />
+      {progress?.running && progress.throttledRps != null && (
+        // Adaptive speed has slowed the crawl because the site pushed back
+        // — shown beside the speed so a slower crawl is never unexplained.
+        <Stat
+          label={t('stats.throttled', { defaultValue: 'Throttled' })}
+          value={`~${progress.throttledRps.toFixed(1)}/s`}
+          valueClassName="text-amber-300"
+          title={t('stats.throttledTitle', {
+            defaultValue:
+              'Adaptive speed slowed the crawl because the site answered 429 / 503. It speeds up again once responses are clean.',
+          })}
+        />
+      )}
       <Stat label={t('stats.avgResp')} value={`${progress?.avgResponseTimeMs ?? 0}ms`} />
       <Stat label={t('stats.elapsed')} value={elapsedStr} />
       <Stat
@@ -316,9 +329,23 @@ export function StatsBar() {
           </span>
         ) : progress?.running ? (
           progress.paused ? (
-            <span className="inline-flex items-center gap-1.5">
+            <span
+              className="inline-flex items-center gap-1.5"
+              title={
+                progress.pausedReason === 'host-unresponsive'
+                  ? t('stats.pausedHostDownTitle', {
+                      defaultValue:
+                        'The site stopped answering, so the crawl paused itself instead of failing the rest of the queue. Check the site, then press Resume.',
+                    })
+                  : undefined
+              }
+            >
               <span className="h-2 w-2 rounded-full bg-amber-500" />
-              <span className="text-amber-400">{t('stats.paused')}</span>
+              <span className="text-amber-400">
+                {progress.pausedReason === 'host-unresponsive'
+                  ? t('stats.pausedHostDown', { defaultValue: 'Paused — site stopped responding' })
+                  : t('stats.paused')}
+              </span>
             </span>
           ) : (
             <span className="inline-flex items-center gap-1.5">

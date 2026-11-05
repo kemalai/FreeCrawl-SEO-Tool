@@ -95,6 +95,30 @@ export function claimIfDue(
   return updated;
 }
 
+/**
+ * "Run Now" — claim the project's schedule for an immediate, out-of-band
+ * fire. Unlike `claimIfDue` it ignores `enabled` and the due time, and it
+ * leaves `nextFiresAt` alone: running a daily 03:00 crawl by hand at noon
+ * must not push tonight's run to tomorrow.
+ */
+export function claimNow(
+  store: SchedulerStore,
+  projectPath: string,
+  now: number = Date.now(),
+): ScheduleEntry | null {
+  if (!projectPath) return null;
+  const map = store.load();
+  const entry = map[projectPath];
+  if (!entry) return null;
+  const updated: ScheduleEntry = {
+    spec: entry.spec,
+    status: { ...entry.status, lastFiredAt: now, lastStatus: 'running' },
+  };
+  map[projectPath] = updated;
+  store.save(map);
+  return updated;
+}
+
 export function recordFireResult(
   store: SchedulerStore,
   projectPath: string,
@@ -141,6 +165,7 @@ function normalizeSpec(spec: ScheduleSpec): ScheduleSpec {
       out.afterCrawl = normalized;
     }
   }
+  if (spec.autoCompare === true) out.autoCompare = true;
   return out;
 }
 

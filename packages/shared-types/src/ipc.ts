@@ -21,6 +21,7 @@ import type {
   OverviewCounts,
   UrlCategory,
   UrlDetail,
+  WebhookFormat,
 } from './crawl.js';
 import type { IntegrationsState } from './integrations.js';
 import type {
@@ -57,7 +58,13 @@ import type {
   MetricaNotice,
   MetricaErrorCode,
 } from './metrica.js';
-import type { AiProvider, AiRow } from './ai.js';
+import type {
+  AiModelsResult,
+  AiProvider,
+  AiProviderSettings,
+  AiRow,
+  AiSettingsState,
+} from './ai.js';
 import type {
   AssistantApprovalInput,
   AssistantEvent,
@@ -93,6 +100,7 @@ export const IPC = {
   crawlStart: 'crawl:start',
   crawlStop: 'crawl:stop',
   crawlPause: 'crawl:pause',
+  crawlSetAdaptiveSpeed: 'crawl:set-adaptive-speed',
   crawlResume: 'crawl:resume',
   crawlClear: 'crawl:clear',
   crawlAddUrl: 'crawl:add-url',
@@ -153,6 +161,8 @@ export const IPC = {
   urlsQuery: 'urls:query',
   urlDetailGet: 'urls:detail',
   urlSourceGet: 'urls:source',
+  urlMarkdownGet: 'urls:markdown',
+  exportMarkdown: 'export:markdown',
   urlPageImages: 'urls:page-images',
   urlCertInfo: 'urls:cert-info',
   urlContextMenu: 'url:context-menu',
@@ -201,6 +211,9 @@ export const IPC = {
   pickImageFile: 'app:pick-image-file',
   exportBulk: 'export:bulk',
   compareLoad: 'compare:load',
+  compareWithPrevious: 'compare:with-previous',
+  /** Settings → Webhook → Send test. */
+  webhookTest: 'webhook:test',
   graphSnapshot: 'graph:snapshot',
   crawlPath: 'graph:crawl-path',
   topAnchorTexts: 'graph:anchor-texts',
@@ -312,6 +325,7 @@ export const IPC = {
   prefsImportSettings: 'prefs:import-settings',
   scheduleGet: 'schedule:get',
   scheduleSet: 'schedule:set',
+  scheduleRunNow: 'schedule:run-now',
   /** Faz 7 — integration credential store (safeStorage-encrypted).
    *  `integrationsGetAll` returns the redacted state map (secret values
    *  never leave the main process); `set` merges the supplied fields;
@@ -441,6 +455,12 @@ export const IPC = {
   aiCancel: 'ai:cancel',
   aiQuery: 'ai:query',
   aiProgress: 'ai:progress',
+  /** Per-provider default model / system prompt / timeout + token totals. */
+  aiSettingsGet: 'ai:settings-get',
+  aiSettingsSet: 'ai:settings-set',
+  aiUsageReset: 'ai:usage-reset',
+  /** The provider's live model list, and whether a model is on it. */
+  aiModels: 'ai:models',
   /** Faz 7 — third-party SEO authority providers (Ahrefs / Majestic /
    *  Moz / Semrush). Same shape as the AI run: pick a provider, fetch
    *  per-URL metrics, store them, list joined with crawled pages. */
@@ -529,6 +549,12 @@ export interface ScheduleSpec {
   dayOfWeek?: number;
   /** Post-crawl export / notification; absent = nothing beyond the crawl itself. */
   afterCrawl?: ScheduleAfterCrawl;
+  /**
+   * Auto Compare Crawls: keep a snapshot of the previous crawl when the
+   * scheduled crawl starts and report what changed once it finishes
+   * (export folder, webhook, File → Compare With Previous Crawl).
+   */
+  autoCompare?: boolean;
 }
 
 export interface ScheduleStatus {
@@ -543,6 +569,13 @@ export interface ScheduleEntry {
   spec: ScheduleSpec;
   status: ScheduleStatus;
 }
+
+/** Result of "Run Now" on a scheduled crawl. `reason` says why it didn't
+ *  start: no project open, no schedule saved for it, a crawl already
+ *  running, or no crawl config saved yet (nothing to run). */
+export type ScheduleRunNowResult =
+  | { ok: true; entry: ScheduleEntry }
+  | { ok: false; reason: 'no-project' | 'no-schedule' | 'busy' | 'no-config' };
 
 export interface UrlsQueryInput {
   limit: number;
@@ -567,6 +600,8 @@ export interface ImagesQueryInput {
   missingAltOnly?: boolean;
   /** Only images with an explicit empty `alt=""` (decorative). */
   emptyAltOnly?: boolean;
+  /** Only image uses whose `<img>` has no `title` attribute. */
+  missingTitleOnly?: boolean;
   /** Only images whose non-empty alt text is shared by ≥2 distinct images. */
   duplicateAltOnly?: boolean;
   internalOnly?: boolean;
@@ -620,11 +655,13 @@ export type MenuEvent =
   | 'export-issues'
   | 'export-seo-audit'
   | 'export-bulk'
+  | 'export-markdown'
   | 'export-sheets'
   | 'export-bigquery'
   | 'delete-domain-data'
   | 'clear-all-data'
   | 'compare-with-project'
+  | 'compare-with-previous'
   | 'save-project'
   | 'save-project-as'
   | 'save-project-encrypted'
@@ -697,6 +734,8 @@ export interface ExportImagesInput {
   missingAltOnly?: boolean;
   /** Export only images with an explicit empty `alt=""` (decorative). */
   emptyAltOnly?: boolean;
+  /** Export only image uses whose `<img>` has no `title` attribute. */
+  missingTitleOnly?: boolean;
   /** Export only images whose non-empty alt is shared by ≥2 distinct images. */
   duplicateAltOnly?: boolean;
   /** Free-text URL/alt filter (substring match, case-insensitive).
@@ -963,6 +1002,46 @@ export interface CompareDiffRow {
 export interface CompareLoadInput {
   /** Optional path; empty triggers an Open File dialog. */
   filePath?: string;
+}
+
+/** Result of Settings → Webhook → Send test. `detail` is `invalid-url` when
+ *  the URL is not http(s), else the endpoint's reply / network error. */
+export interface WebhookTestResult {
+  ok: boolean;
+  status: number | null;
+  detail: string;
+  /** The body format actually used (`auto` resolved). */
+  format: 'json' | 'slack' | 'discord' | 'teams';
+}
+
+/** One issue check whose page count moved between two crawls. */
+export interface IssueCountDelta {
+  category: UrlCategory;
+  /** English sidebar group (`Page Titles`) — `label` alone ("Missing") is ambiguous. */
+  group: string;
+  /** English label; the renderer translates it through `translateLabel`. */
+  label: string;
+  before: number;
+  after: number;
+}
+
+/**
+ * "What changed since the previous crawl" (Screaming Frog 24.0 Auto Compare
+ * Crawls). The previous crawl is the snapshot a scheduled / CLI crawl with
+ * auto-compare took just before it started; this crawl is the project now.
+ */
+export interface PreviousCrawlComparison {
+  /** When the snapshot was taken — i.e. when the newer crawl started. */
+  previousTakenAt: string;
+  previousStartUrl: string | null;
+  /** HTML pages on each side: previous crawl, this crawl. */
+  totalPrevious: number;
+  totalCurrent: number;
+  counts: Record<CompareCategory, number>;
+  /** Capped per category; `counts` stay exact. */
+  samples: CompareDiffRow[];
+  /** Checks whose page count changed, largest move first. */
+  issues: IssueCountDelta[];
 }
 
 export interface CompareLoadResult {
@@ -2046,6 +2125,9 @@ export interface FreeCrawlApi {
   crawlStop(): Promise<void>;
   crawlPause(): Promise<void>;
   crawlResume(): Promise<void>;
+  /** Switch Adaptive speed on/off for the crawl that is running now (the
+   *  saved setting covers the next ones). No-op without an active crawl. */
+  crawlSetAdaptiveSpeed(enabled: boolean): Promise<void>;
   crawlClear(): Promise<void>;
   crawlAddUrl(url: string): Promise<{ accepted: boolean }>;
   projectSaveAs(): Promise<{ filePath: string; bytesWritten: number } | null>;
@@ -2098,6 +2180,13 @@ export interface FreeCrawlApi {
   urlsQuery(input: UrlsQueryInput): Promise<UrlsQueryResult>;
   urlDetailGet(input: UrlDetailInput): Promise<UrlDetail | null>;
   urlSourceGet(input: UrlSourceInput): Promise<UrlSourceResult>;
+  /** The stored page converted to Markdown (main content when found).
+   *  `rendered` uses the post-JS DOM. `markdown` is null when no body of
+   *  that kind was stored. Converted on a parser worker. */
+  urlMarkdownGet(input: { id: number; rendered?: boolean }): Promise<{ markdown: string | null }>;
+  /** Bulk Export → All Page Markdown: one `.md` per stored HTML page plus an
+   *  `index.csv`, in a folder the user picks. Null when cancelled. */
+  exportMarkdown(): Promise<{ outputDir: string; files: number; skipped: number } | null>;
   urlPageImages(input: UrlPageImagesInput): Promise<UrlPageImagesResult>;
   urlCertInfo(input: UrlCertInfoInput): Promise<UrlCertInfoResult>;
   urlContextMenu(input: UrlContextMenuInput): Promise<void>;
@@ -2134,6 +2223,10 @@ export interface FreeCrawlApi {
   pickImageFile(): Promise<string | null>;
   exportBulk(): Promise<BulkExportResult>;
   compareLoad(input: CompareLoadInput): Promise<CompareLoadResult>;
+  /** Changes since the previous crawl's snapshot; null when there is none. */
+  compareWithPrevious(): Promise<PreviousCrawlComparison | null>;
+  /** Send one test message to `url` in `format` (the unsaved form values). */
+  webhookTest(url: string, format: WebhookFormat): Promise<WebhookTestResult>;
   graphSnapshot(input: GraphSnapshotInput): Promise<GraphSnapshotResult>;
   crawlPath(input: CrawlPathInput): Promise<CrawlPathResult>;
   topAnchorTexts(limit?: number): Promise<AnchorTextRow[]>;
@@ -2222,6 +2315,10 @@ export interface FreeCrawlApi {
   /** Save / update the schedule for the currently-loaded project. Passing
    *  `null` removes the schedule entirely. */
   scheduleSet(spec: ScheduleSpec | null): Promise<ScheduleEntry | null>;
+  /** Start the current project's scheduled crawl immediately — same
+   *  config and after-crawl actions as a timed fire. Leaves the regular
+   *  cadence (`nextFiresAt`) untouched. Works on a disabled schedule too. */
+  scheduleRunNow(): Promise<ScheduleRunNowResult>;
   /** Faz 7 — read the redacted credential state of every integration.
    *  Secret field values are never returned, only a `set` flag. */
   integrationsGetAll(): Promise<IntegrationsState>;
@@ -2327,6 +2424,13 @@ export interface FreeCrawlApi {
   aiQuery(input: AiQueryInput): Promise<AiQueryResult>;
   /** Live progress of an in-flight AI run. */
   onAiProgress(cb: (p: AiProgress) => void): () => void;
+  /** Per-provider AI settings plus the token totals counted so far. */
+  aiSettingsGet(): Promise<AiSettingsState>;
+  aiSettingsSet(provider: AiProvider, settings: AiProviderSettings): Promise<AiSettingsState>;
+  aiUsageReset(provider: AiProvider): Promise<AiSettingsState>;
+  /** Fetch the provider's live model list and check `model` (blank = the
+   *  provider's effective default) against it. */
+  aiModels(provider: AiProvider, model?: string): Promise<AiModelsResult>;
   /** Faz 7 — run an SEO authority provider against the given URLs. */
   seoRun(input: SeoRunInput): Promise<SeoRunResult>;
   seoCancel(): Promise<void>;

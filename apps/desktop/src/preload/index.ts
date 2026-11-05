@@ -1,6 +1,13 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import {
   IPC,
+  type AiModelsResult,
+  type AiProvider,
+  type AiProviderSettings,
+  type AiSettingsState,
+  type PreviousCrawlComparison,
+  type WebhookFormat,
+  type WebhookTestResult,
   type BridgeSessionInfo,
   type BrowserInstallState,
   type ConfirmClearResult,
@@ -98,6 +105,7 @@ import {
   type SettingsExportResult,
   type SettingsImportResult,
   type ScheduleEntry,
+  type ScheduleRunNowResult,
   type ScheduleSpec,
   type IntegrationsState,
   type OverviewCounts,
@@ -219,6 +227,7 @@ const api: FreeCrawlApi = {
   crawlStart: (config: CrawlConfig) => ipcRenderer.invoke(IPC.crawlStart, config),
   crawlStop: () => ipcRenderer.invoke(IPC.crawlStop),
   crawlPause: () => ipcRenderer.invoke(IPC.crawlPause),
+  crawlSetAdaptiveSpeed: (enabled: boolean) => ipcRenderer.invoke(IPC.crawlSetAdaptiveSpeed, enabled),
   crawlResume: () => ipcRenderer.invoke(IPC.crawlResume),
   crawlClear: () => ipcRenderer.invoke(IPC.crawlClear),
   crawlAddUrl: (url: string): Promise<{ accepted: boolean }> =>
@@ -274,6 +283,10 @@ const api: FreeCrawlApi = {
     ipcRenderer.invoke(IPC.urlsQuery, input),
   urlDetailGet: (input: UrlDetailInput): Promise<UrlDetail | null> =>
     ipcRenderer.invoke(IPC.urlDetailGet, input),
+  urlMarkdownGet: (input: { id: number; rendered?: boolean }): Promise<{ markdown: string | null }> =>
+    ipcRenderer.invoke(IPC.urlMarkdownGet, input),
+  exportMarkdown: (): Promise<{ outputDir: string; files: number; skipped: number } | null> =>
+    ipcRenderer.invoke(IPC.exportMarkdown),
   urlSourceGet: (input: UrlSourceInput): Promise<UrlSourceResult> =>
     ipcRenderer.invoke(IPC.urlSourceGet, input),
   urlPageImages: (input: UrlPageImagesInput): Promise<UrlPageImagesResult> =>
@@ -448,6 +461,7 @@ const api: FreeCrawlApi = {
   scheduleGet: (): Promise<ScheduleEntry | null> => ipcRenderer.invoke(IPC.scheduleGet),
   scheduleSet: (spec: ScheduleSpec | null): Promise<ScheduleEntry | null> =>
     ipcRenderer.invoke(IPC.scheduleSet, spec),
+  scheduleRunNow: (): Promise<ScheduleRunNowResult> => ipcRenderer.invoke(IPC.scheduleRunNow),
   pickDirectory: (input?: { title?: string; defaultPath?: string }): Promise<string | null> =>
     ipcRenderer.invoke(IPC.pickDirectory, input),
   defaultProjectDir: (): Promise<string> => ipcRenderer.invoke(IPC.defaultProjectDir),
@@ -527,6 +541,17 @@ const api: FreeCrawlApi = {
   aiRun: (input: AiRunInput): Promise<AiRunResult> =>
     ipcRenderer.invoke(IPC.aiRun, input),
   aiCancel: (): Promise<void> => ipcRenderer.invoke(IPC.aiCancel),
+  compareWithPrevious: (): Promise<PreviousCrawlComparison | null> =>
+    ipcRenderer.invoke(IPC.compareWithPrevious),
+  webhookTest: (url: string, format: WebhookFormat): Promise<WebhookTestResult> =>
+    ipcRenderer.invoke(IPC.webhookTest, url, format),
+  aiSettingsGet: (): Promise<AiSettingsState> => ipcRenderer.invoke(IPC.aiSettingsGet),
+  aiSettingsSet: (provider: AiProvider, settings: AiProviderSettings): Promise<AiSettingsState> =>
+    ipcRenderer.invoke(IPC.aiSettingsSet, provider, settings),
+  aiUsageReset: (provider: AiProvider): Promise<AiSettingsState> =>
+    ipcRenderer.invoke(IPC.aiUsageReset, provider),
+  aiModels: (provider: AiProvider, model?: string): Promise<AiModelsResult> =>
+    ipcRenderer.invoke(IPC.aiModels, provider, model),
   aiQuery: (input: AiQueryInput): Promise<AiQueryResult> =>
     ipcRenderer.invoke(IPC.aiQuery, input),
   onAiProgress: (cb) => subscribe<AiProgress>(IPC.aiProgress, cb),

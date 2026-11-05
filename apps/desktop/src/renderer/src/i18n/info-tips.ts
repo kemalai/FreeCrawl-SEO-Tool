@@ -36,6 +36,7 @@ import { IT_INFO_TIPS } from './info-tips/it.js';
 import { PT_BR_INFO_TIPS } from './info-tips/pt-BR.js';
 import { FR_INFO_TIPS } from './info-tips/fr.js';
 import { ES_INFO_TIPS } from './info-tips/es.js';
+import { NL_INFO_TIPS } from './info-tips/nl.js';
 
 /** Per-language tables. Exported for the parity test only. */
 export const INFO_TIPS: Partial<Record<UiLanguage, Record<string, string>>> = {
@@ -49,6 +50,7 @@ export const INFO_TIPS: Partial<Record<UiLanguage, Record<string, string>>> = {
   'pt-BR': PT_BR_INFO_TIPS,
   fr: FR_INFO_TIPS,
   es: ES_INFO_TIPS,
+  nl: NL_INFO_TIPS,
 };
 
 /**

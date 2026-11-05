@@ -1,4 +1,6 @@
 import * as cheerio from 'cheerio';
+import { isTag, isText, type AnyNode } from 'domhandler';
+import { decodeHTML, decodeHTMLAttribute } from 'entities';
 import type {
   ContentKind,
   CustomExtractionRule,
@@ -8,6 +10,8 @@ import type {
   LinkPathType,
   LinkPosition,
   SchemaFinding,
+  UncrawlableLink,
+  UncrawlableLinkKind,
 } from '@freecrawl/shared-types';
 import { GENERIC_ANCHOR_TEXTS } from '@freecrawl/shared-types';
 import {
@@ -135,9 +139,9 @@ export interface ParsedPage {
   schemaUnknownTypes: number;
   /**
    * Count of JSON-LD nodes whose declared `@type` is one of the
-   * Google-documented high-traffic types (Article / Product / Recipe
-   * / Event / FAQPage / HowTo / BreadcrumbList / Organization /
-   * VideoObject) and which is missing one or more required properties.
+   * Google rich-result types in `SCHEMA_REQUIRED_PROPS` (Product /
+   * Recipe / Event / JobPosting / VideoObject / BreadcrumbList / …) and
+   * which is missing one or more required properties.
    */
   schemaMissingRequired: number;
   /**
@@ -210,6 +214,8 @@ export interface ParsedPage {
   feedUrl: string | null;
   /** Number of internal hyperlinks with no usable anchor text or image alt. */
   emptyAnchorCount: number;
+  /** `<a>` elements with an `href` attribute that is empty (or only whitespace). */
+  emptyHrefCount: number;
   /** `<a href>` elements whose anchor text is longer than 100 characters. */
   anchorTooLongCount: number;
   /** `<a href>` elements whose anchor is a generic phrase (`GENERIC_ANCHOR_TEXTS`). */
@@ -217,16 +223,16 @@ export interface ParsedPage {
   /** `<a target="_blank">` elements without `rel="noopener"` / `noreferrer`. */
   targetBlankNoNoopenerCount: number;
   /**
-   * Number of `<a>` elements that look clickable but are NOT crawlable —
-   * either no `href` at all (with `onclick`), `href="javascript:…"`, or
-   * `href="#"` paired with an `onclick`. Search engines can't follow
-   * these so any navigation that depends on them is invisible to crawl.
-   * Excludes `href="#"` without `onclick` (legitimate scroll anchors)
-   * and `href="#section-id"` (in-page jumps — crawlable as the same URL).
-   * Also counts non-`<a>` elements whose `onclick` navigates
-   * (`location.href = …`, `location.assign(…)`, `window.open(…)`).
+   * Distinct internal uncrawlable links on the page (see
+   * `UncrawlableLinkKind`) — a target we couldn't read counts as internal.
+   * Search engines can't follow these, so any navigation that depends on
+   * them is invisible to a crawl. `href="#"` without `onclick` (scroll
+   * anchors) and `href="#section-id"` (in-page jumps) are not counted.
    */
   jsOnlyLinksCount: number;
+  /** The uncrawlable links themselves, internal and external, capped at
+   *  200 per page. Never followed. */
+  uncrawlableLinks: UncrawlableLink[];
   /**
    * Visible-text bytes divided by total HTML bytes, expressed as an
    * integer percent (0–100). Low ratio (typically <10%) suggests heavy
@@ -539,6 +545,36 @@ function isTrackingPixel(
 const JS_NAVIGATION_RE =
   /(?:^|[^\w$.])(?:window\.|document\.|top\.|self\.)?location(?:\.href)?\s*=(?!=)|location\.(?:assign|replace)\s*\(|window\.open\s*\(/;
 
+/** Elements that carry `href` by design (or are SVG references), so an
+ *  `href` on them is not an uncrawlable link. */
+const HREF_BY_DESIGN_TAGS = new Set(['a', 'link', 'base', 'area', 'use', 'image']);
+/** The string a navigation assignment / call hands over: `location.href =
+ *  '…'`, `location.assign('…')`, `window.open('…'`. */
+const SCRIPT_NAV_TARGET_RE =
+  /(?:location(?:\.href)?\s*=(?!=)\s*|location\.(?:assign|replace)\s*\(\s*|window\.open\s*\(\s*)(["'`])((?:(?!\1)[^\\\n]|\\.)*)\1/;
+const SCRIPT_STRING_RE = /(["'`])((?:(?!\1)[^\\\n]|\\.)*)\1/g;
+/** A string literal that reads as an address: absolute, protocol- or
+ *  root-relative, dot-relative, or a file with a page extension. */
+const SCRIPT_URL_LITERAL_RE =
+  /^(?:https?:\/\/|\/\/|\/|\.\.?\/)|\.(?:s?html?|php|aspx?|jsp|cfm)(?:[?#]|$)/i;
+
+/**
+ * The address a link script heads to, as written — the target of a
+ * navigation assignment / call, else the first string literal that reads as
+ * an address (`goto('https://example.com')`). Null when there is none to
+ * read (`javascript:void(0)`, `goTo('products')`) or it is built at runtime.
+ */
+function scriptTargetLiteral(code: string): string | null {
+  const nav = SCRIPT_NAV_TARGET_RE.exec(code);
+  const navTarget = nav?.[2]?.trim();
+  if (navTarget && !navTarget.includes('${')) return navTarget;
+  for (const m of code.matchAll(SCRIPT_STRING_RE)) {
+    const s = (m[2] ?? '').trim();
+    if (s && !s.includes('${') && SCRIPT_URL_LITERAL_RE.test(s)) return s;
+  }
+  return null;
+}
+
 /** `document.title = …` — an assignment, never a read or a comparison. */
 const JS_TITLE_ASSIGN_RE =
   /(?:^|[^\w$.])document\.title\s*=(?!=)\s*(?:(["'`])((?:(?!\1)[^\\\n$]|\\.)*)\1)?/;
@@ -556,6 +592,58 @@ export interface InlineScriptHeadWrites {
   title: string | null;
   /** An inline script writes a robots / googlebot meta carrying noindex. */
   noindexWrite: boolean;
+}
+
+/**
+ * Elements an HTML5 parser keeps in `<head>`. The fast path parses with
+ * htmlparser2, which builds the tree as written; a browser — and Google —
+ * closes `<head>` at the first element not on this list (or the first
+ * non-whitespace text), so every tag after it lands in `<body>`. Google
+ * documents exactly that: an invalid element in `<head>` ends the head for
+ * its parser, and a canonical or hreflang after it is ignored.
+ */
+const HEAD_CONTENT_TAGS = new Set([
+  'base',
+  'basefont',
+  'bgsound',
+  'link',
+  'meta',
+  'noframes',
+  'noscript',
+  'script',
+  'style',
+  'template',
+  'title',
+]);
+
+/**
+ * Predicate: would an HTML5 parser leave `el` in `<head>`? Not inside
+ * `<body>` (a document with no explicit `<body>` reads as head, which is
+ * where such a link sits in the HTML5 tree) and not at or after the first
+ * child of `<head>` that ends it — `<div>` then `<link rel="canonical">`
+ * puts the canonical in the body. `<noscript>` content is not inspected:
+ * with scripting on, the HTML5 parser reads it as raw text.
+ */
+function headScope($: cheerio.CheerioAPI): (el: AnyNode) => boolean {
+  const evicted = new Set<AnyNode>();
+  const head = $('head').get(0);
+  if (head) {
+    let ended = false;
+    for (const child of head.children) {
+      if (!ended) {
+        if (isText(child)) ended = /\S/.test(child.data);
+        else if (isTag(child)) ended = !HEAD_CONTENT_TAGS.has(child.name.toLowerCase());
+      }
+      if (ended) evicted.add(child);
+    }
+  }
+  return (el) => {
+    for (let n: AnyNode | null = el; n; n = n.parent) {
+      if (evicted.has(n)) return false;
+      if (isTag(n) && n.name.toLowerCase() === 'body') return false;
+    }
+    return true;
+  };
 }
 
 /**
@@ -666,7 +754,7 @@ export function readServedHeadSignals(html: string): ServedHeadSignals {
   const headEnd = html.search(/<\/head\s*>/i);
   const head = headEnd >= 0 ? html.slice(0, headEnd) : html.slice(0, 200_000);
   const t = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(head);
-  const title = t?.[1] ? decodeEntities(t[1].replace(/\s+/g, ' ').trim()) || null : null;
+  const title = t?.[1] ? decodeEntities(t[1]).replace(/\s+/g, ' ').trim() || null : null;
   let noindex = false;
   for (const m of head.matchAll(/<meta\b[^>]*>/gi)) {
     const tag = m[0];
@@ -789,6 +877,10 @@ export function parseHtml(
      *  extraction to a specific region. Empty / missing → heuristic
      *  (main/article/body-minus-chrome) is used. */
     contentAreaSelector?: string;
+    /** Link regions whose links are recorded but not followed. */
+    excludeLinkPositions?: readonly LinkPosition[];
+    /** CSS selectors whose descendant links are recorded but not followed. */
+    excludeLinkSelectors?: readonly string[];
   } = {},
 ): ParsedPage {
   // Fast path: force the htmlparser2 backend and skip entity decoding.
@@ -836,11 +928,14 @@ export function parseHtml(
   // way a browser (and a search result) renders it: a line break or a
   // double space in the markup is not a character the reader sees, so it
   // must not count toward the length limits or make "H1 = Title" miss.
+  // Entities are decoded first: `&nbsp;&nbsp;` or `&#10;` become whitespace
+  // only once decoded, and collapsing before that stored them uncollapsed,
+  // so the counted length disagreed with the text a reader sees.
   const collapseWs = (s: string): string => s.replace(/\s+/g, ' ').trim();
-  const title = decodeEntities(collapseWs(titleEls.first().text())) || null;
+  const title = collapseWs(decodeEntities(titleEls.first().text())) || null;
   const metaDescription =
-    decodeEntities(collapseWs($('meta[name="description"]').attr('content') ?? '')) || null;
-  const h1 = decodeEntities(collapseWs($('h1').first().text())) || null;
+    collapseWs(decodeAttr($('meta[name="description"]').attr('content') ?? '')) || null;
+  const h1 = collapseWs(decodeEntities($('h1').first().text())) || null;
   const h1Count = $('h1').length;
   const h2Count = $('h2').length;
   const h3Count = $('h3').length;
@@ -868,18 +963,18 @@ export function parseHtml(
     }
     prevHeadingLevel = level;
     if (headings.length >= 200) return;
-    const raw = $(el).text().replace(/\s+/g, ' ').trim();
-    const text = decodeEntities(raw).slice(0, 200);
+    const text = decodeEntities($(el).text()).replace(/\s+/g, ' ').trim().slice(0, 200);
     headings.push({ level, text });
   });
   // Only a canonical in `<head>` counts. Google ignores `rel=canonical`
   // anywhere in `<body>` — honouring it here reported a page as properly
   // canonicalised when the search engine sees no canonical at all. The
-  // body ones are counted for their own issue instead. (No explicit
-  // `<body>` element — tag omitted in the source — reads as head, which
-  // is where such a link sits in the HTML5 tree.)
+  // body ones are counted for their own issue instead. "In head" is the
+  // HTML5 reading (see `headScope`): one after an invalid head element is
+  // in the body too.
+  const inHead = headScope($);
   const allCanonicalEls = $('link[rel="canonical"]');
-  const canonicalEls = allCanonicalEls.filter((_, el) => $(el).closest('body').length === 0);
+  const canonicalEls = allCanonicalEls.filter((_, el) => inHead(el));
   const canonicalOutsideHead = allCanonicalEls.length - canonicalEls.length;
   const canonical = (canonicalEls.first().attr('href') ?? '').trim() || null;
   const canonicalCount = canonicalEls.length;
@@ -955,9 +1050,9 @@ export function parseHtml(
   const lang = ($('html').attr('lang') ?? '').trim() || null;
   const viewport = ($('meta[name="viewport"]').attr('content') ?? '').trim() || null;
   const ogTitle =
-    decodeEntities(($('meta[property="og:title"]').attr('content') ?? '').trim()) || null;
+    decodeAttr(($('meta[property="og:title"]').attr('content') ?? '').trim()) || null;
   const ogDescription =
-    decodeEntities(
+    decodeAttr(
       ($('meta[property="og:description"]').attr('content') ?? '').trim(),
     ) || null;
   const ogImage = ($('meta[property="og:image"]').attr('content') ?? '').trim() || null;
@@ -970,30 +1065,29 @@ export function parseHtml(
     null;
   const ogUrl = ($('meta[property="og:url"]').attr('content') ?? '').trim() || null;
   const ogSiteName =
-    decodeEntities(($('meta[property="og:site_name"]').attr('content') ?? '').trim()) ||
+    decodeAttr(($('meta[property="og:site_name"]').attr('content') ?? '').trim()) ||
     null;
   const ogLocale =
     ($('meta[property="og:locale"]').attr('content') ?? '').trim() || null;
 
-  // Twitter Cards use `name=` (not `property=`) per Twitter's spec. Many
-  // sites leave one set missing and rely on the other — we capture both.
-  const twitterCard =
-    ($('meta[name="twitter:card"]').attr('content') ?? '').trim().toLowerCase() || null;
-  const twitterTitle =
-    decodeEntities(($('meta[name="twitter:title"]').attr('content') ?? '').trim()) || null;
-  const twitterDescription =
-    decodeEntities(
-      ($('meta[name="twitter:description"]').attr('content') ?? '').trim(),
-    ) || null;
-  const twitterImage =
-    ($('meta[name="twitter:image"]').attr('content') ?? '').trim() || null;
+  // Twitter Cards are specified with `name=`, but X's card parser falls
+  // back to `property=` — the OpenGraph habit many CMSs and SEO plugins
+  // carry over. Reading only `name=` reported "Twitter Card Missing" on
+  // pages whose cards render fine.
+  const twitterMeta = (key: string): string =>
+    ($(`meta[name="twitter:${key}"]`).attr('content') ?? '').trim() ||
+    ($(`meta[property="twitter:${key}"]`).attr('content') ?? '').trim();
+  const twitterCard = twitterMeta('card').toLowerCase() || null;
+  const twitterTitle = decodeAttr(twitterMeta('title')) || null;
+  const twitterDescription = decodeAttr(twitterMeta('description')) || null;
+  const twitterImage = twitterMeta('image') || null;
 
   const metaKeywords =
-    decodeEntities(($('meta[name="keywords"]').attr('content') ?? '').trim()) || null;
+    decodeAttr(($('meta[name="keywords"]').attr('content') ?? '').trim()) || null;
   const metaAuthor =
-    decodeEntities(($('meta[name="author"]').attr('content') ?? '').trim()) || null;
+    decodeAttr(($('meta[name="author"]').attr('content') ?? '').trim()) || null;
   const metaGenerator =
-    decodeEntities(($('meta[name="generator"]').attr('content') ?? '').trim()) || null;
+    decodeAttr(($('meta[name="generator"]').attr('content') ?? '').trim()) || null;
   const themeColor =
     ($('meta[name="theme-color"]').attr('content') ?? '').trim() || null;
 
@@ -1225,8 +1319,11 @@ export function parseHtml(
   // Pagination — `<link rel="next">` / `<link rel="prev">`. Resolved to
   // absolute via normalizeUrl so the values are comparable to the URLs
   // we crawl and store.
-  const paginationNextRaw = ($('link[rel="next"]').attr('href') ?? '').trim();
-  const paginationPrevRaw = ($('link[rel="prev"]').attr('href') ?? '').trim();
+  // Head-only, like the canonical: a search engine reads rel=next/prev
+  // from `<head>`, so one in the body (or after an invalid head element)
+  // is not pagination markup.
+  const paginationNextRaw = ($('link[rel="next"]').filter((_, el) => inHead(el)).first().attr('href') ?? '').trim();
+  const paginationPrevRaw = ($('link[rel="prev"]').filter((_, el) => inHead(el)).first().attr('href') ?? '').trim();
   const paginationNext = paginationNextRaw ? normalizeUrl(paginationNextRaw, baseUrl, opts.urlRewrites) : null;
   const paginationPrev = paginationPrevRaw ? normalizeUrl(paginationPrevRaw, baseUrl, opts.urlRewrites) : null;
 
@@ -1240,7 +1337,7 @@ export function parseHtml(
   const hreflangs: HreflangEntry[] = [];
   let hreflangOutsideHead = 0;
   $('link[rel="alternate"][hreflang]').each((_, el) => {
-    if ($(el).closest('body').length > 0) {
+    if (!inHead(el)) {
       hreflangOutsideHead++;
       return;
     }
@@ -1576,46 +1673,10 @@ export function parseHtml(
   }
 
   let emptyAnchorCount = 0;
+  let emptyHrefCount = 0;
   let anchorTooLongCount = 0;
   let genericAnchorCount = 0;
   let targetBlankNoNoopenerCount = 0;
-  // JS-only / non-crawlable anchors. Three patterns count toward this
-  // number — see the field doc on `parseHtml` return for the rationale:
-  //   1. `<a onclick="…">`               (no href at all)
-  //   2. `<a href="javascript:…">`       (href is a JS URI scheme)
-  //   3. `<a href="#" onclick="…">`      (placeholder href + JS handler)
-  // We scan ALL `<a>` (not just `a[href]`) because pattern 1 has no href.
-  let jsOnlyLinksCount = 0;
-  $('a').each((_, el) => {
-    const $el = $(el);
-    const rawHref = $el.attr('href');
-    const onclick = $el.attr('onclick');
-    if (rawHref === undefined) {
-      if (onclick && onclick.trim() !== '') jsOnlyLinksCount++;
-      return;
-    }
-    const href = rawHref.trim();
-    // RFC 3986 — `javascript:` scheme is the canonical JS-only marker.
-    // Lowercased before match to handle `JavaScript:` casing in the wild.
-    if (/^javascript:/i.test(href)) {
-      jsOnlyLinksCount++;
-      return;
-    }
-    // `#` exactly = placeholder; only counts when an onclick is wired.
-    // `#section-id` (length > 1) is a legitimate in-page jump — skip.
-    if (href === '#' && onclick && onclick.trim() !== '') {
-      jsOnlyLinksCount++;
-    }
-  });
-  // Clickable non-link elements that navigate in script — `<span onclick=
-  // "location.href='/x'">`, `<button onclick="window.open(…)">`. There is
-  // no URL in the markup at all, so the target is reachable only by a
-  // visitor running JavaScript. Handlers that don't navigate (add to cart,
-  // toggle a menu) are left alone.
-  $('[onclick]').each((_, el) => {
-    if ((el as { name?: string }).name?.toLowerCase() === 'a') return;
-    if (JS_NAVIGATION_RE.test($(el).attr('onclick') ?? '')) jsOnlyLinksCount++;
-  });
 
   // Hrefs that survive being an `<a href>` but not being a URL: doubled
   // schemes, stray whitespace inside the authority, bare `:::`. Kept raw
@@ -1625,10 +1686,141 @@ export function parseHtml(
   // not malformed and never land here.
   const NON_NAVIGABLE_SCHEME = /^(mailto|tel|sms|callto|javascript|data|blob|about|file|ftp|news|whatsapp|skype|viber|intent|market|itms-apps|geo|magnet|bitcoin|webcal|feed|irc|ssh|slack|tg|zoommtg|msteams):/i;
   const invalidLinkSet = new Set<string>();
+
+  // Uncrawlable links — things a visitor can click that a search engine
+  // can't follow, because Google only follows `<a href>` with a real URL
+  // (see `UncrawlableLinkKind`). Each distinct one is recorded for the
+  // page's Outlinks, where it shows as "Uncrawlable"; the internal ones —
+  // and the ones whose target can't be read, which are the page's own
+  // navigation — make up the JS-Only Navigation count. Never followed.
+  const uncrawlableLinks: UncrawlableLink[] = [];
+  const uncrawlableSeen = new Set<string>();
+  let jsOnlyLinksCount = 0;
+  const resolveScriptTarget = (code: string): string | null => {
+    const literal = scriptTargetLiteral(code);
+    if (!literal) return null;
+    const n = normalizeUrl(literal, baseUrl, opts.urlRewrites);
+    return n && /^https?:/.test(n) ? n : null;
+  };
+  const addUncrawlable = (
+    el: unknown,
+    text: string,
+    label: string | undefined,
+    kind: UncrawlableLinkKind,
+    rawCode: string,
+    toUrl: string | null,
+  ): void => {
+    const code = rawCode.replace(/\s+/g, ' ').trim().slice(0, 500);
+    const key = toUrl ?? `${kind}|${code}`;
+    if (uncrawlableSeen.has(key)) return;
+    uncrawlableSeen.add(key);
+    const isInternal = toUrl ? isSameHost(pageUrl, toUrl, opts) : true;
+    if (isInternal) jsOnlyLinksCount++;
+    if (uncrawlableLinks.length >= 200) return;
+    const visible = decodeEntities(text).replace(/\s+/g, ' ').trim().slice(0, 200);
+    const named = decodeAttr(label ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    uncrawlableLinks.push({
+      toUrl,
+      code,
+      kind,
+      element: ((el as { name?: string }).name ?? '').toLowerCase(),
+      anchor: visible || named || null,
+      linkPath: buildLinkPath(el),
+      linkPosition: detectLinkPosition(el),
+      isInternal,
+    });
+  };
+  // `<a>` without a followable href. We scan ALL `<a>` (not just
+  // `a[href]`) because the first pattern has no href. `href="#"` with no
+  // handler is a scroll-to-top anchor and `#section` an in-page jump —
+  // both crawlable as the page itself, so neither counts.
+  $('a').each((_, el) => {
+    const $el = $(el);
+    const rawHref = $el.attr('href');
+    const onclick = ($el.attr('onclick') ?? '').trim();
+    const label = $el.attr('aria-label') ?? $el.attr('title');
+    if (rawHref === undefined) {
+      if (onclick) {
+        addUncrawlable(el, $el.text(), label, 'onclick-no-href', onclick, resolveScriptTarget(onclick));
+      }
+      return;
+    }
+    const href = rawHref.trim();
+    if (/^javascript:/i.test(href)) {
+      let script = href.slice('javascript:'.length);
+      try {
+        script = decodeURIComponent(script);
+      } catch {
+        // Not percent-encoded after all — read it as written.
+      }
+      addUncrawlable(el, $el.text(), label, 'javascript-href', href, resolveScriptTarget(script));
+      return;
+    }
+    if (href === '#' && onclick) {
+      addUncrawlable(el, $el.text(), label, 'placeholder-href', onclick, resolveScriptTarget(onclick));
+    }
+  });
+  // An `href` on something that isn't a link — `<span href>`, `<div href>`,
+  // `<button href>`. Browsers ignore it; a script makes it clickable.
+  // `<link>`, `<base>` and `<area>` carry href by design, and SVG uses it
+  // for references (`<use href="#icon">`), so those are left alone.
+  $('[href]').each((_, el) => {
+    const tag = ((el as { name?: string }).name ?? '').toLowerCase();
+    if (HREF_BY_DESIGN_TAGS.has(tag)) return;
+    const $el = $(el);
+    if ($el.closest('svg').length > 0) return;
+    const href = ($el.attr('href') ?? '').trim();
+    if (!href || href.startsWith('#')) return;
+    const label = $el.attr('aria-label') ?? $el.attr('title');
+    if (/^javascript:/i.test(href)) {
+      addUncrawlable(el, $el.text(), label, 'non-anchor-href', href, resolveScriptTarget(href.slice(11)));
+      return;
+    }
+    if (NON_NAVIGABLE_SCHEME.test(href)) return;
+    const n = normalizeUrl(href, baseUrl, opts.urlRewrites);
+    addUncrawlable(el, $el.text(), label, 'non-anchor-href', href, n && /^https?:/.test(n) ? n : null);
+  });
+  // Clickable non-link elements that navigate in script — `<span onclick=
+  // "location.href='/x'">`, `<button onclick="window.open(…)">`. Handlers
+  // that don't navigate (add to cart, toggle a menu) are left alone.
+  $('[onclick]').each((_, el) => {
+    if ((el as { name?: string }).name?.toLowerCase() === 'a') return;
+    const $el = $(el);
+    const onclick = ($el.attr('onclick') ?? '').trim();
+    if (!JS_NAVIGATION_RE.test(onclick)) return;
+    const label = $el.attr('aria-label') ?? $el.attr('title');
+    addUncrawlable(el, $el.text(), label, 'non-anchor-onclick', onclick, resolveScriptTarget(onclick));
+  });
+
   const linkMap = new Map<string, DiscoveredLink>();
+  // "Exclude links by position / selector": the `<a>` elements whose link
+  // must not be followed. Selectors are user input — an invalid one is
+  // skipped rather than failing the whole page.
+  const excludedPositions = new Set<LinkPosition>(opts.excludeLinkPositions ?? []);
+  const excludedAnchors = new Set<unknown>();
+  for (const raw of opts.excludeLinkSelectors ?? []) {
+    const sel = raw.trim();
+    if (!sel) continue;
+    try {
+      $(sel).each((_, container) => {
+        const $c = $(container);
+        if ((container as { name?: string }).name?.toLowerCase() === 'a') excludedAnchors.add(container);
+        $c.find('a[href]').each((__, a) => {
+          excludedAnchors.add(a);
+        });
+      });
+    } catch {
+      // Invalid selector — ignored.
+    }
+  }
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href');
-    if (!href) return;
+    // `<a href="">` resolves to the page itself in a browser — a link that
+    // goes nowhere, usually a CMS field left blank. Counted, never followed.
+    if (!href || href.trim() === '') {
+      emptyHrefCount++;
+      return;
+    }
     const normalized = normalizeUrl(href, baseUrl, opts.urlRewrites);
     if (!normalized || !/^https?:/.test(normalized)) {
       const raw = href.trim();
@@ -1651,15 +1843,14 @@ export function parseHtml(
     const $el = $(el);
     const rel = ($el.attr('rel') ?? '').trim().toLowerCase() || null;
     const target = ($el.attr('target') ?? '').trim() || null;
-    const rawAnchor = $el.text().replace(/\s+/g, ' ').trim().slice(0, 200) || null;
-    const anchor = rawAnchor ? decodeEntities(rawAnchor) : null;
+    const anchor = decodeEntities($el.text()).replace(/\s+/g, ' ').trim().slice(0, 200) || null;
 
     // Image inside <a>: capture its alt attribute so the detail table can
     // show it alongside the plain anchor text.
     let altText: string | null = null;
     const imgAlt = $el.find('img[alt]').first().attr('alt');
     if (imgAlt !== undefined) {
-      altText = decodeEntities(imgAlt.trim());
+      altText = decodeAttr(imgAlt.trim());
       if (altText === '') altText = null;
     }
 
@@ -1700,8 +1891,14 @@ export function parseHtml(
     // dropped it entirely — so the page lost an inlink and, if that was its
     // only link, was never crawled and reported as an orphan. If any
     // occurrence is followable, the link is followable.
+    const followExcluded =
+      excludedAnchors.has(el) ||
+      (excludedPositions.size > 0 && excludedPositions.has(detectLinkPosition(el)));
     const existing = linkMap.get(normalized);
     if (existing) {
+      // Followable if any occurrence is: the menu link to /pricing must not
+      // hide the same link in the body.
+      if (!followExcluded) existing.followExcluded = false;
       if (existing.rel?.includes('nofollow') && !rel?.includes('nofollow')) {
         existing.rel = rel;
         // The stored record describes the followable occurrence, so its
@@ -1740,6 +1937,7 @@ export function parseHtml(
       linkPosition,
       linkOrigin: 'html',
       isInternal,
+      ...(followExcluded ? { followExcluded: true } : {}),
     });
   });
 
@@ -1934,7 +2132,7 @@ export function parseHtml(
   // attribute — screen readers skip it, so there is nothing to describe.
   const imgAlt = ($img: ReturnType<typeof $>): string | null => {
     const altAttr = $img.attr('alt');
-    if (altAttr !== undefined) return decodeEntities(altAttr.trim());
+    if (altAttr !== undefined) return decodeAttr(altAttr.trim());
     const role = ($img.attr('role') ?? '').trim().toLowerCase();
     const hidden = ($img.attr('aria-hidden') ?? '').trim().toLowerCase() === 'true';
     return role === 'presentation' || role === 'none' || hidden ? '' : null;
@@ -2021,6 +2219,7 @@ export function parseHtml(
         height,
         isInternal,
         lazy,
+        hasTitle: ($el.attr('title') ?? '').trim() !== '',
       });
     } else if (!lazy) {
       prev.lazy = false;
@@ -2161,10 +2360,12 @@ export function parseHtml(
     manifestUrl,
     feedUrl,
     emptyAnchorCount,
+    emptyHrefCount,
     anchorTooLongCount,
     genericAnchorCount,
     targetBlankNoNoopenerCount,
     jsOnlyLinksCount,
+    uncrawlableLinks,
     textCodeRatio,
     fleschReadingEase: readability.fleschReadingEase,
     fleschKincaidGrade: readability.fleschKincaidGrade,
@@ -2465,48 +2666,59 @@ function collectSchemaTypes(node: unknown, out: Set<string>): void {
 }
 
 /**
- * Required-property whitelist for the high-traffic Schema.org types Google
- * documents validation rules for. Source:
- * <https://developers.google.com/search/docs/appearance/structured-data>.
- * Each entry lists "must be present" properties — for types where Google
- * accepts one of several alternatives (e.g. Product needs `image` OR
- * `offers`), those are listed in `oneOf` instead.
+ * Required / recommended properties for the Schema.org types that still
+ * earn a Google rich result, per Google Search Central's structured-data
+ * gallery (<https://developers.google.com/search/docs/appearance/structured-data/search-gallery>),
+ * reviewed 2026-11. `required` must all be present; each `oneOf[i]` group
+ * needs at least one member; `recommended` only raises the softer
+ * "Missing Recommended Property" finding.
  *
- * The check is intentionally permissive: a node passes validation if it
- * declares one of the listed `@type` values AND every required property
- * is present (truthy). Additional properties are fine. Types not in this
- * map are skipped — we don't want to raise false positives for niche
- * types (Movie, ComicBook, …) where the page may legitimately ship a
- * minimal subset.
+ * Kept in step with Google's own changes:
+ *   - HowTo is gone (rich result removed 2023) — no longer validated, so a
+ *     HowTo block raises nothing.
+ *   - Course info, Book actions, Claim Review, Estimated Salary, Learning
+ *     Video, Special Announcement and Vehicle Listing were phased out in
+ *     2025; Course keeps only what the remaining course list uses.
+ *   - The sitelinks search box is gone (2024): WebSite no longer recommends
+ *     `potentialAction`; it now feeds site names (`name`, `alternateName`).
+ *   - Article has no required properties — Google lists every field as
+ *     recommended, so a missing `image` is a recommendation, not an error.
+ *   - Product snippets need `name` plus one of offers / review /
+ *     aggregateRating; the image is recommended.
+ *
+ * Types not in this map are skipped — we don't want to raise false
+ * positives for types Google doesn't turn into a rich result.
  */
 const SCHEMA_REQUIRED_PROPS: Record<
   string,
   { required: string[]; oneOf?: string[][]; recommended?: string[] }
 > = {
   Article: {
-    required: ['headline', 'image', 'datePublished'],
-    recommended: ['author', 'dateModified', 'publisher'],
+    required: [],
+    recommended: ['headline', 'image', 'datePublished', 'dateModified', 'author'],
   },
   NewsArticle: {
-    required: ['headline', 'image', 'datePublished'],
-    recommended: ['author', 'dateModified', 'publisher'],
+    required: [],
+    recommended: ['headline', 'image', 'datePublished', 'dateModified', 'author'],
   },
   BlogPosting: {
-    required: ['headline', 'image', 'datePublished'],
-    recommended: ['author', 'dateModified', 'publisher'],
+    required: [],
+    recommended: ['headline', 'image', 'datePublished', 'dateModified', 'author'],
   },
   Product: {
     required: ['name'],
-    oneOf: [['image', 'offers']],
-    recommended: ['description', 'brand', 'review', 'aggregateRating', 'sku'],
+    oneOf: [['offers', 'review', 'aggregateRating']],
+    recommended: ['image', 'description', 'brand', 'sku'],
   },
   BreadcrumbList: { required: ['itemListElement'] },
   Recipe: {
     required: ['name', 'image'],
-    oneOf: [['recipeIngredient', 'recipeInstructions']],
     recommended: [
       'author',
       'datePublished',
+      'description',
+      'recipeIngredient',
+      'recipeInstructions',
       'aggregateRating',
       'nutrition',
       'prepTime',
@@ -2517,12 +2729,29 @@ const SCHEMA_REQUIRED_PROPS: Record<
   },
   Event: {
     required: ['name', 'startDate', 'location'],
-    recommended: ['endDate', 'offers', 'performer', 'image', 'description'],
+    recommended: [
+      'description',
+      'endDate',
+      'eventAttendanceMode',
+      'eventStatus',
+      'image',
+      'offers',
+      'organizer',
+      'performer',
+    ],
   },
+  // Rich result limited to authoritative government / health sites since
+  // 2023, but the markup itself is still valid and validated.
   FAQPage: { required: ['mainEntity'] },
-  HowTo: {
-    required: ['name', 'step'],
-    recommended: ['image', 'totalTime', 'supply', 'tool'],
+  QAPage: { required: ['mainEntity'] },
+  ProfilePage: {
+    required: ['mainEntity'],
+    recommended: ['dateCreated', 'dateModified'],
+  },
+  DiscussionForumPosting: {
+    required: ['author', 'datePublished'],
+    oneOf: [['text', 'image', 'video']],
+    recommended: ['headline', 'url', 'dateModified'],
   },
   Organization: {
     required: [],
@@ -2534,28 +2763,26 @@ const SCHEMA_REQUIRED_PROPS: Record<
     recommended: ['description', 'duration', 'contentUrl', 'embedUrl'],
   },
   LocalBusiness: {
-    required: ['name'],
-    recommended: [
-      'address',
-      'telephone',
-      'openingHours',
-      'geo',
-      'priceRange',
-      'image',
-    ],
+    required: ['name', 'address'],
+    recommended: ['telephone', 'openingHoursSpecification', 'geo', 'url', 'priceRange', 'image'],
   },
   JobPosting: {
     required: ['title', 'description', 'datePosted', 'hiringOrganization'],
-    recommended: ['validThrough', 'employmentType', 'jobLocation', 'baseSalary'],
+    // Remote jobs replace a physical location with the applicant region.
+    oneOf: [['jobLocation', 'applicantLocationRequirements']],
+    recommended: ['validThrough', 'employmentType', 'baseSalary', 'identifier'],
   },
   Course: {
     required: ['name', 'description'],
-    recommended: ['provider', 'offers', 'hasCourseInstance'],
+    recommended: ['provider'],
   },
   Review: {
-    required: ['reviewRating'],
-    oneOf: [['itemReviewed', 'author']],
-    recommended: ['datePublished', 'publisher'],
+    required: ['author', 'reviewRating'],
+    recommended: ['itemReviewed', 'datePublished'],
+  },
+  EmployerAggregateRating: {
+    required: ['itemReviewed', 'ratingValue'],
+    recommended: ['ratingCount', 'reviewCount'],
   },
   Person: {
     required: ['name'],
@@ -2563,12 +2790,20 @@ const SCHEMA_REQUIRED_PROPS: Record<
   },
   WebSite: {
     required: ['name', 'url'],
-    recommended: ['potentialAction'],
+    recommended: ['alternateName'],
   },
   SoftwareApplication: {
-    required: ['name'],
-    oneOf: [['offers', 'aggregateRating', 'review']],
+    required: ['name', 'offers'],
+    oneOf: [['aggregateRating', 'review']],
     recommended: ['applicationCategory', 'operatingSystem'],
+  },
+  Dataset: {
+    required: ['name', 'description'],
+    recommended: ['url', 'creator', 'license'],
+  },
+  Movie: {
+    required: ['name', 'image'],
+    recommended: ['dateCreated', 'director', 'aggregateRating'],
   },
 };
 
@@ -2991,40 +3226,28 @@ function detectLinkPosition(el: unknown): LinkPosition {
   return 'content';
 }
 
-const NAMED_ENTITIES: Record<string, string> = {
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-  nbsp: ' ',
-  copy: '©',
-  reg: '®',
-  trade: '™',
-  hellip: '…',
-  mdash: '—',
-  ndash: '–',
-  lsquo: '‘',
-  rsquo: '’',
-  ldquo: '“',
-  rdquo: '”',
-  laquo: '«',
-  raquo: '»',
-};
-
+/**
+ * Text is parsed with `decodeEntities: false` for speed, so extracted
+ * strings still carry raw references. Decoded with the HTML5 rules (the
+ * `entities` package cheerio itself uses): every named entity — `&ccedil;`
+ * and the rest were left raw by the old 18-name table — the legacy ones a
+ * browser accepts without a semicolon (`&nbsp`, `&copy`), numeric
+ * references including the windows-1252 range, and U+FFFD for an invalid
+ * code point instead of a thrown RangeError.
+ */
 function decodeEntities(s: string): string {
   if (!s || s.indexOf('&') === -1) return s;
-  return s.replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z]+));/gi, (m, dec, hex, name) => {
-    if (dec) {
-      const code = parseInt(dec, 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
-    }
-    if (hex) {
-      const code = parseInt(hex, 16);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
-    }
-    return NAMED_ENTITIES[name.toLowerCase()] ?? m;
-  });
+  return decodeHTML(s);
+}
+
+/**
+ * `decodeEntities` for an attribute value. The HTML5 attribute rule leaves
+ * a semicolon-less legacy name alone when `=` or an alphanumeric follows,
+ * so `content="a?x=1&copy=2"` keeps its `&copy=` the way a browser does.
+ */
+function decodeAttr(s: string): string {
+  if (!s || s.indexOf('&') === -1) return s;
+  return decodeHTMLAttribute(s);
 }
 
 /**

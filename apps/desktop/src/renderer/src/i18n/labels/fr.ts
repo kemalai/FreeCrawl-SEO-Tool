@@ -817,4 +817,22 @@ export const FR_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': 'Audit de catalogue : extrait prix, devise, stock, note, SKU et marque du JSON-LD, signale le texte « rupture de stock » et ignore les facettes de query string pour que les filtres ne fassent pas exploser le crawl.',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': 'Audit éditeur : suit les hreflang et les sitemaps news, extrait l\'auteur et les dates de publication / modification, et vérifie la réciprocité hreflang — pour les sites où fraîcheur et ciblage linguistique font le classement.',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': 'Rend chaque page dans Chromium et lance l\'audit WCAG en page (contraste, contour de focus, cibles tactiles, taille de police) plus les contrôles d\'ergonomie mobile. Lent par conception — faible concurrence.',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "Attribut title absent",
+  "Self Reference Only": "Auto-référence uniquement",
+  "Mismatch With HTML lang": "Différent du lang HTML",
+  "Empty href": "href vide",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph incomplet",
+  "Twitter Card Incomplete": "Twitter Card incomplète",
+  "OG Image Not 200": "Image OG pas en 200",
+  "Twitter Image Not 200": "Image Twitter pas en 200",
+  "og:image Width": "Largeur og:image",
+  "og:image Height": "Hauteur og:image",
+  "twitter:image Width": "Largeur twitter:image",
+  "twitter:image Height": "Hauteur twitter:image",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "Explorabilité du lien",
+  "Crawlable": "Explorable",
+  "Uncrawlable": "Non explorable",
 };

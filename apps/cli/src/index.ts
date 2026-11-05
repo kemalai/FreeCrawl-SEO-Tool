@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import {
   closeSync,
+  copyFileSync,
   existsSync,
+  renameSync,
   mkdtempSync,
   openSync,
   readdirSync,
@@ -14,15 +16,35 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import {
+  CLI_CONFIG_META_KEY,
+  configForResume,
+  liveCrawl,
+  readStatus,
+  removeStatus,
+  sendControl,
+  takeControl,
+  waitForState,
+  writeStatus,
+  type ControlAction,
+  type CrawlState,
+} from './crawl-control.js';
 import {
   DEFAULT_CRAWL_CONFIG,
+  WEBHOOK_FORMATS,
+  type WebhookFormat,
   type CrawlConfig,
+  type LinkPosition,
   type LogIngestInput,
   type MetricaFetchMeta,
+  type PreviousCrawlComparison,
 } from '@freecrawl/shared-types';
 import {
   Crawler,
   compareCrawls,
+  writeCrawlChangesCsvs,
+  COMPARE_CATEGORY_LABELS,
   exportUrlsToCsv,
   exportUrlsToJson,
   testUrlAgainstRobots,
@@ -52,6 +74,18 @@ Usage:
   freecrawl analyze-logs <access.log> [more.log …] [--project file]
                                                   Parse one or more server access logs (Apache / Nginx / IIS / custom), detect bots,
                                                   and merge the aggregates into a project for crawl × log analysis
+  freecrawl pause  [--db file]                    Pause the crawl running on a project (from another terminal)
+  freecrawl resume [--db file] [options]          Resume it — or, when no crawl is running, carry on from
+                                                  where the last one stopped, with its saved settings
+  freecrawl stop   [--db file]                    Stop the running crawl; its results are kept
+  freecrawl delete [--db file] [--force]          Delete a project file and its sidecars (--force stops a
+                                                  running crawl on it first)
+  freecrawl project create <file> [--name n]      Create an empty project
+  freecrawl project rename <file> <name>          Set a project's display name
+  freecrawl project move <file> <dest>            Move a project (to a folder or a new path)
+  freecrawl project delete <file> [--force]       Same as delete
+  freecrawl project list [dir]                    List the projects in a folder (default: current)
+  freecrawl project info <file>                   Name, start URL, URL count and crawl state
   freecrawl metrica-counters [--json]             List the Yandex Metrica counters the token can read
   freecrawl metrica-fetch --counter <id> [--days 7|28|90] [--project file] [--config file]
                                                   Pull per-page Yandex Metrica data (pageviews, visits, users,
@@ -73,6 +107,17 @@ Options:
                         a WordPress blog can go from ~2k to ~40k image requests with this on)
   --adaptive-speed    Back off automatically on HTTP 429/503 and Retry-After, then recover
                         (off by default; the fixed --rps / --concurrency hold otherwise)
+  --connection-retries <n>
+                      Retries for a request that gets no response at all (timeout, reset,
+                        refused); default 2
+  --on-unresponsive <stop|wait>
+                      When the site stops responding the crawl pauses. stop (default): save
+                        and exit with code 3 — continue later with \`freecrawl resume\`. wait:
+                        stay paused until \`freecrawl resume\` / \`freecrawl stop\` from another terminal
+  --exclude-link-position <pos>
+                      Don't follow links in navigation | header | footer | sidebar; repeatable
+  --exclude-link-selector <css>
+                      Don't follow links inside elements matching this CSS selector; repeatable
   --header <K: V>     Extra request header for the crawled site only (never sent to external
                         hosts); repeatable (e.g. --header "Authorization: Bearer X")
   --include <regex>   Only crawl URLs matching this regex; repeatable
@@ -87,6 +132,13 @@ Options:
                         any other → CSV (subset of common columns)
   --json              Print a machine-readable JSON summary to stdout (instead of human progress).
                         Useful for CI/CD pipelines.
+  --webhook <url>     POST a notification when the crawl finishes (Slack, Discord, Teams, any URL)
+  --webhook-format <auto|json|slack|discord|teams>
+                      Body of that POST (default auto: chat services are recognised from the URL,
+                        everything else gets the JSON summary)
+  --auto-compare      Keep the crawl this one replaces and report what changed: pages added /
+                        removed, field changes and issue counts. Writes crawl-changes.csv and
+                        crawl-issue-changes.csv next to --out (or the project file)
 
 analyze-logs options:
   --project <file>    Project to merge log aggregates into (default: ./crawl.seoproject)
@@ -130,6 +182,12 @@ async function main(): Promise<void> {
       external: { type: 'boolean' },
       'image-variants': { type: 'boolean' },
       'adaptive-speed': { type: 'boolean' },
+      'connection-retries': { type: 'string' },
+      'on-unresponsive': { type: 'string' },
+      'exclude-link-position': { type: 'string', multiple: true },
+      'exclude-link-selector': { type: 'string', multiple: true },
+      name: { type: 'string' },
+      force: { type: 'boolean' },
       header: { type: 'string', multiple: true },
       include: { type: 'string', multiple: true },
       exclude: { type: 'string', multiple: true },
@@ -138,6 +196,9 @@ async function main(): Promise<void> {
       db: { type: 'string' },
       out: { type: 'string' },
       json: { type: 'boolean' },
+      'auto-compare': { type: 'boolean' },
+      webhook: { type: 'string' },
+      'webhook-format': { type: 'string' },
       project: { type: 'string' },
       format: { type: 'string' },
       regex: { type: 'string' },
@@ -147,6 +208,11 @@ async function main(): Promise<void> {
       help: { type: 'boolean', short: 'h' },
     },
   });
+
+  if (typeof values['webhook-format'] === 'string' && !isWebhookFormat(values['webhook-format'])) {
+    console.error(`--webhook-format must be one of: ${WEBHOOK_FORMATS.join(', ')}`);
+    process.exit(2);
+  }
 
   // Subcommands: `validate-sitemap <url>` and `audit-robots <url>` short-
   // circuit the crawl path — they're standalone diagnostics that don't
@@ -204,6 +270,48 @@ async function main(): Promise<void> {
       },
     );
     process.exit(exitCode);
+  }
+  if (positionals[0] === 'pause' || positionals[0] === 'stop') {
+    const dbPath = resolve(values.db ?? positionals[1] ?? 'crawl.seoproject');
+    process.exit(await runControl(dbPath, positionals[0], Boolean(values.json)));
+  }
+  if (positionals[0] === 'resume') {
+    const dbPath = resolve(values.db ?? positionals[1] ?? 'crawl.seoproject');
+    const live = liveCrawl(dbPath);
+    if (live) process.exit(await runControl(dbPath, 'resume', Boolean(values.json)));
+    // Nothing running: carry on from where the last crawl stopped. A crawl
+    // started again on the same project skips every URL it already has
+    // and fetches the link targets it never reached.
+    if (!existsSync(dbPath)) {
+      console.error(`Project not found: ${dbPath}`);
+      process.exit(2);
+    }
+    const db = new ProjectDb(dbPath);
+    const saved = db.getMeta(CLI_CONFIG_META_KEY);
+    if (!saved) {
+      db.close();
+      console.error(
+        `No CLI crawl settings are stored in ${dbPath} — start the crawl again with its start URL (freecrawl <url> --db ${values.db ?? positionals[1] ?? 'crawl.seoproject'}).`,
+      );
+      process.exit(2);
+    }
+    let fileConfig: Record<string, unknown> = {};
+    if (values.config) fileConfig = readConfigFile(values.config);
+    const config: CrawlConfig = {
+      ...DEFAULT_CRAWL_CONFIG,
+      ...(JSON.parse(saved) as Partial<CrawlConfig>),
+      ...fileConfig,
+      ...flagOverrides(values),
+    };
+    if (!values.json) console.log(`Resuming ${config.startUrl} on ${dbPath}…`);
+    process.exit(await runCrawl(config, db, dbPath, values));
+  }
+  if (positionals[0] === 'delete') {
+    const dbPath = resolve(values.db ?? positionals[1] ?? 'crawl.seoproject');
+    process.exit(await runDelete(dbPath, Boolean(values.force)));
+  }
+  if (positionals[0] === 'project') {
+    process.exit(await runProjectCommand(positionals.slice(1), values));
   }
   if (positionals[0] === 'metrica-counters') {
     process.exit(await runMetricaCounters(Boolean(values.json)));
@@ -270,25 +378,46 @@ async function main(): Promise<void> {
   // `?? DEFAULT` fallback silently overwrite a value the user set in the
   // --config file (the help text promises "the command line still win[s]",
   // not "defaults clobber the file").
-  const config = {
+  const config: CrawlConfig = {
     ...DEFAULT_CRAWL_CONFIG,
     ...fileConfig,
     mode: listFile ? ('list' as const) : ('spider' as const),
     urlList: listUrls,
     startUrl,
-    ...(values.depth !== undefined
-      ? { maxDepth: parseNumeric(values.depth, DEFAULT_CRAWL_CONFIG.maxDepth) }
+    ...flagOverrides(values),
+  };
+
+  // Auto Compare: keep the crawl this one is about to replace. A resume
+  // continues the same crawl, so only a fresh start takes a snapshot.
+  if (values['auto-compare']) {
+    const kept = db.snapshotForCompare();
+    if (!values.json && kept > 0) console.log(`Kept ${kept} page(s) of the previous crawl for comparison.`);
+  }
+
+  process.exit(await runCrawl(config, db, dbPath, values));
+}
+
+type CliValues = Record<string, string | boolean | string[] | undefined>;
+
+/** The crawl settings the command line sets explicitly (absent flags leave
+ *  the file / saved value alone). */
+function flagOverrides(values: CliValues): Partial<CrawlConfig> {
+  const str = (k: string): string | undefined => (typeof values[k] === 'string' ? (values[k] as string) : undefined);
+  const list = (k: string): string[] | undefined =>
+    Array.isArray(values[k]) ? (values[k] as string[]) : undefined;
+  const positions = list('exclude-link-position')?.filter((p): p is LinkPosition =>
+    ['navigation', 'header', 'footer', 'sidebar', 'content', 'aside'].includes(p),
+  );
+  return {
+    ...(str('depth') !== undefined
+      ? { maxDepth: parseNumeric(str('depth'), DEFAULT_CRAWL_CONFIG.maxDepth) }
       : {}),
-    ...(values.max !== undefined
-      ? { maxUrls: parseNumeric(values.max, DEFAULT_CRAWL_CONFIG.maxUrls) }
+    ...(str('max') !== undefined ? { maxUrls: parseNumeric(str('max'), DEFAULT_CRAWL_CONFIG.maxUrls) } : {}),
+    ...(str('concurrency') !== undefined
+      ? { maxConcurrency: parseNumeric(str('concurrency'), DEFAULT_CRAWL_CONFIG.maxConcurrency) }
       : {}),
-    ...(values.concurrency !== undefined
-      ? { maxConcurrency: parseNumeric(values.concurrency, DEFAULT_CRAWL_CONFIG.maxConcurrency) }
-      : {}),
-    ...(values.rps !== undefined
-      ? { maxRps: parseNumeric(values.rps, DEFAULT_CRAWL_CONFIG.maxRps) }
-      : {}),
-    ...(values['user-agent'] !== undefined ? { userAgent: values['user-agent'] } : {}),
+    ...(str('rps') !== undefined ? { maxRps: parseNumeric(str('rps'), DEFAULT_CRAWL_CONFIG.maxRps) } : {}),
+    ...(str('user-agent') !== undefined ? { userAgent: str('user-agent')! } : {}),
     // `--no-robots` / `--external` only flip the flag ON in their direction;
     // absent, the file value (or default) stands.
     ...(values['no-robots'] ? { respectRobotsTxt: false } : {}),
@@ -296,12 +425,54 @@ async function main(): Promise<void> {
     ...(values.external ? { crawlExternal: true } : {}),
     ...(values['image-variants'] ? { crawlImageVariants: true } : {}),
     ...(values['adaptive-speed'] ? { adaptiveSpeed: true } : {}),
-    ...(values.header !== undefined ? { customHeaders: parseHeaders(values.header) } : {}),
-    ...(values.include !== undefined ? { includePatterns: values.include } : {}),
-    ...(values.exclude !== undefined ? { excludePatterns: values.exclude } : {}),
+    ...(str('connection-retries') !== undefined
+      ? { connectionFailureRetries: parseNumeric(str('connection-retries'), DEFAULT_CRAWL_CONFIG.connectionFailureRetries) }
+      : {}),
+    ...(list('header') !== undefined ? { customHeaders: parseHeaders(list('header')) } : {}),
+    ...(list('include') !== undefined ? { includePatterns: list('include')! } : {}),
+    ...(list('exclude') !== undefined ? { excludePatterns: list('exclude')! } : {}),
+    ...(positions !== undefined ? { excludeLinkPositions: positions } : {}),
+    ...(list('exclude-link-selector') !== undefined
+      ? { excludeLinkSelectors: list('exclude-link-selector')! }
+      : {}),
+    ...(str('webhook') !== undefined ? { webhookUrl: str('webhook')!.trim() } : {}),
+    ...(isWebhookFormat(str('webhook-format')) ? { webhookFormat: str('webhook-format') as WebhookFormat } : {}),
   };
+}
 
-  const crawler = new Crawler(config, db);
+function isWebhookFormat(v: string | undefined): v is WebhookFormat {
+  return v !== undefined && (WEBHOOK_FORMATS as readonly string[]).includes(v);
+}
+
+/**
+ * Run a crawl on `db` to the end and report. While it runs it can be
+ * paused, resumed or stopped from another terminal (`freecrawl pause …`);
+ * its settings are saved in the project (without credentials) so
+ * `freecrawl resume` can carry on later. Returns the exit code.
+ */
+async function runCrawl(
+  config: CrawlConfig,
+  db: ProjectDb,
+  dbPath: string,
+  values: CliValues,
+): Promise<number> {
+  const startUrl = config.startUrl;
+  const live = liveCrawl(dbPath);
+  if (live && live.pid !== process.pid) {
+    db.close();
+    console.error(
+      `A crawl is already running on ${dbPath} (pid ${live.pid}). Pause or stop it first: freecrawl stop --db ${dbPath}`,
+    );
+    return 2;
+  }
+  const onUnresponsive = values['on-unresponsive'] === 'wait' ? 'wait' : 'stop';
+  // Saved for `freecrawl resume`. A crawl of a different site wipes the
+  // project (meta included) when it starts, so it is written again then.
+  const saveResumeConfig = (): void =>
+    db.setMeta(CLI_CONFIG_META_KEY, JSON.stringify(configForResume(config)));
+  saveResumeConfig();
+
+  const crawler = new Crawler(config, db, { onProjectReset: saveResumeConfig });
   const jsonMode = Boolean(values.json);
 
   if (!jsonMode) {
@@ -321,14 +492,89 @@ async function main(): Promise<void> {
     process.stderr.write(`\n[error] ${msg}\n`);
   });
 
-  await crawler.start();
+  // ---- remote control + crawl state file ----------------------------
+  const startedAt = new Date().toISOString();
+  let state: CrawlState = 'running';
+  let pausedReason: string | null = null;
+  let unresponsiveStop = false;
+  const publish = (): void => {
+    try {
+      writeStatus(dbPath, { pid: process.pid, startedAt, startUrl, state, pausedReason });
+    } catch {
+      /* status is a convenience for other terminals; the crawl goes on */
+    }
+  };
+  const cleanupStatus = (): void => removeStatus(dbPath);
+  pendingCleanups.add(cleanupStatus);
+  publish();
+  const note = (msg: string): void => {
+    if (!jsonMode) process.stdout.write(`\n${msg}\n`);
+  };
+  const poll = setInterval(() => {
+    let action: ControlAction | null = null;
+    try {
+      action = takeControl(dbPath);
+    } catch {
+      action = null;
+    }
+    if (action === 'pause') crawler.pause();
+    else if (action === 'resume') crawler.resume();
+    else if (action === 'stop') {
+      state = 'stopping';
+      publish();
+      note('Stop requested — finishing up…');
+      crawler.stop();
+    }
+  }, 1000);
+  crawler.on('progress', (p) => {
+    if (state === 'stopping') return;
+    const next: CrawlState = p.paused ? 'paused' : 'running';
+    const reason = p.paused ? (p.pausedReason ?? null) : null;
+    if (next === state && reason === pausedReason) return;
+    state = next;
+    pausedReason = reason;
+    publish();
+    if (next === 'running') {
+      note('Resumed.');
+      return;
+    }
+    if (reason === 'host-unresponsive') {
+      if (onUnresponsive === 'wait') {
+        note(
+          `Paused: the site stopped responding. Continue with: freecrawl resume --db ${dbPath}  (or: freecrawl stop --db ${dbPath})`,
+        );
+      } else {
+        unresponsiveStop = true;
+        state = 'stopping';
+        publish();
+        note(
+          `Paused: the site stopped responding — saving and exiting. Continue later with: freecrawl resume --db ${dbPath}`,
+        );
+        crawler.stop();
+      }
+      return;
+    }
+    note(`Paused. Continue with: freecrawl resume --db ${dbPath}`);
+  });
+
+  try {
+    await crawler.start();
+  } finally {
+    clearInterval(poll);
+    cleanupStatus();
+    pendingCleanups.delete(cleanupStatus);
+  }
+  // The crawl-finished webhook is posted after `done`; the process exits as
+  // soon as this function returns, which would cut the POST off.
+  await crawler.webhookSettled();
   if (!jsonMode) process.stdout.write('\n');
 
   const summary = db.getSummary();
   let exportedTo: string | null = null;
   let rowsWritten = 0;
-  if (values.out) {
-    const outPath = resolve(values.out);
+  const out = typeof values.out === 'string' ? values.out : undefined;
+  if (out) {
+    const outPath = resolve(out);
     // Auto-detect format from extension. `.json` -> full JSON dump, anything
     // else -> CSV (existing behaviour).
     const isJson = outPath.toLowerCase().endsWith('.json');
@@ -337,6 +583,16 @@ async function main(): Promise<void> {
       : await exportUrlsToCsv(db, outPath);
     rowsWritten = r.rowsWritten;
     exportedTo = outPath;
+  }
+
+  // Auto Compare: what changed since the snapshot taken before this crawl.
+  let comparison: PreviousCrawlComparison | null = null;
+  let changeFiles: string[] = [];
+  if (values['auto-compare']) {
+    comparison = db.compareWithPreviousCrawl();
+    if (comparison) {
+      changeFiles = await writeCrawlChangesCsvs(comparison, out ? dirname(resolve(out)) : dirname(dbPath));
+    }
   }
 
   const overview = db.getOverviewCounts();
@@ -366,6 +622,21 @@ async function main(): Promise<void> {
           site: { soft404Probe, botBlocked },
           exportedTo,
           rowsExported: exportedTo ? rowsWritten : null,
+          stoppedBecauseUnresponsive: unresponsiveStop,
+          ...(values['auto-compare']
+            ? {
+                comparison: comparison
+                  ? {
+                      previousCrawlAt: comparison.previousTakenAt,
+                      pagesBefore: comparison.totalPrevious,
+                      pagesNow: comparison.totalCurrent,
+                      changes: comparison.counts,
+                      issues: comparison.issues,
+                      files: changeFiles,
+                    }
+                  : null,
+              }
+            : {}),
         },
         null,
         2,
@@ -378,6 +649,7 @@ async function main(): Promise<void> {
     if (exportedTo) {
       console.log(`Wrote ${rowsWritten} rows -> ${exportedTo}`);
     }
+    if (values['auto-compare']) printComparison(comparison, changeFiles);
     if (botBlocked) {
       console.log(
         `Warning: bot protection blocked ${botBlocked.count} URL(s)` +
@@ -394,7 +666,34 @@ async function main(): Promise<void> {
   }
 
   db.close();
-  process.exit(hasErrors ? 1 : 0);
+  // 3 = paused because the site stopped responding; `freecrawl resume`
+  // carries on from where it stopped.
+  return unresponsiveStop ? 3 : hasErrors ? 1 : 0;
+}
+
+/** Human summary of `--auto-compare`: page changes, then the checks that moved most. */
+function printComparison(comparison: PreviousCrawlComparison | null, files: string[]): void {
+  if (!comparison) {
+    console.log(
+      'Auto compare: no previous crawl in this project yet — the next --auto-compare run compares with this one.',
+    );
+    return;
+  }
+  const changed = (Object.keys(comparison.counts) as (keyof typeof comparison.counts)[])
+    .filter((k) => comparison.counts[k] > 0)
+    .map((k) => `${COMPARE_CATEGORY_LABELS[k]}: ${comparison.counts[k]}`);
+  console.log(
+    `Changes since the previous crawl (${comparison.previousTakenAt}): ` +
+      (changed.length > 0 ? changed.join(', ') : 'no page changes'),
+  );
+  if (comparison.issues.length > 0) {
+    console.log(`Issue checks that changed: ${comparison.issues.length}`);
+    for (const i of comparison.issues.slice(0, 10)) {
+      const d = i.after - i.before;
+      console.log(`  ${i.group} > ${i.label}: ${i.before} -> ${i.after} (${d > 0 ? '+' : ''}${d})`);
+    }
+  }
+  for (const f of files) console.log(`Wrote ${f}`);
 }
 
 /**
@@ -1352,3 +1651,253 @@ main().catch((err: unknown) => {
   console.error(err instanceof Error ? err.stack : err);
   process.exit(2);
 });
+
+/** `freecrawl pause|resume|stop` against a crawl running in another process. */
+async function runControl(dbPath: string, action: ControlAction, json: boolean): Promise<number> {
+  const live = liveCrawl(dbPath);
+  const print = (o: Record<string, unknown>, text: string): void => {
+    if (json) process.stdout.write(JSON.stringify(o) + '\n');
+    else console.log(text);
+  };
+  if (!live) {
+    print({ ok: false, error: 'no-running-crawl', project: dbPath }, `No crawl is running on ${dbPath}.`);
+    return 1;
+  }
+  if (action === 'pause' && live.state === 'paused') {
+    print({ ok: true, state: 'paused', pid: live.pid }, `Already paused (pid ${live.pid}).`);
+    return 0;
+  }
+  if (action === 'resume' && live.state === 'running') {
+    print({ ok: true, state: 'running', pid: live.pid }, `Already running (pid ${live.pid}).`);
+    return 0;
+  }
+  sendControl(dbPath, action);
+  const want: CrawlState[] =
+    action === 'pause' ? ['paused'] : action === 'resume' ? ['running'] : ['stopping'];
+  const after = await waitForState(dbPath, want);
+  const state = after?.state ?? 'stopped';
+  const ok = after === null ? action === 'stop' : want.includes(after.state);
+  print(
+    { ok, action, state, pid: live.pid },
+    ok
+      ? `${action === 'pause' ? 'Paused' : action === 'resume' ? 'Resumed' : 'Stopping'}: ${live.startUrl} (pid ${live.pid}).`
+      : `The crawl (pid ${live.pid}) did not confirm within 10 s; it reports "${state}".`,
+  );
+  return ok ? 0 : 1;
+}
+
+/** The project file plus everything stored beside it. */
+function projectFiles(path: string): string[] {
+  return [path, `${path}-wal`, `${path}-shm`, `${path}.crawl.json`, `${path}.control`].filter((f) =>
+    existsSync(f),
+  );
+}
+
+/** A reason the project can't be touched right now, or null. */
+function busyReason(path: string): string | null {
+  const live = liveCrawl(path);
+  if (live) return `a crawl is running on it (pid ${live.pid}) — stop it first: freecrawl stop --db ${path}`;
+  const lock = readIfExists(`${path}.lock`);
+  if (lock !== null) {
+    const holder = lockHolder(`${path}.lock`, lock);
+    if (holder !== null) return `another FreeCrawl CLI command is using it (pid ${holder})`;
+  }
+  return null;
+}
+
+async function runDelete(path: string, force: boolean): Promise<number> {
+  if (!existsSync(path)) {
+    console.error(`Project not found: ${path}`);
+    return 2;
+  }
+  const live = liveCrawl(path);
+  if (live && force) {
+    sendControl(path, 'stop');
+    const until = Date.now() + 60_000;
+    while (liveCrawl(path) && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
+  }
+  const busy = busyReason(path);
+  if (busy) {
+    console.error(`Not deleted: ${busy}.`);
+    return 1;
+  }
+  for (const f of projectFiles(path)) rmSync(f, { force: true });
+  rmSync(`${path}.lock`, { force: true });
+  console.log(`Deleted ${path}`);
+  return 0;
+}
+
+/** Name, URL count, start URL and last crawl time of a project, read without
+ *  migrating it. A desktop-saved (packed) project only reports its file. */
+function projectSummary(path: string): Record<string, unknown> {
+  const st = statSync(path);
+  const format = detectProjectFormat(path);
+  const out: Record<string, unknown> = {
+    file: path,
+    format: format === 'archive' ? 'desktop (packed)' : format,
+    sizeBytes: st.size,
+    modified: st.mtime.toISOString(),
+  };
+  const live = readStatus(path);
+  if (live && liveCrawl(path)) out['crawl'] = { state: live.state, pid: live.pid, startUrl: live.startUrl };
+  if (format !== 'sqlite') return out;
+  let raw: DatabaseSync | null = null;
+  try {
+    raw = new DatabaseSync(path, { readOnly: true });
+    const meta = (key: string): string | null => {
+      try {
+        return (raw!.prepare('SELECT value FROM project_meta WHERE key = ?').get(key) as { value: string } | undefined)?.value ?? null;
+      } catch {
+        return null;
+      }
+    };
+    out['name'] = meta('projectName');
+    const cfg = meta(CLI_CONFIG_META_KEY) ?? meta('lastCrawlConfig');
+    if (cfg) {
+      try {
+        out['startUrl'] = (JSON.parse(cfg) as { startUrl?: string }).startUrl ?? null;
+      } catch {
+        /* encrypted / foreign config */
+      }
+    }
+    try {
+      out['urls'] = (raw.prepare('SELECT COUNT(*) AS c FROM urls WHERE is_external = 0').get() as { c: number }).c;
+    } catch {
+      out['urls'] = null;
+    }
+  } catch {
+    /* unreadable — report the file only */
+  } finally {
+    raw?.close();
+  }
+  return out;
+}
+
+async function runProjectCommand(args: string[], values: CliValues): Promise<number> {
+  const [cmd, a, b] = args;
+  const json = Boolean(values.json);
+  const usage = (): number => {
+    console.error(
+      'Usage: freecrawl project create <file> [--name n] | rename <file> <name> | move <file> <dest> | delete <file> [--force] | list [dir] | info <file>',
+    );
+    return 2;
+  };
+  switch (cmd) {
+    case 'create': {
+      if (!a) return usage();
+      const path = resolve(a);
+      if (existsSync(path)) {
+        console.error(`Already exists: ${path}`);
+        return 1;
+      }
+      const db = new ProjectDb(path);
+      const name = typeof values.name === 'string' ? values.name.trim() : '';
+      if (name) db.setMeta('projectName', name);
+      db.close();
+      console.log(`Created ${path}`);
+      return 0;
+    }
+    case 'rename': {
+      if (!a || !b) return usage();
+      const path = resolve(a);
+      const busy = busyReason(path);
+      if (busy) {
+        console.error(`Not renamed: ${busy}.`);
+        return 1;
+      }
+      try {
+        const project = await openProject(path, { forWrite: true });
+        try {
+          project.db.setMeta('projectName', b.trim());
+          await project.save();
+        } finally {
+          project.dispose();
+        }
+      } catch (err) {
+        console.error((err as Error).message);
+        return 2;
+      }
+      console.log(`Renamed ${path} → "${b.trim()}"`);
+      return 0;
+    }
+    case 'move': {
+      if (!a || !b) return usage();
+      const from = resolve(a);
+      if (!existsSync(from)) {
+        console.error(`Project not found: ${from}`);
+        return 2;
+      }
+      const busy = busyReason(from);
+      if (busy) {
+        console.error(`Not moved: ${busy}.`);
+        return 1;
+      }
+      let to = resolve(b);
+      try {
+        if (statSync(to).isDirectory()) to = join(to, basename(from));
+      } catch {
+        /* a new path */
+      }
+      if (existsSync(to)) {
+        console.error(`Already exists: ${to}`);
+        return 1;
+      }
+      // Fold a bare SQLite project's WAL back into the file first, so the
+      // move carries one self-contained file.
+      if (detectProjectFormat(from) === 'sqlite') new ProjectDb(from).close();
+      for (const f of projectFiles(from)) {
+        const dest = to + f.slice(from.length);
+        try {
+          renameSync(f, dest);
+        } catch (err) {
+          // Another drive / volume: copy, then remove the original.
+          if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+          copyFileSync(f, dest);
+          rmSync(f, { force: true });
+        }
+      }
+      console.log(`Moved ${from} → ${to}`);
+      return 0;
+    }
+    case 'delete': {
+      if (!a) return usage();
+      return runDelete(resolve(a), Boolean(values.force));
+    }
+    case 'list': {
+      const dir = resolve(a ?? '.');
+      let files: string[];
+      try {
+        files = readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.seoproject'));
+      } catch (err) {
+        console.error(`Cannot read ${dir}: ${(err as Error).message}`);
+        return 2;
+      }
+      const rows = files.map((f) => projectSummary(join(dir, f)));
+      if (json) {
+        process.stdout.write(JSON.stringify(rows, null, 2) + '\n');
+      } else if (rows.length === 0) {
+        console.log(`No .seoproject files in ${dir}`);
+      } else {
+        for (const r of rows) {
+          const crawl = r['crawl'] as { state: string } | undefined;
+          console.log(
+            `${basename(String(r['file']))}  ${r['name'] ? `"${r['name']}"  ` : ''}${r['urls'] != null ? `${r['urls']} URLs  ` : ''}${r['startUrl'] ? `${r['startUrl']}  ` : ''}${crawl ? `[${crawl.state}]` : ''}`,
+          );
+        }
+      }
+      return 0;
+    }
+    case 'info': {
+      if (!a) return usage();
+      const path = resolve(a);
+      if (!existsSync(path)) {
+        console.error(`Project not found: ${path}`);
+        return 2;
+      }
+      process.stdout.write(JSON.stringify(projectSummary(path), null, 2) + '\n');
+      return 0;
+    }
+    default:
+      return usage();
+  }
+}

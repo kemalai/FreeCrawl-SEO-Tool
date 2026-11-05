@@ -49,6 +49,7 @@ export {
   MOBILE_DEVICE_SCALE_FACTOR,
   configuredProxyUrl,
   effectiveProxyUrl,
+  redactUrlSecrets,
 } from './http-client.js';
 export { exportUrlsToJson, type JsonExportOptions } from './json-export.js';
 export { exportUrlsToXml } from './xml-export.js';
@@ -122,11 +123,24 @@ export {
 export {
   postCrawlCompleteWebhook,
   postWebhookJson,
+  postWebhookMessage,
   type WebhookPayload,
   type WebhookResult,
 } from './webhook.js';
 export {
+  resolveWebhookFormat,
+  renderWebhookBody,
+  buildCrawlCompleteNotice,
+  buildScheduledCrawlNotice,
+  topIssueLines,
+  comparisonLines,
+  type WebhookNotice,
+  type ResolvedWebhookFormat,
+} from './webhook-format.js';
+export {
   compareCrawls,
+  writeCrawlChangesCsvs,
+  COMPARE_CATEGORY_LABELS,
   type CompareCategory,
   type CompareDiffRow,
   type CompareSummary,
@@ -134,6 +148,7 @@ export {
 } from './compare.js';
 export {
   discoverSitemapUrls,
+  resolveSitemapUrls,
   fetchSitemaps,
   type SitemapEntry,
   type SitemapDiscoveryResult,
@@ -196,3 +211,11 @@ export {
   type MetricaFetchOptions,
   type MetricaPageMetrics,
 } from './metrica.js';
+export { htmlToMarkdown, type HtmlToMarkdownOptions } from './html-to-markdown.js';
+export {
+  diagnoseCrawl,
+  type CrawlDiagnosis,
+  type CrawlHealthStats,
+  type DiagnosisFinding,
+  type DiagnosisSeverity,
+} from './crawl-diagnosis.js';

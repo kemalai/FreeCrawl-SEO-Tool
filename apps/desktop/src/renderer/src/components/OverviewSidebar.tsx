@@ -1,10 +1,13 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronRight, Search, X } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import {
   ISSUE_GROUPS,
   issueCount,
+  effectiveIssueSeverity,
+  type IssueSeverity,
+  type IssueSeverityOverrides,
   type OverviewCounts,
   type UrlCategory,
 } from '@freecrawl/shared-types';
@@ -26,8 +29,17 @@ interface Node {
   /** The check is switched off by a crawl setting, so there is no count to
    *  show — rendered as "Off" instead of a misleading 0. */
   off?: boolean;
+  /** Issue checks only: the tier the check is reported under (built-in or
+   *  the project's override), drawn as a small coloured marker. */
+  severity?: IssueSeverity;
   children?: Node[];
 }
+
+const SEVERITY_DOT: Record<IssueSeverity, string> = {
+  critical: 'bg-red-500',
+  warning: 'bg-amber-500',
+  info: 'bg-sky-500',
+};
 
 export function OverviewSidebar() {
   const { t, i18n } = useTranslation();
@@ -158,7 +170,24 @@ export function OverviewSidebar() {
       });
   }, [progressCrawled, progressRunning, setOverview]);
 
+  // Search box: filters the tree by label (English + the UI language), so
+  // "hreflang" or "eksik" finds checks in a 180-node tree without scrolling.
+  // While a query is active every matching branch is shown expanded;
+  // collapsing one there is remembered only until the query changes.
+  const [query, setQuery] = useState('');
+  const [searchCollapsed, setSearchCollapsed] = useState<Set<string>>(new Set());
+  const searching = query.trim() !== '';
+
   const toggle = (k: string) => {
+    if (searching) {
+      setSearchCollapsed((prev) => {
+        const next = new Set(prev);
+        if (next.has(k)) next.delete(k);
+        else next.add(k);
+        return next;
+      });
+      return;
+    }
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(k)) next.delete(k);
@@ -175,10 +204,37 @@ export function OverviewSidebar() {
   // the three cookie checks have nothing to count: a 0 there read as "no
   // insecure cookies" on a site that sets them on every page.
   const cookiesOff = useAppStore((s) => (s.config.cookiePolicy ?? 'reject-all') === 'reject-all');
+  const severityOverrides = useAppStore((s) => s.config.issueSeverityOverrides);
   const tree = useMemo(
-    () => buildTree(overview, disabledSet, cookiesOff),
-    [overview, disabledSet, cookiesOff],
+    () => buildTree(overview, disabledSet, cookiesOff, severityOverrides),
+    [overview, disabledSet, cookiesOff, severityOverrides],
   );
+  const severityLabels: Record<IssueSeverity, string> = {
+    critical: t('settingsPanels.issues.severityCritical', { defaultValue: 'Critical' }),
+    warning: t('settingsPanels.issues.severityWarning', { defaultValue: 'Warning' }),
+    info: t('settingsPanels.issues.severityInfo', { defaultValue: 'Info' }),
+  };
+  const visibleTree = useMemo(() => {
+    const terms = query
+      .toLocaleLowerCase(lang)
+      .split(/\s+/)
+      .filter((term) => term !== '');
+    return terms.length === 0 ? tree : filterTree(tree, terms, lang, '');
+  }, [tree, query, lang]);
+  const visibleExpanded = useMemo(() => {
+    if (!searching) return expanded;
+    const keys = new Set<string>();
+    const walk = (nodes: Node[]) => {
+      for (const n of nodes) {
+        if (n.children?.length) {
+          if (!searchCollapsed.has(n.key)) keys.add(n.key);
+          walk(n.children);
+        }
+      }
+    };
+    walk(visibleTree);
+    return keys;
+  }, [searching, expanded, visibleTree, searchCollapsed]);
   const offLabel = t('sidebar.checkOff', { defaultValue: 'Off' });
   const notComputedLabel = t('sidebar.notComputed', { defaultValue: 'Not computed' });
   const notComputedHint = t('sidebar.notComputedHint', {
@@ -203,6 +259,34 @@ export function OverviewSidebar() {
           <span>{t('sidebar.urls', { defaultValue: 'URLs' })}</span>
           <span>{t('sidebar.percentOfTotal', { defaultValue: '% of Total' })}</span>
         </div>
+      </div>
+      <div className="flex items-center gap-1 border-b border-surface-800 px-2 py-1">
+        <Search className="h-3 w-3 shrink-0 text-surface-500" />
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setSearchCollapsed(new Set());
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setQuery('');
+          }}
+          placeholder={t('sidebar.searchPlaceholder', { defaultValue: 'Search checks…' })}
+          aria-label={t('sidebar.searchPlaceholder', { defaultValue: 'Search checks…' })}
+          className="min-w-0 flex-1 bg-transparent text-[11px] text-surface-200 placeholder:text-surface-500 focus:outline-none"
+        />
+        {searching && (
+          <button
+            type="button"
+            onClick={() => setQuery('')}
+            title={t('sidebar.searchClear', { defaultValue: 'Clear search' })}
+            aria-label={t('sidebar.searchClear', { defaultValue: 'Clear search' })}
+            className="rounded p-0.5 text-surface-500 hover:bg-surface-800 hover:text-surface-200"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        )}
       </div>
       {botBlocked && (
         // The crawl itself is incomplete — said up front, because every
@@ -257,12 +341,17 @@ export function OverviewSidebar() {
       )}
       <div className="flex-1 overflow-auto">
         <div className="py-1 text-[11px]">
-          {tree.map((node) => (
+          {searching && visibleTree.length === 0 && (
+            <div className="px-3 py-2 text-surface-500">
+              {t('sidebar.searchNoResults', { defaultValue: 'No matching checks.' })}
+            </div>
+          )}
+          {visibleTree.map((node) => (
             <TreeNode
               key={node.key}
               node={node}
               depth={0}
-              expanded={expanded}
+              expanded={visibleExpanded}
               toggle={toggle}
               activeCategory={activeCategory}
               onClick={navigateToCategory}
@@ -272,6 +361,7 @@ export function OverviewSidebar() {
               offHint={cookiesOffHint}
               notComputedLabel={notComputedLabel}
               notComputedHint={notComputedHint}
+              severityLabels={severityLabels}
             />
           ))}
         </div>
@@ -293,6 +383,7 @@ const TreeNode = memo(function TreeNode({
   offHint,
   notComputedLabel,
   notComputedHint,
+  severityLabels,
 }: {
   node: Node;
   depth: number;
@@ -306,6 +397,7 @@ const TreeNode = memo(function TreeNode({
   offHint: string;
   notComputedLabel: string;
   notComputedHint: string;
+  severityLabels: Record<IssueSeverity, string>;
 }) {
   const isExpanded = expanded.has(node.key);
   const isActive = node.category && node.category === activeCategory;
@@ -332,6 +424,13 @@ const TreeNode = memo(function TreeNode({
           )
         ) : (
           <span className="w-3 shrink-0" />
+        )}
+        {node.severity && (
+          <span
+            className={clsx('h-1.5 w-1.5 shrink-0 rounded-full', SEVERITY_DOT[node.severity])}
+            title={severityLabels[node.severity]}
+            aria-label={severityLabels[node.severity]}
+          />
         )}
         <span className="min-w-0 flex-1 truncate text-surface-200">{translateLabel(node.label, lang)}</span>
         {node.off && (
@@ -377,16 +476,42 @@ const TreeNode = memo(function TreeNode({
             offHint={offHint}
             notComputedLabel={notComputedLabel}
             notComputedHint={notComputedHint}
+            severityLabels={severityLabels}
           />
         ))}
     </>
   );
 });
 
+/**
+ * The tree narrowed to `terms` (lower-cased, all must match). A node's text
+ * is its English label plus its translation, prefixed by its ancestors' —
+ * so "hreflang missing" finds "x-default Missing" under Hreflang. A node
+ * that matches keeps its whole subtree; otherwise it survives only as the
+ * parent of a matching descendant.
+ */
+function filterTree(nodes: Node[], terms: string[], lang: string, path: string): Node[] {
+  const out: Node[] = [];
+  for (const n of nodes) {
+    const own = `${n.label} ${translateLabel(n.label, lang)}`.toLocaleLowerCase(lang);
+    const hay = `${path} ${own}`;
+    if (terms.every((term) => hay.includes(term))) {
+      out.push(n);
+      continue;
+    }
+    if (n.children?.length) {
+      const kids = filterTree(n.children, terms, lang, hay);
+      if (kids.length > 0) out.push({ ...n, children: kids });
+    }
+  }
+  return out;
+}
+
 function buildTree(
   o: OverviewCounts | null,
   disabled: ReadonlySet<string>,
   cookiesOff: boolean,
+  severityOverrides?: IssueSeverityOverrides,
 ): Node[] {
   if (!o) return [];
   // Response Codes and Security deliberately count external URLs too (that's
@@ -569,6 +694,7 @@ function buildTree(
             label: i.label,
             count: issueCount(o.issues, i),
             category: i.category,
+            severity: effectiveIssueSeverity(i.category, severityOverrides),
             ...(i.percentBase === 'images' ? { percentBase: o.summary.totalImages } : {}),
             ...(cookiesOff && i.category.startsWith('issues:cookie-') ? { off: true } : {}),
           })),

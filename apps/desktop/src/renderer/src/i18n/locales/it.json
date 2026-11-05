@@ -10,7 +10,10 @@
     "checkOff": "Disattivato",
     "cookiesOffHint": "I controlli sui cookie sono disattivati perché la politica dei cookie della scansione è \"Rifiuta tutto\". Scegli \"Accetta tutto\" o \"Blocca terze parti\" in Impostazioni → Cookie per analizzare le intestazioni Set-Cookie.",
     "notComputed": "Non calcolato",
-    "notComputedHint": "I link in entrata non sono ancora stati calcolati, quindi le pagine orfane non possono essere contate. Vengono calcolati al termine di una scansione con \"Ricalcola i link in entrata\" attivo."
+    "notComputedHint": "I link in entrata non sono ancora stati calcolati, quindi le pagine orfane non possono essere contate. Vengono calcolati al termine di una scansione con \"Ricalcola i link in entrata\" attivo.",
+    "searchPlaceholder": "Cerca controlli…",
+    "searchClear": "Cancella ricerca",
+    "searchNoResults": "Nessun controllo corrispondente."
   },
   "integrations": {
     "intro": "Collega servizi esterni con le tue credenziali. Le chiavi API e i segreti sono cifrati a riposo tramite l'archivio sicuro del tuo sistema operativo e non lasciano mai questa macchina.",
@@ -189,7 +192,11 @@
     "capacityTitle": "Stima degli URL aggiuntivi che stanno nella memoria di sistema rimanente al costo attuale per URL. Calcolo: memoriaLibera / costoPerUrl. Consideralo un limite superiore: la velocità sostenuta è di solito limitata prima dalla CPU.",
     "lagResponsiveTitle": "Il thread principale risponde — l'interazione sembra istantanea",
     "lagContendedTitle": "Il thread principale è in contesa — leggeri scatti al clic",
-    "lagBusyTitle": "Il thread principale è occupato — l'IPC si è accumulato; molto probabilmente l'SQL della barra laterale o il caricamento dei blocchi della tabella è in competizione con lo scanner"
+    "lagBusyTitle": "Il thread principale è occupato — l'IPC si è accumulato; molto probabilmente l'SQL della barra laterale o il caricamento dei blocchi della tabella è in competizione con lo scanner",
+    "throttled": "Rallentata",
+    "throttledTitle": "La velocità adattiva ha rallentato la scansione perché il sito ha risposto 429 / 503. Riaccelera quando le risposte tornano pulite.",
+    "pausedHostDown": "In pausa: il sito non risponde più",
+    "pausedHostDownTitle": "Il sito ha smesso di rispondere, quindi la scansione si è messa in pausa invece di segnare come fallito il resto della coda. Controlla il sito, poi premi Riprendi."
   },
   "menu": {
     "file": "File",
@@ -651,7 +658,9 @@
       "worstCaseDelay": "Ritardo nel caso peggiore per URL fallito ≈ ritardoIniziale × (2 ^ tentativi − 1) = {{value}}",
       "tip1": "Per una prima passata rapida su un sito sano prova il preset <bold>Rapido</bold> (Impostazioni → Preset) — concorrenza 40, RPS 40, nessun nuovo tentativo.",
       "tip2": "Per origini instabili o API lente prova <bold>Approfondito</bold> — concorrenza 10, 3 tentativi, timeout di 30 s.",
-      "tip3": "Concorrenza × keep-alive HTTP = numero di connessioni a regime. La maggior parte dei server gestisce comodamente 20–40; proxy e WAF aziendali spesso si fermano a 8–10."
+      "tip3": "Concorrenza × keep-alive HTTP = numero di connessioni a regime. La maggior parte dei server gestisce comodamente 20–40; proxy e WAF aziendali spesso si fermano a 8–10.",
+      "pauseOnHostUnresponsive": "Metti in pausa la scansione se un host smette di rispondere",
+      "connectionFailureRetries": "Tentativi su errore di connessione (nessuna risposta: timeout / reset / rifiuto)"
     },
     "requests": {
       "intro": "Header HTTP inviati con ogni richiesta.",
@@ -664,7 +673,13 @@
     "filters": {
       "intro": "Elenco di URL consentiti/bloccati. I pattern sono espressioni regolari JavaScript testate sull'URL completo.",
       "includePatterns": "Pattern di inclusione (regex, uno per riga — vuoto = tutto consentito)",
-      "excludePatterns": "Pattern di esclusione (regex, uno per riga)"
+      "excludePatterns": "Pattern di esclusione (regex, uno per riga)",
+      "linkPositionsHeading": "Non seguire i link in",
+      "linkPositionNavigation": "Navigazione (<nav>)",
+      "linkPositionHeader": "Intestazione (<header>)",
+      "linkPositionFooter": "Piè di pagina (<footer>)",
+      "linkPositionSidebar": "Barra laterale (<aside>)",
+      "excludeLinkSelectors": "Non seguire i link all'interno di questi elementi (selettori CSS, uno per riga)"
     },
     "customSearch": {
       "intro1": "Segnala le pagine il cui corpo contiene uno di questi termini. Due modalità per riga:",
@@ -758,8 +773,17 @@
     "webhook": {
       "intro1": "Webhook attivato una volta al termine di ogni scansione. Una singola",
       "intro2": "con un riepilogo JSON (URL iniziale, durata, totale URL, distribuzione degli stati, tutti i conteggi di problemi diversi da zero). Vuoto lo disattiva.",
-      "outro": "Compatibile con i webhook in entrata di Slack (la forma del JSON è abbastanza ricca perché Slack la mostri come testo semplice), i trigger «Catch Hook» di Zapier, i webhook di Discord ed endpoint HTTP personalizzati.",
-      "url": "URL del webhook"
+      "url": "URL del webhook",
+      "format": "Formato del messaggio",
+      "formatAuto": "Automatico (rilevato dall’URL)",
+      "formatJson": "JSON (Zapier, Make, n8n, endpoint proprio)",
+      "outroFormats": "Slack, Discord e Microsoft Teams ricevono un messaggio leggibile: distribuzione dei codici di stato, problemi principali e, per le scansioni pianificate con Auto Compare, le modifiche dalla scansione precedente. Automatico riconosce i webhook in ingresso di Slack, i webhook di Discord e gli URL dei connettori Teams; per un URL di Teams Workflows scegli Microsoft Teams. Qualsiasi altro indirizzo riceve il riepilogo JSON.",
+      "secretNote": "Un URL di webhook funziona come una password: chiunque lo possieda può pubblicare nel tuo canale. FreeCrawl lo conserva cifrato e lo esclude dalle impostazioni esportate.",
+      "test": "Invia messaggio di prova",
+      "testing": "Invio in corso…",
+      "testOk": "Consegnato come {{format}} (HTTP {{status}}).",
+      "testInvalid": "Inserisci prima un URL http(s).",
+      "testFailed": "Non consegnato ({{status}}): {{detail}}"
     },
     "auth": {
       "intro": "Autenticazione HTTP inviata solo al sito scansionato (l'origine dell'URL iniziale, o gli URL elencati in modalità Elenco) — mai a link esterni, CDN o altri host. Utile per ambienti di staging protetti da autenticazione Basic/Digest, o per API che richiedono un token Bearer. Per siti protetti da un modulo di login HTML, usa invece il login tramite modulo qui sotto.",
@@ -859,7 +883,14 @@
       "disableAll": "Disattiva tutti",
       "summary": "Attivi: {{on}} / {{total}}",
       "groupSummary": "{{on}} / {{total}} attivi",
-      "noMatch": "Nessun controllo corrisponde al filtro."
+      "noMatch": "Nessun controllo corrisponde al filtro.",
+      "severityIntro": "Cambia la gravità di un controllo per spostarlo tra i gruppi Critico / Avviso / Info, l'ordine del report e l'indicatore della barra laterale, ad esempio quando un controllo conta di più o di meno su questo sito.",
+      "severityCritical": "Critico",
+      "severityWarning": "Avviso",
+      "severityInfo": "Info",
+      "severityLabel": "Gravità",
+      "severityChanged": "Predefinito: {{tier}}",
+      "resetSeverities": "Ripristina le gravità"
     },
     "advanced": {
       "intro": "Limiti di basso livello e interruttori per il seguire i link. I valori predefiniti sono tarati per i tipici audit SEO — modificali solo se sai perché.",
@@ -975,7 +1006,15 @@
     "urlHeader": "URL",
     "beforeHeader": "Prima",
     "afterHeader": "Dopo",
-    "noDiffs": "Nessuna differenza in questa categoria."
+    "noDiffs": "Nessuna differenza in questa categoria.",
+    "previousTitle": "Modifiche dalla scansione precedente",
+    "previousCrawl": "Scansione precedente ({{date}})",
+    "thisCrawl": "Questa scansione",
+    "noPrevious": "Non c’è ancora una scansione precedente da confrontare. Attiva \"Confronta automaticamente con la scansione precedente\" in Scansione pianificata, oppure esegui la scansione dalla CLI con --auto-compare.",
+    "issuesChanged": "Problemi cambiati",
+    "issueHeader": "Problema",
+    "changeHeader": "Variazione",
+    "noIssueChanges": "Nessun conteggio dei problemi è cambiato."
   },
   "scheduled": {
     "title": "Scansione pianificata",
@@ -1017,7 +1056,16 @@
     "browse": "Sfoglia…",
     "outputDirHint": "Scegli una cartella: ogni esecuzione scrive in una sottocartella con data e ora.",
     "sheets": "Invia anche tutti gli URL a un nuovo foglio Google Sheets",
-    "webhook": "Notifica il webhook del progetto con l'elenco dei file (Impostazioni → Webhook)"
+    "webhook": "Notifica il webhook del progetto con l'elenco dei file (Impostazioni → Webhook)",
+    "runNow": "Esegui ora",
+    "runNowTitle": "Avvia subito questa scansione pianificata. La pianificazione regolare non cambia.",
+    "runNowSaveFirst": "Salva prima le modifiche.",
+    "runNowBusy": "È già in corso una scansione: attendi che finisca o fermala prima.",
+    "runNowNoConfig": "Esegui prima una scansione manualmente una volta: la pianificazione ne riutilizza le impostazioni.",
+    "runNowNoProject": "Apri o salva prima un progetto.",
+    "runNowNoSchedule": "Salva prima la pianificazione.",
+    "autoCompare": "Confronta automaticamente con la scansione precedente",
+    "autoCompareHint": "Conserva la scansione precedente quando questa parte. Le modifiche finiscono nella cartella di esportazione (crawl-changes.csv), nel webhook e in File → Confronta con la scansione precedente."
   },
   "serp": {
     "noTitle": "(nessun titolo)",
@@ -1440,7 +1488,9 @@
     "loadingSource": "Caricamento del codice sorgente…",
     "noBody": "Nessun corpo HTML archiviato per questo URL.",
     "noBodyHint1": "Vedi codice sorgente viene acquisito solo per le pagine HTML scansionate con l'impostazione",
-    "noBodyHint2": "attiva."
+    "noBodyHint2": "attiva.",
+    "markdownLoading": "Conversione in Markdown…",
+    "markdownFailed": "Impossibile convertire questa pagina in Markdown."
   },
   "viewRendered": {
     "noBody": "Nessun DOM renderizzato archiviato per questo URL.",
@@ -1550,7 +1600,9 @@
     "imagesUnit": "immagini",
     "loaded": "{{n}} caricate",
     "row": "Riga",
-    "noImages": "Nessuna immagine"
+    "noImages": "Nessuna immagine",
+    "missingTitleOnly": "Solo senza title",
+    "emptyMissingTitle": "Nessuna immagine senza attributo title."
   },
   "serpTab": {
     "title": "Anteprima SERP",
@@ -1985,7 +2037,10 @@
     "summary": "{{shown}} pagine · {{tested}} con risposta · {{errors}} errori · {{selected}} selezionate",
     "running": "Esecuzione: {{url}}",
     "emptyNoData": "Nessuna pagina HTML interna ancora scansionata — esegui una scansione, poi seleziona le pagine e premi Esegui.",
-    "emptyNoMatch": "Nessuna pagina corrisponde al filtro attuale."
+    "emptyNoMatch": "Nessuna pagina corrisponde al filtro attuale.",
+    "modelDefault": "Modello (predefinito: {{model}})",
+    "modelMissing": "\"{{model}}\" non è nell’elenco attuale dei modelli di {{provider}}.",
+    "pickModel": "Scegli un modello disponibile…"
   },
   "seoTab": {
     "title": "Autorità SEO",
@@ -2155,7 +2210,10 @@
       "note": "I dati della scansione attiva risiedono nella directory dei dati utente dell'applicazione fino a quando non usi Salva con nome — il percorso sopra controlla solo da dove parte Salva con nome. Cambiarlo non sposta alcun file di progetto esistente.",
       "autoSaveTitle": "Salvataggio a lotti",
       "autoSaveLabel": "Salva il progetto ogni N URL scansionati — 0 = disattivato",
-      "autoSaveHint": "Durante la scansione il file .seoproject aperto viene riscritto ogni volta che vengono scansionati altrettanti URL, così un crash o un blackout costa al massimo un lotto. Vale solo dopo aver salvato il progetto su file; minimo {{min}}. Ogni salvataggio è uno snapshot completo: sui siti grandi tienilo nell'ordine delle migliaia."
+      "autoSaveHint": "Durante la scansione il file .seoproject aperto viene riscritto ogni volta che vengono scansionati altrettanti URL, così un crash o un blackout costa al massimo un lotto. Vale solo dopo aver salvato il progetto su file; minimo {{min}}. Ogni salvataggio è uno snapshot completo: sui siti grandi tienilo nell'ordine delle migliaia.",
+      "fileNamesTitle": "Nomi dei file di esportazione",
+      "fileNamesReset": "Ripristina",
+      "fileNamesPreview": "Esempio:"
     },
     "agents": {
       "title": "Sessioni di agente (MCP)",
@@ -2435,5 +2493,42 @@
     "setupResidential": "Per i proxy residenziali, crea prima una lista nella dashboard (paese, rotazione) e usa i dati di connessione che mostra.",
     "setupJsRender": "Con il rendering JavaScript attivo, usa il formato HTTP: il browser non può usare un proxy SOCKS5 che richiede una password.",
     "hide": "Nascondi"
+  },
+  "rateLimitNotice": {
+    "title": "Il sito sta limitando la scansione",
+    "body_one": "Il server ha risposto a {{count}} richiesta con 429 (Too Many Requests) o 503 (Service Unavailable). La velocità adattiva è disattivata, quindi la scansione mantiene il suo ritmo fisso e altre pagine potrebbero fallire.",
+    "body_many": "Il server ha risposto a {{count}} di richieste con 429 (Too Many Requests) o 503 (Service Unavailable). La velocità adattiva è disattivata, quindi la scansione mantiene il suo ritmo fisso e altre pagine potrebbero fallire.",
+    "body_other": "Il server ha risposto a {{count}} richieste con 429 (Too Many Requests) o 503 (Service Unavailable). La velocità adattiva è disattivata, quindi la scansione mantiene il suo ritmo fisso e altre pagine potrebbero fallire.",
+    "benefit": "Se attivi la velocità adattiva, la velocità di scansione si regola da sola: rallenta finché il server frena e riaccelera quando le risposte tornano pulite. Salvarla vale anche per questa scansione.",
+    "where": "Dove attivarla",
+    "path": "Impostazioni → Velocità → Velocità adattiva",
+    "dontShow": "Non mostrare più",
+    "notNow": "Non ora",
+    "openSettings": "Apri impostazioni di velocità"
+  },
+  "aiSettings": {
+    "title": "Modello e prompt",
+    "defaultModel": "Modello predefinito",
+    "checkModels": "Verifica modelli",
+    "checking": "Verifica in corso…",
+    "checkNeedsCredentials": "Salva prima le credenziali qui sopra.",
+    "listFailed": "Impossibile caricare l’elenco dei modelli: {{detail}}",
+    "modelOk": "{{model}} è disponibile.",
+    "modelMissing": "{{model}} non è nell’elenco attuale dei modelli di {{provider}}.",
+    "pickModel": "Scegli un modello disponibile…",
+    "defaultModelHint": "Usato quando la scheda IA o l’Assistente lasciano vuoto il modello. Lascia vuoto per il predefinito integrato ({{model}}).",
+    "systemPrompt": "Prompt di sistema",
+    "systemPromptPlaceholder": "Sei uno specialista di SEO tecnica. Rispondi con frasi brevi e semplici.",
+    "systemPromptHint": "Inviato con ogni prompt della scheda IA a questo fornitore: ruolo, tono, lingua, vincoli. L’Assistente mantiene le proprie istruzioni.",
+    "timeout": "Timeout della richiesta (secondi)",
+    "timeoutHint": "Quanto attendere la risposta del modello locale (10–3600). I modelli grandi su hardware modesto richiedono di più. Vuoto = 120 per la scheda IA, 180 per l’Assistente.",
+    "usageTitle": "Utilizzo dei token",
+    "usageRequests": "Richieste: {{value}}",
+    "usageTokensIn": "Token in ingresso: {{value}}",
+    "usageTokensOut": "Token in uscita: {{value}}",
+    "usageSince": "Dal {{date}}",
+    "usageReset": "Azzera",
+    "usageNone": "Nessuna richiesta registrata finora.",
+    "usageHint": "Conteggiato su questo computer dai numeri di token riportati da ogni risposta (scheda IA e Assistente). Fa fede la fattura del tuo fornitore."
   }
 }

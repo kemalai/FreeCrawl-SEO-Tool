@@ -1,6 +1,7 @@
 import {
   ISSUE_GROUPS,
-  ISSUE_SEVERITY,
+  effectiveIssueSeverity,
+  type IssueSeverityOverrides,
   type IssueCountKey,
   type IssueSeverity,
   type OverviewCounts,
@@ -39,14 +40,17 @@ export const SEVERITY_LABEL: Record<IssueSeverity, string> = {
  * 0 in `counts`. Composite checks (Broken (All)) are skipped: they only
  * sum siblings that are listed on their own.
  */
-export function summarizeIssues(counts: OverviewCounts): IssueSummary[] {
+export function summarizeIssues(
+  counts: OverviewCounts,
+  severityOverrides?: IssueSeverityOverrides,
+): IssueSummary[] {
   const out: IssueSummary[] = [];
   for (const group of ISSUE_GROUPS) {
     for (const item of group.items) {
       if (typeof item.count !== 'string') continue;
       const count = counts.issues[item.count];
       if (count == null || !(count > 0)) continue;
-      const severity = ISSUE_SEVERITY[item.category] ?? 'info';
+      const severity = effectiveIssueSeverity(item.category, severityOverrides) ?? 'info';
       out.push({
         category: item.category,
         title: `${group.label}: ${item.label}`,
@@ -234,6 +238,14 @@ const ISSUE_ADVICE: Partial<Record<IssueCountKey, string>> = {
   brokenLinksInternal: 'Fix or remove internal links to 4xx/5xx pages.',
   brokenLinksExternal: 'Update or remove external links to dead pages.',
   linkEmptyAnchor: 'Give links descriptive anchor text (or alt text on image links).',
+  linkEmptyHref: 'Give every <a> a real destination, or replace click-only elements with a <button>.',
+  imageMissingTitle: 'Add a title attribute where an image needs extra context; it is optional for decorative images.',
+  hreflangSelfOnly: 'List the other language versions in hreflang, or remove annotations that only point at the page itself.',
+  ogIncomplete: 'Add all four required OpenGraph tags: og:title, og:type, og:image and og:url.',
+  twitterIncomplete: 'Add twitter:card, and give the card a title and (for large-image cards) an image.',
+  ogImageNot200: 'Point og:image at an image URL that returns 200.',
+  twitterImageNot200: 'Point twitter:image at an image URL that returns 200.',
+  hreflangLangMismatch: 'Make the self-referencing hreflang code and html[lang] name the same language.',
   anchorTextTooLong: 'Shorten anchor texts over 100 characters to a concise description of the target page.',
   anchorTextGeneric: 'Replace generic anchors like "click here" or "read more" with text that describes the target page.',
   targetBlankNoNoopener: 'Add rel="noopener" to links that open in a new tab.',

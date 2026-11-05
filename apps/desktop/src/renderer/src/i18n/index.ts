@@ -17,6 +17,7 @@ import ko from './locales/ko.json';
 import ptBR from './locales/pt-BR.json';
 import ru from './locales/ru.json';
 import es from './locales/es.json';
+import nl from './locales/nl.json';
 
 /**
  * V1 Faz 8 — UI internationalisation.
@@ -93,6 +94,7 @@ void i18n.use(initReactI18next).init({
     'pt-BR': { translation: ptBR },
     ru: { translation: ru },
     es: { translation: es },
+    nl: { translation: nl },
   },
   lng: initialLanguage,
   fallbackLng: 'en',

@@ -802,4 +802,22 @@ export const TR_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': 'Ürün kataloğu denetimi: JSON-LD\'den fiyat, para birimi, stok, puan, SKU ve markayı çıkarır, "stokta yok" metnini işaretler ve filtrelerin taramayı şişirmemesi için sorgu dizesi facet\'lerini atlar.',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': 'Yayıncı denetimi: hreflang ve haber sitemap\'lerini izler, yazar ile yayın / güncelleme tarihlerini çıkarır ve hreflang karşılıklılığını denetler — tazelik ve dil hedeflemenin sıralamayı belirlediği siteler için.',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': 'Her sayfayı Chromium\'da render eder ve sayfa içi WCAG denetimi (kontrast, odak çerçevesi, dokunma hedefleri, yazı boyutu) ile mobil kullanılabilirlik kontrollerini çalıştırır. Kasıtlı olarak yavaş — düşük eşzamanlılık.',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "Title Özniteliği Eksik",
+  "Self Reference Only": "Yalnızca Self-Ref",
+  "Mismatch With HTML lang": "HTML lang ile Uyuşmuyor",
+  "Empty href": "Boş href",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph Eksik Kısımlı",
+  "Twitter Card Incomplete": "Twitter Card Eksik Kısımlı",
+  "OG Image Not 200": "OG Görsel 200 Değil",
+  "Twitter Image Not 200": "Twitter Görsel 200 Değil",
+  "og:image Width": "og:image Genişlik",
+  "og:image Height": "og:image Yükseklik",
+  "twitter:image Width": "twitter:image Genişlik",
+  "twitter:image Height": "twitter:image Yükseklik",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "Bağlantı Taranabilirliği",
+  "Crawlable": "Taranabilir",
+  "Uncrawlable": "Taranamaz",
 };

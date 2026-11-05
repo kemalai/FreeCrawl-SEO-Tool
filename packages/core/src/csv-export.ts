@@ -147,12 +147,60 @@ export async function exportLinksToCsv(
   return { rowsWritten };
 }
 
+const UNCRAWLABLE_LINKS_CSV_HEADER = [
+  'From URL',
+  'To URL',
+  'Target Status',
+  'Code',
+  'Kind',
+  'Element',
+  'Anchor',
+  'Internal',
+  'Position',
+  'Path',
+];
+
+/**
+ * One row per recorded uncrawlable link (Bulk Export "Uncrawlable Links") —
+ * the links behind the JS-Only Navigation filter, with the code a developer
+ * has to change. `To URL` is empty when no address could be read.
+ */
+export async function exportUncrawlableLinksToCsv(
+  db: ProjectDb,
+  filePath: string,
+): Promise<{ rowsWritten: number }> {
+  let rowsWritten = 0;
+  const header = UNCRAWLABLE_LINKS_CSV_HEADER.join(',') + '\n';
+  const generator = async function* (): AsyncGenerator<string> {
+    yield '﻿' + header;
+    for (const l of db.iterateUncrawlableLinks()) {
+      const cells = [
+        l.from_url,
+        l.to_url,
+        l.to_status,
+        l.code,
+        l.kind,
+        l.element,
+        l.anchor,
+        l.is_internal === 1 ? 'true' : 'false',
+        l.link_position,
+        l.link_path,
+      ];
+      rowsWritten++;
+      yield cells.map(escapeCsv).join(',') + '\n';
+    }
+  };
+  await pipeline(Readable.from(generator()), createWriteStream(filePath, { encoding: 'utf8' }));
+  return { rowsWritten };
+}
+
 export async function exportImagesToCsv(
   db: ProjectDb,
   filePath: string,
   options: {
     missingAltOnly?: boolean;
     emptyAltOnly?: boolean;
+    missingTitleOnly?: boolean;
     duplicateAltOnly?: boolean;
     search?: string;
     minByteSize?: number;
@@ -166,6 +214,7 @@ export async function exportImagesToCsv(
     for (const row of db.iterateImages({
       missingAltOnly: options.missingAltOnly,
       emptyAltOnly: options.emptyAltOnly,
+      missingTitleOnly: options.missingTitleOnly,
       duplicateAltOnly: options.duplicateAltOnly,
       search: options.search,
       minByteSize: options.minByteSize,

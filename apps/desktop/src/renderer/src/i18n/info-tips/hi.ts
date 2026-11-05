@@ -313,14 +313,14 @@ export const HI_INFO_TIPS: Record<string, string> = {
     'यदि आपका CMS एक ही पेज मिश्रित केस में परोसता है (/Foo और /foo) तो चालू।',
   ['On if your site canonicalises to non-www but emits www links somewhere.']:
     'यदि आपकी साइट गैर-www पर कैनोनिकल करती है पर कहीं www लिंक निकालती है तो चालू।',
-  ["On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."]:
-    'नेटवर्क त्रुटियों और 408/425/429/5xx प्रतिक्रियाओं पर हार मानने से पहले N बार और पुनः प्रयास करें। हर पुनः प्रयास URL के प्रतिक्रिया समय बजट में गिना जाता है।',
+  ["On 408/425/429/5xx responses, retry up to N more times before giving up. Requests that get no response at all use Connection Failure Retries below. Each retry counts toward the URL's response time budget."]:
+    "408/425/429/5xx जवाबों पर, हार मानने से पहले अधिकतम N बार और कोशिश करता है। जिन अनुरोधों को कोई जवाब नहीं मिलता, वे नीचे दिए कनेक्शन विफलता पुनःप्रयास का उपयोग करते हैं। हर कोशिश URL के प्रतिक्रिया-समय बजट में गिनी जाती है।",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'मोबाइल UX ऑडिट या PageSpeed-शैली मोबाइल पूर्वावलोकन कैप्चर करते समय चालू।',
   ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
     "'Key: Value' प्रारूप में प्रति पंक्ति एक हेडर। HTTP प्रमाणीकरण की तरह केवल क्रॉल की जा रही साइट को भेजा जाता है — बाहरी लिंक या अन्य होस्ट को कभी नहीं। प्रमाणीकरण टोकन या कस्टम रूटिंग संकेतों के लिए उपयोगी। कुंजियाँ टकराने पर उपयोगकर्ता मान डिफ़ॉल्ट को ओवरराइड करते हैं।",
-  ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
-    'प्रति पंक्ति एक साइटमैप URL। शुरुआती URL से लिंक फ़ॉलो करने के अलावा क्रॉलर ये साइटमैप फ़ेच करता है और उनमें सूचीबद्ध हर पेज को अतिरिक्त सीड के रूप में कतार में डालता है — तेज़/अधिक पूर्ण खोज, और साइटमैप गैर-मानक पथ पर हो तब भी विश्वसनीय अनाथ पहचान। बंद करने के लिए खाली छोड़ें।',
+  ["One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "प्रति पंक्ति एक साइटमैप URL। शुरुआती URL से लिंक फ़ॉलो करने के अलावा क्रॉलर ये साइटमैप फ़ेच करता है और उनमें सूचीबद्ध हर पेज को अतिरिक्त सीड के रूप में कतार में डालता है — तेज़/अधिक पूर्ण खोज, और साइटमैप गैर-मानक पथ पर हो तब भी विश्वसनीय अनाथ पहचान। बंद करने के लिए खाली छोड़ें। /sitemap.xml जैसे सापेक्ष पथ प्रारंभिक URL के आधार पर हल किए जाते हैं।",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
     'प्रति पंक्ति एक URL। हर एक ठीक एक बार फ़ेच होता है; आउटलिंक फ़ॉलो नहीं किए जाते। # से शुरू होने वाली टिप्पणियाँ अनदेखी की जाती हैं।',
   ['OS scheduler hint applied at crawl start. Lowering priority lets the rest of the machine stay responsive during heavy crawls. May require elevated privileges on some platforms.']:
@@ -600,9 +600,9 @@ export const HI_INFO_TIPS: Record<string, string> = {
     'अलग-URL (m-dot) मोबाइल संस्करण: <link rel="alternate" media="only screen and (max-width: …)">। रिस्पॉन्सिव साइटों पर null, जो अधिकांश हैं — यहाँ मान हो पर वापस कोई पारस्परिक कैनोनिकल न हो तो यह क्लासिक टूटा m-dot सेटअप है।',
   ['Crawl on only when the site really does serve a separate mobile host.']:
     'क्रॉल केवल तब चालू करें जब साइट वास्तव में अलग मोबाइल होस्ट परोसती हो।',
-  ['Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", and href="#" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter.']:
-    'ऐसे लिंक जिन्हें सर्च इंजन फ़ॉलो नहीं कर सकता: बिना href पर onclick वाला <a>, href="javascript:…", और हैंडलर से जुड़े href="#" प्लेसहोल्डर। केवल-संग्रह — गैर-क्रॉल योग्य लिंक परिभाषा से कभी फ़ेच नहीं होता। केवल-JS नेविगेशन समस्या फ़िल्टर को डेटा देता है।',
-  ['On — it is a count, so it costs nothing.']: 'चालू — यह एक गिनती है, इसलिए इसका कोई खर्च नहीं।',
+  ["Links a search engine cannot follow: <a> with no href but an onclick, href=\"javascript:…\", href=\"#\" placeholders wired to a handler, an href on a non-link element such as <span> or <div>, and non-link elements whose onclick navigates. Store-only — an uncrawlable link is by definition never fetched. Each one appears under Outlinks as Uncrawlable; the internal ones drive the JS-Only Navigation issue filter."]:
+    "ऐसे लिंक जिन्हें सर्च इंजन फ़ॉलो नहीं कर सकता: बिना href पर onclick वाला <a>, href=\"javascript:…\", हैंडलर से जुड़े href=\"#\" प्लेसहोल्डर, <span> या <div> जैसे गैर-लिंक एलिमेंट पर href, और ऐसे गैर-लिंक एलिमेंट जिनका onclick दूसरे पेज पर ले जाता है। केवल-संग्रह — गैर-क्रॉल योग्य लिंक परिभाषा से कभी फ़ेच नहीं होता। हर लिंक आउटलिंक में क्रॉल योग्य नहीं के रूप में दिखता है; आंतरिक लिंक केवल JS से नेविगेशन समस्या फ़िल्टर को डेटा देते हैं।",
+  ["On — recording them costs almost nothing."]: "चालू — इन्हें रिकॉर्ड करने में लगभग कोई लागत नहीं।",
   ['With a Subfolder-scoped crawl, links pointing outside the start folder are fetched once so their status code is known, then stopped — they are checked, not crawled through. Off leaves them undiscovered entirely.']:
     'सबफ़ोल्डर-दायरे वाले क्रॉल में शुरुआती फ़ोल्डर के बाहर के लिंक एक बार फ़ेच होते हैं ताकि उनका स्टेटस कोड पता चले, फिर रुक जाते हैं — जाँचे जाते हैं, क्रॉल नहीं किए जाते। बंद उन्हें पूरी तरह अनखोजा छोड़ देता है।',
   ['On — knowing a link out of /blog/ is a 404 costs one request.']:
@@ -641,8 +641,8 @@ export const HI_INFO_TIPS: Record<string, string> = {
   ['Reads Sitemap: directives from /robots.txt plus the conventional /sitemap.xml fallbacks at crawl start. Cheap I/O, and it powers every sitemap issue filter.']:
     'क्रॉल शुरू होने पर /robots.txt से Sitemap: निर्देश और पारंपरिक /sitemap.xml विकल्प पढ़ता है। सस्ता I/O, और हर साइटमैप समस्या फ़िल्टर को चलाता है।',
   ['On (default).']: 'चालू (डिफ़ॉल्ट)।',
-  ['Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions.']:
-    'स्पष्ट साइटमैप URL, प्रति पंक्ति एक। उनकी प्रविष्टियाँ हमेशा दर्ज भी होती हैं और क्रॉल सीड के रूप में कतारबद्ध भी — तब इस्तेमाल करें जब साइटमैप ऐसी जगह हो जिसका robots.txt कभी ज़िक्र नहीं करता।',
+  ["Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "स्पष्ट साइटमैप URL, प्रति पंक्ति एक। उनकी प्रविष्टियाँ हमेशा दर्ज भी होती हैं और क्रॉल सीड के रूप में कतारबद्ध भी — तब इस्तेमाल करें जब साइटमैप ऐसी जगह हो जिसका robots.txt कभी ज़िक्र नहीं करता। /sitemap.xml जैसे सापेक्ष पथ प्रारंभिक URL के आधार पर हल किए जाते हैं।",
   ['Treat the concurrency and RPS above as a ceiling and let the target server set the real pace. On a 429/503 (or a Retry-After header) the crawler pauses for the penalty window and steps the rate + concurrency down; after a sustained run of clean responses it grows them back toward the ceiling. Off = hold the configured rate no matter how the server responds.']:
     'ऊपर की समांतरता और RPS को सीमा मानें और लक्ष्य सर्वर को वास्तविक गति तय करने दें। 429/503 (या Retry-After हेडर) पर क्रॉलर दंड अवधि के लिए रुकता है और दर + समांतरता घटाता है; साफ़ प्रतिक्रियाओं की निरंतर श्रृंखला के बाद उन्हें फिर सीमा की ओर बढ़ाता है। बंद = सर्वर चाहे जैसे जवाब दे, कॉन्फ़िगर की गई दर बनाए रखें।',
   ['Turn on for sites behind Cloudflare / a WAF that returns 429s; leave off for your own infrastructure where the fixed rate is safe.']:
@@ -677,4 +677,50 @@ export const HI_INFO_TIPS: Record<string, string> = {
     "इस URL के निकट-प्रतिलिपि क्लस्टर के किसी अन्य पेज से सबसे अधिक अनुमानित टेक्स्ट समानता, मुख्य टेक्स्ट पर मापी गई। जो पेज निकट-प्रतिलिपि नहीं हैं उनमें खाली रहता है।",
   ["90 = recommended (Screaming Frog's default); 80 catches looser rewrites; 0 turns this pass off."]:
     "90 = अनुशंसित (Screaming Frog डिफ़ॉल्ट); 80 अधिक ढीले पुनर्लेखन पकड़ता है; 0 इस चरण को बंद करता है।",
+  ["The page's `og:title` — the headline Facebook, LinkedIn and other OpenGraph readers show on a share card. One of the four required OpenGraph properties."]:
+    "पेज का `og:title` — वह शीर्षक जो Facebook, LinkedIn और अन्य OpenGraph पढ़ने वाले शेयर कार्ड पर दिखाते हैं। चार ज़रूरी OpenGraph गुणों में से एक।",
+  ["The `og:description` text shown under the title on a share card."]:
+    "`og:description` का पाठ जो शेयर कार्ड पर शीर्षक के नीचे दिखता है।",
+  ["The `og:image` URL as written in the page. The share card uses this picture; it should be absolute and return 200. One of the four required OpenGraph properties."]:
+    "पेज में लिखा गया `og:image` URL। शेयर कार्ड यही छवि इस्तेमाल करता है; यह पूर्ण (absolute) होना चाहिए और 200 लौटाना चाहिए। चार ज़रूरी OpenGraph गुणों में से एक।",
+  ["Pixel width of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "og:image की पिक्सेल चौड़ाई, जिसे सोशल-इमेज जाँच पढ़ती है। 0 = छवि पढ़ी नहीं जा सकी; खाली = जाँच नहीं हुई।",
+  ["Pixel height of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "og:image की पिक्सेल ऊँचाई, जिसे सोशल-इमेज जाँच पढ़ती है। 0 = छवि पढ़ी नहीं जा सकी; खाली = जाँच नहीं हुई।",
+  ["The `og:type` of the page, such as website or article. One of the four required OpenGraph properties."]:
+    "पेज का `og:type`, जैसे website या article। चार ज़रूरी OpenGraph गुणों में से एक।",
+  ["The `og:url` — the address share counts and the card link are attached to. One of the four required OpenGraph properties."]:
+    "`og:url` — वह पता जिससे शेयर गिनती और कार्ड का लिंक जुड़ा होता है। चार ज़रूरी OpenGraph गुणों में से एक।",
+  ["The `og:site_name` that some platforms show above the share card title."]:
+    "`og:site_name` जिसे कुछ प्लेटफ़ॉर्म शेयर कार्ड के शीर्षक के ऊपर दिखाते हैं।",
+  ["The `og:locale` — the language and territory of the markup."]:
+    "`og:locale` — मार्कअप की भाषा और क्षेत्र।",
+  ["The X (Twitter) card type. Without it X shows no card, even when other `twitter:` tags are present."]:
+    "X (Twitter) कार्ड का प्रकार। इसके बिना X कोई कार्ड नहीं दिखाता, भले ही दूसरे `twitter:` टैग मौजूद हों।",
+  ["The X card title. X falls back to og:title when it is missing."]:
+    "X कार्ड का शीर्षक। न होने पर X og:title इस्तेमाल करता है।",
+  ["The X card description. X falls back to og:description when it is missing."]:
+    "X कार्ड का विवरण। न होने पर X og:description इस्तेमाल करता है।",
+  ["The X card image URL. X falls back to og:image when it is missing."]:
+    "X कार्ड की छवि का URL। न होने पर X og:image इस्तेमाल करता है।",
+  ["Pixel width of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "twitter:image की पिक्सेल चौड़ाई, जिसे सोशल-इमेज जाँच पढ़ती है। 0 = छवि पढ़ी नहीं जा सकी; खाली = जाँच नहीं हुई।",
+  ["Pixel height of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "twitter:image की पिक्सेल ऊँचाई, जिसे सोशल-इमेज जाँच पढ़ती है। 0 = छवि पढ़ी नहीं जा सकी; खाली = जाँच नहीं हुई।",
+  ["When a request gets no response at all — a timeout, a reset or a refused connection — retry it up to N more times before recording it as failed. Kept apart from the HTTP retries above, so a flaky network and a struggling server can be tuned separately."]:
+    "जब किसी अनुरोध को कोई जवाब नहीं मिलता — टाइमआउट, रीसेट या अस्वीकृत कनेक्शन — तो उसे विफल दर्ज करने से पहले अधिकतम N बार और आज़माया जाता है। यह ऊपर के HTTP पुनःप्रयासों से अलग है, ताकि अस्थिर नेटवर्क और जूझते सर्वर को अलग-अलग समायोजित किया जा सके।",
+  ["2 default; 0 to record connection failures immediately; 4 on an unstable connection."]:
+    "डिफ़ॉल्ट 2; कनेक्शन विफलताएँ तुरंत दर्ज करने के लिए 0; अस्थिर कनेक्शन पर 4।",
+  ["When a site that was answering stops responding — 10 requests in a row get no answer even after their connection retries — the crawl pauses instead of marking the rest of the queue as failed. Fix the problem or wait for the server to come back, then press Resume to continue where it stopped."]:
+    "जब जवाब दे रही साइट जवाब देना बंद कर दे — कनेक्शन पुनःप्रयासों के बाद भी लगातार 10 अनुरोधों को कोई जवाब न मिले — तो क्रॉल बाकी कतार को विफल चिह्नित करने के बजाय रुक जाता है। समस्या ठीक करें या सर्वर के लौटने की प्रतीक्षा करें, फिर जहाँ रुका था वहीं से जारी रखने के लिए Resume दबाएँ।",
+  ["On by default. Turn it off when any result is better than a paused run, for example a crawl nobody is watching."]:
+    "डिफ़ॉल्ट रूप से चालू। जब रुके हुए रन से कोई भी नतीजा बेहतर हो — जैसे ऐसा क्रॉल जिस पर कोई नज़र नहीं रख रहा — तब इसे बंद करें।",
+  ["Links that sit in these parts of a page are recorded (they still count as inlinks and show in the link reports) but the crawler does not follow them. Useful for mega-menus and footers that link to thousands of pages. A page that is also linked from the body is still crawled."]:
+    "पेज के इन हिस्सों में मौजूद लिंक दर्ज किए जाते हैं (वे इनलिंक के रूप में गिने जाते हैं और लिंक रिपोर्ट में दिखते हैं), लेकिन क्रॉलर उन्हें फ़ॉलो नहीं करता। हज़ारों पेजों से लिंक करने वाले मेगा-मेनू और फ़ुटर के लिए उपयोगी। जिस पेज का लिंक मुख्य सामग्री में भी है, वह फिर भी क्रॉल होता है।",
+  ["Footer + Sidebar on a shop whose footer lists every category"]:
+    "ऐसी दुकान पर फ़ुटर + साइडबार, जिसके फ़ुटर में हर श्रेणी सूचीबद्ध है",
+  ["Links inside any element matching one of these CSS selectors are recorded but not followed — the way to keep faceted filters or a mega-menu from flooding the crawl without excluding the pages themselves. An invalid selector is ignored."]:
+    "इन CSS सेलेक्टरों में से किसी से मेल खाने वाले तत्व के अंदर के लिंक दर्ज होते हैं पर फ़ॉलो नहीं किए जाते — पेजों को बाहर किए बिना फ़ेसेटेड फ़िल्टर या मेगा-मेनू को क्रॉल पर हावी होने से रोकने का तरीका। अमान्य सेलेक्टर अनदेखा किया जाता है।",
+  ["The name every export's save dialog suggests. Tokens are filled in when you export: {report} = what is exported, {date} / {time} / {datetime} = now, {domain} = the crawled site, {project} = the project name. Characters that are not allowed in file names are replaced with a dash."]:
+    "हर निर्यात का सेव डायलॉग जो नाम सुझाता है। निर्यात के समय टोकन भरे जाते हैं: {report} = जो निर्यात हो रहा है, {date} / {time} / {datetime} = अभी का समय, {domain} = क्रॉल की गई साइट, {project} = प्रोजेक्ट का नाम। फ़ाइल नामों में अमान्य वर्ण डैश से बदल दिए जाते हैं।",
 };

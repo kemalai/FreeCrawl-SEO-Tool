@@ -114,6 +114,7 @@ export type UrlCategory =
   | 'issues:non-200-in-sitemap'
   | 'issues:image-missing-alt'
   | 'issues:image-empty-alt'
+  | 'issues:image-missing-title'
   | 'issues:image-duplicate-alt'
   | 'issues:meta-refresh-used'
   | 'issues:charset-missing'
@@ -136,6 +137,8 @@ export type UrlCategory =
   | 'issues:duplicate-content-exact'
   | 'issues:hreflang-invalid-code'
   | 'issues:hreflang-self-ref-missing'
+  | 'issues:hreflang-self-only'
+  | 'issues:hreflang-lang-mismatch'
   | 'issues:hreflang-reciprocity-missing'
   | 'issues:hreflang-target-issues'
   | 'issues:hreflang-unlinked'
@@ -149,6 +152,7 @@ export type UrlCategory =
   | 'issues:url-spaces'
   | 'issues:url-malformed'
   | 'issues:link-empty-anchor'
+  | 'issues:link-empty-href'
   | 'issues:apple-touch-icon-missing'
   | 'issues:manifest-missing'
   | 'issues:feed-missing'
@@ -224,6 +228,10 @@ export type UrlCategory =
   | 'issues:twitter-image-too-large'
   | 'issues:og-image-wrong-aspect'
   | 'issues:twitter-image-wrong-aspect'
+  | 'issues:og-incomplete'
+  | 'issues:twitter-incomplete'
+  | 'issues:og-image-not-200'
+  | 'issues:twitter-image-not-200'
   | 'issues:low-contrast-text'
   | 'issues:focus-outline-suppressed'
   | 'issues:font-too-small'
@@ -236,6 +244,7 @@ export type UrlCategory =
   | 'tab:pagination'
   | 'tab:hreflang'
   | 'tab:amp'
+  | 'tab:social'
   | 'tab:structured-data'
   | 'tab:meta-refresh'
   | 'tab:custom-extraction'
@@ -475,9 +484,9 @@ export interface CrawlUrlRow {
    */
   serverHeader: string | null;
   /**
-   * Per-page count of `<a>` elements that look clickable but are NOT
-   * crawlable (no href + onclick, `href="javascript:…"`, or `href="#"`
-   * with onclick). Surfaces in the "JS-Only Navigation" issue filter.
+   * Per-page count of distinct internal uncrawlable links — see
+   * {@link UncrawlableLinkKind}. Surfaces in the "JS-Only Navigation"
+   * issue filter; the links themselves are in the page's Outlinks.
    */
   jsOnlyLinksCount: number;
   /**
@@ -683,10 +692,16 @@ export interface CrawlUrlRow {
   titleCount: number;
   /** Number of internal hyperlinks with no anchor text or alt — accessibility/SEO issue. */
   emptyAnchorCount: number;
+  /** `<a>` elements whose `href` attribute is present but empty — a link to nowhere. */
+  emptyHrefCount: number;
   /** Hreflang entries on this page whose `lang` is not a valid BCP-47 / `x-default` token. */
   hreflangInvalidCount: number;
   /** True if this page declares hreflang alternates but no self-referencing entry. */
   hreflangSelfRefMissing: boolean;
+  /** Every hreflang annotation on this page points at the page itself — no alternates. */
+  hreflangSelfOnly: boolean;
+  /** The page's self-referencing hreflang names a different language than `html[lang]`. */
+  hreflangLangMismatch: boolean;
   /** Hreflang declarations on this page where the target does NOT declare a reciprocal link back. */
   hreflangReciprocityMissing: number;
   /** Hreflang targets that are non-200, noindex, or canonicalised away. */
@@ -899,8 +914,15 @@ export interface CrawlConfig {
   acceptLanguage: string;
   /** Per-worker delay inserted *after* each request (ms). 0 = disabled. */
   crawlDelayMs: number;
-  /** Max retry attempts on network errors / 5xx / 429 (0 = no retry). */
+  /** Max retry attempts on retryable HTTP answers — 5xx / 429 (0 = no retry). */
   retryAttempts: number;
+  /** Max retry attempts for a request that got no response at all —
+   *  timeout, connection reset or refused (0 = no retry). */
+  connectionFailureRetries: number;
+  /** Pause the crawl when a host that was answering stops responding
+   *  (10 requests in a row with no response), instead of failing the rest
+   *  of the queue. Resume continues where it stopped. */
+  pauseOnHostUnresponsive: boolean;
   /** Initial backoff (ms) — doubles on each attempt. */
   retryInitialDelayMs: number;
   /**
@@ -928,6 +950,19 @@ export interface CrawlConfig {
   includePatterns: string[];
   /** URLs matching any of these regexes are skipped during enqueue. */
   excludePatterns: string[];
+  /**
+   * Don't follow links that sit in these page regions (detected from the
+   * surrounding `<nav>` / `<header>` / `<footer>` / `<aside>`). The links
+   * stay in the link graph — inlinks and anchor reports are unchanged —
+   * they just don't send the crawler anywhere. A target also linked from
+   * an allowed spot is still followed.
+   */
+  excludeLinkPositions: LinkPosition[];
+  /**
+   * Same, by CSS selector: links inside any element matching one of these
+   * (`.facets`, `#filters`, `nav.mega-menu`) are not followed.
+   */
+  excludeLinkSelectors: string[];
   /**
    * Crawl-trap guard. A single path segment repeated this many times or
    * more (`/shop/shop/shop/…`) is a link loop — almost always a relative-
@@ -1058,13 +1093,15 @@ export interface CrawlConfig {
    */
   contentAreaSelector: string;
   /**
-   * Optional webhook URL that receives a single `POST` with a JSON
-   * summary when a crawl finishes. Empty string disables it. Failures
-   * are best-effort — surfaced as an `info` event but never break the
-   * crawl. Used to integrate with Slack incoming webhooks, Zapier,
-   * dashboards, etc.
+   * Optional webhook URL that receives a single `POST` when a crawl
+   * finishes (and after a scheduled crawl's export). Empty string
+   * disables it. Failures are best-effort — surfaced as an `info` event
+   * but never break the crawl. A chat webhook URL works like a password,
+   * so the desktop stores it encrypted with the other secrets.
    */
   webhookUrl: string;
+  /** Body of that POST — see {@link WebhookFormat}. */
+  webhookFormat: WebhookFormat;
   /**
    * Custom extraction rules — each rule is run against every crawled
    * HTML page; results are stored on the URL row as a JSON object
@@ -1389,9 +1426,10 @@ export interface CrawlConfig {
   crawlMobileAlternate: boolean;
   /** Persist the mobile-alternate URL on the page row. */
   storeMobileAlternate: boolean;
-  /** Persist the count of links a search engine cannot follow —
-   *  `<a>` with no href but an onclick, `href="javascript:…"`, and
-   *  `href="#"` placeholders wired to a handler. */
+  /** Record links a search engine cannot follow (see
+   *  {@link UncrawlableLinkKind}): the per-page count behind "JS-Only
+   *  Navigation" and the links themselves, shown in Outlinks as
+   *  Uncrawlable. They are never requested. */
   storeUncrawlableLinks: boolean;
   /** With `scope: 'subfolder'`, still request links that point outside
    *  the start folder (one hop, no recursion) so their status code is
@@ -1468,6 +1506,12 @@ export interface CrawlConfig {
    * no rows. Ids are `issues:*` categories from `ISSUE_GROUPS`.
    */
   disabledIssues: UrlCategory[];
+  /**
+   * Per-project severity changes for issue checks (Settings → Issues):
+   * category → `critical` / `warning` / `info`. Moves the check between
+   * the severity rollups, the report ordering and the sidebar marker.
+   */
+  issueSeverityOverrides: Partial<Record<UrlCategory, 'critical' | 'warning' | 'info'>>;
   /**
    * Page-rendering strategy for the fetch layer.
    *  - `text`  (default) — fetch the raw HTML response as-is. Fast,
@@ -1968,6 +2012,10 @@ export interface OverviewCounts {
     duplicateContentExact: number;
     hreflangInvalidCode: number;
     hreflangSelfRefMissing: number;
+    /** Pages whose only hreflang annotations point at themselves. */
+    hreflangSelfOnly: number;
+    /** Pages whose self-referencing hreflang disagrees with `html[lang]`. */
+    hreflangLangMismatch: number;
     hreflangReciprocityMissing: number;
     hreflangTargetIssues: number;
     hreflangUnlinked: number;
@@ -1988,10 +2036,14 @@ export interface OverviewCounts {
     /** URLs flagged by `isUrlMalformed` (multiple `?`/`#`, control chars, unescaped reserved chars, double-encoding). */
     urlMalformed: number;
     imageEmptyAlt: number;
+    /** Image uses (per page) whose `<img>` has no `title` attribute. */
+    imageMissingTitle: number;
     /** Distinct images whose (non-empty) alt text is shared by ≥2 other
      *  distinct images — non-descriptive / templated alt reuse. */
     imageDuplicateAlt: number;
     linkEmptyAnchor: number;
+    /** Pages with at least one `<a href="">`. */
+    linkEmptyHref: number;
     appleTouchIconMissing: number;
     manifestMissing: number;
     feedMissing: number;
@@ -2129,9 +2181,8 @@ export interface OverviewCounts {
      */
     descriptionEqualsH1: number;
     /**
-     * Pages with at least one `<a>` element that is clickable but not
-     * crawlable (no href + onclick, `href="javascript:…"`, or
-     * `href="#"` paired with onclick). Search-engine bots can't follow
+     * Pages with at least one internal uncrawlable link (see
+     * {@link UncrawlableLinkKind}). Search-engine bots can't follow
      * these — any navigation that depends on them is invisible.
      */
     jsOnlyNavigation: number;
@@ -2217,6 +2268,17 @@ export interface OverviewCounts {
      * `summary` (and the default) wants ~1:1 (min 144×144).
      */
     twitterImageWrongAspect: number;
+    /** Pages with some OpenGraph tags but not all four required ones
+     *  (`og:title`, `og:type`, `og:image`, `og:url`). */
+    ogIncomplete: number;
+    /** Pages whose X (Twitter) card can't render: tags without a
+     *  `twitter:card`, a card with no title, or a large-image card with
+     *  no image (neither `twitter:` nor `og:` fallback). */
+    twitterIncomplete: number;
+    /** Pages whose `og:image` / `twitter:image` answered with a non-2xx
+     *  status (image probe). */
+    ogImageNot200: number;
+    twitterImageNot200: number;
     /**
      * Pages part of a paginated cluster whose ordinals have a gap
      * (e.g. ?page=1, ?page=2, ?page=4 — page 3 missing). Set by the
@@ -2282,7 +2344,27 @@ export interface CrawlProgress {
   phaseDone?: number;
   phaseTotal?: number;
   startUrl: string;
+  /** 429 / 503 answers seen so far this crawl (every attempt). */
+  rateLimitedCount?: number;
+  /** Adaptive speed's current rate in URL/s while it is slowed below the
+   *  configured ceiling; null when not throttling. */
+  throttledRps?: number | null;
+  /** Why the crawl is paused — `host-unresponsive` when the crawler paused
+   *  itself because the site stopped answering. Null while running. */
+  pausedReason?: 'user' | 'host-unresponsive' | null;
 }
+
+/**
+ * Body shape of the crawl webhooks.
+ *   - `json`    the raw summary document (Zapier, Make, n8n, own endpoints)
+ *   - `slack`   Slack incoming webhook message (Block Kit)
+ *   - `discord` Discord webhook embed
+ *   - `teams`   Microsoft Teams Adaptive Card (Workflows / incoming webhook)
+ *   - `auto`    Slack / Discord / Teams when the URL is one of theirs, else JSON
+ */
+export type WebhookFormat = 'auto' | 'json' | 'slack' | 'discord' | 'teams';
+
+export const WEBHOOK_FORMATS: readonly WebhookFormat[] = ['auto', 'json', 'slack', 'discord', 'teams'];
 
 export interface CrawlSummary {
   total: number;
@@ -2321,6 +2403,47 @@ export interface DiscoveredLink {
   linkPosition: LinkPosition;
   linkOrigin: LinkOrigin;
   isInternal: boolean;
+  /**
+   * Every occurrence of this target on the page sits in an excluded link
+   * position / selector (`excludeLinkPositions` / `excludeLinkSelectors`),
+   * so the crawler records the link but does not follow it.
+   */
+  followExcluded?: boolean;
+}
+
+/**
+ * Why a link-like element is not something a search engine can follow
+ * (Google: only `<a href>` with a resolvable URL is a crawlable link).
+ *   - `onclick-no-href`    `<a onclick="…">` with no href at all
+ *   - `javascript-href`    `<a href="javascript:…">`
+ *   - `placeholder-href`   `<a href="#" onclick="…">`
+ *   - `non-anchor-href`    `<span href="…">`, `<div href="…">`, `<button href="…">`
+ *   - `non-anchor-onclick` `<span onclick="location.href='…'">` and other
+ *                          non-link elements whose handler navigates
+ */
+export type UncrawlableLinkKind =
+  | 'onclick-no-href'
+  | 'javascript-href'
+  | 'placeholder-href'
+  | 'non-anchor-href'
+  | 'non-anchor-onclick';
+
+/** One uncrawlable link on a page (Spider → Crawl → Store → Uncrawlable Links). */
+export interface UncrawlableLink {
+  /** Absolute http(s) URL read from the attribute or the script, when one
+   *  is there; null for `javascript:void(0)`, `goTo('products')` and the like. */
+  toUrl: string | null;
+  /** The `href` / `onclick` value as written, whitespace-collapsed and capped. */
+  code: string;
+  kind: UncrawlableLinkKind;
+  /** Lower-case tag name of the element (`a`, `span`, `div`, …). */
+  element: string;
+  anchor: string | null;
+  linkPath: string | null;
+  linkPosition: LinkPosition;
+  /** Points at the crawled site — or at nothing we could read, which is the
+   *  page's own navigation and counts as internal. */
+  isInternal: boolean;
 }
 
 export interface DiscoveredImage {
@@ -2343,6 +2466,11 @@ export interface DiscoveredImage {
    * share-card images, which the page itself never loads.
    */
   lazy?: boolean;
+  /**
+   * The `<img>` carries a non-empty `title` attribute. Unset for variants
+   * and share-card images — they have no `<img>` of their own to check.
+   */
+  hasTitle?: boolean;
 }
 
 /**
@@ -2511,6 +2639,11 @@ export interface OutlinkRow {
   linkPosition: LinkPosition | null;
   linkOrigin: LinkOrigin;
   isInternal: boolean;
+  /** Absent on regular links. `uncrawlable` rows come from the page's
+   *  uncrawlable links (`toUrl` then holds the code when no URL was read). */
+  crawlability?: 'crawlable' | 'uncrawlable';
+  /** Set on `uncrawlable` rows only. */
+  uncrawlableKind?: UncrawlableLinkKind;
 }
 
 export interface HttpHeader {
@@ -2552,11 +2685,15 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   acceptLanguage: 'tr,en;q=0.8',
   crawlDelayMs: 0,
   retryAttempts: 2,
+  connectionFailureRetries: 2,
+  pauseOnHostUnresponsive: true,
   retryInitialDelayMs: 500,
   storeNofollowLinks: false,
   customHeaders: {},
   includePatterns: [],
   excludePatterns: [],
+  excludeLinkPositions: [],
+  excludeLinkSelectors: [],
   maxRepeatedPathSegments: 3,
   maxQueryParams: 0,
   discoverSitemaps: true,
@@ -2577,6 +2714,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   duplicatesOnlyIndexable: true,
   contentAreaSelector: '',
   webhookUrl: '',
+  webhookFormat: 'auto',
   customExtractionRules: [],
   auth: { type: 'none' },
   formLogin: { enabled: false, steps: [] },
@@ -2642,6 +2780,7 @@ export const DEFAULT_CRAWL_CONFIG: CrawlConfig = {
   analysePagination: true,
   analyseIssues: true,
   disabledIssues: [],
+  issueSeverityOverrides: {},
   cookiePolicy: 'reject-all',
   perHostUserAgents: [],
   proxyProfiles: [],

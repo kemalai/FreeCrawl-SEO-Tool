@@ -140,6 +140,11 @@ class ParserPool {
     return this.dispatch(html, '', { contentAreaSelector }, 'prose') as Promise<unknown> as Promise<string>;
   }
 
+  /** The page as Markdown (View Source → Markdown, "All Page Markdown"). */
+  markdown(html: string, pageUrl: string, contentAreaSelector?: string): Promise<string> {
+    return this.dispatch(html, pageUrl, { contentAreaSelector }, 'markdown') as Promise<unknown> as Promise<string>;
+  }
+
   parse(html: string, pageUrl: string, opts: ParseOpts = {}): Promise<ParseResult> {
     return this.dispatch(html, pageUrl, opts, 'parse');
   }
@@ -148,7 +153,7 @@ class ParserPool {
     html: string,
     pageUrl: string,
     opts: ParseOpts,
-    mode: 'parse' | 'prose',
+    mode: 'parse' | 'prose' | 'markdown',
   ): Promise<ParseResult> {
     if (this.terminated || this.workers.length === 0) {
       return Promise.reject(new Error('parser-pool: not ready'));

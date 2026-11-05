@@ -13,7 +13,7 @@ upgrading is the recommended remediation path.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| Latest stable (currently `1.1.3`) | Yes |
+| Latest stable (currently `1.1.4`) | Yes |
 | Older releases                    | No  |
 
 Release artifacts are published at:

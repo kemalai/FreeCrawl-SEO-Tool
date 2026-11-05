@@ -15,6 +15,7 @@ const CRAWL_DATA_TABLES = [
   'resource_usages',
   'resources',
   'links',
+  'uncrawlable_links',
   'headers',
   'url_sources',
   'sitemap_urls',

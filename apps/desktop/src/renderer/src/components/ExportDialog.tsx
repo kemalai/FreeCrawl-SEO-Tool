@@ -188,6 +188,7 @@ const TAB_CATEGORY: Partial<Record<TabKey, UrlCategory>> = {
   pagination: 'tab:pagination',
   hreflang: 'tab:hreflang',
   amp: 'tab:amp',
+  social: 'tab:social',
   'structured-data': 'tab:structured-data',
   'meta-refresh': 'tab:meta-refresh',
   'custom-extraction': 'tab:custom-extraction',

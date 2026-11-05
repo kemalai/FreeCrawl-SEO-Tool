@@ -1,4 +1,8 @@
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ProjectDb } from '@freecrawl/db';
+import type { PreviousCrawlComparison } from '@freecrawl/shared-types';
+import { escapeCsv } from './spreadsheet.js';
 
 /**
  * Cross-project diff engine. Compares two crawl databases by URL key
@@ -235,4 +239,52 @@ export function compareCrawls(
     counts,
     samples,
   };
+}
+
+/** English names of the compare categories, for files and messages. */
+export const COMPARE_CATEGORY_LABELS: Record<CompareCategory, string> = {
+  added: 'Added',
+  removed: 'Removed',
+  status: 'Status Changed',
+  title: 'Title Changed',
+  meta: 'Meta Description Changed',
+  h1: 'H1 Changed',
+  canonical: 'Canonical Changed',
+  indexability: 'Indexability Changed',
+  response_time: 'Response Time Changed',
+};
+
+/**
+ * Write "changes since the previous crawl" next to a scheduled / CLI
+ * export: `crawl-changes.csv` (one row per changed page and field) and
+ * `crawl-issue-changes.csv` (one row per check whose page count moved).
+ * A file with nothing to say is not written. Returns the paths written.
+ */
+export async function writeCrawlChangesCsvs(
+  comparison: PreviousCrawlComparison,
+  dir: string,
+): Promise<string[]> {
+  const written: string[] = [];
+  const line = (cells: unknown[]): string => cells.map(escapeCsv).join(',') + '\n';
+  if (comparison.samples.length > 0) {
+    let out = '\ufeff' + line(['Change', 'URL', 'Before', 'After']);
+    for (const r of comparison.samples) {
+      out += line([COMPARE_CATEGORY_LABELS[r.category], r.url, r.before, r.after]);
+    }
+    const file = join(dir, 'crawl-changes.csv');
+    await writeFile(file, out, 'utf8');
+    written.push(file);
+  }
+  if (comparison.issues.length > 0) {
+    let out = '\ufeff' + line(['Group', 'Issue', 'Filter', 'Before', 'After', 'Change']);
+    for (const i of comparison.issues) {
+      // A number, not "+3": spreadsheets sort and sum it, and a signed
+      // string would be quoted as a would-be formula by escapeCsv.
+      out += line([i.group, i.label, i.category, i.before, i.after, i.after - i.before]);
+    }
+    const file = join(dir, 'crawl-issue-changes.csv');
+    await writeFile(file, out, 'utf8');
+    written.push(file);
+  }
+  return written;
 }

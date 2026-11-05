@@ -311,4 +311,9 @@ export const MENU_IT: MenuLabels = {
   // ── Google OAuth refresh failure ──
   oauthRefreshExpired:
     'Google ha rifiutato l\'accesso salvato ({reason}). Di solito significa che la tua app OAuth di Google Cloud è nello stato "Testing", in cui Google fa scadere la connessione ogni 7 giorni. Risolvi una volta per tutte: Google Cloud Console → OAuth consent screen → "Publish app" (nessuna revisione di verifica), poi Disconnetti e Connetti di nuovo questa integrazione.',
+  exportMarkdown: "Esporta tutte le pagine in Markdown…",
+  dlgExportMarkdownTitle: "Scegli una cartella per i file Markdown",
+  dlgExportMarkdownDoneTitle: "Esportazione Markdown completata",
+  msgExportMarkdownWritten: "File Markdown scritti: {files}. La cartella contiene anche index.csv, che associa ogni URL al suo file.",
+  compareWithPrevious: "Confronta con la scansione precedente…",
 };

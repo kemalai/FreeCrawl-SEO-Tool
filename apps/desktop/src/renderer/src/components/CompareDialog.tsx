@@ -6,12 +6,19 @@ import type {
   CompareCategory,
   CompareDiffRow,
   CompareLoadResult,
+  PreviousCrawlComparison,
 } from '@freecrawl/shared-types';
+import { translateLabel } from '../i18n/labels.js';
 
 interface Props {
   open: boolean;
+  /** `file`: diff against a `.seoproject` the user picks. `previous`: the
+   *  snapshot an Auto Compare crawl kept of the crawl it replaced. */
+  mode?: 'file' | 'previous';
   onClose: () => void;
 }
+
+type ActiveView = CompareCategory | 'issues';
 
 interface CategoryDef {
   key: CompareCategory;
@@ -31,11 +38,14 @@ const CATEGORIES: CategoryDef[] = [
   { key: 'response_time', labelKey: 'compare.responseTimeDelta', fallback: 'Response Time Δ' },
 ];
 
-export function CompareDialog({ open, onClose }: Props) {
-  const { t } = useTranslation();
+export function CompareDialog({ open, mode = 'file', onClose }: Props) {
+  const { t, i18n } = useTranslation();
+  const lang = i18n.language;
   const [result, setResult] = useState<CompareLoadResult | null>(null);
+  const [previous, setPrevious] = useState<PreviousCrawlComparison | null>(null);
+  const [noPrevious, setNoPrevious] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [active, setActive] = useState<CompareCategory>('added');
+  const [active, setActive] = useState<ActiveView>('added');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -54,9 +64,37 @@ export function CompareDialog({ open, onClose }: Props) {
     if (!open) return;
     setError(null);
     setResult(null);
-    void pick();
+    setPrevious(null);
+    setNoPrevious(false);
+    setActive('added');
+    if (mode === 'previous') void loadPrevious();
+    else void pick();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, mode]);
+
+  async function loadPrevious() {
+    setLoading(true);
+    try {
+      const r = await window.freecrawl.compareWithPrevious();
+      if (!r) {
+        setNoPrevious(true);
+        return;
+      }
+      setPrevious(r);
+      setResult({
+        filePath: '',
+        totalA: r.totalPrevious,
+        totalB: r.totalCurrent,
+        counts: r.counts,
+        samples: r.samples,
+      });
+      setActive(r.issues.length > 0 ? 'issues' : 'added');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function pick() {
     setLoading(true);
@@ -79,7 +117,10 @@ export function CompareDialog({ open, onClose }: Props) {
   if (!open) return null;
 
   const sample =
-    result?.samples.filter((r: CompareDiffRow) => r.category === active) ?? [];
+    active === 'issues'
+      ? []
+      : (result?.samples.filter((r: CompareDiffRow) => r.category === active) ?? []);
+  const activeCount = active === 'issues' ? (previous?.issues.length ?? 0) : (result?.counts[active] ?? 0);
 
   return (
     <div
@@ -92,9 +133,24 @@ export function CompareDialog({ open, onClose }: Props) {
       >
         <div className="flex items-center border-b border-surface-800 px-4 py-2.5">
           <div className="text-sm font-semibold tracking-wide text-surface-100">
-            {t('compare.title', { defaultValue: 'Compare Crawls' })}
+            {mode === 'previous'
+              ? t('compare.previousTitle', { defaultValue: 'Changes Since the Previous Crawl' })
+              : t('compare.title', { defaultValue: 'Compare Crawls' })}
           </div>
-          {result && (
+          {result && previous && (
+            <div className="ml-3 truncate text-[11px] text-surface-400">
+              <span className="text-surface-500">
+                {t('compare.previousCrawl', {
+                  defaultValue: 'Previous crawl ({{date}})',
+                  date: new Date(previous.previousTakenAt).toLocaleString(lang),
+                })}
+              </span>{' '}
+              {result.totalA.toLocaleString(lang)} {t('compare.urlsUnit', { defaultValue: 'URLs' })} →{' '}
+              <span className="text-surface-500">{t('compare.thisCrawl', { defaultValue: 'This crawl' })}</span>{' '}
+              {result.totalB.toLocaleString(lang)} {t('compare.urlsUnit', { defaultValue: 'URLs' })}
+            </div>
+          )}
+          {result && !previous && (
             <div className="ml-3 truncate text-[11px] text-surface-400">
               <span className="text-surface-500">{t('compare.aCurrent', { defaultValue: 'A (current)' })}</span>{' '}
               {result.totalA.toLocaleString()} {t('compare.urlsUnit', { defaultValue: 'URLs' })} ·{' '}
@@ -103,8 +159,14 @@ export function CompareDialog({ open, onClose }: Props) {
             </div>
           )}
           <div className="ml-auto flex items-center gap-1">
+            {mode === 'previous' && loading && (
+              <RefreshCw className="mr-1 h-3 w-3 animate-spin text-surface-400" />
+            )}
             <button
-              className="flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800"
+              className={clsx(
+                'flex items-center gap-1 rounded border border-surface-700 px-2 py-1 text-[11px] text-surface-200 hover:border-blue-500 hover:bg-surface-800',
+                mode === 'previous' && 'hidden',
+              )}
               onClick={pick}
               disabled={loading}
               title={t('compare.pickDifferent', { defaultValue: 'Pick a different project file' })}
@@ -132,7 +194,15 @@ export function CompareDialog({ open, onClose }: Props) {
           </div>
         )}
 
-        {!result && !error && !loading && (
+        {!result && !error && !loading && mode === 'previous' && noPrevious && (
+          <div className="flex flex-1 items-center justify-center px-8 text-center text-[12px] text-surface-500">
+            {t('compare.noPrevious', {
+              defaultValue:
+                'No previous crawl to compare with yet. Turn on "Auto compare with the previous crawl" in Scheduled Crawl, or crawl from the CLI with --auto-compare.',
+            })}
+          </div>
+        )}
+        {!result && !error && !loading && mode === 'file' && (
           <div className="flex flex-1 items-center justify-center text-[12px] text-surface-500">
             {t('compare.pickPrompt', { defaultValue: 'Pick a `.seoproject` file to diff against the current crawl.' })}
           </div>
@@ -142,6 +212,23 @@ export function CompareDialog({ open, onClose }: Props) {
           <div className="flex flex-1 min-h-0">
             <aside className="flex w-56 flex-col border-r border-surface-800 bg-surface-950/40">
               <nav className="flex-1 overflow-auto py-1">
+                {previous && (
+                  <button
+                    className={clsx(
+                      'flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition-colors',
+                      active === 'issues'
+                        ? 'bg-accent-600/20 text-accent-200 border-l-2 border-accent-500'
+                        : 'border-l-2 border-transparent text-surface-300 hover:bg-surface-800 hover:text-surface-100',
+                      previous.issues.length === 0 && 'opacity-50',
+                    )}
+                    onClick={() => setActive('issues')}
+                  >
+                    <span>{t('compare.issuesChanged', { defaultValue: 'Issues Changed' })}</span>
+                    <span className="font-mono text-[10px] text-surface-400">
+                      {previous.issues.length.toLocaleString(lang)}
+                    </span>
+                  </button>
+                )}
                 {CATEGORIES.map((c) => {
                   const count = result.counts[c.key] ?? 0;
                   const isActive = c.key === active;
@@ -167,14 +254,58 @@ export function CompareDialog({ open, onClose }: Props) {
               </nav>
             </aside>
 
+            {active === 'issues' && previous ? (
+              <div className="flex-1 overflow-auto">
+                <table className="w-full text-[11px]">
+                  <thead className="sticky top-0 bg-surface-900">
+                    <tr className="text-surface-400">
+                      <th className="py-1.5 px-3 text-left font-medium">{t('compare.issueHeader', { defaultValue: 'Issue' })}</th>
+                      <th className="w-24 py-1.5 px-3 text-right font-medium">{t('compare.beforeHeader', { defaultValue: 'Before' })}</th>
+                      <th className="w-24 py-1.5 px-3 text-right font-medium">{t('compare.afterHeader', { defaultValue: 'After' })}</th>
+                      <th className="w-24 py-1.5 px-3 text-right font-medium">{t('compare.changeHeader', { defaultValue: 'Change' })}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previous.issues.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="px-3 py-3 text-center text-[11px] italic text-surface-500">
+                          {t('compare.noIssueChanges', { defaultValue: 'No issue counts changed.' })}
+                        </td>
+                      </tr>
+                    )}
+                    {previous.issues.map((i) => {
+                      const delta = i.after - i.before;
+                      return (
+                        <tr key={i.category} className="border-b border-surface-900/60 hover:bg-surface-800/40">
+                          <td className="py-1 px-3 text-surface-100">
+                            <span className="text-surface-500">{translateLabel(i.group, lang)} ›</span>{' '}
+                            {translateLabel(i.label, lang)}
+                          </td>
+                          <td className="py-1 px-3 text-right font-mono text-surface-300">{i.before.toLocaleString(lang)}</td>
+                          <td className="py-1 px-3 text-right font-mono text-surface-100">{i.after.toLocaleString(lang)}</td>
+                          <td
+                            className={clsx(
+                              'py-1 px-3 text-right font-mono',
+                              delta > 0 ? 'text-red-300' : 'text-emerald-300',
+                            )}
+                          >
+                            {delta > 0 ? `+${delta.toLocaleString(lang)}` : delta.toLocaleString(lang)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
             <div className="flex flex-1 flex-col min-w-0">
               <div className="border-b border-surface-800 px-4 py-2 text-[11px] text-surface-400">
                 {t('compare.entriesShown', {
                   defaultValue: '{{shown}} of {{total}} entries shown',
                   shown: sample.length.toLocaleString(),
-                  total: (result.counts[active] ?? 0).toLocaleString(),
+                  total: activeCount.toLocaleString(),
                 })}
-                {result.counts[active] > sample.length && (
+                {activeCount > sample.length && (
                   <span className="ml-1 text-surface-500">
                     {t('compare.truncated', { defaultValue: '(truncated — export CSV for the full set)' })}
                   </span>
@@ -228,6 +359,7 @@ export function CompareDialog({ open, onClose }: Props) {
                 </table>
               </div>
             </div>
+            )}
           </div>
         )}
       </div>

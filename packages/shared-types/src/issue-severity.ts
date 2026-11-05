@@ -56,6 +56,16 @@ const CRITICAL: UrlCategory[] = [
 
 /** Suboptimal but non-breaking issues worth fixing. */
 const WARNING: UrlCategory[] = [
+  // A self-only hreflang set declares no alternates at all, and a self
+  // annotation that contradicts html[lang] means one of the two is wrong —
+  // both leave the language targeting unusable. `<a href="">` is a link
+  // to nowhere that users can still click.
+  'issues:hreflang-self-only',
+  'issues:hreflang-lang-mismatch',
+  'issues:link-empty-href',
+  // A share image that does not load leaves the card without a picture.
+  'issues:og-image-not-200',
+  'issues:twitter-image-not-200',
   'issues:redirect-canonical-chain',
   'issues:orphan-page',
   'issues:mobile-parity-mismatch',
@@ -191,6 +201,9 @@ const INFO: UrlCategory[] = [
   'issues:h1-too-long',
   'issues:url-fragment',
   'issues:link-empty-anchor',
+  'issues:image-missing-title',
+  'issues:og-incomplete',
+  'issues:twitter-incomplete',
   'issues:apple-touch-icon-missing',
   'issues:manifest-missing',
   'issues:feed-missing',
@@ -236,11 +249,50 @@ for (const cat of CRITICAL) ISSUE_SEVERITY[cat] = 'critical';
 for (const cat of WARNING) ISSUE_SEVERITY[cat] = 'warning';
 for (const cat of INFO) ISSUE_SEVERITY[cat] = 'info';
 
-/** The `issues:*` categories belonging to one severity tier. */
-export function issueCategoriesBySeverity(tier: IssueSeverity): UrlCategory[] {
-  if (tier === 'critical') return CRITICAL;
-  if (tier === 'warning') return WARNING;
-  return INFO;
+/** Per-project severity changes (Settings → Issues): category → tier. */
+export type IssueSeverityOverrides = Partial<Record<UrlCategory, IssueSeverity>>;
+
+const TIERS: readonly IssueSeverity[] = ['critical', 'warning', 'info'];
+
+/**
+ * A saved overrides map, cleaned: unknown categories and tiers are dropped,
+ * and so is any entry equal to the built-in tier (it changes nothing, and
+ * keeping it would pin the check if the default is revised later).
+ */
+export function normalizeSeverityOverrides(raw: unknown): IssueSeverityOverrides {
+  const out: IssueSeverityOverrides = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [cat, tier] of Object.entries(raw as Record<string, unknown>)) {
+    const builtIn = ISSUE_SEVERITY[cat as UrlCategory];
+    if (!builtIn) continue;
+    if (typeof tier !== 'string' || !TIERS.includes(tier as IssueSeverity)) continue;
+    if (tier === builtIn) continue;
+    out[cat as UrlCategory] = tier as IssueSeverity;
+  }
+  return out;
+}
+
+/** The tier a check is reported under: the project's override, else the built-in one. */
+export function effectiveIssueSeverity(
+  cat: UrlCategory,
+  overrides?: IssueSeverityOverrides,
+): IssueSeverity | undefined {
+  return overrides?.[cat] ?? ISSUE_SEVERITY[cat];
+}
+
+/** The `issues:*` categories belonging to one severity tier, after the
+ *  project's overrides move checks between tiers. */
+export function issueCategoriesBySeverity(
+  tier: IssueSeverity,
+  overrides?: IssueSeverityOverrides,
+): UrlCategory[] {
+  const base = tier === 'critical' ? CRITICAL : tier === 'warning' ? WARNING : INFO;
+  if (!overrides || Object.keys(overrides).length === 0) return base;
+  const out = base.filter((c) => (overrides[c] ?? tier) === tier);
+  for (const [cat, t] of Object.entries(overrides) as [UrlCategory, IssueSeverity][]) {
+    if (t === tier && !out.includes(cat)) out.push(cat);
+  }
+  return out;
 }
 
 /** Maps a severity tier to its virtual rollup UrlCategory. */

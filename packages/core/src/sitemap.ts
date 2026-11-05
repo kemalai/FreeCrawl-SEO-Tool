@@ -196,6 +196,36 @@ interface FetchOpts {
 }
 
 /**
+ * Resolve user-entered sitemap URLs against the crawl's start URL so a
+ * relative path (`/sitemap.xml`, `sitemaps/news.xml`) works the same as a
+ * full URL — the user rarely knows (or wants to retype) the exact
+ * scheme + host the start URL resolves to. Absolute URLs pass through.
+ * Blank lines, non-http(s) schemes and anything that can't be parsed are
+ * dropped; duplicates (after resolution) are collapsed.
+ */
+export function resolveSitemapUrls(raw: readonly string[], base: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const line of raw) {
+    const value = line.trim();
+    if (!value) continue;
+    let resolved: URL;
+    try {
+      resolved = new URL(value, base);
+    } catch {
+      continue;
+    }
+    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') continue;
+    resolved.hash = '';
+    const href = resolved.href;
+    if (seen.has(href)) continue;
+    seen.add(href);
+    out.push(href);
+  }
+  return out;
+}
+
+/**
  * BFS-walk the sitemap tree starting from `roots` (typically what
  * `discoverSitemapUrls` returns). Visited sitemap URLs are deduped so an
  * accidental cycle in `<sitemapindex>` can't loop forever. Caps total

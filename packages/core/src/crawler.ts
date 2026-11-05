@@ -68,7 +68,7 @@ import {
 } from './http-client.js';
 import { setActiveDnsHook } from './dns-resolver.js';
 import { probeAlpn } from './alpn-probe.js';
-import { discoverSitemapUrls, fetchSitemaps, type SitemapEntry } from './sitemap.js';
+import { discoverSitemapUrls, fetchSitemaps, resolveSitemapUrls, type SitemapEntry } from './sitemap.js';
 import { runJsonExtractionRules } from './extraction.js';
 import { SessionCookieJar } from './cookie-jar.js';
 import { runBrowserLogin } from './browser-login.js';
@@ -372,6 +372,8 @@ export class Crawler extends EventEmitter {
   private totalResponseTimeMs = 0;
   private responseSamples = 0;
   private startedAt = 0;
+  /** The crawl-finished webhook POST in flight, if any (see `webhookSettled`). */
+  private webhookDelivery: Promise<void> | null = null;
   private stopped = false;
   private running = false;
   private paused = false;
@@ -403,8 +405,19 @@ export class Crawler extends EventEmitter {
    * its own checker, loaded lazily and cached.
    */
   private robotsByOrigin = new Map<string, RobotsChecker>();
-  /** Origins whose robots.txt fetch is in flight (load-once guard). */
-  private robotsLoadingOrigins = new Set<string>();
+  /** robots.txt fetches in flight, by origin (load-once guard). */
+  private robotsLoads = new Map<string, Promise<RobotsChecker>>();
+  /** Aborts every robots.txt fetch on Stop, so a slow or retrying one
+   *  never holds the crawl's wind-down hostage. */
+  private readonly robotsAbort = new AbortController();
+  /**
+   * URLs that reached `enqueue` while their origin's robots.txt was still
+   * loading, keyed by origin then URL. They wait here and go back through
+   * `enqueue` once the file lands. Letting them through optimistically
+   * meant a refresh crawl — which queues every known URL at once — fetched
+   * every disallowed page before the checker existed.
+   */
+  private robotsDeferred = new Map<string, Map<string, QueueItem>>();
   /** robots.txt `Crawl-delay` for the start origin, in ms (0 = none). */
   private robotsCrawlDelayMs = 0;
   /** Monotonic dispatch clock for the maxRps gate (see acquireRateSlot). */
@@ -1281,21 +1294,16 @@ export class Crawler extends EventEmitter {
 
     const origin = new URL(start).origin;
     // robots.txt + sitemap discovery used to block the crawl start
-    // sequentially (~1–4 s before the first row appeared). Both are now
-    // fire-and-forget. The robots check in enqueue() short-circuits when
-    // `this.robots === null`; by the time the start URL has been fetched
-    // (~500 ms) and outlinks are enqueued, robots.txt has typically
-    // loaded. Both promises are awaited at end-of-crawl so post-crawl
-    // recompute and sitemap-derived issue counts use the full data set.
+    // sequentially (~1–4 s before the first row appeared). Both now run
+    // alongside the crawl. URLs of an origin whose robots.txt is still
+    // loading wait in `robotsDeferred` (see `enqueue`) rather than being
+    // let through, so nothing is fetched before its verdict exists. Both
+    // promises are awaited at end-of-crawl so post-crawl recompute and
+    // sitemap-derived issue counts use the full data set.
     const robotsPromise = this.config.respectRobotsTxt
-      ? loadRobots(origin, this.config.userAgent, (msg) => {
-          if (!this.stopped) this.emit('warn', msg);
-        }).then((r) => {
+      ? this.loadRobotsFor(origin, (r) => {
           if (!this.stopped) {
             this.robots = r;
-            // Seed the per-origin cache so the start origin uses the same
-            // checker (and its Crawl-delay) as every other origin.
-            this.robotsByOrigin.set(origin, r);
             // robots.txt `Crawl-delay` (seconds). Cached once — the start
             // origin's directive applies for the crawl, matching the single
             // robots checker used for allow/deny.
@@ -1323,7 +1331,7 @@ export class Crawler extends EventEmitter {
               );
             }
           }
-        })
+        }).then(() => undefined)
       : Promise.resolve();
     // Runs when auto-discovery is on OR the user supplied explicit sitemap
     // seed URLs — both are handled inside `discoverAndIngestSitemaps`, which
@@ -1422,20 +1430,7 @@ export class Crawler extends EventEmitter {
     try {
       // Wait for internal crawl first, then drain any external probes still
       // in flight or queued (externals may have been enqueued during internal).
-      // p-queue's onIdle resolves the moment size+pending hits 0, but
-      // fetchAndProcess can race with that: a worker finishes the
-      // *last* in-flight task, link extraction enqueues new URLs a
-      // microtask later, and onIdle has already resolved. Loop while
-      // counters disagree — one extra 50 ms wait per pass guards the
-      // race window without spinning.
-      while (!this.stopped) {
-        await this.queue.onIdle();
-        await new Promise<void>((r) => setTimeout(r, 50));
-        // Top up a refresh run's backlog as the queue frees up. No-op for
-        // a normal crawl.
-        this.feedRefreshBacklog();
-        if (this.queue.size + this.queue.pending === 0) break;
-      }
+      await this.drainCrawlQueue();
       await this.externalQueue.onIdle();
       // robots.txt + sitemap discovery may still be running — wait for
       // both before the post-crawl recompute so issue filters depending
@@ -1486,7 +1481,7 @@ export class Crawler extends EventEmitter {
           this.seen.delete(p.url);
           this.enqueue({ url: p.url, depth: p.depth });
         }
-        await this.queue.onIdle();
+        await this.drainCrawlQueue();
         await this.externalQueue.onIdle();
       }
       // Sitemap URLs no link reached (see `deferredSitemapSeeds`). The
@@ -1504,11 +1499,7 @@ export class Crawler extends EventEmitter {
         if (queued > 0) {
           this.emit('info', `Sitemap: ${queued} URL(s) not reached by links queued from the sitemap`);
           this.setOp('crawl:sitemap-orphans');
-          while (!this.stopped) {
-            await this.queue.onIdle();
-            await new Promise<void>((r) => setTimeout(r, 50));
-            if (this.queue.size + this.queue.pending === 0) break;
-          }
+          await this.drainCrawlQueue();
           await this.externalQueue.onIdle();
         }
       }
@@ -1744,9 +1735,16 @@ export class Crawler extends EventEmitter {
       issues,
     };
     // Lazy import to avoid pulling fetch-via-undici at module load on
-    // CLI-only paths that never enable the webhook.
-    void import('./webhook.js').then(({ postCrawlCompleteWebhook }) =>
-      postCrawlCompleteWebhook(url, payload).then((res) => {
+    // CLI-only paths that never enable the webhook. Kept as a promise so a
+    // host that exits right after the crawl can wait for the POST.
+    this.webhookDelivery = Promise.all([import('./webhook.js'), import('./webhook-format.js')]).then(
+      ([{ postWebhookMessage }, { buildCrawlCompleteNotice }]) =>
+      postWebhookMessage(
+        url,
+        this.config.webhookFormat,
+        payload,
+        buildCrawlCompleteNotice(payload),
+      ).then((res) => {
         if (res.ok) {
           // Origin only. A Slack / Discord / Zapier incoming-webhook URL is
           // bearer-equivalent — anyone holding it can post as the user — and
@@ -1754,16 +1752,28 @@ export class Crawler extends EventEmitter {
           // to send to support.
           this.emit(
             'info',
-            `Webhook posted to ${redactUrlSecrets(url)} (${res.status} in ${res.durationMs} ms)`,
+            `Webhook (${res.format}) posted to ${redactUrlSecrets(url)} (${res.status} in ${res.durationMs} ms)`,
           );
         } else {
           this.emit(
             'info',
-            `Webhook failed: ${res.status ?? 'no response'} — ${res.detail.slice(0, 120)}`,
+            `Webhook (${res.format}) failed: ${res.status ?? 'no response'} — ${res.detail.slice(0, 120)}`,
           );
         }
       }),
-    );
+    ).catch(() => {
+      /* best-effort: a failed module load must not reject the waiter */
+    });
+  }
+
+  /**
+   * Resolves once the crawl-finished webhook has been answered or has failed
+   * (at most the POST's 10 s timeout); immediately when none was sent. A
+   * host that exits right after the crawl — the CLI — awaits this, or the
+   * POST dies with the process.
+   */
+  webhookSettled(): Promise<void> {
+    return this.webhookDelivery ?? Promise.resolve();
   }
 
   /**
@@ -2116,7 +2126,7 @@ export class Crawler extends EventEmitter {
     } catch {
       return;
     }
-    if (this.config.respectRobotsTxt && !this.robotsAllows(probeUrl)) return;
+    if (this.config.respectRobotsTxt && !(await this.robotsAllowsSettled(probeUrl))) return;
 
     const controller = new AbortController();
     const timer = abortAfter(controller, this.config.requestTimeoutMs);
@@ -2301,6 +2311,8 @@ export class Crawler extends EventEmitter {
       urlRewrites: this.urlRewrites,
       customExtractionRules: this.config.customExtractionRules,
       contentAreaSelector: this.config.contentAreaSelector,
+      excludeLinkPositions: this.config.excludeLinkPositions,
+      excludeLinkSelectors: this.config.excludeLinkSelectors,
     };
     const worker = async (): Promise<void> => {
       while (!this.stopped) {
@@ -2588,7 +2600,9 @@ export class Crawler extends EventEmitter {
 
   /**
    * List-mode entry point — fetch each URL in `urlList` exactly once, no
-   * link follow, no robots.txt, no sitemap discovery. The start URL field
+   * link follow, no sitemap discovery. robots.txt is not loaded up front,
+   * but with Respect robots.txt on each listed origin's file is fetched on
+   * first sight and every URL waits for it. The start URL field
    * is repurposed to a list-fingerprint so the resume / reset decision
    * still works (changing the list re-runs from scratch).
    *
@@ -2786,7 +2800,7 @@ export class Crawler extends EventEmitter {
     }
 
     try {
-      await this.queue.onIdle();
+      await this.drainCrawlQueue();
       await this.externalQueue.onIdle();
     } finally {
       if (this.progressTimer) clearInterval(this.progressTimer);
@@ -2898,8 +2912,11 @@ export class Crawler extends EventEmitter {
 
         // (2) User-supplied seed sitemaps — recorded AND enqueued.
         let seedEntries: SitemapEntry[] = [];
-        if (this.config.seedSitemapUrls.length > 0) {
-          const res = await fetchSitemaps(this.config.seedSitemapUrls, fetchOpts);
+        // Relative entries (`/sitemap.xml`) resolve against the start
+        // URL's origin, like a browser resolves a link on the home page.
+        const seedRoots = resolveSitemapUrls(this.config.seedSitemapUrls, `${origin}/`);
+        if (seedRoots.length > 0) {
+          const res = await fetchSitemaps(seedRoots, fetchOpts);
           if (this.stopped) return;
           seedEntries = res.entries;
           let seeded = 0;
@@ -3273,6 +3290,7 @@ export class Crawler extends EventEmitter {
           statusText: botBlock ?? (res.statusText || null),
           botBlocked: botBlock,
           contentType: res.headers.get('content-type'),
+          contentKind: errorAnswerKind(url, res.status),
           contentLength: parseIntSafe(res.headers.get('content-length')),
           responseTimeMs,
           redirectTarget,
@@ -3317,6 +3335,7 @@ export class Crawler extends EventEmitter {
     // prompt on the next launch.
     this.stopQueueCheckpointTimer();
     this.stopIssueRecomputeTimer();
+    this.robotsAbort.abort();
     // Cancel any in-flight sitemap discovery so its 'info' / 'done'
     // events don't leak into the next crawl.
     if (this.sitemapAbort) {
@@ -3351,6 +3370,7 @@ export class Crawler extends EventEmitter {
   pause(): void {
     if (this.stopped || this.paused) return;
     this.paused = true;
+    this.pausedReason ??= 'user';
     // PQueue.pause() halts new dispatch. By itself that lets every
     // in-flight fetch run to completion — at concurrency 20 the user
     // sees ~20 more URLs land in the table before things stop, which
@@ -3372,9 +3392,30 @@ export class Crawler extends EventEmitter {
     this.emitProgressFinal();
   }
 
+  /**
+   * Turn Adaptive speed on or off for this running crawl — the user
+   * enabled it after the crawl started drawing 429s. Off restores the
+   * full configured rate at once.
+   */
+  setAdaptiveSpeed(enabled: boolean): void {
+    if (this.config.adaptiveSpeed === enabled) return;
+    this.config = { ...this.config, adaptiveSpeed: enabled };
+    if (!enabled) {
+      this.adaptiveRateScale = 1;
+      this.adaptiveCooldownUntil = 0;
+      this.adaptiveCleanStreak = 0;
+      this.setThrottleScale(1, 'adaptive');
+    }
+    this.emit('info', `Adaptive speed ${enabled ? 'enabled' : 'disabled'} for the running crawl.`);
+    this.emitProgressFinal();
+  }
+
   resume(): void {
     if (this.stopped || !this.paused) return;
     this.paused = false;
+    // Resuming after an automatic pause gives the host a clean slate.
+    if (this.pausedReason === 'host-unresponsive') this.noResponseStreak.clear();
+    this.pausedReason = null;
     this.queue.start();
     this.externalQueue.start();
     this.setOp('idle');
@@ -3656,33 +3697,144 @@ export class Crawler extends EventEmitter {
    */
   private resourceAdmitted = 0;
 
+  /** Callbacks waiting on an in-flight robots.txt load (see `loadRobotsFor`). */
+  private robotsLoadedHooks = new Map<string, ((r: RobotsChecker) => void)[]>();
+
+  /**
+   * Fetch (once) the robots.txt of `origin`, cache its checker, then send
+   * every URL parked in `robotsDeferred` for that origin back through
+   * `enqueue`. `onLoaded` runs before that flush, so state it sets (the
+   * start origin's Crawl-delay) is in place before the first fetch. A file
+   * that cannot be read after the retries in `loadRobots` allows everything,
+   * and the crawl log says so.
+   */
+  private loadRobotsFor(
+    origin: string,
+    onLoaded?: (r: RobotsChecker) => void,
+  ): Promise<RobotsChecker> {
+    const cached = this.robotsByOrigin.get(origin);
+    if (cached) {
+      onLoaded?.(cached);
+      return Promise.resolve(cached);
+    }
+    if (onLoaded) {
+      const hooks = this.robotsLoadedHooks.get(origin) ?? [];
+      hooks.push(onLoaded);
+      this.robotsLoadedHooks.set(origin, hooks);
+    }
+    const inFlight = this.robotsLoads.get(origin);
+    if (inFlight) return inFlight;
+    // The user's request timeout, kept between 5 s (a slow but healthy
+    // origin) and 15 s (URLs of this origin wait for the verdict).
+    const timeoutMs = Math.min(15_000, Math.max(5_000, this.config.requestTimeoutMs));
+    const load = loadRobots(
+      origin,
+      this.config.userAgent,
+      (msg) => {
+        if (!this.stopped) this.emit('warn', msg);
+      },
+      { timeoutMs, signal: this.robotsAbort.signal },
+    )
+      .catch((): RobotsChecker => ({ isAllowed: () => true, getCrawlDelay: () => undefined }))
+      .then((r) => {
+        this.robotsByOrigin.set(origin, r);
+        this.robotsLoads.delete(origin);
+        const hooks = this.robotsLoadedHooks.get(origin) ?? [];
+        this.robotsLoadedHooks.delete(origin);
+        for (const hook of hooks) hook(r);
+        const waiting = this.robotsDeferred.get(origin);
+        this.robotsDeferred.delete(origin);
+        if (waiting && !this.stopped) {
+          for (const item of waiting.values()) this.enqueue(item);
+        }
+        return r;
+      });
+    this.robotsLoads.set(origin, load);
+    return load;
+  }
+
+  /**
+   * Park `item` until its origin's robots.txt has loaded. Returns false
+   * (nothing parked) when the checker is already cached or the URL has no
+   * origin to ask. Caller guards on `respectRobotsTxt`.
+   */
+  private deferUntilRobots(item: QueueItem): boolean {
+    let origin: string;
+    try {
+      origin = new URL(item.url).origin;
+    } catch {
+      return false;
+    }
+    if (this.robotsByOrigin.has(origin)) return false;
+    let waiting = this.robotsDeferred.get(origin);
+    if (!waiting) {
+      waiting = new Map();
+      this.robotsDeferred.set(origin, waiting);
+    }
+    const prev = waiting.get(item.url);
+    if (!prev || item.depth < prev.depth) waiting.set(item.url, item);
+    void this.loadRobotsFor(origin);
+    return true;
+  }
+
   /**
    * Is `url` allowed by the robots.txt of ITS OWN origin? Caller guards on
-   * `respectRobotsTxt`. Loads and caches a per-origin checker on first sight;
-   * while a fetch is in flight the URL is allowed optimistically — the same
-   * window the start origin already has before its own robots.txt finishes
-   * loading (see `start`), so behaviour is consistent, just now correct for
-   * additional origins instead of skipping them entirely.
+   * `respectRobotsTxt`. One checker per origin — robots-parser answers
+   * `undefined` for a URL from another origin than the file it parsed, so
+   * a single start-origin checker let every subdomain / other-protocol URL
+   * through. `enqueue` parks URLs until their checker exists, so a missing
+   * one here means the URL has no usable origin.
    */
   private robotsAllows(url: string): boolean {
+    try {
+      return this.robotsByOrigin.get(new URL(url).origin)?.isAllowed(url) ?? true;
+    } catch {
+      return true;
+    }
+  }
+
+  /** `robotsAllows`, waiting for the origin's robots.txt when it is not loaded yet. */
+  private async robotsAllowsSettled(url: string): Promise<boolean> {
     let origin: string;
     try {
       origin = new URL(url).origin;
     } catch {
       return true;
     }
-    const checker = this.robotsByOrigin.get(origin);
-    if (checker) return checker.isAllowed(url);
-    if (!this.robotsLoadingOrigins.has(origin)) {
-      this.robotsLoadingOrigins.add(origin);
-      void loadRobots(origin, this.config.userAgent)
-        .then((r) => {
-          if (!this.stopped) this.robotsByOrigin.set(origin, r);
-        })
-        .catch(() => undefined)
-        .finally(() => this.robotsLoadingOrigins.delete(origin));
+    return (await this.loadRobotsFor(origin)).isAllowed(url);
+  }
+
+  /**
+   * Wait until the crawl queue is truly empty. p-queue's onIdle resolves
+   * the moment size+pending hits 0, but fetchAndProcess can race with
+   * that: a worker finishes the *last* in-flight task, link extraction
+   * enqueues new URLs a microtask later, and onIdle has already resolved.
+   * Loop while counters disagree — one extra 50 ms wait per pass guards
+   * the race window without spinning. URLs parked behind a robots.txt that
+   * is still loading are outstanding work too: the queue can sit idle while
+   * they wait, so the loop also waits for those loads, whose flush refills
+   * the queue.
+   */
+  private async drainCrawlQueue(): Promise<void> {
+    while (!this.stopped) {
+      await this.queue.onIdle();
+      await new Promise<void>((r) => setTimeout(r, 50));
+      // Top up a refresh run's backlog as the queue frees up. No-op for
+      // a normal crawl.
+      this.feedRefreshBacklog();
+      if (this.queue.size + this.queue.pending > 0) continue;
+      if (this.robotsDeferred.size === 0) break;
+      if (this.robotsLoads.size > 0) {
+        await Promise.all(this.robotsLoads.values());
+        continue;
+      }
+      // Parked URLs with no load left to release them — cannot happen by
+      // construction, but re-enqueueing either admits them (checker cached)
+      // or starts the load that will, so the loop never spins on them.
+      const stranded = [...this.robotsDeferred.values()];
+      this.robotsDeferred.clear();
+      for (const waiting of stranded) for (const item of waiting.values()) this.enqueue(item);
     }
-    return true;
   }
 
   private enqueue(item: QueueItem): void {
@@ -3700,6 +3852,10 @@ export class Crawler extends EventEmitter {
       return;
     }
     if (item.depth > this.config.maxDepth) return;
+    // No verdict yet for this origin: park the URL until its robots.txt
+    // has loaded (it comes back through here then). Ahead of the trap
+    // guards so their counters see each URL once.
+    if (this.config.respectRobotsTxt && this.deferUntilRobots(item)) return;
     // Link-loop guard, before robots/filters so a runaway `/a/a/a/...` fan-out
     // costs one cheap string check rather than a robots lookup per hop.
     // The start URL is exempt - the user asked for it explicitly.
@@ -3959,6 +4115,52 @@ export class Crawler extends EventEmitter {
   // and branch here is dead unless the opt-in is set.
   // ==================================================================
 
+  /** 429 / 503 answers seen this crawl (every attempt), adaptive or not —
+   *  the UI suggests Adaptive speed when a fixed-rate crawl keeps drawing
+   *  them. */
+  private rateLimitedResponses = 0;
+  /** Why the crawl is paused: the user, or the host going silent. */
+  private pausedReason: 'user' | 'host-unresponsive' | null = null;
+  /** Per host: requests in a row that got no response at all since its
+   *  last answer, and whether it ever answered. */
+  private noResponseStreak = new Map<string, number>();
+  private hostAnswered = new Set<string>();
+  /**
+   * "Pause crawl if a host stops responding": this many requests in a row
+   * to a host that *was* answering end with no response (after their
+   * connection retries) → pause instead of burning the queue into
+   * thousands of failed rows. A host that never answered (a dead external
+   * domain) never trips it.
+   */
+  private static readonly HOST_UNRESPONSIVE_STREAK = 10;
+
+  private noteHostAnswered(url: string): void {
+    const host = hostOf(url);
+    this.hostAnswered.add(host);
+    this.noResponseStreak.delete(host);
+  }
+
+  private noteHostNoResponse(url: string): void {
+    const host = hostOf(url);
+    if (!this.hostAnswered.has(host)) return;
+    const streak = (this.noResponseStreak.get(host) ?? 0) + 1;
+    this.noResponseStreak.set(host, streak);
+    if (
+      streak >= Crawler.HOST_UNRESPONSIVE_STREAK &&
+      (this.config.pauseOnHostUnresponsive ?? true) &&
+      this.running &&
+      !this.paused &&
+      !this.stopped
+    ) {
+      this.emit(
+        'error',
+        `${host} stopped responding (${streak} requests in a row got no answer) — crawl paused. Check the site, then press Resume.`,
+      );
+      this.pausedReason = 'host-unresponsive';
+      this.pause();
+    }
+  }
+
   /** Current fraction (down to {@link adaptiveMinScale}, up to 1) of the
    *  configured rate/concurrency in effect. */
   private adaptiveRateScale = 1;
@@ -4182,6 +4384,7 @@ export class Crawler extends EventEmitter {
       // only at write time, after the body is read.
       const alpnProbe = item.url.startsWith('https:') ? this.negotiatedProtocol(item.url) : null;
       const res = await this.fetchWithRetry(item.url, controller.signal, deadline);
+      this.noteHostAnswered(item.url);
 
       const responseTimeMs = Date.now() - attemptStart;
       this.totalResponseTimeMs += responseTimeMs;
@@ -4392,7 +4595,7 @@ export class Crawler extends EventEmitter {
       const connectionHeader = (res.headers.get('connection') ?? '').toLowerCase();
       const keepAlive = !connectionHeader.includes('close');
 
-      const kind = detectContentKind(item.url, contentType);
+      const kind = errorAnswerKind(item.url, statusCode) ?? detectContentKind(item.url, contentType);
 
       // Materialize all response headers once — used for the HTTP Headers
       // tab in the URL Details panel. Built before each upsertUrl so we
@@ -4774,6 +4977,8 @@ export class Crawler extends EventEmitter {
         urlRewrites: this.urlRewrites,
         customExtractionRules: this.config.customExtractionRules,
         contentAreaSelector: this.config.contentAreaSelector,
+        excludeLinkPositions: this.config.excludeLinkPositions,
+        excludeLinkSelectors: this.config.excludeLinkSelectors,
       });
 
       // A bot challenge served with 200: recorded as blocked like the
@@ -5016,6 +5221,13 @@ export class Crawler extends EventEmitter {
           csp,
           referrerPolicy,
           permissionsPolicy,
+          // Read for every response above, but only the redirect and
+          // non-HTML rows stored them — so both CORS checks never fired on
+          // the pages they mostly concern.
+          corsAllowOrigin,
+          corsAllowCredentials,
+          corsAllowMethods,
+          corsAllowHeaders,
           customSearchHits:
             Object.keys(parsed.customSearchHits).length > 0
               ? JSON.stringify(parsed.customSearchHits)
@@ -5071,6 +5283,7 @@ export class Crawler extends EventEmitter {
           titleCount: parsed.titleCount,
           imagesEmptyAlt: parsed.imagesEmptyAlt,
           emptyAnchorCount: parsed.emptyAnchorCount,
+          emptyHrefCount: parsed.emptyHrefCount,
           anchorTooLongCount: parsed.anchorTooLongCount,
           genericAnchorCount: parsed.genericAnchorCount,
           targetBlankNoNoopenerCount: parsed.targetBlankNoNoopenerCount,
@@ -5146,6 +5359,9 @@ export class Crawler extends EventEmitter {
         // Lets a script / stylesheet / font row list the pages that embed
         // it under Inlinks.
         resources: parsed.resources,
+        // Recorded for Outlinks / the bulk export only — never queued.
+        uncrawlableLinks: this.config.storeUncrawlableLinks ? parsed.uncrawlableLinks : [],
+        storeUncrawlableLinks: this.config.storeUncrawlableLinks ?? true,
         fromDepth: item.depth,
       });
       // V2 Faz 1 — Persist render artefacts inline so they finish before
@@ -5207,7 +5423,7 @@ export class Crawler extends EventEmitter {
         this.config.mode === 'list' || this.config.mode === 'sitemap';
       if (!fixedUrlMode) {
         for (const link of storableLinks) {
-          if (!link.isInternal) this.enqueueExternal(link.toUrl);
+          if (!link.isInternal && !link.followExcluded) this.enqueueExternal(link.toUrl);
         }
       }
       this.crawled++;
@@ -5255,6 +5471,9 @@ export class Crawler extends EventEmitter {
               this.config.checkLinksOutsideStartFolder &&
               isInScope(this.config.startUrl, link.toUrl, 'subdomain');
             if (!inScope && !checkOnly && !this.config.crawlExternal) continue;
+            // Settings → Filters "Don't follow links in": the link is kept in
+            // the graph, it just doesn't lead the crawl anywhere.
+            if (link.followExcluded) continue;
             // Wave 3 — nofollow follow toggle. By default nofollow links
             // are stored (when `storeNofollowLinks` is on) but never
             // recursed into. Turning the matching row on opts out of the
@@ -5376,6 +5595,7 @@ export class Crawler extends EventEmitter {
       // fetches it again; tracked so a recovery takes it off the count.
       this.failed++;
       this.pendingFailedUrls.add(item.url);
+      this.noteHostNoResponse(item.url);
       const detail = formatFetchError(err);
       const elapsed = Date.now() - attemptStart;
       // Distinguish the seed URL (depth 0 means the user's start URL or a
@@ -5780,7 +6000,15 @@ export class Crawler extends EventEmitter {
     signal: AbortSignal,
     deadline?: RequestDeadline,
   ): Promise<FetchedResponse> {
+    // Two retry budgets: one for responses that came back retryable
+    // (5xx / 429), one for requests that got no response at all (timeout,
+    // reset, refused). A flaky connection and a server error are different
+    // problems — "Connection Failure Retries" sizes the first separately.
     const maxAttempts = Math.max(0, this.config.retryAttempts) + 1;
+    const maxConnAttempts =
+      Math.max(0, this.config.connectionFailureRetries ?? this.config.retryAttempts) + 1;
+    let httpTries = 0;
+    let connTries = 0;
     const baseDelay = Math.max(0, this.config.retryInitialDelayMs);
     let lastError: unknown = null;
     // Backoff waits stop the request clock and end early on Stop / Pause.
@@ -5789,7 +6017,7 @@ export class Crawler extends EventEmitter {
       await sleepUnlessAborted(ms, signal);
     };
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    for (let attempt = 0; attempt < maxAttempts + maxConnAttempts; attempt++) {
       if (this.stopped) throw lastError ?? new Error('crawler stopped');
       if (attempt > 0) {
         // A retry is a request like any other: it waits out the global
@@ -5869,6 +6097,8 @@ export class Crawler extends EventEmitter {
         // Keep the login session alive — capture any rotated session cookies.
         this.refreshSessionJar(url, res);
         const ttfbMs = Date.now() - tStart;
+        httpTries++;
+        if (res.status === 429 || res.status === 503) this.rateLimitedResponses++;
         const rateLimited =
           this.config.adaptiveSpeed && (res.status === 429 || res.status === 503);
         const ownLimit = rateLimited && this.isUrlOwnLimit(url, tStart);
@@ -5880,7 +6110,7 @@ export class Crawler extends EventEmitter {
         // Final attempt or non-retryable status — return as-is. We attach
         // ttfbMs as a non-enumerable property so the existing call sites
         // can read it without breaking the Response shape elsewhere.
-        if (attempt === maxAttempts - 1 || !isRetryableStatus(res.status) || giveUp) {
+        if (httpTries >= maxAttempts || !isRetryableStatus(res.status) || giveUp) {
           const out = res as unknown as FetchedResponse;
           out.ttfbMs = ttfbMs;
           out.ownRateLimit = ownLimit;
@@ -5903,7 +6133,7 @@ export class Crawler extends EventEmitter {
         if (rateLimited && !ownLimit) this.noteRateLimited(adaptiveRetryMs, tStart);
         this.emit(
           'warn',
-          `Retry ${attempt + 1}/${maxAttempts - 1} for ${url}: HTTP ${res.status} after ${ttfbMs}ms${
+          `Retry ${httpTries}/${maxAttempts - 1} for ${url}: HTTP ${res.status} after ${ttfbMs}ms${
             ownLimit ? ' (this URL only — the crawl keeps its pace)' : ''
           }`,
         );
@@ -5927,16 +6157,17 @@ export class Crawler extends EventEmitter {
           );
           throw err;
         }
-        if (attempt === maxAttempts - 1) {
+        connTries++;
+        if (connTries >= maxConnAttempts) {
           this.emit(
             'debug',
-            `Final attempt ${attempt + 1}/${maxAttempts} failed for ${url}: ${formatFetchError(err)}`,
+            `Final attempt ${connTries}/${maxConnAttempts} failed for ${url}: ${formatFetchError(err)}`,
           );
           throw err;
         }
         this.emit(
           'warn',
-          `Retry ${attempt + 1}/${maxAttempts - 1} for ${url}: ${formatFetchError(err)} (elapsed ${elapsedMs}ms)`,
+          `Retry ${connTries}/${maxConnAttempts - 1} for ${url}: ${formatFetchError(err)} (elapsed ${elapsedMs}ms)`,
         );
       }
       const delay = baseDelay * 2 ** attempt;
@@ -6131,6 +6362,12 @@ export class Crawler extends EventEmitter {
       phaseDone: this.phaseDone,
       phaseTotal: this.phaseTotal,
       startUrl: this.config.startUrl,
+      rateLimitedCount: this.rateLimitedResponses,
+      throttledRps:
+        this.config.adaptiveSpeed && this.adaptiveRateScale < 1
+          ? Math.round(this.adaptiveBaseRps() * this.adaptiveRateScale * 10) / 10
+          : null,
+      pausedReason: this.paused ? this.pausedReason : null,
     };
     this.emit('progress', progress);
   }
@@ -6448,6 +6685,22 @@ function parseLinkRelCanonical(linkHeader: string | null): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Kind of a URL whose answer is not the resource it names — an error page
+ * or a redirect. `/app.js` answering 404 with the site's HTML error page is
+ * a broken script, not an HTML page: classed by the Content-Type of that
+ * page it sat among the Internal HTML pages and out of the JS filter. The
+ * URL's asset extension (js, css, image, pdf, font) wins here; null for a
+ * 2xx, for no answer at all (`detectContentKind` already goes by the
+ * extension then) and for an extension that names no asset.
+ */
+function errorAnswerKind(url: string, statusCode: number | null): ContentKind | null {
+  if (statusCode === null || (statusCode >= 200 && statusCode < 300)) return null;
+  const ext = extractExtension(url);
+  const kind = ext ? EXT_TO_KIND[ext] : undefined;
+  return kind !== undefined && kind !== 'html' ? kind : null;
 }
 
 function detectContentKind(url: string, contentType: string | null): ContentKind {

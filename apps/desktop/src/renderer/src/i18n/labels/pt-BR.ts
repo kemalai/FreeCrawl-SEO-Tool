@@ -817,4 +817,22 @@ export const PT_BR_LABELS: Record<string, string> = {
   'Product catalogue audit: extracts price, currency, stock, rating, SKU and brand from JSON-LD, flags "out of stock" copy, and skips query-string facets so filters don\'t explode the crawl.': 'Auditoria de catálogo: extrai preço, moeda, estoque, avaliação, SKU e marca do JSON-LD, sinaliza o texto "fora de estoque" e ignora facetas de query string para que os filtros não explodam o rastreamento.',
   'Publisher audit: follows hreflang and news sitemaps, extracts author and publish / modified dates, and checks hreflang reciprocity — for sites where freshness and language targeting drive rankings.': 'Auditoria editorial: segue hreflang e sitemaps de notícias, extrai autor e datas de publicação / modificação e verifica a reciprocidade hreflang — para sites onde frescor e segmentação por idioma definem o ranking.',
   'Renders every page in Chromium and runs the in-page WCAG audit (contrast, focus outline, tap targets, font size) plus the mobile-usability checks. Slow by design — low concurrency.': 'Renderiza cada página no Chromium e executa a auditoria WCAG na página (contraste, contorno de foco, alvos de toque, tamanho da fonte) mais as verificações de usabilidade móvel. Lento de propósito — baixa concorrência.',
+  // SF 25.0 parity — new issue checks
+  "Missing Title Attribute": "Falta o atributo title",
+  "Self Reference Only": "Só autorreferência",
+  "Mismatch With HTML lang": "Não corresponde ao lang do HTML",
+  "Empty href": "href vazio",
+  // SF 25.0 parity — Social tab
+  "OpenGraph Incomplete": "OpenGraph incompleto",
+  "Twitter Card Incomplete": "Twitter Card incompleto",
+  "OG Image Not 200": "Imagem OG não retorna 200",
+  "Twitter Image Not 200": "Imagem do Twitter não retorna 200",
+  "og:image Width": "Largura da og:image",
+  "og:image Height": "Altura da og:image",
+  "twitter:image Width": "Largura da twitter:image",
+  "twitter:image Height": "Altura da twitter:image",
+  // Outlinks — Link Crawlability column (SF 24 uncrawlable links)
+  "Link Crawlability": "Rastreabilidade do link",
+  "Crawlable": "Rastreável",
+  "Uncrawlable": "Não rastreável",
 };

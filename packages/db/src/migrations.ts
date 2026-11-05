@@ -2606,6 +2606,99 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 105,
+    name: 'sf25_parity_columns',
+    // Screaming Frog 25.0 parity checks:
+    //   - urls.empty_href_count     — `<a href="">` elements on the page
+    //   - urls.hreflang_self_only   — every hreflang annotation is the page itself
+    //   - urls.hreflang_lang_mismatch — self hreflang language ≠ html[lang]
+    //   - links.follow_excluded     — link recorded but not followed
+    //   - image_usages.has_title    — the <img> carries a title attribute;
+    //     NULL for variants / share cards and for rows written before this
+    //     version, so an old crawl does not read as "every image untitled".
+    up: (db) => {
+      const urlCols = new Set(
+        (db.prepare('PRAGMA table_info(urls)').all() as unknown as { name: string }[]).map(
+          (c) => c.name,
+        ),
+      );
+      const addUrl = (name: string, type: string) => {
+        if (!urlCols.has(name)) db.exec(`ALTER TABLE urls ADD COLUMN ${name} ${type}`);
+      };
+      addUrl('empty_href_count', 'INTEGER NOT NULL DEFAULT 0');
+      addUrl('hreflang_self_only', 'INTEGER NOT NULL DEFAULT 0');
+      addUrl('hreflang_lang_mismatch', 'INTEGER NOT NULL DEFAULT 0');
+      const usageCols = db.prepare('PRAGMA table_info(image_usages)').all() as unknown as {
+        name: string;
+      }[];
+      if (!usageCols.some((c) => c.name === 'has_title')) {
+        db.exec('ALTER TABLE image_usages ADD COLUMN has_title INTEGER');
+      }
+      // links.follow_excluded — the link sits in an excluded link position
+      // / selector: recorded for the graph, never followed (not even by the
+      // end-of-crawl drain of uncrawled link targets).
+      const linkCols = db.prepare('PRAGMA table_info(links)').all() as unknown as {
+        name: string;
+      }[];
+      if (!linkCols.some((c) => c.name === 'follow_excluded')) {
+        db.exec('ALTER TABLE links ADD COLUMN follow_excluded INTEGER NOT NULL DEFAULT 0');
+      }
+    },
+  },
+  {
+    version: 106,
+    name: 'add_uncrawlable_links',
+    // Screaming Frog 24.0 "Find Uncrawlable Links": the links behind the
+    // JS-Only Navigation count, one row per distinct link per page. Kept
+    // out of `links` so inlink counts, link score, orphans and the broken
+    // link join keep describing what a search engine can actually follow.
+    // `to_url` is NULL when no address could be read from the markup.
+    up: `
+      CREATE TABLE IF NOT EXISTS uncrawlable_links (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_url_id   INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        to_url        TEXT,
+        code          TEXT NOT NULL,
+        kind          TEXT NOT NULL,
+        element       TEXT NOT NULL,
+        anchor        TEXT,
+        link_path     TEXT,
+        link_position TEXT,
+        is_internal   INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE INDEX IF NOT EXISTS idx_uncrawlable_links_from ON uncrawlable_links(from_url_id);
+    `,
+  },
+  {
+    version: 107,
+    name: 'add_previous_crawl_snapshot',
+    // Screaming Frog 24.0 "Auto Compare Crawls": a scheduled / CLI crawl
+    // with auto-compare copies the crawl it is about to replace into these
+    // two tables first, so "what changed since last time" can be answered
+    // after a refresh crawl rewrote every row. Only the fields the compare
+    // view diffs are kept, plus the issue counters for the issue-level
+    // view. Deliberately not emptied by reset(): a crawl of a new start URL
+    // resets the project *after* the snapshot was taken.
+    up: `
+      CREATE TABLE IF NOT EXISTS previous_crawl_urls (
+        url              TEXT PRIMARY KEY,
+        status_code      INTEGER,
+        title            TEXT,
+        meta_description TEXT,
+        h1               TEXT,
+        canonical        TEXT,
+        indexability     TEXT,
+        response_time_ms INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS previous_crawl_info (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        taken_at     TEXT NOT NULL,
+        start_url    TEXT,
+        issue_counts TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** Schema version a fully migrated project carries. */

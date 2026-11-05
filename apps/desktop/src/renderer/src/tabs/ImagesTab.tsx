@@ -50,6 +50,7 @@ export function ImagesTab() {
   // distinct DB filter so the count shown equals the rows listed.
   const missingAltOnly = activeCategory === 'issues:image-missing-alt';
   const emptyAltOnly = activeCategory === 'issues:image-empty-alt';
+  const missingTitleOnly = activeCategory === 'issues:image-missing-title';
   const duplicateAltOnly = activeCategory === 'issues:image-duplicate-alt';
 
   // Sort and size filter go to the query. This tab loads one page of
@@ -67,6 +68,7 @@ export function ImagesTab() {
           search: search || undefined,
           missingAltOnly,
           emptyAltOnly,
+          missingTitleOnly,
           duplicateAltOnly,
           minByteSize,
           sortBy,
@@ -96,6 +98,7 @@ export function ImagesTab() {
     search,
     missingAltOnly,
     emptyAltOnly,
+    missingTitleOnly,
     duplicateAltOnly,
     minByteSize,
     sortBy,
@@ -127,6 +130,7 @@ export function ImagesTab() {
       await window.freecrawl.exportImages({
         missingAltOnly,
         emptyAltOnly,
+        missingTitleOnly,
         duplicateAltOnly,
         search: search || undefined,
         minByteSize,
@@ -249,6 +253,11 @@ export function ImagesTab() {
         {emptyAltOnly && (
           <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
             {t('imagesTab.emptyAltOnly', { defaultValue: 'Empty Alt only' })}
+          </span>
+        )}
+        {missingTitleOnly && (
+          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+            {t('imagesTab.missingTitleOnly', { defaultValue: 'Missing Title only' })}
           </span>
         )}
         {duplicateAltOnly && (
@@ -512,7 +521,9 @@ export function ImagesTab() {
                     ? t('imagesTab.emptyMissingAlt', { defaultValue: 'No images without alt text.' })
                     : emptyAltOnly
                       ? t('imagesTab.emptyEmptyAlt', { defaultValue: 'No images with an empty alt="".' })
-                      : duplicateAltOnly
+                      : missingTitleOnly
+                        ? t('imagesTab.emptyMissingTitle', { defaultValue: 'No images without a title attribute.' })
+                        : duplicateAltOnly
                         ? t('imagesTab.emptyDuplicateAlt', { defaultValue: 'No images share the same alt text.' })
                         : t('imagesTab.emptyDefault', { defaultValue: 'Crawl a site to discover images.' })}
                 </div>

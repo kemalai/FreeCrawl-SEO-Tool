@@ -306,4 +306,9 @@ export const MENU_ZH_CN: MenuLabels = {
   // ── Google OAuth refresh failure ──
   oauthRefreshExpired:
     'Google 拒绝了已保存的登录（{reason}）。这通常表示你的 Google Cloud OAuth 应用处于 "Testing" 状态，Google 会每 7 天使连接失效。一次性修复：Google Cloud Console → OAuth consent screen → "Publish app"（无需验证审核），然后断开并重新连接此集成。',
+  exportMarkdown: "将所有页面导出为 Markdown…",
+  dlgExportMarkdownTitle: "选择存放 Markdown 文件的文件夹",
+  dlgExportMarkdownDoneTitle: "Markdown 导出完成",
+  msgExportMarkdownWritten: "已写入 Markdown 文件：{files}。文件夹中还有 index.csv，列出每个 URL 对应的文件。",
+  compareWithPrevious: "与上一次抓取比较…",
 };

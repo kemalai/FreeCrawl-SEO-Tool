@@ -103,6 +103,7 @@ const ALLOWED_METHODS = new Set<string>([
   'getPendingInternalLinks',
   'vacuumInto',
   'writeFetchedUrl',
+  'snapshotForCompare',
   'upsertUrl',
   'insertLinks',
   'insertImages',

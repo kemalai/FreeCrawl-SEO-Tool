@@ -314,14 +314,14 @@ export const AZ_INFO_TIPS: Record<string, string> = {
     'CMS-iniz eyni səhifəni qarışıq registrdə verirsə (/Foo və /foo) aktiv.',
   ['On if your site canonicalises to non-www but emits www links somewhere.']:
     'Saytınız www-suz formaya kanonikləşdirir, amma haradasa www keçidləri çıxarırsa aktiv.',
-  ["On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."]:
-    'Şəbəkə xətalarında və 408/425/429/5xx cavablarında imtina etməzdən əvvəl N dəfə də təkrar cəhd et. Hər təkrar cəhd URL-in cavab vaxtı büdcəsinə sayılır.',
+  ["On 408/425/429/5xx responses, retry up to N more times before giving up. Requests that get no response at all use Connection Failure Retries below. Each retry counts toward the URL's response time budget."]:
+    "408/425/429/5xx cavablarında, imtina etməzdən əvvəl ən çox N dəfə də cəhd edir. Heç cavab almayan sorğular aşağıdakı Bağlantı xətası təkrar cəhdləri parametrindən istifadə edir. Hər cəhd URL-in cavab müddəti büdcəsinə daxildir.",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     'Mobil UX auditi edərkən və ya PageSpeed tərzində mobil önizləmələr çəkərkən aktiv.',
   ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
     "'Açar: Dəyər' formatında hər sətirdə bir başlıq. HTTP autentifikasiyası kimi yalnız taranan sayta göndərilir — heç vaxt xarici keçidlərə və ya başqa hostlara. Autentifikasiya tokenləri və ya fərdi yönləndirmə göstərişləri üçün faydalıdır. Açarlar toqquşduqda istifadəçi dəyərləri standartları əvəz edir.",
-  ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
-    'Hər sətirdə bir sitemap URL-i. Başlanğıc URL-dən keçidləri izləməklə yanaşı, tarayıcı bu sitemap-ləri yükləyir və siyahıdakı hər səhifəni əlavə toxum kimi növbəyə qoyur — daha sürətli/tam kəşf və sitemap qeyri-standart yolda olsa belə etibarlı yetim aşkarlanması. Söndürmək üçün boş buraxın.',
+  ["One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "Hər sətirdə bir sitemap URL-i. Başlanğıc URL-dən keçidləri izləməklə yanaşı, tarayıcı bu sitemap-ləri yükləyir və siyahıdakı hər səhifəni əlavə toxum kimi növbəyə qoyur — daha sürətli/tam kəşf və sitemap qeyri-standart yolda olsa belə etibarlı yetim aşkarlanması. Söndürmək üçün boş buraxın. /sitemap.xml kimi nisbi yollar başlanğıc URL-ə görə həll olunur.",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
     'Hər sətirdə bir URL. Hər biri tam bir dəfə yüklənir; çıxış keçidləri İZLƏNMİR. # ilə başlayan şərhlər nəzərə alınmır.',
   ['OS scheduler hint applied at crawl start. Lowering priority lets the rest of the machine stay responsive during heavy crawls. May require elevated privileges on some platforms.']:
@@ -602,10 +602,10 @@ export const AZ_INFO_TIPS: Record<string, string> = {
     'Ayrı URL-li (m-dot) mobil versiya: <link rel="alternate" media="only screen and (max-width: …)">. Responsiv saytlarda null-dır, ki onlar əksəriyyətdir — burada dəyər olub geriyə qarşılıqlı kanonik yoxdursa, bu klassik qırıq m-dot qurulumudur.',
   ['Crawl on only when the site really does serve a separate mobile host.']:
     'Yalnız sayt həqiqətən ayrı mobil host verirsə Tara aktiv.',
-  ['Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", and href="#" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter.']:
-    'Axtarış sisteminin izləyə bilmədiyi keçidlər: href-siz amma onclick-li <a>, href="javascript:…" və işləyiciyə bağlı href="#" yer tutucuları. Yalnız Saxla — taranmayan keçid tərifə görə heç vaxt yüklənmir. Yalnız JS naviqasiyası problem filtrini doldurur.',
-  ['On — it is a count, so it costs nothing.']:
-    'Aktiv — bu bir saydır, ona görə heç nəyə başa gəlmir.',
+  ["Links a search engine cannot follow: <a> with no href but an onclick, href=\"javascript:…\", href=\"#\" placeholders wired to a handler, an href on a non-link element such as <span> or <div>, and non-link elements whose onclick navigates. Store-only — an uncrawlable link is by definition never fetched. Each one appears under Outlinks as Uncrawlable; the internal ones drive the JS-Only Navigation issue filter."]:
+    "Axtarış sisteminin izləyə bilmədiyi keçidlər: href-siz amma onclick-li <a>, href=\"javascript:…\", işləyiciyə bağlı href=\"#\" yer tutucuları, <span> və ya <div> kimi keçid olmayan elementdəki href və onclick-i başqa səhifəyə aparan keçid olmayan elementlər. Yalnız Saxla — taranmayan keçid tərifə görə heç vaxt yüklənmir. Hər biri Çıxan keçidlər bölməsində Taranıla bilməyən kimi göstərilir; daxili olanlar Yalnız JS ilə gəzinti problem filtrini doldurur.",
+  ["On — recording them costs almost nothing."]:
+    "Aktiv — onları qeyd etmək demək olar ki, heç nəyə başa gəlmir.",
   ['With a Subfolder-scoped crawl, links pointing outside the start folder are fetched once so their status code is known, then stopped — they are checked, not crawled through. Off leaves them undiscovered entirely.']:
     'Alt-qovluq əhatəli taramada başlanğıc qovluğundan kənarı göstərən keçidlər status kodları məlum olsun deyə bir dəfə yüklənir, sonra dayandırılır — yoxlanılır, dərinə taranmır. Söndürülü onları tamamilə kəşf edilməmiş qoyur.',
   ['On — knowing a link out of /blog/ is a 404 costs one request.']:
@@ -644,8 +644,8 @@ export const AZ_INFO_TIPS: Record<string, string> = {
   ['Reads Sitemap: directives from /robots.txt plus the conventional /sitemap.xml fallbacks at crawl start. Cheap I/O, and it powers every sitemap issue filter.']:
     'Tarama başlananda /robots.txt-dən Sitemap: direktivlərini və adi /sitemap.xml ehtiyatlarını oxuyur. Ucuz I/O və hər sitemap problem filtrini qidalandırır.',
   ['On (default).']: 'Aktiv (standart).',
-  ['Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions.']:
-    'Açıq sitemap URL-ləri, hər sətirdə bir. Onların qeydləri həmişə həm yazılır, həm də tarama toxumu kimi növbəyə qoyulur — sitemap robots.txt-nin heç vaxt qeyd etmədiyi yerdə olduqda bundan istifadə edin.',
+  ["Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "Açıq sitemap URL-ləri, hər sətirdə bir. Onların qeydləri həmişə həm yazılır, həm də tarama toxumu kimi növbəyə qoyulur — sitemap robots.txt-nin heç vaxt qeyd etmədiyi yerdə olduqda bundan istifadə edin. /sitemap.xml kimi nisbi yollar başlanğıc URL-ə görə həll olunur.",
   ['Treat the concurrency and RPS above as a ceiling and let the target server set the real pace. On a 429/503 (or a Retry-After header) the crawler pauses for the penalty window and steps the rate + concurrency down; after a sustained run of clean responses it grows them back toward the ceiling. Off = hold the configured rate no matter how the server responds.']:
     'Yuxarıdakı paralelliyi və RPS-i tavan kimi qəbul et və real tempi hədəf server təyin etsin. 429/503 (və ya Retry-After başlığı) zamanı tarayıcı cəza pəncərəsi boyu dayanır və sürəti + paralelliyi aşağı salır; davamlı təmiz cavablardan sonra onları yenidən tavana doğru artırır. Söndürülü = server necə cavab verirsə versin, konfiqurasiya edilmiş sürəti saxla.',
   ['Turn on for sites behind Cloudflare / a WAF that returns 429s; leave off for your own infrastructure where the fixed rate is safe.']:
@@ -680,4 +680,50 @@ export const AZ_INFO_TIPS: Record<string, string> = {
     "Bu URL-in yaxın dublikat qrupundakı başqa bir səhifə ilə ən yüksək təxmini mətn oxşarlığı; əsas məzmun mətni üzərindən ölçülür. Yaxın dublikat olmayan səhifələrdə boşdur.",
   ["90 = recommended (Screaming Frog's default); 80 catches looser rewrites; 0 turns this pass off."]:
     "90 = tövsiyə olunan (Screaming Frog standartı); 80 daha sərbəst yenidən yazılmaları tutur; 0 bu mərhələni söndürür.",
+  ["The page's `og:title` — the headline Facebook, LinkedIn and other OpenGraph readers show on a share card. One of the four required OpenGraph properties."]:
+    "Səhifənin `og:title` dəyəri — Facebook, LinkedIn və digər OpenGraph oxuyucularının paylaşım kartında göstərdiyi başlıq. Məcburi dörd OpenGraph xüsusiyyətindən biri.",
+  ["The `og:description` text shown under the title on a share card."]:
+    "Paylaşım kartında başlığın altında göstərilən `og:description` mətni.",
+  ["The `og:image` URL as written in the page. The share card uses this picture; it should be absolute and return 200. One of the four required OpenGraph properties."]:
+    "Səhifədə yazıldığı kimi `og:image` URL-i. Paylaşım kartı bu şəkildən istifadə edir; mütləq olmalı və 200 qaytarmalıdır. Məcburi dörd OpenGraph xüsusiyyətindən biri.",
+  ["Pixel width of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Sosial şəkil yoxlamasının oxuduğu og:image şəklinin piksel eni. 0 = şəkil oxuna bilmədi; boş = yoxlanmayıb.",
+  ["Pixel height of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Sosial şəkil yoxlamasının oxuduğu og:image şəklinin piksel hündürlüyü. 0 = şəkil oxuna bilmədi; boş = yoxlanmayıb.",
+  ["The `og:type` of the page, such as website or article. One of the four required OpenGraph properties."]:
+    "Səhifənin `og:type` dəyəri, məsələn website və ya article. Məcburi dörd OpenGraph xüsusiyyətindən biri.",
+  ["The `og:url` — the address share counts and the card link are attached to. One of the four required OpenGraph properties."]:
+    "`og:url` — paylaşım saylarının və kart keçidinin bağlandığı ünvan. Məcburi dörd OpenGraph xüsusiyyətindən biri.",
+  ["The `og:site_name` that some platforms show above the share card title."]:
+    "Bəzi platformaların paylaşım kartının başlığı üzərində göstərdiyi `og:site_name`.",
+  ["The `og:locale` — the language and territory of the markup."]:
+    "`og:locale` — işarələmənin dili və regionu.",
+  ["The X (Twitter) card type. Without it X shows no card, even when other `twitter:` tags are present."]:
+    "X (Twitter) kartının növü. Bu olmadan, digər `twitter:` teqləri olsa belə X kart göstərmir.",
+  ["The X card title. X falls back to og:title when it is missing."]:
+    "X kartının başlığı. Yoxdursa, X og:title dəyərindən istifadə edir.",
+  ["The X card description. X falls back to og:description when it is missing."]:
+    "X kartının təsviri. Yoxdursa, X og:description dəyərindən istifadə edir.",
+  ["The X card image URL. X falls back to og:image when it is missing."]:
+    "X kartının şəkil URL-i. Yoxdursa, X og:image dəyərindən istifadə edir.",
+  ["Pixel width of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Sosial şəkil yoxlamasının oxuduğu twitter:image şəklinin piksel eni. 0 = şəkil oxuna bilmədi; boş = yoxlanmayıb.",
+  ["Pixel height of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "Sosial şəkil yoxlamasının oxuduğu twitter:image şəklinin piksel hündürlüyü. 0 = şəkil oxuna bilmədi; boş = yoxlanmayıb.",
+  ["When a request gets no response at all — a timeout, a reset or a refused connection — retry it up to N more times before recording it as failed. Kept apart from the HTTP retries above, so a flaky network and a struggling server can be tuned separately."]:
+    "Sorğu heç cavab almadıqda — vaxt aşımı, sıfırlanmış və ya rədd edilmiş bağlantı — onu uğursuz kimi qeyd etməzdən əvvəl ən çox N dəfə də təkrarlayır. Yuxarıdakı HTTP təkrar cəhdlərindən ayrıdır ki, qeyri-sabit şəbəkə ilə çətinlik çəkən server ayrıca tənzimlənə bilsin.",
+  ["2 default; 0 to record connection failures immediately; 4 on an unstable connection."]:
+    "Standart 2; bağlantı xətalarını dərhal qeyd etmək üçün 0; qeyri-sabit bağlantıda 4.",
+  ["When a site that was answering stops responding — 10 requests in a row get no answer even after their connection retries — the crawl pauses instead of marking the rest of the queue as failed. Fix the problem or wait for the server to come back, then press Resume to continue where it stopped."]:
+    "Cavab verən sayt cavab verməyi dayandırdıqda — bağlantı təkrar cəhdlərindən sonra belə ardıcıl 10 sorğu cavabsız qalırsa — tarama növbənin qalanını uğursuz kimi qeyd etmək əvəzinə fasilə verir. Problemi həll edin və ya serverin qayıtmasını gözləyin, sonra dayandığı yerdən davam etmək üçün Davam et düyməsini basın.",
+  ["On by default. Turn it off when any result is better than a paused run, for example a crawl nobody is watching."]:
+    "Standart olaraq açıqdır. Fasilədə qalan işdən istənilən nəticə daha yaxşı olduqda, məsələn heç kimin izləmədiyi taramada, söndürün.",
+  ["Links that sit in these parts of a page are recorded (they still count as inlinks and show in the link reports) but the crawler does not follow them. Useful for mega-menus and footers that link to thousands of pages. A page that is also linked from the body is still crawled."]:
+    "Səhifənin bu hissələrindəki keçidlər qeyd olunur (daxil olan keçid kimi sayılmağa və keçid hesabatlarında görünməyə davam edir), amma tarayıcı onları izləmir. Minlərlə səhifəyə keçid verən meqa menyular və alt hissələr üçün faydalıdır. Mətndən də keçid alan səhifə yenə taranır.",
+  ["Footer + Sidebar on a shop whose footer lists every category"]:
+    "Alt hissəsində bütün kateqoriyalar sadalanan mağazada Alt hissə + Yan panel",
+  ["Links inside any element matching one of these CSS selectors are recorded but not followed — the way to keep faceted filters or a mega-menu from flooding the crawl without excluding the pages themselves. An invalid selector is ignored."]:
+    "Bu CSS seçicilərindən birinə uyğun gələn istənilən elementin içindəki keçidlər qeyd olunur, amma izlənmir — səhifələrin özünü xaric etmədən faset filtrlərinin və ya meqa menyunun taramanı doldurmasının qarşısını almağın yolu. Etibarsız seçici nəzərə alınmır.",
+  ["The name every export's save dialog suggests. Tokens are filled in when you export: {report} = what is exported, {date} / {time} / {datetime} = now, {domain} = the crawled site, {project} = the project name. Characters that are not allowed in file names are replaced with a dash."]:
+    "Hər ixracın saxlama pəncərəsinin təklif etdiyi ad. Tokenlər ixrac zamanı doldurulur: {report} = ixrac olunan, {date} / {time} / {datetime} = indiki an, {domain} = taranan sayt, {project} = layihənin adı. Fayl adlarında icazə verilməyən simvollar tire ilə əvəz olunur.",
 };

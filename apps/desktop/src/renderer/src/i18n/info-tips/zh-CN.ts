@@ -306,14 +306,14 @@ export const ZH_CN_INFO_TIPS: Record<string, string> = {
     '如果你的 CMS 以混合大小写提供同一页面（/Foo 和 /foo）则开启。',
   ['On if your site canonicalises to non-www but emits www links somewhere.']:
     '如果你的站点规范化为不带 www，但某处输出了 www 链接则开启。',
-  ["On network errors, 408/425/429/5xx responses, retry up to N more times before giving up. Each retry counts toward the URL's response time budget."]:
-    '遇到网络错误及 408/425/429/5xx 响应时，最多再重试 N 次后放弃。每次重试都计入该 URL 的响应时间预算。',
+  ["On 408/425/429/5xx responses, retry up to N more times before giving up. Requests that get no response at all use Connection Failure Retries below. Each retry counts toward the URL's response time budget."]:
+    "遇到 408/425/429/5xx 响应时，最多再重试 N 次后放弃。完全没有响应的请求使用下方的“连接失败重试次数”。每次重试都计入该 URL 的响应时间预算。",
   ['On when auditing mobile UX or capturing PageSpeed-style mobile previews.']:
     '审计移动端 UX 或捕获 PageSpeed 风格的移动端预览时开启。',
   ["One header per line in 'Key: Value' format. Sent only to the site being crawled, like HTTP authentication — never to external links or other hosts. Useful for auth tokens or custom routing hints. User values override defaults when keys collide."]:
     "每行一个请求头，格式为 'Key: Value'。与 HTTP 认证一样，仅发送到正在抓取的站点——绝不发送到外部链接或其他主机。适用于认证令牌或自定义路由提示。键冲突时用户值覆盖默认值。",
-  ['One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable.']:
-    '每行一个 sitemap URL。除了从起始 URL 跟踪链接外，抓取器还会获取这些 sitemap 并将其列出的每个页面作为额外种子入队——发现更快/更完整，即使 sitemap 位于非标准路径也能可靠检测孤立页面。留空则禁用。',
+  ["One sitemap URL per line. On top of following links from the start URL, the crawler fetches these sitemaps and queues every page they list as an extra seed — faster/more complete discovery, and reliable orphan detection even when the sitemap lives at a non-standard path. Leave empty to disable. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "每行一个 sitemap URL。除了从起始 URL 跟踪链接外，抓取器还会获取这些 sitemap 并将其列出的每个页面作为额外种子入队——发现更快/更完整，即使 sitemap 位于非标准路径也能可靠检测孤立页面。留空则禁用。 /sitemap.xml 之类的相对路径会基于起始 URL 解析。",
   ['One URL per line. Each is fetched exactly once; outlinks are NOT followed. Comments starting with # are ignored.']:
     '每行一个 URL。每个只抓取一次；不跟踪出链。以 # 开头的注释会被忽略。',
   ['OS scheduler hint applied at crawl start. Lowering priority lets the rest of the machine stay responsive during heavy crawls. May require elevated privileges on some platforms.']:
@@ -589,9 +589,9 @@ export const ZH_CN_INFO_TIPS: Record<string, string> = {
     '独立 URL 的移动版本（m-dot）：<link rel="alternate" media="only screen and (max-width: …)">。在响应式站点上为 null（大多数站点如此）——此处有值却没有反向的 canonical 互指，是典型的失效 m-dot 配置。',
   ['Crawl on only when the site really does serve a separate mobile host.']:
     '仅当站点确实提供独立移动主机时开启“抓取”。',
-  ['Links a search engine cannot follow: <a> with no href but an onclick, href="javascript:…", and href="#" placeholders wired to a handler. Store-only — an uncrawlable link is by definition never fetched. Drives the JS-Only Navigation issue filter.']:
-    '搜索引擎无法跟踪的链接：无 href 但有 onclick 的 <a>、href="javascript:…"，以及绑定了处理程序的 href="#" 占位符。仅“存储”——不可抓取的链接按定义永远不会被获取。为“仅 JS 导航”问题筛选器提供数据。',
-  ['On — it is a count, so it costs nothing.']: '开启——这只是一个计数，没有任何成本。',
+  ["Links a search engine cannot follow: <a> with no href but an onclick, href=\"javascript:…\", href=\"#\" placeholders wired to a handler, an href on a non-link element such as <span> or <div>, and non-link elements whose onclick navigates. Store-only — an uncrawlable link is by definition never fetched. Each one appears under Outlinks as Uncrawlable; the internal ones drive the JS-Only Navigation issue filter."]:
+    "搜索引擎无法跟踪的链接：无 href 但有 onclick 的 <a>、href=\"javascript:…\"、绑定了处理程序的 href=\"#\" 占位符、非链接元素（如 <span> 或 <div>）上的 href，以及 onclick 会跳转页面的非链接元素。仅“存储”——不可抓取的链接按定义永远不会被获取。每条都会以“不可抓取”出现在“出链”中；其中的内部链接为“仅靠 JS 的导航”问题筛选器提供数据。",
+  ["On — recording them costs almost nothing."]: "开启——记录它们几乎没有开销。",
   ['With a Subfolder-scoped crawl, links pointing outside the start folder are fetched once so their status code is known, then stopped — they are checked, not crawled through. Off leaves them undiscovered entirely.']:
     '在子文件夹范围的抓取中，指向起始文件夹之外的链接会抓取一次以获知状态码，然后停止——只检查，不深入抓取。关闭则完全不发现它们。',
   ['On — knowing a link out of /blog/ is a 404 costs one request.']:
@@ -628,8 +628,8 @@ export const ZH_CN_INFO_TIPS: Record<string, string> = {
   ['Reads Sitemap: directives from /robots.txt plus the conventional /sitemap.xml fallbacks at crawl start. Cheap I/O, and it powers every sitemap issue filter.']:
     '抓取开始时读取 /robots.txt 中的 Sitemap: 指令以及常规的 /sitemap.xml 回退。I/O 开销低，并为所有 sitemap 问题筛选器提供数据。',
   ['On (default).']: '开启（默认）。',
-  ['Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions.']:
-    '显式的 sitemap URL，每行一个。其条目始终既被记录又作为抓取种子入队——当 sitemap 位于 robots.txt 从未提及的位置时使用。',
+  ["Explicit sitemap URLs, one per line. Their entries are always both recorded and queued as crawl seeds — use this when the sitemap lives somewhere robots.txt never mentions. Relative paths such as /sitemap.xml are resolved against the start URL."]:
+    "显式的 sitemap URL，每行一个。其条目始终既被记录又作为抓取种子入队——当 sitemap 位于 robots.txt 从未提及的位置时使用。 /sitemap.xml 之类的相对路径会基于起始 URL 解析。",
   ['Treat the concurrency and RPS above as a ceiling and let the target server set the real pace. On a 429/503 (or a Retry-After header) the crawler pauses for the penalty window and steps the rate + concurrency down; after a sustained run of clean responses it grows them back toward the ceiling. Off = hold the configured rate no matter how the server responds.']:
     '将上方的并发数和 RPS 视为上限，让目标服务器决定实际节奏。遇到 429/503（或 Retry-After 响应头）时，抓取器在惩罚窗口内暂停并降低速率 + 并发；持续获得干净响应后再逐步恢复到上限。关闭 = 无论服务器如何响应都保持配置的速率。',
   ['Turn on for sites behind Cloudflare / a WAF that returns 429s; leave off for your own infrastructure where the fixed rate is safe.']:
@@ -664,4 +664,50 @@ export const ZH_CN_INFO_TIPS: Record<string, string> = {
     "与该 URL 近似重复聚类中其他页面的最高估算文本相似度，基于主体文本计算。非近似重复页面为空。",
   ["90 = recommended (Screaming Frog's default); 80 catches looser rewrites; 0 turns this pass off."]:
     "90 = 推荐值（Screaming Frog 默认）；80 可发现改写幅度更大的副本；0 关闭此步骤。",
+  ["The page's `og:title` — the headline Facebook, LinkedIn and other OpenGraph readers show on a share card. One of the four required OpenGraph properties."]:
+    "页面的 `og:title`——Facebook、LinkedIn 等 OpenGraph 读取方在分享卡片上显示的标题。四个必填 OpenGraph 属性之一。",
+  ["The `og:description` text shown under the title on a share card."]:
+    "分享卡片上显示在标题下方的 `og:description` 文本。",
+  ["The `og:image` URL as written in the page. The share card uses this picture; it should be absolute and return 200. One of the four required OpenGraph properties."]:
+    "页面中写明的 `og:image` URL。分享卡片使用这张图片；它应为绝对地址并返回 200。四个必填 OpenGraph 属性之一。",
+  ["Pixel width of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "og:image 的像素宽度，由社交图片探测读取。0 = 无法读取图片；空 = 未探测。",
+  ["Pixel height of the og:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "og:image 的像素高度，由社交图片探测读取。0 = 无法读取图片；空 = 未探测。",
+  ["The `og:type` of the page, such as website or article. One of the four required OpenGraph properties."]:
+    "页面的 `og:type`，例如 website 或 article。四个必填 OpenGraph 属性之一。",
+  ["The `og:url` — the address share counts and the card link are attached to. One of the four required OpenGraph properties."]:
+    "`og:url`——分享计数和卡片链接所关联的地址。四个必填 OpenGraph 属性之一。",
+  ["The `og:site_name` that some platforms show above the share card title."]:
+    "部分平台在分享卡片标题上方显示的 `og:site_name`。",
+  ["The `og:locale` — the language and territory of the markup."]:
+    "`og:locale`——标记的语言和地区。",
+  ["The X (Twitter) card type. Without it X shows no card, even when other `twitter:` tags are present."]:
+    "X（Twitter）卡片类型。缺少它时，即使存在其他 `twitter:` 标签，X 也不会显示卡片。",
+  ["The X card title. X falls back to og:title when it is missing."]:
+    "X 卡片标题。缺失时 X 会改用 og:title。",
+  ["The X card description. X falls back to og:description when it is missing."]:
+    "X 卡片描述。缺失时 X 会改用 og:description。",
+  ["The X card image URL. X falls back to og:image when it is missing."]:
+    "X 卡片图片 URL。缺失时 X 会改用 og:image。",
+  ["Pixel width of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "twitter:image 的像素宽度，由社交图片探测读取。0 = 无法读取图片；空 = 未探测。",
+  ["Pixel height of the twitter:image, read by the social-image probe. 0 = the image could not be read; empty = not probed."]:
+    "twitter:image 的像素高度，由社交图片探测读取。0 = 无法读取图片；空 = 未探测。",
+  ["When a request gets no response at all — a timeout, a reset or a refused connection — retry it up to N more times before recording it as failed. Kept apart from the HTTP retries above, so a flaky network and a struggling server can be tuned separately."]:
+    "请求完全没有响应（超时、连接被重置或被拒绝）时，最多再重试 N 次，然后记为失败。它与上方的 HTTP 重试分开，因此网络不稳定和服务器吃力可以分别调整。",
+  ["2 default; 0 to record connection failures immediately; 4 on an unstable connection."]:
+    "默认 2；设为 0 则立即记录连接失败；连接不稳定时设为 4。",
+  ["When a site that was answering stops responding — 10 requests in a row get no answer even after their connection retries — the crawl pauses instead of marking the rest of the queue as failed. Fix the problem or wait for the server to come back, then press Resume to continue where it stopped."]:
+    "原本有响应的网站停止响应时（即使经过连接重试，仍有连续 10 个请求没有响应），抓取会暂停，而不是把队列中剩余的 URL 记为失败。解决问题或等待服务器恢复后，点击“继续”从中断处接着抓取。",
+  ["On by default. Turn it off when any result is better than a paused run, for example a crawl nobody is watching."]:
+    "默认开启。如果任何结果都比一次暂停的抓取更好（例如无人值守的抓取），请将其关闭。",
+  ["Links that sit in these parts of a page are recorded (they still count as inlinks and show in the link reports) but the crawler does not follow them. Useful for mega-menus and footers that link to thousands of pages. A page that is also linked from the body is still crawled."]:
+    "位于页面这些部分的链接会被记录（仍计为入链并显示在链接报告中），但抓取器不会跟踪它们。适用于链接到成千上万个页面的巨型菜单和页脚。若某页面在正文中也有链接，仍会被抓取。",
+  ["Footer + Sidebar on a shop whose footer lists every category"]:
+    "页脚列出所有分类的商店：页脚 + 侧边栏",
+  ["Links inside any element matching one of these CSS selectors are recorded but not followed — the way to keep faceted filters or a mega-menu from flooding the crawl without excluding the pages themselves. An invalid selector is ignored."]:
+    "任何匹配这些 CSS 选择器之一的元素内的链接都会被记录但不会被跟踪——这样既能防止分面筛选或巨型菜单淹没抓取，又不必排除页面本身。无效的选择器会被忽略。",
+  ["The name every export's save dialog suggests. Tokens are filled in when you export: {report} = what is exported, {date} / {time} / {datetime} = now, {domain} = the crawled site, {project} = the project name. Characters that are not allowed in file names are replaced with a dash."]:
+    "每次导出时保存对话框建议的文件名。导出时会填入以下标记：{report} = 导出的内容，{date} / {time} / {datetime} = 当前时间，{domain} = 抓取的网站，{project} = 项目名称。文件名中不允许的字符会替换为连字符。",
 };

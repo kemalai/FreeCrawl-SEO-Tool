@@ -22,6 +22,7 @@ import { isUiLanguage, type UiLanguage } from '@freecrawl/shared-types';
 import { MENU_EN } from './menu-locales/en.js';
 import { MENU_TR } from './menu-locales/tr.js';
 import { MENU_AZ } from './menu-locales/az.js';
+import { MENU_NL } from './menu-locales/nl.js';
 import { MENU_ZH_CN } from './menu-locales/zh-CN.js';
 import { MENU_FR } from './menu-locales/fr.js';
 import { MENU_HI } from './menu-locales/hi.js';
@@ -343,12 +344,23 @@ export interface MenuLabels {
   // ── Google OAuth refresh failure ──
   /** `{reason}` = Google's error code / description (e.g. `invalid_grant`). */
   oauthRefreshExpired: string;
+  /** File menu → export every stored page as Markdown. */
+  exportMarkdown: string;
+  /** Folder picker title for the Markdown export. */
+  dlgExportMarkdownTitle: string;
+  /** Title of the Markdown export completion dialog. */
+  dlgExportMarkdownDoneTitle: string;
+  /** `{files}` = number of Markdown files written. */
+  msgExportMarkdownWritten: string;
+  /** File → Compare With Previous Crawl (Auto Compare snapshot) */
+  compareWithPrevious: string;
 }
 
 const MENU_LABELS: Record<UiLanguage, MenuLabels> = {
   en: MENU_EN,
   tr: MENU_TR,
   az: MENU_AZ,
+  nl: MENU_NL,
   'zh-CN': MENU_ZH_CN,
   fr: MENU_FR,
   hi: MENU_HI,
