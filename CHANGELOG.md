@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.1.4] — 2026-11-05
+
+### Added
+- Auto Compare: scheduled and CLI crawls report pages added or removed and changed fields and issue counts since the previous crawl.
+- Crawl notifications now come in Slack, Discord and Microsoft Teams formats, with a Send test button in Settings.
+- Links that only JavaScript can follow are recorded as uncrawlable and shown in Outlinks, a JS-only check and the bulk export.
+- AI settings per provider: default model, system prompt, Ollama timeout, token usage and a live check that the model exists.
+- New Social tab with Open Graph and Twitter Card data, plus checks for incomplete tags and share images that do not load.
+- New checks for images without a title, hreflang pointing only to itself, hreflang language differing from html lang, and empty links.
+- Overview sidebar search, per-project issue severity and export file name patterns.
+- Page content can be viewed and exported as Markdown, one file per page for the whole crawl.
+- Links in chosen page regions or CSS selectors can be recorded without being followed.
+- Scheduled crawls can be started right away with Run Now.
+- MCP agents can run list-mode crawls and ask diagnose_crawl why a crawl went wrong.
+- CLI pause, resume, stop and delete commands for a running crawl, plus project create, rename, move, list and info.
+- Dutch interface language.
+
+### Changed
+- Dropped connections are retried, a crawl pauses when the site stops answering, and repeated 429/503 answers now show an explanation.
+- Rich result checks follow Google's current list of supported structured data types.
+- Relative sitemap paths such as /sitemap.xml are accepted in the sitemap fields.
+- No Response now lists only requests that got no answer, not robots-blocked URLs or links that were never requested.
+- Asset URLs that answer with an HTML error page keep their asset type instead of counting as HTML pages.
+- An unreadable robots.txt is retried, and the crawl log now says so when it still cannot be read.
+
+### Fixed
+- URLs disallowed by robots.txt are no longer crawled while robots.txt is still loading, including on a re-crawl.
+- The first crawl of a new site keeps its start URL, so reports and comparisons name the site and the home page is no orphan.
+- CORS checks now work on HTML pages.
+- A canonical, hreflang or rel=next after an invalid element in head is treated as outside head, as Google does.
+- Twitter Card tags written with property= are now read.
+- URL Contains Uppercase now catches uppercase letters in percent-encoded URLs.
+- Titles and descriptions now decode every HTML entity, and their lengths match the visible text.
+
 ## [1.1.3] — 2026-11-01
 
 ### Added
