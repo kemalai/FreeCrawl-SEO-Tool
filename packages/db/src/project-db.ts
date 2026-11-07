@@ -74,6 +74,7 @@ import {
   ISSUE_COUNT_KEY,
   ISSUE_GROUPS,
   issueCount,
+  issueCategoryForCounter,
   type CompareCategory,
   type CompareDiffRow,
   type IssueCountDelta,
@@ -463,6 +464,13 @@ export interface QueueCheckpointPatch {
 
 export interface UpsertUrlInput {
   url: string;
+  /**
+   * The URL is on a host the crawl doesn't own (an external link fetched
+   * by "Check External Links", or a redirect hop off-site). Only ever
+   * raises the flag: a row already known as external stays external when
+   * a caller leaves this out.
+   */
+  isExternal?: boolean;
   contentKind?: ContentKind;
   statusCode?: number | null;
   statusText?: string | null;
@@ -690,7 +698,7 @@ const CHANGED_FLAG_SQL = `CASE
 
 const UPSERT_URL_SQL = `
   INSERT INTO urls (
-    url, content_kind, status_code, status_text, indexability, indexability_reason,
+    url, is_external, content_kind, status_code, status_text, indexability, indexability_reason,
     title, title_length, meta_description, meta_description_length,
     h1, h1_length, h1_count, h2_count, h3_count, h4_count, h5_count, h6_count,
     word_count, canonical, canonical_resolved, canonical_distinct_count,
@@ -735,7 +743,7 @@ const UPSERT_URL_SQL = `
     http_charset, meta_charset, canonical_outside_head, content_lang, lang_mismatch,
     soft_404, js_noindex, js_title_changed, js_title, minhash, hreflang_outside_head
   ) VALUES (
-    :url, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
+    :url, :is_external, :content_kind, :status_code, :status_text, :indexability, :indexability_reason,
     :title, :title_length, :meta_description, :meta_description_length,
     :h1, :h1_length, :h1_count, :h2_count, :h3_count, :h4_count, :h5_count, :h6_count,
     :word_count, :canonical, :canonical_resolved, :canonical_distinct_count,
@@ -781,6 +789,9 @@ const UPSERT_URL_SQL = `
     :soft_404, :js_noindex, :js_title_changed, :js_title, :minhash, :hreflang_outside_head
   )
   ON CONFLICT(url) DO UPDATE SET
+    -- MAX, not a plain assignment: the external-link stub (inserted with 1)
+    -- is updated by writers that don't say, and must not drop to internal.
+    is_external = MAX(urls.is_external, excluded.is_external),
     content_kind = excluded.content_kind,
     status_code = excluded.status_code,
     status_text = excluded.status_text,
@@ -1149,6 +1160,16 @@ const DUPLICATE_ALT_PREDICATE = `is_variant = 0 AND alt IS NOT NULL AND alt != '
   SELECT alt FROM images WHERE is_variant = 0 AND alt IS NOT NULL AND alt != ''
    GROUP BY alt HAVING COUNT(*) > 1
 )`;
+
+/**
+ * The Images size filter: any given number (0 included) means "known size
+ * of at least this many bytes", so `0` lists the measured rows only. The
+ * UI sends `undefined` for an empty box. `minByteSize: 0` used to apply no
+ * filter at all and still count the unknown sizes.
+ */
+function minByteFilter(raw: number | undefined): number | null {
+  return typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : null;
+}
 
 // Per-usage duplicate-alt: a usage whose alt text is also carried by a
 // DIFFERENT image somewhere on the site. Operates on `image_usages.alt` to
@@ -2703,6 +2724,7 @@ export class ProjectDb {
   upsertUrl(input: UpsertUrlInput): number {
     const params = {
       url: input.url,
+      is_external: input.isExternal ? 1 : 0,
       content_kind: input.contentKind ?? 'html',
       status_code: input.statusCode ?? null,
       status_text: input.statusText ?? null,
@@ -6736,7 +6758,7 @@ export class ProjectDb {
     // Sorting is done here, not in the renderer: the tab loads one page of
     // rows, and ordering that page client-side only ever sorted whichever
     // 5 000 rows the default order happened to return first.
-    const minBytes = Math.max(0, Math.floor(params.minByteSize ?? 0));
+    const minBytes = minByteFilter(params.minByteSize);
     if (this.hasImageUsages()) {
       const where: string[] = [];
       const args: (string | number)[] = [];
@@ -6752,7 +6774,7 @@ export class ProjectDb {
       }
       // The size filter has to see the same expression the SELECT exposes,
       // so both the count and the page agree on which rows qualify.
-      if (minBytes > 0) {
+      if (minBytes !== null) {
         where.push(`${IMAGE_BYTE_SIZE_SQL} >= ?`);
         args.push(minBytes);
       }
@@ -6772,7 +6794,7 @@ export class ProjectDb {
         .prepare(
           `SELECT i.id, i.src, iu.alt AS alt, i.width, i.height, i.is_internal,
                   i.occurrences, u.url AS from_url, iu.from_url_id AS from_url_id,
-                  ${IMAGE_BYTE_SIZE_SQL} AS byte_size
+                  ${IMAGE_BYTE_SIZE_SQL} AS byte_size, iu.is_variant AS is_variant
              FROM image_usages iu
              JOIN images i ON iu.image_id = i.id
              LEFT JOIN urls u ON iu.from_url_id = u.id
@@ -6784,6 +6806,7 @@ export class ProjectDb {
         .all(...args, params.limit, params.offset) as unknown as (ImageRowDb & {
         from_url: string | null;
         from_url_id: number | null;
+        is_variant: number | null;
       })[];
       return {
         total,
@@ -6798,6 +6821,7 @@ export class ProjectDb {
           fromUrl: r.from_url ?? null,
           fromUrlId: r.from_url_id ?? null,
           byteSize: r.byte_size ?? null,
+          isVariant: r.is_variant === 1,
         })),
       };
     }
@@ -6817,7 +6841,7 @@ export class ProjectDb {
       const like = `%${params.search}%`;
       args.push(like, like);
     }
-    if (minBytes > 0) {
+    if (minBytes !== null) {
       where.push(`${IMAGE_BYTE_SIZE_SQL} >= ?`);
       args.push(minBytes);
     }
@@ -8691,7 +8715,7 @@ export class ProjectDb {
   } = {}): IterableIterator<ImageRow> {
     const where: string[] = [];
     const args: (string | number)[] = [];
-    const minBytes = Math.max(0, Math.floor(options.minByteSize ?? 0));
+    const minBytes = minByteFilter(options.minByteSize);
     // Per-usage export to match the per-usage Images tab (one row per page).
     if (this.hasImageUsages()) {
       if (options.missingAltOnly) where.push('iu.alt IS NULL AND iu.is_variant = 0');
@@ -8703,7 +8727,7 @@ export class ProjectDb {
         const like = `%${options.search}%`;
         args.push(like, like);
       }
-      if (minBytes > 0) {
+      if (minBytes !== null) {
         where.push(`${IMAGE_BYTE_SIZE_SQL} >= ?`);
         args.push(minBytes);
       }
@@ -8753,7 +8777,7 @@ export class ProjectDb {
       const like = `%${options.search}%`;
       args.push(like, like);
     }
-    if (minBytes > 0) {
+    if (minBytes !== null) {
       where.push(`${IMAGE_BYTE_SIZE_SQL} >= ?`);
       args.push(minBytes);
     }
@@ -11749,6 +11773,29 @@ function buildClauseSql(c: FilterClause, args: (string | number)[]): string | nu
   }
 }
 
+/**
+ * A `category` argument from outside the app (MCP server, assistant tools)
+ * as a filter `queryUrls` understands. An unknown string would fall through
+ * `categoryWhereClause` to "no clause" and return the whole crawl under the
+ * label asked for, so it is refused instead. A sidebar counter name
+ * (`issues:h1Missing` or `h1Missing`, as `getOverviewCounts` names them) is
+ * accepted as its category.
+ */
+export function resolveUrlCategory(raw: unknown): UrlCategory {
+  if (raw === undefined || raw === null || raw === '') return 'all';
+  if (typeof raw !== 'string') throw new Error('`category` must be a string.');
+  const name = raw.trim();
+  if (name === 'all' || categoryWhereClause(name as UrlCategory) !== null) {
+    return name as UrlCategory;
+  }
+  const viaCounter = issueCategoryForCounter(name);
+  if (viaCounter) return viaCounter;
+  throw new Error(
+    `Unknown category "${raw}". Pass a category from top_issues (e.g. "issues:h1-missing"), ` +
+      'or one of "all", "internal:html", "external:all", "status:4xx", "indexability:non-indexable".',
+  );
+}
+
 export function categoryWhereClause(
   cat: UrlCategory,
   /** Silenced issue checks (Settings → Issues): their filter matches nothing. */
@@ -12410,6 +12457,14 @@ export function categoryWhereClause(
       return `is_external = 0 AND content_kind = 'html'
               AND id IN (SELECT from_url_id FROM image_usages
                           WHERE has_title = 0 AND is_variant = 0)`;
+    case 'issues:image-duplicate-alt':
+      // Pages using at least one image whose alt text a different image
+      // also carries (the Images tab lists the individual uses). Without
+      // a clause the bulk export wrote every URL into
+      // image-duplicate-alt.csv and query_urls could not filter by it.
+      return `is_external = 0 AND content_kind = 'html'
+              AND id IN (SELECT iu.from_url_id FROM image_usages iu
+                          WHERE ${USAGE_DUPLICATE_ALT_PREDICATE})`;
     case 'issues:hreflang-self-only':
       // Every hreflang annotation on the page is the page itself.
       return "is_external = 0 AND content_kind = 'html' AND hreflang_self_only = 1";

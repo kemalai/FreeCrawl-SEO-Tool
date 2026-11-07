@@ -2512,6 +2512,10 @@ export interface ImageRow {
    *  `content_length` when the image was fetched as its own URL. Null when
    *  neither ran — "unknown", never "zero". */
   byteSize: number | null;
+  /** A srcset / `<picture>` candidate rather than the `<img src>` itself.
+   *  Variants are neither fetched nor size-probed unless Settings › srcset
+   *  Variants is on, so their `byteSize` is normally null. */
+  isVariant?: boolean;
 }
 
 /** Columns the Images tab can order by. Sorting happens in SQL so the

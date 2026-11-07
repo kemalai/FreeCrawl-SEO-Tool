@@ -563,8 +563,8 @@ export const KO_INFO_TIPS: Record<string, string> = {
     '같은 사이트의 <a href> 대상. 크롤링을 끄면 실행이 고정된 페이지 집합의 감사로 바뀝니다 — 사이트맵, canonical, 아래의 다른 선언된 대체 버전은 여전히 발견에 기여합니다. 저장을 끄면 링크 그래프가 비워집니다: 인링크, 아웃링크, 앵커 텍스트 보고서, 링크 점수가 모두 사라집니다.',
   ['Leave both on. Crawl off only when a sitemap or URL list already defines the exact set you want.']:
     '둘 다 켜 두세요. 사이트맵이나 URL 목록이 원하는 정확한 집합을 이미 정의할 때만 크롤링을 끄세요.',
-  ['Outbound links to other hosts are always status-checked (one HEAD each) so Broken Links catches dead externals — that does not depend on this row. Crawl here means fully crawling those pages, following their links onward too. Store keeps outbound links in the link graph.']:
-    '다른 호스트로 나가는 링크는 항상 상태 검사(각각 HEAD 한 번)를 받아 깨진 링크가 죽은 외부 링크를 잡습니다 — 이는 이 행에 의존하지 않습니다. 여기서 크롤링은 그 페이지들을 완전히 크롤링하고 그 링크까지 따라간다는 뜻입니다. 저장은 아웃바운드 링크를 링크 그래프에 유지합니다.',
+  ['Outbound links to other hosts are always status-checked (one HEAD each) so Broken Links catches dead externals — that does not depend on this row. Crawl here also fetches each external page in full (GET) for its status and title; external pages are never crawled through — their links are not followed. Store keeps outbound links in the link graph.']:
+    '다른 호스트로 나가는 링크는 항상 상태 검사(각각 HEAD 한 번)를 받아 깨진 링크가 죽은 외부 링크를 잡습니다 — 이는 이 행에 의존하지 않습니다. 여기서 크롤링은 각 외부 페이지를 상태와 제목을 위해 전체(GET)로 가져옵니다. 외부 페이지를 거쳐 더 크롤링하지는 않으며 그 링크는 따라가지 않습니다. 저장은 아웃바운드 링크를 링크 그래프에 유지합니다.',
   ['Crawl off (default) — status-check externals without spidering the whole web.']:
     '크롤링 끔(기본값) — 웹 전체를 스파이더링하지 않고 외부 링크 상태만 검사합니다.',
   ['<link rel=canonical> and its HTTP Link: header form. Crawl also enqueues the canonical target, treating it as a navigation hint. Store feeds the Canonicals tab and every canonical issue filter.']:

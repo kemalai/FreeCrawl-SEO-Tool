@@ -2216,7 +2216,7 @@ function SpiderCrawlPanel({ form, update }: PanelProps) {
             />
             <CrawlRow
               label="External Links"
-              info="Outbound links to other hosts are always status-checked (one HEAD each) so Broken Links catches dead externals — that does not depend on this row. Crawl here means fully crawling those pages, following their links onward too. Store keeps outbound links in the link graph."
+              info="Outbound links to other hosts are always status-checked (one HEAD each) so Broken Links catches dead externals — that does not depend on this row. Crawl here also fetches each external page in full (GET) for its status and title; external pages are never crawled through — their links are not followed. Store keeps outbound links in the link graph."
               example="Crawl off (default) — status-check externals without spidering the whole web."
               crawl={{ checked: form.crawlExternal, onChange: (v) => update('crawlExternal', v) }}
               store={{

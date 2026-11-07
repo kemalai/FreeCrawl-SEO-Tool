@@ -6,14 +6,14 @@
  * SQLite WAL mode permits arbitrary concurrent readers.
  */
 
-import type { ProjectDb } from '@freecrawl/db';
+import { resolveUrlCategory, type ProjectDb } from '@freecrawl/db';
 import { diagnoseCrawl, htmlToMarkdown } from '@freecrawl/core';
+import { DEFAULT_CRAWL_CONFIG, rankIssues } from '@freecrawl/shared-types';
 import type {
   AiProvider,
   CrawlConfig,
   CrawlProgress,
   SeoProvider,
-  UrlCategory,
 } from '@freecrawl/shared-types';
 import { bridgeRequest } from './desktop-bridge.js';
 
@@ -37,9 +37,10 @@ export interface Tool {
 // internal/external content kinds, status:* buckets, security:*,
 // indexability:*, tab:* groupings, and per-issue drill-downs like
 // "issues:title-missing" / "issues:severity-critical"). The union is a
-// type, not a runtime list, so we validate at the DB layer (categoryWhereClause)
-// and describe rather than `enum`-constrain — an enum of a hand-picked subset
-// would reject the very `issues:*` drill-downs that `top_issues` returns.
+// type, not a runtime list, so we validate at the DB layer
+// (`resolveUrlCategory`) and describe rather than `enum`-constrain — an enum
+// of a hand-picked subset would reject the very `issues:*` drill-downs that
+// `top_issues` returns.
 const URL_CATEGORY_DESC =
   'UrlCategory filter matching the desktop UI categories. Accepts "all"; ' +
   'internal:*/external:* content kinds; status:2xx/3xx/4xx/5xx/no-response/blocked-robots; ' +
@@ -147,6 +148,18 @@ function clamp(n: unknown, min: number, max: number, fallback: number): number {
   return Math.max(min, Math.min(max, Math.floor(v)));
 }
 
+/**
+ * One typed property per CrawlConfig field, typed like its default. A
+ * client sends real JSON only for declared properties; without these,
+ * `set_crawl_config` received `"false"` / `"[...]"` strings.
+ */
+const CRAWL_CONFIG_PROPERTIES: Record<string, { type: string }> = Object.fromEntries(
+  Object.entries(DEFAULT_CRAWL_CONFIG).map(([key, value]) => [
+    key,
+    { type: Array.isArray(value) ? 'array' : typeof value },
+  ]),
+);
+
 export function buildTools(): Tool[] {
   return [
     {
@@ -174,13 +187,13 @@ export function buildTools(): Tool[] {
     {
       name: 'query_urls',
       description:
-        'Paginated query against the URLs table with the same category filter the UI uses. Returns rows + total count. Use `category` to narrow (e.g. "issues:title-missing"), `search` to substring-match URLs/titles, and `limit`/`offset` to page through.',
+        'Paginated query against the URLs table with the same category filter the UI uses. Returns rows + total count. Use `category` to narrow (e.g. "issues:title-missing", exactly as top_issues returns it), `search` to substring-match URLs/titles, and `limit`/`offset` to page through. An unknown category is an error, never a silent "all". Broken-link categories count links, not URLs — list them with query_broken_links.',
       inputSchema: {
         type: 'object',
         properties: {
           category: {
             type: 'string',
-            description: 'UrlCategory filter (e.g. "all", "internal:html", "issues:title-missing", "status:4xx"). Defaults to "all".',
+            description: `${URL_CATEGORY_DESC} A get_overview_counts counter name ("issues:h1Missing") is accepted as its category.`,
           },
           search: {
             type: 'string',
@@ -215,7 +228,7 @@ export function buildTools(): Tool[] {
         },
       },
       handler: (args, db) => {
-        const category = (args.category as UrlCategory | undefined) ?? 'all';
+        const category = resolveUrlCategory(args.category);
         const search = typeof args.search === 'string' ? args.search : undefined;
         const limit = Math.min(
           Math.max(typeof args.limit === 'number' ? args.limit : 50, 1),
@@ -246,6 +259,18 @@ export function buildTools(): Tool[] {
                 fieldsArg,
               ),
             );
+        // The broken-link filters describe link rows, so the URL table
+        // matches none — say where they are instead of an unexplained 0
+        // next to a non-zero top_issues count.
+        if (category.startsWith('issues:broken-links-')) {
+          return {
+            rows: projected,
+            total,
+            limit,
+            offset,
+            note: 'Broken-link categories count links, not URL rows. Use query_broken_links (scope "internal" / "external") to list them.',
+          };
+        }
         return { rows: projected, total, limit, offset };
       },
     },
@@ -349,7 +374,11 @@ export function buildTools(): Tool[] {
               respectRobotsTxt: { type: 'boolean' },
               respectCrawlDelay: { type: 'boolean' },
               followRedirects: { type: 'boolean' },
-              crawlExternal: { type: 'boolean' },
+              crawlExternal: {
+                type: 'boolean',
+                description:
+                  'Check external links: GET each link target on another host once for its status and title. External pages are never crawled through — their links are not followed.',
+              },
               userAgent: { type: 'string' },
               includePatterns: { type: 'array', items: { type: 'string' } },
               excludePatterns: { type: 'array', items: { type: 'string' } },
@@ -510,7 +539,7 @@ export function buildTools(): Tool[] {
     {
       name: 'top_issues',
       description:
-        'Ranked list of non-empty issue categories from get_overview_counts, sorted by count descending. Quick way to ask "what are the biggest problems with this crawl?".',
+        'Ranked list of non-empty issue checks, sorted by count descending. Quick way to ask "what are the biggest problems with this crawl?". Each entry has `category` (pass it to query_urls unchanged), `label`, `count` and `unit`: "urls" = pages, "images" = image usages (query_urls lists the pages carrying them; query_images lists the images), "links" = link rows (use query_broken_links).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -527,14 +556,8 @@ export function buildTools(): Tool[] {
           Math.max(typeof args.limit === 'number' ? args.limit : 20, 1),
           200,
         );
-        const counts = db.getOverviewCounts() as unknown as Record<string, unknown>;
-        const issues = (counts.issues as Record<string, number>) ?? {};
-        const ranked = Object.entries(issues)
-          .filter(([, n]) => n > 0)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, limit)
-          .map(([category, count]) => ({ category: `issues:${category}`, count }));
-        return { issues: ranked };
+        const ranked = rankIssues(db.getOverviewCounts().issues, db.getDisabledIssues());
+        return { issues: ranked.slice(0, limit) };
       },
     },
 
@@ -1002,7 +1025,7 @@ export function buildTools(): Tool[] {
     {
       name: 'query_images',
       description:
-        'Project-wide image catalogue — one row per image USAGE (image × page), with src, alt, declared width/height, occurrences, fromUrl (the page), fromUrlId, and byteSize (from the post-crawl size probe or the crawled image row; null = unknown). Backs the Images tab. For "large images and where they are used", combine `minByteSize` with `sortBy: "byteSize"`.',
+        'Project-wide image catalogue — one row per image USAGE (image × page), with src, alt, declared width/height, occurrences, fromUrl (the page), fromUrlId, byteSize (from the post-crawl size probe or the crawled image row; null = unknown) and isVariant. A variant (srcset / <picture> candidate) is not fetched or size-probed unless Settings › srcset Variants is on, so its byteSize is normally null; `minByteSize: 0` lists only the measured rows. Backs the Images tab. For "large images and where they are used", combine `minByteSize` with `sortBy: "byteSize"`.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1755,7 +1778,7 @@ export function buildTools(): Tool[] {
     {
       requiresDb: false,
       name: 'get_crawl_config',
-      description: 'Read the most recently-used CrawlConfig — the same config `start_crawl` falls back to when called without overrides. Reflects whatever the user (or the previous MCP `set_crawl_config` call) configured in Settings. Secrets (HTTP auth password / token, form-login password, proxy URL) are returned blank.',
+      description: 'Read the most recently-used CrawlConfig — the same config `start_crawl` falls back to when called without overrides. Reflects whatever the user (or the previous MCP `set_crawl_config` call) configured in Settings. Secrets (HTTP auth password / token, form-login values, the proxy URL and every proxy profile URL, custom header values, the webhook URL) are returned blank; names stay readable.',
       inputSchema: { type: 'object', properties: {} },
       handler: async () =>
         bridgeRequest<unknown>('POST', '/v1/action/get-crawl-config', {}),
@@ -1765,10 +1788,11 @@ export function buildTools(): Tool[] {
       requiresDb: false,
       name: 'set_crawl_config',
       description:
-        'Persist a full CrawlConfig as the saved default — next `start_crawl` without overrides will use these settings. The input is the entire CrawlConfig object (every field the Settings dialog exposes). Pass `get_crawl_config` first to read the current shape, then send the modified copy back; secret fields left blank keep their stored values. Validation happens at crawl launch time — out-of-range values may be silently clamped or fail at start.',
+        'Persist a full CrawlConfig as the saved default — next `start_crawl` without overrides will use these settings. The input is the entire CrawlConfig object (every field the Settings dialog exposes); a field left out resets to its default. Pass `get_crawl_config` first to read the current shape, then send the modified copy back; secret fields left blank keep their stored values. A field of the wrong type rejects the whole call with the field named; out-of-range values are clamped or fail at crawl launch.',
       inputSchema: {
         type: 'object',
         description: 'Full CrawlConfig object. Pass the result of `get_crawl_config` with your modifications layered on.',
+        properties: CRAWL_CONFIG_PROPERTIES,
         additionalProperties: true,
       },
       handler: async (args) =>

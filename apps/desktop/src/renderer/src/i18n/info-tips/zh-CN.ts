@@ -559,8 +559,8 @@ export const ZH_CN_INFO_TIPS: Record<string, string> = {
     '同一站点上的 <a href> 目标。“抓取”关会将运行变成对固定页面集的审计——sitemap、canonical 及下方其他声明的替代版本仍会推动发现。“存储”关会清空链接图：入链、出链、锚文本报告和链接得分随之消失。',
   ['Leave both on. Crawl off only when a sitemap or URL list already defines the exact set you want.']:
     '两者都保持开启。仅当 sitemap 或 URL 列表已定义你想要的精确集合时关闭“抓取”。',
-  ['Outbound links to other hosts are always status-checked (one HEAD each) so Broken Links catches dead externals — that does not depend on this row. Crawl here means fully crawling those pages, following their links onward too. Store keeps outbound links in the link graph.']:
-    '指向其他主机的出站链接始终会进行状态检查（每个一次 HEAD），使“断链”能捕获失效外链——这不依赖于此行。此处的“抓取”意味着完整抓取那些页面，并继续跟踪其链接。“存储”将出站链接保留在链接图中。',
+  ['Outbound links to other hosts are always status-checked (one HEAD each) so Broken Links catches dead externals — that does not depend on this row. Crawl here also fetches each external page in full (GET) for its status and title; external pages are never crawled through — their links are not followed. Store keeps outbound links in the link graph.']:
+    '指向其他主机的出站链接始终会进行状态检查（每个一次 HEAD），使“断链”能捕获失效外链——这不依赖于此行。此处的“抓取”还会完整获取（GET）每个外部页面以获得其状态和标题；外部页面永远不会被继续抓取——不会跟踪其链接。“存储”将出站链接保留在链接图中。',
   ['Crawl off (default) — status-check externals without spidering the whole web.']:
     '“抓取”关（默认）——检查外链状态但不去抓取整个互联网。',
   ['<link rel=canonical> and its HTTP Link: header form. Crawl also enqueues the canonical target, treating it as a navigation hint. Store feeds the Canonicals tab and every canonical issue filter.']:

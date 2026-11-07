@@ -20,7 +20,8 @@
  * the loop, so a tab switch can't strand a half-finished tool round.
  */
 import { randomUUID } from 'node:crypto';
-import type { ProjectDb } from '@freecrawl/db';
+import { resolveUrlCategory, type ProjectDb } from '@freecrawl/db';
+import { rankIssues } from '@freecrawl/shared-types';
 import type {
   AiProvider,
   AssistantEvent,
@@ -135,7 +136,7 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
   {
     name: 'top_issues',
     description:
-      'Ranked list of non-empty SEO issue categories in the open crawl, biggest first. Use it to answer "what is wrong with this site?" before drilling into a category.',
+      'Ranked list of non-empty SEO issue checks in the open crawl, biggest first. Use it to answer "what is wrong with this site?" before drilling into a category. Pass `category` to query_urls unchanged. `unit` says what `count` counts: "urls" (pages), "images" (image usages — query_urls lists the pages carrying them) or "links" (broken link rows, not listed by query_urls).',
     parameters: {
       type: 'object',
       properties: {
@@ -144,14 +145,8 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
     },
     run: (args, db) => {
       const limit = clamp(args['limit'], 1, 100, 20);
-      const counts = db.getOverviewCounts() as unknown as Record<string, unknown>;
-      const issues = (counts['issues'] as Record<string, number>) ?? {};
-      const ranked = Object.entries(issues)
-        .filter(([, n]) => n > 0)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, limit)
-        .map(([category, count]) => ({ category: `issues:${category}`, count }));
-      return { issues: ranked };
+      const ranked = rankIssues(db.getOverviewCounts().issues, db.getDisabledIssues());
+      return { issues: ranked.slice(0, limit) };
     },
   },
   {
@@ -180,9 +175,9 @@ const BUILTIN_TOOLS: BuiltinTool[] = [
       const limit = clamp(args['limit'], 1, 200, 25);
       const offset = clamp(args['offset'], 0, 1_000_000, 0);
       const { rows, total } = db.queryUrls({
-        category: (typeof args['category'] === 'string'
-          ? args['category']
-          : 'all') as Parameters<ProjectDb['queryUrls']>[0]['category'],
+        // Throws on an unknown name, which the loop feeds back to the model
+        // as a tool error, rather than answering with the whole crawl.
+        category: resolveUrlCategory(args['category']),
         search: typeof args['search'] === 'string' ? args['search'] : undefined,
         limit,
         offset,

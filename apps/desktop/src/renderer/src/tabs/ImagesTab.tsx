@@ -25,6 +25,12 @@ function kbToBytes(raw: string): number | undefined {
   return Number.isFinite(kb) && kb > 0 ? Math.round(kb * 1024) : undefined;
 }
 
+/** A row is one image on one page: the same image id repeats across
+ *  pages, and one page holds many images, so neither id alone is unique. */
+function usageKey(row: ImageRow): string {
+  return `${row.id}:${row.fromUrl ?? ''}`;
+}
+
 export function ImagesTab() {
   const { t, i18n } = useTranslation();
   const lang = i18n.language;
@@ -42,6 +48,7 @@ export function ImagesTab() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [exporting, setExporting] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [activeUsage, setActiveUsage] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const minByteSize = kbToBytes(minKb);
 
@@ -112,11 +119,9 @@ export function ImagesTab() {
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 30,
-    // Composite key: the tab is per-usage, so the same image id can appear
-    // on several rows (one per page). Keying by id alone would collide.
     getItemKey: (index) => {
       const r = rows[index];
-      return r ? `${r.id}:${r.fromUrl ?? ''}` : index;
+      return r ? usageKey(r) : index;
     },
   });
 
@@ -154,6 +159,7 @@ export function ImagesTab() {
   // answers "where is this image used, and what else is on that page".
   const selectPage = (row: ImageRow) => {
     if (row.fromUrlId === null) return;
+    setActiveUsage(usageKey(row));
     setSelectedUrlId(row.fromUrlId);
     setSelectedUrlIds([row.fromUrlId]);
   };
@@ -343,7 +349,15 @@ export function ImagesTab() {
             {virtualizer.getVirtualItems().map((vi) => {
               const row = rows[vi.index];
               if (!row) return null;
-              const isActivePage = row.fromUrlId !== null && row.fromUrlId === selectedUrlId;
+              // Only the clicked usage: highlighting every row whose page is
+              // selected lit up each other image on that page (rows 1 and
+              // 18 — two logos on the home page) as if both were picked.
+              // The page check drops the highlight once another tab
+              // selects a different URL.
+              const isActive =
+                row.fromUrlId !== null &&
+                row.fromUrlId === selectedUrlId &&
+                usageKey(row) === activeUsage;
               return (
                 <div
                   key={vi.key}
@@ -352,7 +366,7 @@ export function ImagesTab() {
                   className={clsx(
                     'absolute left-0 top-0 flex items-center border-b border-surface-900 text-[11px]',
                     row.fromUrlId !== null && 'cursor-pointer',
-                    isActivePage ? 'bg-accent-500/20' : 'hover:bg-surface-900/60',
+                    isActive ? 'bg-accent-500/20' : 'hover:bg-surface-900/60',
                   )}
                   style={{
                     transform: `translateY(${vi.start}px)`,

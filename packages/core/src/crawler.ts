@@ -1478,8 +1478,7 @@ export class Crawler extends EventEmitter {
           // Drop from `seen` first — these URLs were never actually
           // crawled, just stubbed; enqueue's seen-check would reject
           // them otherwise.
-          this.seen.delete(p.url);
-          this.enqueue({ url: p.url, depth: p.depth });
+          this.enqueuePending(p);
         }
         await this.drainCrawlQueue();
         await this.externalQueue.onIdle();
@@ -1918,8 +1917,12 @@ export class Crawler extends EventEmitter {
         // does: CDNs and WAFs answer HEAD with 403 / 405 / 5xx (or drop it)
         // for an image a GET serves fine, and some servers route GET only.
         // A redirect loop or a DNS / connect failure won't change on GET.
+        // A 2xx HEAD without Content-Length (chunked — Cloudflare answers
+        // image HEADs this way) says nothing about size; the GET measures
+        // the body instead.
         const retry = result
-          ? result.status >= 400 && result.status !== IMAGE_REDIRECT_LIMIT_STATUS
+          ? (result.status >= 400 && result.status !== IMAGE_REDIRECT_LIMIT_STATUS) ||
+            (result.status >= 200 && result.status < 300 && result.length === null)
           : !isHardTransportError(headErr);
         if (retry && !this.stopped) {
           try {
@@ -1955,7 +1958,8 @@ export class Crawler extends EventEmitter {
    * internal address; that hop is not requested and its 3xx is recorded
    * instead. Each request after the first HEAD (a redirect hop, the GET
    * retry) waits for its own `maxRps` slot, and each has its own timeout.
-   * The body is never read. Throws on a transport failure.
+   * The body is read only by a GET whose 2xx answer has no Content-Length,
+   * to measure it. Throws on a transport failure.
    */
   private async fetchImageHeaders(src: string, method: 'HEAD' | 'GET'): Promise<ImageProbeResult> {
     const timeoutMs = Math.max(2_000, this.config.requestTimeoutMs / 2);
@@ -1981,14 +1985,25 @@ export class Crawler extends EventEmitter {
           redirect: 'manual',
           signal: controller.signal,
         });
-      } finally {
+      } catch (err) {
         clearTimeout(timeout);
+        throw err;
       }
       const status = res.status;
       const lenStr = res.headers.get('content-length');
       const location = status >= 300 && status < 400 ? res.headers.get('location') : null;
-      // HEAD has no body (undici still wants 1xx/204 drained); a GET's is
-      // never needed — the headers carry the size.
+      if (!location && method === 'GET' && lenStr === null && status >= 200 && status < 300) {
+        // Chunked answer: the size is only in the body. Measured under the
+        // same timeout, so a stalled stream ends as "unknown size".
+        try {
+          return { status, length: await countBodyBytes(res, ABSOLUTE_BODY_CAP_BYTES) };
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+      clearTimeout(timeout);
+      // HEAD has no body (undici still wants 1xx/204 drained); otherwise
+      // the headers carry the size.
       try {
         await res.body?.cancel();
       } catch {
@@ -3088,14 +3103,26 @@ export class Crawler extends EventEmitter {
       if (pending.url === seededStartUrl) continue;
       // Drop from `seen` so enqueue accepts it — these URLs are genuinely
       // unfinished work.
-      this.seen.delete(pending.url);
-      this.enqueue({ url: pending.url, depth: pending.depth });
+      this.enqueuePending(pending);
     }
 
     // Re-queue any external URLs that were stubbed but never probed.
     for (const extUrl of this.db.getUnprobedExternalUrls()) {
       this.enqueueExternal(extUrl);
     }
+  }
+
+  /**
+   * Re-queue a URL the project lists as unfinished internal work. A crawl
+   * from before external pages stopped recording their links left rows
+   * that point at the external site's own pages as "internal"; those are
+   * checked once when external links are checked, and skipped otherwise.
+   */
+  private enqueuePending(p: { url: string; depth: number }): void {
+    const foreign = this.isForeignHost(p.url);
+    if (foreign && !this.config.crawlExternal) return;
+    this.seen.delete(p.url);
+    this.enqueue({ url: p.url, depth: p.depth, checkOnly: foreign });
   }
 
   private enqueueExternal(url: string): void {
@@ -3881,6 +3908,7 @@ export class Crawler extends EventEmitter {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
             urlTrap: this.trapKind(item.url),
+            isExternal: this.isForeignHost(item.url),
             // Never fetched, so the extension is all there is to go on. A
             // flat 'html' put blocked scripts, styles and images in the HTML
             // / Non-Indexable counts (40 of 58 robots-blocked URLs on one
@@ -4341,6 +4369,17 @@ export class Crawler extends EventEmitter {
     // are bounded by ~concurrency / maxRps, so Stop stays responsive.
     await this.acquireRateSlot();
     if (this.stopped) return;
+    // Pause arrived while this task waited for its rate slot. Slots are
+    // spaced 1 / maxRps apart, so at 2 rps and concurrency 20 twenty tasks
+    // sit here, none in flight: pause()'s abort cannot reach them and they
+    // kept fetching for ~10 s after Pause. Park the URL in the paused
+    // queue, as an aborted in-flight fetch is.
+    if (this.paused) {
+      this.queue
+        .add(() => this.fetchAndProcess(item), { priority: Crawler.priorityFor(item) })
+        .catch(() => undefined);
+      return;
+    }
     // A retry of a URL that failed earlier (blocked, or no response): it is
     // failed again only if it fails again.
     if (this.pendingFailedUrls.delete(item.url)) this.failed--;
@@ -4413,6 +4452,7 @@ export class Crawler extends EventEmitter {
               url: item.url,
               urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
               urlTrap: this.trapKind(item.url),
+              isExternal: this.isForeignHost(item.url),
               contentKind: 'other',
               statusCode: res.status,
               statusText: 'size-cap-exceeded',
@@ -4505,6 +4545,7 @@ export class Crawler extends EventEmitter {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
             urlTrap: this.trapKind(item.url),
+            isExternal: this.isForeignHost(item.url),
             // The challenge page is HTML whatever the URL was; classify by
             // the URL, as the robots-blocked path does.
             contentKind: detectContentKind(item.url, null),
@@ -4664,6 +4705,7 @@ export class Crawler extends EventEmitter {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
             urlTrap: this.trapKind(item.url),
+            isExternal: this.isForeignHost(item.url),
             contentKind: kind,
             statusCode,
             statusText: null,
@@ -4713,12 +4755,19 @@ export class Crawler extends EventEmitter {
             );
             return;
           }
-          const inScope = isInScope(this.config.startUrl, target, this.config.scope);
-          if (inScope || this.config.crawlExternal) {
-            this.enqueue({ url: target, depth: item.depth, redirectHopCount: hopCount });
-          } else if (!inScope) {
-            // Record the target as an external stub so the hop chain is
-            // visible in Outlinks even when we won't follow it.
+          // An off-site hop is checked, not crawled through, whichever
+          // route reached it — wa.me → api.whatsapp.com included.
+          const admit = this.admitTarget(target);
+          if (admit) {
+            this.enqueue({
+              url: target,
+              depth: item.depth,
+              redirectHopCount: hopCount,
+              checkOnly: admit === 'check',
+            });
+          } else {
+            // Out of scope and not checked: record the target as an
+            // external stub so the hop chain is visible in Outlinks.
             this.enqueueExternal(target);
           }
         }
@@ -4749,12 +4798,27 @@ export class Crawler extends EventEmitter {
         // discard the stream without buffering megabytes into memory — this is
         // what makes "Check Images / CSS / JS" resource crawling lightweight.
         let nonHtmlBody = '';
+        let contentLength = parseIntSafe(contentLengthHeader);
         if (needsJsonExtraction || needsCssParse) {
           try {
             nonHtmlBody = await res.text();
           } catch {
             /* ignore */
           }
+          if (contentLength === null && nonHtmlBody) contentLength = Buffer.byteLength(nonHtmlBody);
+        } else if (
+          contentLength === null &&
+          statusCode >= 200 &&
+          statusCode < 300 &&
+          SIZED_RESOURCE_KINDS.has(kind) &&
+          // Not for a resource whose row isn't stored (below): nothing
+          // would record the number.
+          !(item.resourceRow && !this.storesResourceRow(item.resourceRow))
+        ) {
+          // No Content-Length (chunked): an image row with an empty size
+          // leaves every image-weight check blind, so count the bytes as
+          // they stream past instead of dropping them unmeasured.
+          contentLength = await countBodyBytes(res, effectiveBodyCap(this.config.maxFileSizeBytes));
         } else {
           try {
             await res.body?.cancel();
@@ -4798,6 +4862,7 @@ export class Crawler extends EventEmitter {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
             urlTrap: this.trapKind(item.url),
+            isExternal: this.isForeignHost(item.url),
             contentKind: kind,
             statusCode,
             statusText: null,
@@ -4805,7 +4870,7 @@ export class Crawler extends EventEmitter {
             indexabilityReason: indexability === 'indexable' ? null : `HTTP ${statusCode}`,
             contentType,
             extractionResults: jsonExtraction ? JSON.stringify(jsonExtraction) : null,
-            contentLength: parseIntSafe(contentLengthHeader),
+            contentLength,
             xRobotsTag,
             responseTimeMs,
             ttfbMs,
@@ -4857,6 +4922,7 @@ export class Crawler extends EventEmitter {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
             urlTrap: this.trapKind(item.url),
+            isExternal: this.isForeignHost(item.url),
             contentKind: 'other',
             statusCode,
             statusText: 'size-cap-exceeded',
@@ -4996,6 +5062,7 @@ export class Crawler extends EventEmitter {
             url: item.url,
             urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
             urlTrap: this.trapKind(item.url),
+            isExternal: this.isForeignHost(item.url),
             contentKind: detectContentKind(item.url, null),
             statusCode: null,
             statusText: challenge,
@@ -5151,12 +5218,21 @@ export class Crawler extends EventEmitter {
       // Before the write, so a page that completes a calendar trap is
       // itself stored with the trap flag.
       if (statusCode >= 200 && statusCode < 300) this.observeCalendarPage(item.url, parsed.simhash);
+      // An external page fetched by "Check External Links" keeps its own
+      // row (status, title, response time) but records nothing it points
+      // at. Its links were classified against ITS host, so stored they'd
+      // turn Instagram's pages into "internal" link targets (which the
+      // end-of-crawl drain then crawls), its images into site images, its
+      // og:image into a probe. The empty lists are written as "has none",
+      // which also clears what an earlier crawl stored for it.
+      const foreignPage = this.isForeignHost(item.url);
       this.setOp(`crawl:write:${item.url}`);
       const { urlId } = await this.writeFetchedUrl({
         upsert: {
           url: item.url,
           urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
           urlTrap: this.trapKind(item.url),
+          isExternal: this.isForeignHost(item.url),
           contentKind: 'html',
           statusCode,
           statusText: null,
@@ -5344,24 +5420,26 @@ export class Crawler extends EventEmitter {
                   : 1_048_576,
             }
           : null,
-        links: persistedLinks,
-        images: this.config.storeImages ? parsed.images : [],
-        socialImages: parsed.socialImages,
+        links: foreignPage ? [] : persistedLinks,
+        images: !foreignPage && this.config.storeImages ? parsed.images : [],
+        socialImages: foreignPage ? [] : parsed.socialImages,
         // Whether the empty lists above mean "this page has none"
         // (storage on → the writer replaces the page's rows) or "not
         // recording" (storage off → it keeps what an earlier crawl stored).
         storeLinks:
+          foreignPage ||
           storeInternalLinks ||
           storeExternalLinks ||
           this.config.storeIframes ||
           this.config.crawlInvalidLinks,
-        storeImages: this.config.storeImages,
+        storeImages: foreignPage || this.config.storeImages,
         // Lets a script / stylesheet / font row list the pages that embed
         // it under Inlinks.
-        resources: parsed.resources,
+        resources: foreignPage ? [] : parsed.resources,
         // Recorded for Outlinks / the bulk export only — never queued.
-        uncrawlableLinks: this.config.storeUncrawlableLinks ? parsed.uncrawlableLinks : [],
-        storeUncrawlableLinks: this.config.storeUncrawlableLinks ?? true,
+        uncrawlableLinks:
+          !foreignPage && this.config.storeUncrawlableLinks ? parsed.uncrawlableLinks : [],
+        storeUncrawlableLinks: foreignPage || (this.config.storeUncrawlableLinks ?? true),
         fromDepth: item.depth,
       });
       // V2 Faz 1 — Persist render artefacts inline so they finish before
@@ -5421,12 +5499,18 @@ export class Crawler extends EventEmitter {
       // Outlinks tab; they're just not fetched as their own URL rows here.
       const fixedUrlMode =
         this.config.mode === 'list' || this.config.mode === 'sitemap';
-      if (!fixedUrlMode) {
+      if (!fixedUrlMode && !foreignPage) {
         for (const link of storableLinks) {
           if (!link.isInternal && !link.followExcluded) this.enqueueExternal(link.toUrl);
         }
       }
       this.crawled++;
+
+      // A page on another host was fetched to check the link that pointed
+      // at it. Its links, assets and alternates belong to that other site:
+      // queueing them is how one Instagram link became thousands of
+      // Instagram pages, listed as internal.
+      if (foreignPage) return;
 
       // Subresource crawling — fetch internal images / CSS / JS referenced by
       // this page so they appear in the Internal tab with their own status
@@ -5455,22 +5539,21 @@ export class Crawler extends EventEmitter {
         // a URL pulled in only to check its status (see `checkOnly`).
       } else {
         const nextDepth = item.depth + 1;
+        // Every discovery route below admits its targets the same way:
+        // in scope → crawled, out of scope → at most checked once (see
+        // `admitTarget`).
+        const enqueueTarget = (target: string | null): void => {
+          if (!target || target === item.url) return;
+          const admit = this.admitTarget(target);
+          if (admit) this.enqueue({ url: target, depth: nextDepth, checkOnly: admit === 'check' });
+        };
         // Spider → Crawl "Internal Hyperlinks / Crawl". Off leaves every
         // other discovery route (sitemaps, canonicals, pagination) intact,
         // so it audits a fixed set of pages without spidering outward.
         if (this.config.crawlInternalLinks) {
           for (const link of storableLinks) {
-            const inScope = isInScope(this.config.startUrl, link.toUrl, this.config.scope);
-            // With `scope: 'subfolder'`, "Check Links Outside of Start
-            // Folder" fetches out-of-folder targets once so their status
-            // is known, then stops — Screaming Frog draws the same line
-            // between checking a link and crawling through it.
-            const checkOnly =
-              !inScope &&
-              this.config.scope === 'subfolder' &&
-              this.config.checkLinksOutsideStartFolder &&
-              isInScope(this.config.startUrl, link.toUrl, 'subdomain');
-            if (!inScope && !checkOnly && !this.config.crawlExternal) continue;
+            const admit = this.admitTarget(link.toUrl);
+            if (!admit) continue;
             // Settings → Filters "Don't follow links in": the link is kept in
             // the graph, it just doesn't lead the crawl anywhere.
             if (link.followExcluded) continue;
@@ -5488,19 +5571,15 @@ export class Crawler extends EventEmitter {
                 : this.config.followExternalNofollow;
               if (!followThis) continue;
             }
-            this.enqueue({ url: link.toUrl, depth: nextDepth, checkOnly });
+            this.enqueue({ url: link.toUrl, depth: nextDepth, checkOnly: admit === 'check' });
           }
         }
         // Wave 3 — Pagination follow toggle. rel=next/prev are part of
         // the standard discovery graph; the toggle exists to debug
         // pagination-only loops without disabling all link follow.
         if (this.config.followPaginationLinks) {
-          for (const target of [parsed.paginationNext, parsed.paginationPrev]) {
-            if (!target) continue;
-            const inScope = isInScope(this.config.startUrl, target, this.config.scope);
-            if (!inScope && !this.config.crawlExternal) continue;
-            this.enqueue({ url: target, depth: nextDepth });
-          }
+          enqueueTarget(parsed.paginationNext);
+          enqueueTarget(parsed.paginationPrev);
         }
         // Bölüm 29 — SPA routes discovered during JS render. The app
         // reached these itself (pushState / hash change) or links to
@@ -5509,15 +5588,7 @@ export class Crawler extends EventEmitter {
         // request the crawler could see.
         if (renderSpaRoutes.length > 0) {
           for (const route of renderSpaRoutes) {
-            const normalized = normalizeUrl(route, item.url, this.urlRewrites);
-            if (!normalized || normalized === item.url) continue;
-            const inScope = isInScope(
-              this.config.startUrl,
-              normalized,
-              this.config.scope,
-            );
-            if (!inScope && !this.config.crawlExternal) continue;
-            this.enqueue({ url: normalized, depth: nextDepth });
+            enqueueTarget(normalizeUrl(route, item.url, this.urlRewrites));
           }
         }
         // Wave 3 — Canonical follow toggle. When on, a 200 page that
@@ -5532,42 +5603,24 @@ export class Crawler extends EventEmitter {
           // Resolved, not raw: a relative canonical passed verbatim to
           // isInScope/enqueue is not a URL and would either be dropped or
           // fetched against the wrong base.
-          const inScope = isInScope(
-            this.config.startUrl,
-            parsed.canonicalResolved,
-            this.config.scope,
-          );
-          if (inScope || this.config.crawlExternal) {
-            this.enqueue({ url: parsed.canonicalResolved, depth: nextDepth });
-          }
+          enqueueTarget(parsed.canonicalResolved);
         }
         // Wave 3 — JS-style redirect follow: `<meta http-equiv="refresh">`
         // content URLs and `window.location = "…"`-style statements the
         // parser could resolve statically (literal targets only).
         if (this.config.followJsRedirects) {
-          for (const target of [parsed.metaRefreshUrl, parsed.jsRedirectUrl]) {
-            if (!target || target === item.url) continue;
-            const inScope = isInScope(this.config.startUrl, target, this.config.scope);
-            if (inScope || this.config.crawlExternal) {
-              this.enqueue({ url: target, depth: nextDepth });
-            }
-          }
+          enqueueTarget(parsed.metaRefreshUrl);
+          enqueueTarget(parsed.jsRedirectUrl);
         }
         // Spider → Crawl rows that only add discovery. Each one enqueues a
         // declared alternate — a translated page, an AMP variant, an m-dot
         // URL — that an ordinary hyperlink often never points at, which is
         // exactly why they go uncrawled without an explicit opt-in.
-        const followDeclared = (target: string | null): void => {
-          if (!target || target === item.url) return;
-          const inScope = isInScope(this.config.startUrl, target, this.config.scope);
-          if (!inScope && !this.config.crawlExternal) return;
-          this.enqueue({ url: target, depth: nextDepth });
-        };
         if (this.config.crawlHreflang) {
-          for (const h of parsed.hreflangs) followDeclared(h.href);
+          for (const h of parsed.hreflangs) enqueueTarget(h.href);
         }
-        if (this.config.crawlAmp) followDeclared(parsed.amphtml);
-        if (this.config.crawlMobileAlternate) followDeclared(parsed.mobileAlternate);
+        if (this.config.crawlAmp) enqueueTarget(parsed.amphtml);
+        if (this.config.crawlMobileAlternate) enqueueTarget(parsed.mobileAlternate);
       }
     } catch (err) {
       // Stop / Clear: abandon silently. No row is written, no failure
@@ -5611,6 +5664,7 @@ export class Crawler extends EventEmitter {
           url: item.url,
           urlMalformed: isUrlMalformed(item.url) ? 1 : 0,
           urlTrap: this.trapKind(item.url),
+          isExternal: this.isForeignHost(item.url),
           // Nothing came back, so the kind comes from the URL: a failed
           // `.webp` stays an image instead of appearing among HTML pages.
           contentKind: detectContentKind(item.url, null),
@@ -5689,6 +5743,44 @@ export class Crawler extends EventEmitter {
     string,
     { challenge: DigestChallenge; nc: number }
   >();
+
+  /**
+   * True when `url` is on a host this crawl doesn't own — the same line the
+   * parser draws for a link found on one of the site's own pages (the start
+   * host, its registrable domain under `all-subdomains`, configured CDN
+   * hosts). Such a page is a link target being checked, not part of the
+   * site: its row is external and nothing it links to is discovered.
+   *
+   * Spider mode only. List and sitemap rows have no single start host to
+   * measure against and keep their default classification.
+   */
+  private isForeignHost(url: string): boolean {
+    if (this.config.mode === 'list' || this.config.mode === 'sitemap') return false;
+    return !isSameHost(this.config.startUrl, url, {
+      includeSubdomains: this.config.scope === 'all-subdomains',
+      cdnHosts: this.config.cdnHosts,
+    });
+  }
+
+  /**
+   * How a URL found on a crawled page joins the crawl:
+   * - `'follow'`: in scope; fetch it and follow its links.
+   * - `'check'`: out of scope, but the matching option wants its status
+   *   ("Check Links Outside of Start Folder" for the start host's other
+   *   folders, "Check External Links" for everything else). Fetched once;
+   *   nothing it links to is followed. Screaming Frog draws the same line,
+   *   so a link to Instagram is checked, not spidered.
+   * - `null`: leave it alone.
+   */
+  private admitTarget(url: string): 'follow' | 'check' | null {
+    const { startUrl, scope } = this.config;
+    if (isInScope(startUrl, url, scope)) return 'follow';
+    const otherFolder = scope === 'subfolder' && isInScope(startUrl, url, 'subdomain');
+    const check = otherFolder
+      ? this.config.checkLinksOutsideStartFolder
+      : this.config.crawlExternal;
+    return check ? 'check' : null;
+  }
 
   /**
    * The URLs this crawl's HTTP auth + custom headers belong to: what the
@@ -6507,6 +6599,47 @@ const ABSOLUTE_BODY_CAP_BYTES = 64 * 1024 * 1024;
 function effectiveBodyCap(configured: number): number {
   return configured > 0 ? configured : ABSOLUTE_BODY_CAP_BYTES;
 }
+
+/**
+ * Size of a response body that came without a Content-Length (chunked
+ * transfer; Cloudflare serves images this way, on HEAD too), measured by
+ * streaming it through and keeping none of it. Null when the stream fails
+ * or runs past `capBytes`: an unknown size, never a guessed one.
+ */
+async function countBodyBytes(res: { body: unknown }, capBytes: number): Promise<number | null> {
+  const body = res.body as ReadableStream<Uint8Array> | null;
+  if (!body) return null;
+  const reader = body.getReader();
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return total;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > capBytes) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** Resource kinds whose byte size feeds a check (image weight, page weight). */
+const SIZED_RESOURCE_KINDS: ReadonlySet<ContentKind> = new Set<ContentKind>([
+  'image',
+  'css',
+  'js',
+  'font',
+]);
 
 /**
  * Read a fetch Response body as raw bytes with a hard byte cap. undici streams

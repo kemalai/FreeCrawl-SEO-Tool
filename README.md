@@ -28,7 +28,7 @@ A high-performance website crawler built for serious SEO audits. Targets <kbd>1M
 <br />
 
 > [!IMPORTANT]
-> **v1.0.0 is the full release.** Everything planned for 1.0 ships in this build, and it is ready for daily audit work. Development does not stop here: further updates will follow based on user feedback and bug reports, so if something gets in your way, [open an issue](https://github.com/kemalai/FreeCrawl-SEO-Tool/issues).
+> **The core of FreeCrawl was completed in v1.0.** For a smooth, trouble-free experience, always use the [latest release](https://github.com/kemalai/FreeCrawl-SEO-Tool/releases/latest). Development continues based on user feedback and bug reports, so if something gets in your way, [open an issue](https://github.com/kemalai/FreeCrawl-SEO-Tool/issues).
 
 <br />
 

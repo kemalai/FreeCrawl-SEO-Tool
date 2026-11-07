@@ -336,6 +336,14 @@ import {
 } from '@freecrawl/core';
 import { fetch as undiciFetch } from 'undici';
 import { apiFetch } from './api-fetch.js';
+import {
+  applyConfigSecrets,
+  configForAgent,
+  keepStoredSecrets,
+  redactConfigSecrets,
+  splitConfigSecrets,
+} from './config-secrets.js';
+import { coerceAgentConfig } from './agent-config-input.js';
 import { ProjectDb, EXPENSIVE_ISSUE_DEFINITIONS } from '@freecrawl/db';
 import { buildAppMenu } from './menu.js';
 import {
@@ -2464,87 +2472,12 @@ function getDb(): ProjectDb {
 
 // ── Crawl-config secret handling ───────────────────────────────────────────
 //
-// `CrawlConfig` carries credentials — HTTP-auth password/token, the browser
-// form-login password, and a proxy URL that can embed `user:pass@`. These
+// `CrawlConfig` carries credentials — HTTP-auth password/token, form-login
+// values, proxy URLs that can embed `user:pass@`, custom header tokens. These
 // must not sit in plaintext in preferences.json or the .seoproject, nor be
-// handed to a colleague in a shared settings-export. `configSecretFields`
-// enumerates them; the helpers below either blank them (export) or split
-// them out for at-rest encryption (prefs / project meta).
-
-/** Return the secret values from a config as a flat record, and a deep-ish
- *  copy of the config with those values blanked. */
-function splitConfigSecrets(config: CrawlConfig): {
-  clean: CrawlConfig;
-  secrets: Record<string, string>;
-} {
-  const clean: CrawlConfig = JSON.parse(JSON.stringify(config)) as CrawlConfig;
-  const secrets: Record<string, string> = {};
-  if (clean.auth) {
-    if (clean.auth.password) {
-      secrets['auth.password'] = clean.auth.password;
-      clean.auth.password = '';
-    }
-    if (clean.auth.token) {
-      secrets['auth.token'] = clean.auth.token;
-      clean.auth.token = '';
-    }
-  }
-  const pv = clean.formLogin?.browser?.passwordValue;
-  if (pv) {
-    secrets['formLogin.browser.passwordValue'] = pv;
-    clean.formLogin!.browser!.passwordValue = '';
-  }
-  if (clean.proxyUrl) {
-    secrets['proxyUrl'] = clean.proxyUrl;
-    clean.proxyUrl = '';
-  }
-  // A Slack / Discord / Teams webhook URL is bearer-equivalent: anyone
-  // holding it can post into the channel. Same treatment as a password —
-  // encrypted at rest, blanked in the settings export and for MCP agents.
-  if (clean.webhookUrl) {
-    secrets['webhookUrl'] = clean.webhookUrl;
-    clean.webhookUrl = '';
-  }
-  return { clean, secrets };
-}
-
-/** Re-apply previously split secrets onto a (cleaned) config, in place. */
-function applyConfigSecrets(
-  config: CrawlConfig,
-  secrets: Record<string, string>,
-): CrawlConfig {
-  if (secrets['auth.password'] !== undefined && config.auth) {
-    config.auth.password = secrets['auth.password'];
-  }
-  if (secrets['auth.token'] !== undefined && config.auth) {
-    config.auth.token = secrets['auth.token'];
-  }
-  if (
-    secrets['formLogin.browser.passwordValue'] !== undefined &&
-    config.formLogin?.browser
-  ) {
-    config.formLogin.browser.passwordValue = secrets['formLogin.browser.passwordValue'];
-  }
-  if (secrets['proxyUrl'] !== undefined) {
-    config.proxyUrl = secrets['proxyUrl'];
-  }
-  if (secrets['webhookUrl'] !== undefined) {
-    config.webhookUrl = secrets['webhookUrl'];
-  }
-  return config;
-}
-
-/** A copy of the config with every secret blanked — for the shareable
- *  settings-export, which must never carry credentials. Accepts a loose
- *  record because the export IPC types its payload as `Record<string,
- *  unknown>`; the JSON round-trip inside `splitConfigSecrets` tolerates
- *  partial/extra fields. */
-function redactConfigSecrets(config: Record<string, unknown>): Record<string, unknown> {
-  return splitConfigSecrets(config as unknown as CrawlConfig).clean as unknown as Record<
-    string,
-    unknown
-  >;
-}
+// handed to a colleague in a shared settings-export or to an MCP agent.
+// `./config-secrets.ts` enumerates them and splits / blanks / restores them;
+// the helpers below handle the at-rest envelope (prefs / project meta).
 
 /** An MCP agent's list-mode URLs, cleaned the way the desktop's list
  *  editor cleans pasted text: trimmed, blank and `#` comment lines dropped,
@@ -2569,29 +2502,6 @@ function cleanBridgeUrlList(raw: unknown): string[] {
     out.push(value);
   }
   return out;
-}
-
-/** `config` with its secrets blanked, for replies to an MCP agent: an
- *  agent's context goes to its model provider, so the user's passwords,
- *  tokens and proxy credentials must never be in it. */
-function configForAgent(config: CrawlConfig): CrawlConfig {
-  return splitConfigSecrets(config).clean;
-}
-
-/** `next` with every secret it leaves blank taken from `current`. An agent
- *  only ever sees blanked secrets (`configForAgent`), so a read-modify-write
- *  of the config sends them back blank — that must keep the stored values,
- *  not wipe them. */
-function keepStoredSecrets(next: CrawlConfig, current: CrawlConfig | null): CrawlConfig {
-  if (!current) return next;
-  const stored = splitConfigSecrets(current).secrets;
-  const given = splitConfigSecrets(next).secrets;
-  const keep: Record<string, string> = {};
-  for (const [field, value] of Object.entries(stored)) {
-    if (!given[field]) keep[field] = value;
-  }
-  if (Object.keys(keep).length === 0) return next;
-  return applyConfigSecrets(JSON.parse(JSON.stringify(next)) as CrawlConfig, keep);
 }
 
 /** Serialize a config for at-rest storage: secrets are pulled out and the
@@ -9252,11 +9162,9 @@ function registerIpc(): void {
       // is intentionally loose (full CrawlConfig) because the desktop's
       // Settings dialog has dozens of fields and gating MCP narrower
       // than the UI would be arbitrary. The crawler itself validates
-      // ranges at launch time.
-      const cfg = input as CrawlConfig;
-      if (!cfg || typeof cfg !== 'object') {
-        throw new Error('CrawlConfig object required.');
-      }
+      // ranges at launch time; field *types* are checked here, because a
+      // client may send undeclared values as strings ("false" is truthy).
+      const cfg = coerceAgentConfig(input);
       currentSession().lastCrawlConfig = keepStoredSecrets(
         { ...DEFAULT_CRAWL_CONFIG, ...cfg },
         currentSession().lastCrawlConfig,

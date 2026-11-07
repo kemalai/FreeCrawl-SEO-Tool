@@ -410,6 +410,70 @@ export function issueCount(issues: OverviewCounts['issues'], def: IssueCheckDef)
     : def.count.reduce((acc, k) => acc + (issues[k] ?? 0), 0);
 }
 
+/** Counter name (`h1Missing`) → the `issues:*` category it counts. */
+const CATEGORY_BY_COUNTER: ReadonlyMap<string, UrlCategory> = new Map(
+  [...ISSUE_COUNT_KEY].map(([category, key]) => [key, category] as const),
+);
+
+/**
+ * The category behind a sidebar counter name — `h1Missing`, or the
+ * `issues:h1Missing` form agents build from `OverviewCounts.issues` — or
+ * null when the name is no counter.
+ */
+export function issueCategoryForCounter(name: string): UrlCategory | null {
+  const key = name.startsWith('issues:') ? name.slice('issues:'.length) : name;
+  return CATEGORY_BY_COUNTER.get(key) ?? null;
+}
+
+/**
+ * What an issue counter counts, which decides where its rows are listed:
+ * `urls` → the URL query for its category; `images` → image usages (the
+ * category lists the pages carrying them); `links` → link rows, served by
+ * the broken-links listing rather than the URL table.
+ */
+export type IssueCountUnit = 'urls' | 'images' | 'links';
+
+/** One non-empty issue check, as the agent-facing `top_issues` lists it. */
+export interface RankedIssue {
+  /** Filter category for the URL query — never a counter name. */
+  category: UrlCategory;
+  /** English sidebar path, e.g. "H1 › Missing". */
+  label: string;
+  count: number;
+  unit: IssueCountUnit;
+}
+
+/**
+ * Non-empty, enabled issue checks, biggest first. Built from the catalog
+ * so each entry carries its filter category: ranking the raw
+ * `OverviewCounts.issues` fields handed out counter names
+ * (`issues:h1Missing`) that no filter knows.
+ */
+export function rankIssues(
+  issues: OverviewCounts['issues'],
+  disabled: ReadonlySet<string> = new Set(),
+): RankedIssue[] {
+  const ranked: RankedIssue[] = [];
+  for (const group of ISSUE_GROUPS) {
+    for (const def of group.items) {
+      if (disabled.has(def.category)) continue;
+      const count = issueCount(issues, def);
+      if (count === null || !(count > 0)) continue;
+      ranked.push({
+        category: def.category,
+        label: `${group.label} › ${def.label}`,
+        count,
+        unit: def.category.startsWith('issues:broken-links-')
+          ? 'links'
+          : def.percentBase === 'images'
+            ? 'images'
+            : 'urls',
+      });
+    }
+  }
+  return ranked.sort((a, b) => b.count - a.count);
+}
+
 /** Every toggleable issue category, in sidebar order. */
 export const ISSUE_CATEGORIES: readonly UrlCategory[] = ISSUE_GROUPS.flatMap((g) =>
   g.items.map((i) => i.category),
