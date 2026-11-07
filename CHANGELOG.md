@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.5] — 2026-11-07
+
+### Changed
+- MCP top_issues now labels each issue and says whether it counts pages, images or links.
+- MCP set_crawl_config refuses a setting of the wrong type and names it, instead of saving a value that reads the opposite way.
+- MCP image results now mark srcset variants, which are not size-measured unless srcset crawling is on.
+
+### Fixed
+- Check External Links no longer crawls through other sites: each external page is fetched once and listed as external.
+- Saved proxy passwords, form login values and custom header values are no longer shown to MCP agents, stored unencrypted or exported.
+- Image sizes are now measured when the server sends no Content-Length, as with many images behind Cloudflare.
+- Pause now stops the crawl at once when a requests-per-second limit is set, instead of fetching a few more pages.
+- Clicking a row in the Images tab now selects only that row.
+- The Duplicate Alt Text export lists only affected pages, and the check now counts toward severity totals and reports.
+- MCP query_urls now filters by every category top_issues returns instead of returning all rows.
+- MCP query_images with minByteSize 0 now lists only images with a known size.
+
 ## [1.1.4] — 2026-11-05
 
 ### Added
